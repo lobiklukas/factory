@@ -57,6 +57,11 @@ const SessionRpcHandlers = SessionRpc.toLayer(
             Effect.provideService(CredentialProvider, credentials),
             Effect.provideService(HttpClient.HttpClient, forge),
           ),
+      discardSession: (input) =>
+        sessions.releaseWorkspace({
+          sessionId: input.sessionId,
+          reason: "discarded",
+        }),
       watchSession: (input) => sessions.events(input.sessionId),
     });
   }),

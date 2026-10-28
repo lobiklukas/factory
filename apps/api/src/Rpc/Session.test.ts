@@ -17,6 +17,7 @@
  */
 import { execSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -452,6 +453,120 @@ describe("proposeDecomposition over RPC (LOB-201)", () => {
     });
     // Refused is not stored: the session the client reads back holds no proposals.
     expect(outcome.after.proposedIssues).toBeUndefined();
+  }, 120_000);
+});
+
+/**
+ * The terminal events this app wires (LOB-268): an operator's `discardSession`, and a `moveTask` that
+ * lands a card in `canceled`. Both tear the session's worktree and branch down; the move does it
+ * after it committed, and a move that leaves the card open tears down nothing. The worktrees are cut
+ * from a checkout this case makes, so the branches it reads are its own.
+ */
+describe("a session's workspace is torn down over RPC only on a terminal event (LOB-268)", () => {
+  it("discards a session once, and tears a card's run down when the card is canceled", async () => {
+    const checkout = mkdtempSync(join(tmpdir(), "factory-api-rpc-kept-"));
+    const git = (command: string) =>
+      execSync(command, {
+        cwd: checkout,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+    const branchExists = (branch: string) => {
+      try {
+        git(`git rev-parse --verify --quiet ${branch}`);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    git("git init -b main");
+    git(
+      "git -c user.email=t@t.com -c user.name=t commit --allow-empty -m base",
+    );
+    const keptRepo = RepoSlug.make(`acme/rpc-kept-${run}`);
+    try {
+      const outcome = await callApi((client) =>
+        Effect.gen(function* () {
+          yield* client.registerRepo({ repo: keptRepo, localPath: checkout });
+          const scratch = yield* client.createSession({
+            repo: keptRepo,
+            baseRef: "main",
+          });
+          const scratchBranch = `factory/${scratch.id}`;
+          const before = branchExists(scratchBranch);
+          const discarded = yield* client.discardSession({
+            sessionId: scratch.id,
+          });
+          const repeat = yield* client.discardSession({
+            sessionId: scratch.id,
+          });
+          const refused = yield* failureOf(
+            client.sendMessage({ sessionId: scratch.id, content: "more" }),
+          );
+
+          const board = yield* client.createBoard({
+            repo: keptRepo,
+            definitionId: DefinitionId.make("default"),
+          });
+          const created = yield* client.createTask({
+            boardId: board.id,
+            title: "a card to cancel",
+            actor: "person:rpc",
+          });
+          const run = yield* client.createSession({
+            title: created.title,
+            taskId: created.id,
+            taskColumn: created.column,
+            repo: keptRepo,
+            baseRef: "main",
+          });
+          const runBranch = `factory/${run.id}`;
+          const specifying = yield* client.moveTask({
+            taskId: created.id,
+            expectedRevision: created.revision,
+            to: "specifying",
+            actor: "person:rpc",
+          });
+          const keptWhileOpen = branchExists(runBranch);
+          yield* client.moveTask({
+            taskId: created.id,
+            expectedRevision: specifying.revision,
+            to: "canceled",
+            actor: "person:rpc",
+          });
+          const afterCancel = yield* client.getSession({ sessionId: run.id });
+          return {
+            scratch,
+            before,
+            discarded,
+            repeat,
+            refused,
+            scratchGone: !branchExists(scratchBranch),
+            keptWhileOpen,
+            afterCancel,
+            runGone: !branchExists(runBranch),
+          };
+        }),
+      );
+      expect(outcome.before).toBe(true);
+      expect(outcome.discarded).toMatchObject({
+        sessionId: outcome.scratch.id,
+        first: true,
+        release: { reason: "discarded" },
+      });
+      expect(outcome.repeat).toEqual({ ...outcome.discarded, first: false });
+      expect(outcome.refused).toMatchObject({
+        _tag: "SessionError",
+        code: "invalid_input",
+      });
+      expect(outcome.scratchGone).toBe(true);
+      expect(outcome.keptWhileOpen).toBe(true);
+      expect(outcome.afterCancel.workspace.released?.reason).toBe("canceled");
+      expect(existsSync(outcome.afterCancel.workspace.path)).toBe(false);
+      expect(outcome.runGone).toBe(true);
+    } finally {
+      rmSync(checkout, { recursive: true, force: true });
+    }
   }, 120_000);
 });
 

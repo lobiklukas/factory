@@ -307,12 +307,50 @@ export const SessionBudget = Schema.Struct({
 export type SessionBudget = typeof SessionBudget.Type;
 
 /**
+ * The terminal events that tear a session's worktree and branch down (LOB-268), and nothing else
+ * does: the idle sweep and a shutdown release the harness and leave the work where it is.
+ *
+ * - `done`, `canceled` — the card the session is a run of reached that terminal column.
+ * - `merged` — the pull request the session opened merged.
+ * - `discarded` — an operator discarded the session (`factory discard`, `discardSession`).
+ */
+export const WorkspaceReleaseReason = Schema.Literals([
+  "done",
+  "canceled",
+  "merged",
+  "discarded",
+]);
+export type WorkspaceReleaseReason = typeof WorkspaceReleaseReason.Type;
+
+/** When and why a session's workspace was torn down: the first terminal event, kept. */
+export const WorkspaceRelease = Schema.Struct({
+  reason: WorkspaceReleaseReason,
+  at: Timestamp,
+});
+export type WorkspaceRelease = typeof WorkspaceRelease.Type;
+
+/**
+ * What a teardown answers (LOB-268). `first` says this call is the one that released the workspace;
+ * a repeat answers `false` with the release the first call recorded, its reason included, so a
+ * second terminal event (a merge, then the card's `done`) is a no-op that says so.
+ */
+export const ReleaseWorkspaceResult = Schema.Struct({
+  sessionId: SessionId,
+  release: WorkspaceRelease,
+  first: Schema.Boolean,
+});
+export type ReleaseWorkspaceResult = typeof ReleaseWorkspaceResult.Type;
+
+/**
  * Where a session's work actually lives, as the server resolved it (docs/features.md §3 A1).
  *
  * `path` is the session's working directory — one per session, so sessions never share files — and
  * under a repo it is scoped by that repo. `commands` is what the repo declares about itself, and
  * `commandsSource` says whether that came from a `.factory/config` the server could read or from
  * nothing at all: a repo with no config is a fact the caller can see, not an empty answer.
+ *
+ * `released` is set once the worktree and branch were torn down (LOB-268): `path` is where they
+ * were, not a directory that exists, and the session takes no new run.
  */
 export const SessionWorkspace = Schema.Struct({
   path: Schema.String,
@@ -321,6 +359,7 @@ export const SessionWorkspace = Schema.Struct({
   branch: Schema.optional(Schema.String),
   commands: RepoCommands,
   commandsSource: Schema.Literals(["repo", "none"]),
+  released: Schema.optional(WorkspaceRelease),
 });
 export type SessionWorkspace = typeof SessionWorkspace.Type;
 

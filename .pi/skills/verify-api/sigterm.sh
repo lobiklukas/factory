@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Prove SIGTERM mid-run (LOB-21): the process releases the session owners it holds, and the session
-# it interrupted is resumable rather than lost.
+# it interrupted is resumable rather than lost. And (LOB-268) the release is the harness's only: the
+# session's branch and worktree, with a commit and an uncommitted edit the run left, survive the
+# signal and the restart, and the resumed run works on them.
 #
 # This script owns its own API instance — its own port, session root, log and pid file — because the
 # point of the test is to kill it. It does not touch the instance ./up.sh started, and it leaves
 # nothing running.
 #
 #   ./sigterm.sh
+#   SIGTERM_PORT=9540 ./sigterm.sh     # another port
 #
 # Evidence: .verify/evidence/latest/api/sigterm-session.json (what the session looked like, from the
 # driver) plus sigterm-process.json (what the process did, from this script), the API log, and the
@@ -21,9 +24,14 @@ EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/latest}/api"
 STATE="$RUN_DIR/session-id"
 DRIVER="$ROOT/.pi/skills/verify-api/sigterm.ts"
 LOG="$RUN_DIR/api.log"
+# The checkout the session's worktree is cut from, fresh per run, and a slug this run owns: a slug
+# another drive registered would hand the session that drive's checkout.
+CHECKOUT="$RUN_DIR/checkout"
+REPO="${SIGTERM_REPO:-lobiklukas/factory-sigterm-$(date +%s)$$}"
+WORK="$STATE.work.json"
 
 mkdir -p "$RUN_DIR" "$EVIDENCE_DIR"
-rm -f "$STATE"
+rm -f "$STATE" "$WORK"
 
 failed=0
 rows=()
@@ -83,6 +91,18 @@ stop_api() {
 
 trap 'stop_api' EXIT
 
+if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "port $PORT is already in use — set SIGTERM_PORT to a free one" >&2
+  exit 1
+fi
+
+# The checkout: a real repository with one commit on main, so the session gets a linked worktree on
+# `factory/<id>` and the branch is a ref this script can read before and after the restart.
+rm -rf "$CHECKOUT" "$RUN_DIR/sessions"
+git init -q -b main "$CHECKOUT"
+git -C "$CHECKOUT" -c user.email=sigterm@localhost -c user.name=sigterm \
+  commit -q --allow-empty -m "sigterm checkout"
+
 # The session log is Postgres; the shared check asks the port before it asks compose, so this works
 # from a ralph worktree (LOB-57).
 source "$ROOT/.pi/skills/lib/postgres.sh"
@@ -95,6 +115,7 @@ wait_ready || { echo "api did not become ready — see $LOG" >&2; exit 1; }
 
 # --- arm: a busy session, then SIGTERM ------------------------------------------------------------
 MODE=arm API_URL="$API_URL" SIGTERM_STATE="$STATE" EVIDENCE_DIR="$EVIDENCE_DIR" \
+  SIGTERM_CHECKOUT="$CHECKOUT" SIGTERM_REPO="$REPO" \
   bun "$DRIVER" > "$RUN_DIR/arm.log" 2>&1 &
 ARM_PID=$!
 
@@ -123,11 +144,24 @@ check "and reported the owners released" \
   "$(grep -q 'shutdown: session owners released' "$LOG" && echo 0 || echo 1)" \
   "log line present"
 
+# LOB-268: with no process running at all, the branch and the worktree the run left are on disk.
+BRANCH="$(bun -e 'console.log(JSON.parse(await Bun.file(process.argv[1]).text()).branch)' "$WORK" 2>/dev/null)"
+SHA="$(bun -e 'console.log(JSON.parse(await Bun.file(process.argv[1]).text()).sha)' "$WORK" 2>/dev/null)"
+WORKTREE="$(bun -e 'console.log(JSON.parse(await Bun.file(process.argv[1]).text()).path)' "$WORK" 2>/dev/null)"
+KEPT="$(git -C "$CHECKOUT" rev-parse --verify --quiet "$BRANCH" 2>/dev/null)"
+check "the branch survives the shutdown, on the run's commit" \
+  "$([ -n "$SHA" ] && [ "$KEPT" = "$SHA" ] && echo 0 || echo 1)" "$BRANCH=${KEPT:-gone}"
+check "the worktree survives the shutdown, with the uncommitted edit" \
+  "$([ -n "$WORKTREE" ] && [ -f "$WORKTREE/NOTES.md" ] && echo 0 || echo 1)" "${WORKTREE:-none}"
+check "and git still lists it as a worktree of the checkout" \
+  "$(git -C "$CHECKOUT" worktree list --porcelain | grep -qxF "worktree $WORKTREE" && echo 0 || echo 1)" "worktree list"
+
 # --- verify: a fresh process reads the session back and continues it ------------------------------
 start_api "echo faux-ok"
 wait_ready || { echo "the restarted api did not become ready — see $LOG" >&2; exit 1; }
 
 MODE=verify API_URL="$API_URL" SIGTERM_STATE="$STATE" EVIDENCE_DIR="$EVIDENCE_DIR" \
+  SIGTERM_CHECKOUT="$CHECKOUT" SIGTERM_REPO="$REPO" \
   bun "$DRIVER" > "$RUN_DIR/verify.log" 2>&1
 VERIFY_RC=$?
 cat "$RUN_DIR/verify.log"
@@ -138,6 +172,8 @@ cp "$LOG" "$EVIDENCE_DIR/sigterm-api.log"
   printf '{\n'
   printf '  "apiUrl": "%s",\n' "$API_URL"
   printf '  "sessionId": "%s",\n' "$SESSION_ID"
+  printf '  "branch": "%s",\n' "$BRANCH"
+  printf '  "commit": "%s",\n' "$SHA"
   printf '  "checks": {\n'
   write_checks
   printf '  }\n}\n'

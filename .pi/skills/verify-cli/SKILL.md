@@ -1,6 +1,6 @@
 ---
 name: verify-cli
-description: Drive and prove the factory CLI (`factory run` / `watch` / `ls` / `send` / `withdraw` / `approvals` / `approve` / `deny` / `repo` / `pr` in apps/cli; `pr` is proven by verify-board's build phase) in a real tmux terminal against a real control plane. Use when asked to verify, test, or show evidence that the CLI works, or after changing apps/cli, packages/domain, or apps/api.
+description: Drive and prove the factory CLI (`factory run` / `watch` / `ls` / `send` / `withdraw` / `approvals` / `approve` / `deny` / `repo` / `discard` / `pr` in apps/cli; `pr` is proven by verify-board's build phase) in a real tmux terminal against a real control plane. Use when asked to verify, test, or show evidence that the CLI works, or after changing apps/cli, packages/domain, or apps/api.
 ---
 
 # Verify the CLI
@@ -32,6 +32,7 @@ own instance of `apps/api` and record it in `.verify/run/api.pid`, so run them o
 | `--when-busy reject` (LOB-167)                            | `./steer.sh`: `error: busy`, non-zero, nothing queued; idle → `run`      | a script can refuse to queue behind a running run           |
 | `factory repo` (LOB-253)                                  | `./repo.sh`, run by `drive.sh`: add, re-add, refusals, `ls`, `show`      | an operator binds a checkout without writing code           |
 | `factory approve` (LOB-53)                                | `./approve.sh`, run by `drive.sh`: a parked approval decided, resumed    | the answer reaches the run, not only the row                |
+| `factory discard` (LOB-268)                               | `./discard.sh`: worktree and branch gone, repeat names the first release | the only way an operator ends a session's work              |
 | `factory pr` (LOB-86)                                     | not here: verify-board `./drive.sh`'s build phase, against a GitHub fake | the link is the forge's answer, never assumed               |
 | `factory board block\|unblock\|attention\|runs` (LOB-264) | not here: verify-board `./drive.sh`'s triage phase                       | the card and its runs are the server's, never a local guess |
 
@@ -46,6 +47,7 @@ Every check is required: `drive.sh` exits non-zero when one fails.
 ./withdraw.sh    # self-contained: its own API on :9310 (WITHDRAW_PORT) with a sleeping faux turn
 ./approve.sh     # self-contained: its own gated API on :9330 (APPROVE_PORT); drive.sh runs it last
 ./steer.sh       # self-contained: its own API on :9320 (STEER_PORT) with the sleeping faux script
+./discard.sh     # self-contained: its own API on :9340 (DISCARD_PORT) and a checkout it registers
 ./repo.sh        # needs ./up.sh's instance (API_URL/API_PORT); drive.sh runs it before approve.sh
 ```
 
@@ -69,6 +71,11 @@ session root and tmux server under `.verify/run/cli-withdraw/`, and stops all of
 of a sleeping command: `FAUX_SLEEP_MS=8000` (`STEER_SLEEP_MS`) makes the model nap before each step
 of a turn, so the steer and the refused reject both land before the tool round, whatever the tool
 does. Its state is under `.verify/run/cli-steer/`. See `features/steer.md`.
+
+`discard.sh` is separate because a discard removes a linked worktree and a branch, and the instance
+`up.sh` started registers no checkout to cut one from: it creates a repository under
+`.verify/run/cli-discard/checkout`, registers it over the RPC (no CLI verb registers a checkout yet),
+and runs the session on it. See `features/discard.md`.
 
 `up.sh` needs Postgres on host port 5442 — the session log _is_ Postgres. It does not start one
 blindly: the shared `.pi/skills/lib/postgres.sh` asks the port first and runs `docker compose up -d

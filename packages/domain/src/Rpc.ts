@@ -81,6 +81,7 @@ import {
   ListSessionsOutput,
   ListSpendInput,
   RegisterRepoInput,
+  ReleaseWorkspaceResult,
   ReplaySessionInput,
   RepoNotFound,
   RepoSummary,
@@ -232,6 +233,13 @@ export class SessionRpc extends RpcGroup.make(
     payload: OpenPullRequestPayload,
     success: PullRequestStep,
     error: Schema.Union([SessionError, PrError, CredentialError]),
+  }),
+  // An operator's discard (LOB-268): one of the terminal events that tear the session's worktree
+  // and branch down. A repeat answers `first: false` and the first release's reason.
+  Rpc.make("discardSession", {
+    payload: SessionIdInput,
+    success: ReleaseWorkspaceResult,
+    error: SessionError,
   }),
   Rpc.make("watchSession", {
     payload: SessionIdInput,

@@ -34,9 +34,10 @@ task has no submission of its own, so its outcome comes from the transcript. Its
 reported as `inherited: { from, turns }` and is not counted in `turns` or `cost`, because the parent
 paid for it.
 
-Writing the source's side opens an owner of the source, as any write to a released session does.
-That re-creates its worktree until the idle sweep releases it again, and it counts as activity, so
-the source moves up the session list when its replay is compared.
+Writing the source's side opens an owner of the source, as any write to a session nobody owns does.
+That takes no new worktree: the source's worktree and branch outlive its owner (LOB-268), and one a
+terminal event released is never cut again, so the source's side is written to its log alone. It
+counts as activity, so the source moves up the session list when its replay is compared.
 
 ## How a user reaches it
 

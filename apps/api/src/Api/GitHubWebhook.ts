@@ -3,7 +3,9 @@
  * `POST /webhooks/github`: one GitHub webhook, two events, picked by `X-GitHub-Event`.
  *
  * - `pull_request` (LOB-15) is mirrored on the Linear issue the PR's session was delegated from — a
- *   merge moves it to done, an unmerged close explains itself — and (LOB-36) starts the reviewer run
+ *   merge moves it to done, an unmerged close explains itself — a signed merge tears the PR's
+ *   sessions' and reviewer runs' worktrees and branches down whatever the mirror answered (LOB-268),
+ *   and (LOB-36) starts the reviewer run
  *   its head asks for: `opened`, `reopened`, `ready_for_review` and `synchronize` on a PR the factory
  *   opened from a card (`@repo/core`'s `handlePullRequestReviewWebhook`). The answer carries both, the
  *   review under `review`; a failed mirror's status wins, then a failed review's.
@@ -41,6 +43,7 @@ import {
   handleDocsPushWebhook,
   handleGitHubPullRequestWebhook,
   handlePullRequestReviewWebhook,
+  releaseMergedDelivery,
 } from "@repo/core";
 
 /** The header naming one delivery attempt; the docs push logs it beside the id it derives. */
@@ -125,6 +128,19 @@ export const GitHubWebhookLive = HttpRouter.add(
       signature,
       event,
     });
+    // A merge is a terminal event (LOB-268): the PR's sessions' worktrees and branches are torn
+    // down, now that the work is on the base. Gated on the delivery being a signed `pull_request`
+    // (the release checks the signature itself), not on the mirror: a Linear write-back that failed
+    // is a `500` GitHub does not retry by itself, and must not leave the merge's workspaces behind.
+    // A redelivery finds them released and releases nothing.
+    if (event === "pull_request") {
+      const released = yield* releaseMergedDelivery({ secret, raw, signature });
+      if (released > 0) {
+        yield* Effect.logInfo(
+          `github: a merged pull request released ${released} session workspace(s)`,
+        );
+      }
+    }
     // Only a signed `pull_request` the mirror read reaches the review: every refusal before it (no
     // secret, a bad signature, another event, a payload naming no PR) is the mirror's answer alone.
     if (event !== "pull_request" || mirrored.status !== 200) {

@@ -31,7 +31,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | Transport cap (LOB-21)             | a 2 MiB body → 413, and `/livez` still answers                                                                                                                                                          | the configured cap, not Bun's 128 MiB default                          |
 | Probes (LOB-21)                    | `/livez` 200; `/readyz` 200 naming every check                                                                                                                                                          | liveness is cheap; readiness is a live answer                          |
 | Degraded readiness (LOB-21)        | Postgres down → `/livez` 200, `/readyz` 503, typed `storage` error; back → 200, same pid                                                                                                                | an outage is not a crash loop                                          |
-| SIGTERM mid-run (LOB-21)           | the owners are released, and the interrupted session folds and continues                                                                                                                                | a killed run is resumable, not lost                                    |
+| SIGTERM mid-run (LOB-21)           | the owners are released, and the interrupted session folds and continues; its branch and worktree keep the commit and the edit, and a discard is what removes them (LOB-268)                            | a killed run is resumable, not lost                                    |
 | One PR across a kill (LOB-179)     | `pr-once.sh`: the step dies inside its GitHub call, the replay adopts the PR, one PR entry                                                                                                              | a lost acknowledgement is not a second PR                              |
 | Typed errors over the wire         | unknown id → `SessionError{code: "not_found"}`                                                                                                                                                          | callers can branch on `code`, not on text                              |
 | Interrupt wakes, then stops        | `interruptSession` → idle                                                                                                                                                                               | steering wakes a session before acting on it                           |
@@ -98,7 +98,7 @@ takes the database away. Each script owns its own API instance on its own port, 
 running, and writes its own evidence:
 
 ```sh
-./sigterm.sh     # api on :9400 — a busy session, then SIGTERM, then a fresh process resumes it
+./sigterm.sh     # api on :9400 (SIGTERM_PORT) — a busy session with a commit, SIGTERM, a fresh process resumes it on the same branch
 ./approval-restart.sh  # api on :9416 — a gated call parks on an approval, SIGKILL, a fresh process re-asks nothing
 ./degraded.sh    # api on :9500 — Postgres stopped: /livez 200, /readyz 503, typed errors; then back
 ./pr-once.sh     # fake GitHub on :9411 — SIGKILL between the PR call and its acknowledgement

@@ -14,7 +14,7 @@
  */
 import { Effect, Option, Schema } from "effect";
 // oxlint-disable-next-line node-builtin-import
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import type { FileSystem, Path } from "effect";
 import type {
   RepoCommands,
@@ -69,6 +69,12 @@ export type WorkspaceInput = {
   readonly branch?: string | undefined;
   /** A checkout to read `.factory/config` from, when the session's own directory has none. */
   readonly localPath?: string | undefined;
+  /**
+   * Whether a missing worktree is cut (LOB-268). Absent means yes. A session whose workspace was
+   * torn down resolves with `false`, so reading it never cuts a fresh worktree on a fresh branch at
+   * the base — which is what a read would otherwise do, because the directory is gone.
+   */
+  readonly cut?: boolean | undefined;
 };
 
 /** Read the declared commands from one directory, tolerating a missing or undecodable file. */
@@ -120,7 +126,11 @@ export const resolveWorkspace = (
         ? undefined
         : (input.branch ?? `factory/${input.sessionId}`);
     // M6: cut a linked worktree at the base ref off the registered repo's local_path.
-    if (input.repo !== undefined && input.localPath !== undefined) {
+    if (
+      input.repo !== undefined &&
+      input.localPath !== undefined &&
+      input.cut !== false
+    ) {
       const isGit = yield* Effect.try({
         try: () =>
           execSync("git rev-parse --is-inside-work-tree", {
@@ -143,8 +153,21 @@ export const resolveWorkspace = (
           try: () => {
             const parent = deps.path.dirname(directory);
             execSync(`mkdir -p ${JSON.stringify(parent)}`);
-            // Reuse an existing branch if a previous attempt left one (crash recovery),
-            // otherwise create it at the base ref.
+            // A worktree whose directory went missing is still registered, and git refuses to
+            // check its branch out a second time until that registration is cleared. Only this
+            // path's is: a bare `git worktree prune` would clear every stale registration in the
+            // operator's checkout, theirs included (a worktree on an unmounted volume, say).
+            try {
+              execFileSync(
+                "git",
+                ["worktree", "remove", "--force", directory],
+                { cwd: input.localPath, stdio: "ignore" },
+              );
+            } catch {
+              // not registered: nothing to clear
+            }
+            // Reuse the session's branch when it exists — the idle sweep and a restart leave it,
+            // with the run's commits on it (LOB-268) — otherwise create it at the base ref.
             let created = false;
             try {
               execSync(
@@ -186,4 +209,70 @@ export const resolveWorkspace = (
       commands: Option.getOrElse(found, () => NO_COMMANDS),
       commandsSource: Option.isSome(found) ? "repo" : "none",
     };
+  });
+
+export type RemoveWorkspaceInput = {
+  /** The session's directory: the linked worktree under a repo, a plain directory otherwise. */
+  readonly directory: string;
+  /** The branch the worktree is cut on; absent for a session with no repo. */
+  readonly branch?: string | undefined;
+  /** The registered checkout the worktree was cut from, when the repo has one. */
+  readonly localPath?: string | undefined;
+};
+
+/**
+ * Tear a session's worktree and branch down (LOB-268): the only place either is removed, and only
+ * a terminal event calls it — never the idle sweep or a shutdown, which keep the work for the next
+ * run.
+ *
+ * Idempotent and best-effort, step by step, so a repeat (or a retry after a crash halfway) finishes
+ * what the first call left: each step tolerates what an earlier one already removed. The order is
+ * the one git needs — a branch checked out in a linked worktree cannot be deleted, so the worktree
+ * goes first, then its registration, then the branch.
+ *
+ * Every git call runs in the registered checkout, never in the session's directory: the worktree is
+ * the agent's (D10), and its `.git` file, its hooks and its config are agent-writable, so the
+ * control plane reads none of it (as `./git.ts` does for a push).
+ */
+export const removeWorkspace = (
+  input: RemoveWorkspaceInput,
+  deps: WorkspaceDeps,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const checkout = input.localPath;
+    const git = (repo: string, ...args: ReadonlyArray<string>) =>
+      Effect.try({
+        try: () =>
+          execFileSync(
+            "git",
+            [
+              "-C",
+              repo,
+              "-c",
+              "core.hooksPath=/dev/null",
+              "-c",
+              "core.fsmonitor=false",
+              ...args,
+            ],
+            { stdio: "ignore" },
+          ),
+        // oxlint-disable-next-line global-error-in-effect-catch
+        catch: (cause) => new Error(String(cause)),
+      }).pipe(Effect.ignore);
+    if (checkout !== undefined) {
+      yield* git(checkout, "worktree", "remove", "--force", input.directory);
+    }
+    // What `worktree remove` left — an untracked build directory, or a plain session directory.
+    yield* deps.fs
+      .remove(input.directory, { recursive: true, force: true })
+      .pipe(Effect.ignore);
+    if (checkout !== undefined) {
+      // The registration `worktree remove` left when the directory was already gone, or when it
+      // failed: removed by path, never by a bare `worktree prune`, which would clear every stale
+      // registration in the operator's checkout and not only this session's.
+      yield* git(checkout, "worktree", "remove", "--force", input.directory);
+      if (input.branch !== undefined) {
+        yield* git(checkout, "branch", "-D", input.branch);
+      }
+    }
   });

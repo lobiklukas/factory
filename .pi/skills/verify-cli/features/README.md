@@ -3,6 +3,9 @@
 One file per user-facing feature of `factory`. Each answers: what it is, how a user reaches it, how
 the skill drives it, and what observable end state proves it works.
 
+`factory discard` was verified **2026-10-28** from the `agent/LOB-268` worktree with
+`./discard.sh` (API on `:9541`) — **11/11** checks.
+
 `factory repo add` / `ls` / `show` were verified **2026-10-28** from the `agent/LOB-253` worktree:
 `./drive.sh` (API on `:9520`, approve on `:9522`, the seed's GitHub fake on `:9523`) **22/22**, one
 check being `./repo.sh` at **17/17**. A mutation run (every path read as a git work tree) failed 4 of
@@ -28,6 +31,17 @@ Status reflects the last verified run: **2026-10-27**, from the `agent/LOB-65` w
 `./drive.sh` in tmux — **20/20** required checks passed, including the PR column (LOB-65). A
 mutation run (the row always printing `-`) failed "ls shows the recorded PR URL" with `pr=-`.
 
+| Feature                                         | Status  | File                                                            |
+| ----------------------------------------------- | ------- | --------------------------------------------------------------- |
+| `factory run`                                   | passing | [run.md](run.md)                                                |
+| `factory ls`                                    | passing | [ls.md](ls.md)                                                  |
+| `factory watch`                                 | passing | [watch.md](watch.md)                                            |
+| Typed errors                                    | passing | [errors.md](errors.md)                                          |
+| `factory send` / `factory withdraw`             | passing | [withdraw.md](withdraw.md)                                      |
+| `factory send --when-busy steer/reject`         | passing | [steer.md](steer.md)                                            |
+| `factory approve` / `deny`                      | passing | [approve.md](approve.md)                                        |
+| `factory discard`                               | passing | [discard.md](discard.md)                                        |
+| `factory pr`                                    | passing | [verify-board build.md](../../verify-board/features/build.md)   |
 | Feature                                         | Status  | File                                                            |
 | ----------------------------------------------- | ------- | --------------------------------------------------------------- |
 | `factory run`                                   | passing | [run.md](run.md)                                                |
