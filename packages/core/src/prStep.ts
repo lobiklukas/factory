@@ -243,11 +243,9 @@ export const openPullRequest = (
               onSome: (s) => s.paths,
             }),
             measuredHead,
+            commit,
           )
-        : yield* Effect.as(
-            writePullRequestDoc(input.conversation, input.adopt),
-            input.adopt,
-          ));
+        : yield* adoptCardPr(input.conversation, input.adopt, commit));
 
     const sql = yield* SqlClient;
     yield* sql`
@@ -307,6 +305,8 @@ const open = (
   changed: readonly string[],
   /** The commit (or, unresolved, the branch) those paths were measured at. */
   measuredHead: string,
+  /** The commit measured and pushed, recorded as the PR's published head (C19). */
+  commit: string | undefined,
 ): Effect.Effect<
   PullRequestRecord,
   PrError | CredentialError | SessionError,
@@ -350,11 +350,35 @@ const open = (
       base: input.base,
       head: input.head,
       openedAt: DateTime.formatIso(now),
+      ...(commit === undefined ? {} : { commit }),
       evidence,
     };
     yield* writePullRequestDoc(input.conversation, record);
     return record;
   });
+
+/**
+ * Record the card's PR in this session's log (C19, `adopt`): the PR an earlier run of the card
+ * opened, at the commit *this* step measured and pushed — never the earlier run's commit, which is
+ * not what the branch holds now. With no commit resolved, the record names none, which `pr_link`
+ * reads as unknown.
+ */
+const adoptCardPr = (
+  conversation: Conversation,
+  card: PullRequestRecord,
+  commit: string | undefined,
+): Effect.Effect<PullRequestRecord, SessionError> => {
+  const record: PullRequestRecord = {
+    url: card.url,
+    number: card.number,
+    base: card.base,
+    head: card.head,
+    openedAt: card.openedAt,
+    ...(commit === undefined ? {} : { commit }),
+    ...(card.evidence === undefined ? {} : { evidence: card.evidence }),
+  };
+  return Effect.as(writePullRequestDoc(conversation, record), record);
+};
 
 /** How much a session's branch changes, as the PR step measures it. */
 export type DiffSize = {

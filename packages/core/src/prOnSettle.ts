@@ -14,7 +14,12 @@
  * - **A card's run** opens its PR when the column it was started in *requires* one (`pr_link`, B4's
  *   `building`). The column is the declaration: its exit already demands a PR, and a run that
  *   settles with a change in it has nothing left to do but open it. A run of any other column — a
- *   specifier, a planner, the reviewer the PR itself starts — opens none, whatever started it.
+ *   specifier, a planner, the reviewer the PR itself starts — opens none, whatever started it,
+ *   with one exception (C19): a run that continues the card's branch while another run of the card
+ *   has an unmerged PR recorded from it — a fix run started in `review` after its feedback, a run
+ *   sent back to `planning` — takes the step whatever its column, which adopts the card's PR and
+ *   pushes its commits onto it. Its work is the card's change, and the PR is where it is reviewed.
+ *   A reviewer run names a branch of its own (LOB-36), so it is never one of these.
  * - **A session a trigger opened** (LOB-162 — Linear, Jira, GitHub, Slack, Sentry, the generic
  *   webhook, the docs push and schedule) with no card opens its PR. Nobody is there to type
  *   `factory pr`, which is the gap this closes. "A trigger opened it" is read from the delivery the
@@ -67,6 +72,12 @@ export type SettledRun = {
    * `undefined` for a session that is no card's run.
    */
   readonly columnRequires: ReadonlyArray<string> | undefined;
+  /**
+   * Whether the run continues a branch another run of its card already recorded an unmerged PR
+   * from (C19, `./cardBranch`): the card's PR, which this run's commits are owed to whatever column
+   * it was started in. Absent reads as no.
+   */
+  readonly continuesCardPr?: boolean;
 };
 
 /**
@@ -95,7 +106,8 @@ export const settleDeclarationOf = (run: SettledRun): SettleDeclaration => {
   if (run.forkedFrom !== null) return "undeclared";
   const declares =
     run.columnRequires !== undefined
-      ? run.columnRequires.includes(PR_LINK_REQUIREMENT)
+      ? run.columnRequires.includes(PR_LINK_REQUIREMENT) ||
+        run.continuesCardPr === true
       : run.actor !== null &&
         run.actor.startsWith(TRIGGER_PREFIX) &&
         run.requestId !== null &&

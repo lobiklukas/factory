@@ -5,7 +5,12 @@
  */
 import type { BoardColumn } from "@repo/domain/Task";
 import { describe, expect, it } from "vitest";
-import { type CardRun, cardBranchOf, changeColumnsOf } from "./cardBranch";
+import {
+  branchOwnerOf,
+  type CardRun,
+  cardBranchOf,
+  changeColumnsOf,
+} from "./cardBranch";
 
 const REPO = "acme/widgets";
 
@@ -64,7 +69,21 @@ describe("cardBranchOf", () => {
       sessionId: "ses_a",
       branch: "factory/ses_a",
       baseRef: "release",
+      holders: ["ses_a", "ses_b", "ses_c"],
     });
+  });
+
+  it("names the unreleased runs on the branch as its holders, newest last", () => {
+    const runs = [
+      run("ses_a", "building", { released: true }),
+      run("ses_b", "building", { branch: "factory/ses_a" }),
+      run("ses_r", "review", { branch: "factory/review-1-abc" }),
+      run("ses_c", "review", { branch: "factory/ses_a" }),
+    ];
+    expect(cardBranchOf(runs, CHANGE, REPO)?.holders).toEqual([
+      "ses_b",
+      "ses_c",
+    ]);
   });
 
   it("stays the card's while a later run holds it, though the first run was released", () => {
@@ -105,5 +124,17 @@ describe("cardBranchOf", () => {
         REPO,
       ),
     ).toBeUndefined();
+  });
+});
+
+describe("branchOwnerOf (C19)", () => {
+  it("names the session whose branch a card's later run is bound to", () => {
+    expect(branchOwnerOf("ses_b", "factory/ses_a")).toBe("ses_a");
+  });
+
+  it("keeps the session's own id for any other binding", () => {
+    expect(branchOwnerOf("ses_b", undefined)).toBe("ses_b");
+    expect(branchOwnerOf("ses_b", "factory/review-12-abc")).toBe("ses_b");
+    expect(branchOwnerOf("ses_b", "feature/widget")).toBe("ses_b");
   });
 });

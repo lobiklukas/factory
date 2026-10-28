@@ -438,21 +438,44 @@ describe("the pr_link requirement", () => {
 
   // C19: a card's later runs continue its first change run's branch, so a follow-up run that opened
   // no PR of its own still leaves the card with the PR an earlier run opened from that branch.
-  it("is met when the latest run opened none, but an earlier run's PR is from the branch it continues (C19)", () => {
+  const published = "a".repeat(40);
+  const moved = "b".repeat(40);
+  const continued = (prCommit: string | undefined) => [
+    {
+      sessionId: "ses_a",
+      calls: [],
+      branch: "factory/ses_a",
+      prUrl: link,
+      prHead: "factory/ses_a",
+      ...(prCommit === undefined ? {} : { prCommit }),
+    },
+    { sessionId: "ses_b", calls: [], branch: "factory/ses_a" },
+  ];
+
+  it("is met when the latest run opened none, but an earlier run's PR is from the branch it continues, at its tip (C19)", () => {
     expect(
-      prLinkVerdict({
-        runs: [
-          {
-            sessionId: "ses_a",
-            calls: [],
-            branch: "factory/ses_a",
-            prUrl: link,
-            prHead: "factory/ses_a",
-          },
-          { sessionId: "ses_b", calls: [], branch: "factory/ses_a" },
-        ],
-      }),
+      prLinkVerdict({ runs: continued(published), branchTip: published }),
     ).toEqual({ met: true });
+  });
+
+  // C19 review: a follow-up run that committed and never pushed (its cap refused, its push failed,
+  // it was stopped, or it is still going) moved the branch past the PR, which lacks its commits.
+  it("is unmet when the branch moved past where the earlier run published the card's PR (C19)", () => {
+    expect(
+      prLinkVerdict({ runs: continued(published), branchTip: moved }),
+    ).toEqual({
+      met: false,
+      reason: `the card's latest run ses_b recorded no PR, and its branch factory/ses_a is at ${moved.slice(0, 12)}, past ${published.slice(0, 12)} where run ses_a published the card's PR ${link}: push the run's commits to the PR (factory pr ses_b) before moving the card on`,
+    });
+  });
+
+  it("is unmet when the earlier run's PR names no published commit, or the tip does not read (C19)", () => {
+    expect(
+      prLinkVerdict({ runs: continued(undefined), branchTip: published }),
+    ).toMatchObject({ met: false });
+    expect(prLinkVerdict({ runs: continued(published) })).toMatchObject({
+      met: false,
+    });
   });
 
   it("is unmet when the earlier run's PR is from another branch than the latest run's (C19)", () => {

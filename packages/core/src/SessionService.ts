@@ -286,7 +286,12 @@ import { homeOf, makePresence, type Lease } from "./Presence";
 import { SessionBus, SessionBusPostgres } from "./SessionBus";
 import { atCapacity, runCapReached, SESSION_MAX_CONCURRENT } from "./admission";
 import { checkRunCaps } from "./boardCaps";
-import { type CardBranch, cardBranchOf, changeColumnsOf } from "./cardBranch";
+import {
+  branchOwnerOf,
+  type CardBranch,
+  cardBranchOf,
+  changeColumnsOf,
+} from "./cardBranch";
 import {
   countRefusal,
   countSessionCreate,
@@ -1311,13 +1316,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * One permit per session, held while `effect` runs: an entry lives only while someone holds
        * or awaits it, so a session that is done with the gate leaves nothing behind.
        */
-      const keyedGate = () => {
+      const keyedGate = <K extends string = SessionId>() => {
         const locks = new Map<
-          SessionId,
+          K,
           { readonly semaphore: Semaphore.Semaphore; users: number }
         >();
         return <A, E, R>(
-          sessionId: SessionId,
+          sessionId: K,
           effect: Effect.Effect<A, E, R>,
         ): Effect.Effect<A, E, R> =>
           Effect.acquireUseRelease(
@@ -1347,6 +1352,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * owner is what excludes, which is why no lock is stored anywhere.
        */
       const withPrGate = keyedGate();
+      /**
+       * Serializes the PR steps of one card's runs (C19), inside each one's session gate: a card's
+       * runs share one branch and one PR (`./cardBranch`), so two of them stepping close together
+       * — a run that settles while the run before it is still pushing — would each read no PR on the
+       * card and each ask GitHub for one. Keyed by task, in this process; across processes a second
+       * open of the same head is GitHub's own refusal.
+       */
+      const withCardPrGate = keyedGate<string>();
       /**
        * Serializes the approvals of one session, for the reason `withPrGate` serializes PR opens: two
        * overlapping calls would each read a proposal as not yet created and each create it. Keyed by
@@ -2240,6 +2253,33 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
+       * Refuse a start that would hand the card's branch over from under a run still working on it
+       * (C19, `./cardBranch`): the hand-over detaches that run's worktree, and every commit it made
+       * from then on would miss the card's branch and PR. Seen for the runs this process owns; a run
+       * owned by another process is held by the card's `task` cap (B9).
+       */
+      const refuseBusyHolder = (
+        branch: CardBranch,
+        taskId: string | undefined,
+      ): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          const owners = yield* Ref.get(live);
+          for (const holder of branch.holders) {
+            const owner = HashMap.get(owners, yield* toSessionId(holder));
+            if (Option.isNone(owner)) continue;
+            const busy = yield* isBusy(
+              owner.value.harness,
+              owner.value.root,
+            ).pipe(Effect.orElseSucceed(() => false));
+            if (busy)
+              return yield* new SessionErrorClass({
+                code: "busy",
+                message: `run ${holder} of task ${taskId ?? ""} is still working on the card's branch ${branch.branch}: wait for it to settle, or interrupt it, before starting another run on the card (the new run would take the branch over from under it)`,
+              });
+          }
+        });
+
+      /**
        * Resolve the repo binding a create asked for, registering the repo on first use. A card's run
        * that names no repo is bound to the card's (`cardBindingFor`), so it gets a branch and a
        * worktree whichever client started it; only a run of no card is a scratch session. A card's
@@ -2273,6 +2313,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             input.baseRef === cardBranch.baseRef
               ? cardBranch
               : undefined;
+          if (continued !== undefined)
+            yield* refuseBusyHolder(continued, input.taskId);
           const cardBase =
             continued?.baseRef ??
             (card?.repo === repo ? card.baseRef : undefined);
@@ -2690,7 +2732,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               storage,
               cwd: workspace.path,
               resume: released === undefined && acquisition.resume !== false,
-              policy: policy.forWorktree(workspace.path, id),
+              policy: policy.forWorktree(
+                workspace.path,
+                branchOwnerOf(id, workspace.branch),
+              ),
               run,
               pages,
               verify: {
@@ -3380,6 +3425,60 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           }
         });
 
+      /**
+       * Refuse a message to a card's run whose worktree a later run of the card took the branch over
+       * from (C19, `./cardBranch`): its worktree is on a detached HEAD, so a turn steered into it
+       * would commit off the card's branch, and its settle — answered from the PR it already
+       * recorded — would publish none of it. Both facts are read: a later run of the card bound to the
+       * same branch, and the worktree's HEAD no longer on it (read from the files git keeps, never by
+       * running git in the agent's directory), so a run whose own agent checked something else out is
+       * not refused for it.
+       */
+      const refuseHandedOver = (
+        sessionId: SessionId,
+        row: SessionRow,
+        owner: LiveOwner,
+      ): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          const branch = owner.workspace.branch;
+          if (branch === undefined || row.repo === null) return;
+          const later = (yield* paper(
+            "read the run that took the card's branch",
+            sql<{ sessionId: string }>`
+              SELECT later.session_id
+              FROM task_runs mine
+              JOIN task_runs later
+                ON later.task_id = mine.task_id AND later.session_id <> mine.session_id
+                AND (later.started_at, later.id) > (mine.started_at, mine.id)
+              JOIN sessions s ON s.id = later.session_id
+              WHERE mine.session_id = ${sessionId} AND s.repo = ${row.repo}
+                AND COALESCE(s.branch, 'factory/' || s.id) = ${branch}
+              ORDER BY later.started_at DESC, later.id DESC
+              LIMIT 1
+            `,
+          ))[0];
+          if (later === undefined) return;
+          const head = yield* fs
+            .readFileString(path.join(owner.workspace.path, ".git"))
+            .pipe(
+              Effect.map((pointer) => /^gitdir: (.+)$/m.exec(pointer)?.[1]),
+              Effect.flatMap((gitdir) =>
+                gitdir === undefined
+                  ? Effect.succeed(undefined)
+                  : fs.readFileString(
+                      path.resolve(owner.workspace.path, gitdir.trim(), "HEAD"),
+                    ),
+              ),
+              Effect.orElseSucceed(() => undefined),
+            );
+          if (head === undefined || head.trim() === `ref: refs/heads/${branch}`)
+            return;
+          return yield* new SessionErrorClass({
+            code: "invalid_input",
+            message: `session ${sessionId}'s worktree no longer holds the card's branch ${branch}: the card's later run ${later.sessionId} took it over, so a turn here would commit off the branch and its PR. Send to ${later.sessionId}, or start a new run on the card, which continues the branch`,
+          });
+        });
+
       const send = (
         input: SendMessageInput,
       ): Effect.Effect<SendMessageResult, SessionError> =>
@@ -3391,6 +3490,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const owner = yield* acquireOwner(input.sessionId, row, {
             starts: true,
           });
+          yield* refuseHandedOver(input.sessionId, row, owner);
 
           // The worktree's declared setup before the agent's first turn (S-env-setup): a setup that
           // fails refuses the send, so no message is submitted, nothing is titled from it, and no
@@ -3419,6 +3519,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const owner = yield* acquireOwner(input.sessionId, row, {
             starts: true,
           });
+          yield* refuseHandedOver(input.sessionId, row, owner);
           const pending = yield* startSetup(input.sessionId, owner);
           if (pending === undefined) {
             yield* submitTo(input, row, owner);
@@ -3847,7 +3948,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * run of the same card recorded on this head and base, unmerged. A later run continues the
        * card's branch (`./cardBranch`), and the PR the first run opened from it is the card's one PR.
        * Read only for a session whose own log records none; `undefined` for a run of no card, and for
-       * a card with no such PR — whose run then opens it.
+       * a card with no such PR — whose run then opens it. Read under the card's PR gate
+       * (`withCardPrGate`), so two runs of the card stepping together adopt one PR rather than each
+       * opening one. A PR closed on GitHub without merging is still adopted, because the index records
+       * merges (`pr_merged_at`) but not closes: the push lands on the closed PR's branch, and
+       * reopening it is a person's call. Recording closes, so a closed PR is not adopted, is a
+       * follow-up.
        */
       const cardPullRequestFor = (
         sessionId: SessionId,
@@ -3893,85 +3999,93 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const stepPr = (input: OpenPullRequestArgs) =>
         withPrGate(
           input.sessionId,
-          Effect.gen(function* () {
-            const row = yield* requireSession(input.sessionId);
-            const repo =
-              row.repo === null ? undefined : yield* toRepoSlug(row.repo);
-            if (repo === undefined) {
+          Effect.flatMap(runTaskFor(input.sessionId), (taskId) =>
+            taskId === undefined
+              ? stepPrGated(input)
+              : withCardPrGate(taskId, stepPrGated(input)),
+          ),
+        );
+
+      /** `stepPr`'s body, run under the session's gate and its card's. */
+      const stepPrGated = (input: OpenPullRequestArgs) =>
+        Effect.gen(function* () {
+          const row = yield* requireSession(input.sessionId);
+          const repo =
+            row.repo === null ? undefined : yield* toRepoSlug(row.repo);
+          if (repo === undefined) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message: `session ${input.sessionId} is bound to no repo, so it has no PR to open`,
+            });
+          }
+          const owner = yield* acquireOwner(input.sessionId, row);
+          // The branches come from the session unless an in-process caller named them; the wire
+          // never does (LOB-213). Checked here rather than trusted: both reach git's argv.
+          const head =
+            input.head ??
+            owner.workspace.branch ??
+            `factory/${input.sessionId}`;
+          const base =
+            input.base ?? owner.workspace.baseRef ?? row.baseRef ?? "main";
+          for (const [name, ref] of [
+            ["head", head],
+            ["base", base],
+          ] as const) {
+            if (!isSafeBranchName(ref)) {
               return yield* new SessionErrorClass({
                 code: "invalid_input",
-                message: `session ${input.sessionId} is bound to no repo, so it has no PR to open`,
+                message: `session ${input.sessionId}: ${name} '${ref}' is not a branch name the PR step will pass to git`,
               });
             }
-            const owner = yield* acquireOwner(input.sessionId, row);
-            // The branches come from the session unless an in-process caller named them; the wire
-            // never does (LOB-213). Checked here rather than trusted: both reach git's argv.
-            const head =
-              input.head ??
-              owner.workspace.branch ??
-              `factory/${input.sessionId}`;
-            const base =
-              input.base ?? owner.workspace.baseRef ?? row.baseRef ?? "main";
-            for (const [name, ref] of [
-              ["head", head],
-              ["base", base],
-            ] as const) {
-              if (!isSafeBranchName(ref)) {
-                return yield* new SessionErrorClass({
-                  code: "invalid_input",
-                  message: `session ${input.sessionId}: ${name} '${ref}' is not a branch name the PR step will pass to git`,
-                });
-              }
-            }
-            yield* touch(input.sessionId);
-            const worktree = owner.workspace.path;
-            const publishing = yield* publishingFor(repo, worktree, head, base);
-            const adopt =
-              row.prUrl === null
-                ? yield* cardPullRequestFor(input.sessionId, repo, head, base)
-                : undefined;
-            const snapshot = yield* readLiveSnapshot(
-              owner,
-              refOf(input.sessionId, row, owner.workspace, owner.model),
-            );
-            const model = snapshot.usage.models.reduce<
-              (typeof snapshot.usage.models)[number] | undefined
-            >(
-              (costliest, candidate) =>
-                costliest === undefined ||
-                candidate.usage.costTotal > costliest.usage.costTotal
-                  ? candidate
-                  : costliest,
-              undefined,
-            );
-            const stepped = yield* openPullRequest({
-              harness: owner.harness,
-              conversation: owner.root,
-              sessionId: input.sessionId,
-              repo,
-              title: input.title,
-              head,
-              base,
-              // The branch is measured where it was cut: the session's own working directory.
-              worktree,
-              ...publishing,
-              ...(adopt === undefined ? {} : { adopt }),
-              cap: options.prCap ?? DEFAULT_DIFF_CAP,
-              // The title is the session's own first line, which is the prompt a PR body carries.
-              prompt: row.title,
-              ...(model === undefined ? {} : { model: model.key }),
-              spend: `$${costOf(snapshot.usage).toFixed(2)}`,
-            }).pipe(
-              // The step writes the index row through `SqlClient`, which this layer already holds:
-              // it is not a requirement of the session service, so it does not leave through this
-              // method's type.
-              Effect.provideService(SqlClient, sql),
-              Effect.exit,
-            );
-            if (Exit.isSuccess(stepped)) yield* touchActivity(input.sessionId);
-            return { stepped, storage: owner.storage };
-          }),
-        );
+          }
+          yield* touch(input.sessionId);
+          const worktree = owner.workspace.path;
+          const publishing = yield* publishingFor(repo, worktree, head, base);
+          const adopt =
+            row.prUrl === null
+              ? yield* cardPullRequestFor(input.sessionId, repo, head, base)
+              : undefined;
+          const snapshot = yield* readLiveSnapshot(
+            owner,
+            refOf(input.sessionId, row, owner.workspace, owner.model),
+          );
+          const model = snapshot.usage.models.reduce<
+            (typeof snapshot.usage.models)[number] | undefined
+          >(
+            (costliest, candidate) =>
+              costliest === undefined ||
+              candidate.usage.costTotal > costliest.usage.costTotal
+                ? candidate
+                : costliest,
+            undefined,
+          );
+          const stepped = yield* openPullRequest({
+            harness: owner.harness,
+            conversation: owner.root,
+            sessionId: input.sessionId,
+            repo,
+            title: input.title,
+            head,
+            base,
+            // The branch is measured where it was cut: the session's own working directory.
+            worktree,
+            ...publishing,
+            ...(adopt === undefined ? {} : { adopt }),
+            cap: options.prCap ?? DEFAULT_DIFF_CAP,
+            // The title is the session's own first line, which is the prompt a PR body carries.
+            prompt: row.title,
+            ...(model === undefined ? {} : { model: model.key }),
+            spend: `$${costOf(snapshot.usage).toFixed(2)}`,
+          }).pipe(
+            // The step writes the index row through `SqlClient`, which this layer already holds:
+            // it is not a requirement of the session service, so it does not leave through this
+            // method's type.
+            Effect.provideService(SqlClient, sql),
+            Effect.exit,
+          );
+          if (Exit.isSuccess(stepped)) yield* touchActivity(input.sessionId);
+          return { stepped, storage: owner.storage };
+        });
 
       /**
        * The PR step, and its exit reported to the write-back. Every exit is reported — the PR, a
@@ -4056,6 +4170,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               taskId: string | null;
               column: string | null;
               columns: string | null;
+              continuesCardPr: boolean;
             }>`
               SELECT s.title, s.repo, s.request_id, s.pr_url, s.actor, s.forked_from,
                      s.workspace_released_at IS NOT NULL AS released,
@@ -4063,7 +4178,17 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                        SELECT 1 FROM session_approvals sa
                        WHERE sa.session_id = s.id AND sa.decision IS NULL
                      )) AS waiting,
-                     tr.task_id, tr."column", bd.columns::text AS columns
+                     tr.task_id, tr."column", bd.columns::text AS columns,
+                     -- C19: another run of the card recorded an unmerged PR from this run's branch.
+                     EXISTS (
+                       SELECT 1 FROM task_runs other
+                       JOIN sessions os ON os.id = other.session_id
+                       WHERE other.task_id = tr.task_id AND other.session_id <> s.id
+                         AND os.repo = s.repo
+                         AND os.pr_url IS NOT NULL AND os.pr_merged_at IS NULL
+                         AND COALESCE(os.branch, 'factory/' || os.id)
+                           = COALESCE(s.branch, 'factory/' || s.id)
+                     ) AS continues_card_pr
               FROM sessions s
               LEFT JOIN task_runs tr ON tr.session_id = s.id
               LEFT JOIN tasks t ON t.id = tr.task_id
@@ -4100,6 +4225,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               forkedFrom: row.forkedFrom,
               released: row.released,
               waiting: row.waiting,
+              continuesCardPr: row.continuesCardPr,
               // A card's run whose column the pinned version no longer declares requires nothing.
               columnRequires:
                 columns === undefined
@@ -4670,7 +4796,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * there to approve a check, and a check that waits on a person is not one a join can read.
        */
       const refuseUnpolicedChecks = (
-        sessionId: SessionId,
+        sessionId: string,
         worktree: string,
         workers: readonly MissionWorker[],
       ): Effect.Effect<void, SessionError> =>
@@ -4752,7 +4878,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // The checks are policed against the worktree's path, which needs no worktree: the one the
           // mission runs in is the owner's, cut under the gate.
           const planned = yield* workspaceFor(row, { cut: false });
-          yield* refuseUnpolicedChecks(input.sessionId, planned.path, workers);
+          yield* refuseUnpolicedChecks(
+            branchOwnerOf(input.sessionId, planned.branch),
+            planned.path,
+            workers,
+          );
           const owner = yield* acquireOwner(input.sessionId, row, {
             starts: true,
           });

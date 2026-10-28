@@ -26,9 +26,16 @@
  *
  * The worktree is the agent's, and git checks a branch out in one worktree at a time: the newest
  * run's worktree takes it over, and the earlier run's worktree is left where it was on a detached
- * HEAD (`./workspace`), its files untouched. An earlier run that is still going when a later one
- * starts commits on that detached HEAD from then on, and those commits are not the card's; a board
- * that must never run two at once caps `task` at 1 (B9).
+ * HEAD (`./workspace`), its files untouched. Its commits from then on would land on that detached
+ * HEAD and never reach the card's branch or PR, so neither way of making one is let through:
+ *
+ * - **A start while a run on the branch is still going is refused** (`busy`, naming that run): the
+ *   hand-over would detach it mid-turn. A board pinned to a version with no caps (default versions
+ *   1–4) can otherwise start a second run on a card whose first is busy. A run owned by another API
+ *   process is not seen here; its card's `task` cap (B9) is what holds that case.
+ * - **A message to a run whose worktree was handed over is refused** (`invalid_input`, naming the
+ *   later run that took the branch): steering it would reopen a turn on the detached HEAD. The card's
+ *   newest run is the one to send to, or a new run started on the card, which continues the branch.
  */
 import type { BoardColumn } from "@repo/domain/Task";
 import {
@@ -54,6 +61,8 @@ export type CardBranch = {
   readonly sessionId: string;
   readonly branch: string;
   readonly baseRef: string | null;
+  /** The card's unreleased runs bound to the branch, oldest first: the last one holds it now. */
+  readonly holders: ReadonlyArray<string>;
 };
 
 /** The branch a run is on: the one it named, or D10's `factory/<session-id>`. */
@@ -94,11 +103,28 @@ export const cardBranchOf = (
   const first = inRepo.find(
     (run) => changeColumns.has(run.column) && held.has(branchOfRun(run)),
   );
-  return first === undefined
-    ? undefined
-    : {
-        sessionId: first.sessionId,
-        branch: branchOfRun(first),
-        baseRef: first.baseRef,
-      };
+  if (first === undefined) return undefined;
+  const branch = branchOfRun(first);
+  return {
+    sessionId: first.sessionId,
+    branch,
+    baseRef: first.baseRef,
+    holders: inRepo
+      .filter((run) => !run.released && branchOfRun(run) === branch)
+      .map((run) => run.sessionId),
+  };
 };
+
+/**
+ * The session D11's push rule names for a session bound to `branch` (C19): a card's later run is
+ * bound to its first change run's `factory/<session-id>`, and that is the branch its worktree has
+ * and its agent may push — not `factory/<its own id>`, which does not exist there. Any other binding
+ * (none, a reviewer's `factory/review-…`, a caller-named branch) leaves the session's own id.
+ */
+export const branchOwnerOf = (
+  sessionId: string,
+  branch: string | undefined,
+): string =>
+  (branch === undefined
+    ? undefined
+    : /^factory\/(ses_[0-9a-z]+)$/.exec(branch)?.[1]) ?? sessionId;

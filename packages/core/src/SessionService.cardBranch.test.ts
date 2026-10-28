@@ -15,7 +15,7 @@
 import { BunServices } from "@effect/platform-bun";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RepoSlug, type SessionId } from "@repo/domain/Session";
@@ -141,8 +141,12 @@ const repoRemote: RepoRemote = {
   defaultBranch: () => Effect.succeed("main"),
 };
 
+/** While this file exists, a run's command waits before it commits: a run held busy on purpose. */
+const hold = join(mkdtempSync(join(tmpdir(), "factory-c19-hold-")), "hold");
+
 /** The run's one command: commit one more numbered file than the branch holds. */
 const COMMAND = [
+  `while [ -f ${hold} ]; do sleep 0.1; done`,
   "n=$(ls change-*.txt 2>/dev/null | wc -l | tr -d ' ')",
   "n=$((n+1))",
   'echo "change $n" > "change-$n.txt"',
@@ -220,8 +224,11 @@ const recordedPr = (sessionId: SessionId) =>
 const repo = RepoSlug.make(`c19-${runId}/card`);
 
 /** Where a session's worktree is: the session root, by repo, by id. */
-const worktreeOf = (sessionId: string) =>
-  join(sessionRoot, ...repo.split("/"), sessionId);
+const worktreeOf = (sessionId: string, slug: string = repo) =>
+  join(sessionRoot, ...slug.split("/"), sessionId);
+
+/** A second repository over the same checkout: one board per repository. */
+const gadgetRepo = RepoSlug.make(`c19-${runId}/gadget`);
 
 /** A run of the card in `column`, sent `content` when given, and settled once it answered. */
 const runOnCard = (taskId: string, column: string, content?: string) =>
@@ -300,6 +307,10 @@ describe("a card's runs share one branch and one PR (C19)", () => {
             "HEAD",
           ),
         };
+        // The first run's worktree let go of the branch: steering it would commit off it.
+        const steerFirst = yield* service
+          .send({ sessionId: first, content: "one more thing" })
+          .pipe(Effect.flip);
         yield* service.send({ sessionId: second.id, content: "fix it up" });
         yield* waitUntil(
           service.get(second.id),
@@ -311,6 +322,12 @@ describe("a card's runs share one branch and one PR (C19)", () => {
         const secondDecision = yield* decided(second.id);
         const secondPr = yield* recordedPr(second.id);
         const secondCommit = git(checkout, "rev-parse", `factory/${first}`);
+        const forgeAfterSecond = git(
+          forgeRepo,
+          "rev-parse",
+          `refs/heads/factory/${first}`,
+        );
+        const lastPushAfterSecond = pushes.at(-1);
         const asked = yield* service
           .openPullRequest({ sessionId: second.id, title: "build the widget" })
           .pipe(Effect.provideContext(forgeContext));
@@ -344,6 +361,18 @@ describe("a card's runs share one branch and one PR (C19)", () => {
           "--name-only",
           "main...HEAD",
         );
+        // A fix run in `review` commits on the card's branch, and its settle pushes it onto the
+        // card's PR although `review` requires no PR of its own.
+        yield* service.send({ sessionId: reviewRun, content: "address it" });
+        yield* waitUntil(
+          service.get(reviewRun),
+          (snapshot) =>
+            !snapshot.live.busy &&
+            snapshot.entries.some((entry) => entry.kind === "assistant"),
+          "the review run to settle",
+        );
+        const reviewDecision = yield* decided(reviewRun);
+        const reviewCommit = git(checkout, "rev-parse", `factory/${first}`);
         const runs = yield* sql<{ id: string; branch: string | null }>`
           SELECT s.id, s.branch FROM task_runs tr JOIN sessions s ON s.id = tr.session_id
           WHERE tr.task_id = ${card.id} ORDER BY tr.started_at, tr.id
@@ -360,10 +389,16 @@ describe("a card's runs share one branch and one PR (C19)", () => {
           secondDecision,
           secondPr,
           secondCommit,
+          forgeAfterSecond,
+          lastPushAfterSecond,
           asked,
           moved,
           branchAfterDiscard,
           reviewDiff,
+          reviewDecision,
+          reviewCommit,
+          reviewPr: yield* recordedPr(reviewRun),
+          steerFirst,
           runs,
           forgeHead: git(forgeRepo, "rev-parse", `refs/heads/factory/${first}`),
         };
@@ -373,6 +408,10 @@ describe("a card's runs share one branch and one PR (C19)", () => {
     const branch = `factory/${outcome.first}`;
     // The first run opened the card's one PR, from its own branch.
     expect(outcome.firstDecision).toEqual(["opened"]);
+    expect(outcome.steerFirst).toMatchObject({ code: "invalid_input" });
+    expect(outcome.steerFirst.message).toContain(
+      `the card's later run ${outcome.second} took it over`,
+    );
     expect(outcome.firstPr?.head).toBe(branch);
     expect(created).toEqual([{ head: branch, base: "main" }]);
 
@@ -389,9 +428,17 @@ describe("a card's runs share one branch and one PR (C19)", () => {
     expect(outcome.secondCommit).not.toBe(outcome.firstCommit);
     expect(outcome.secondDecision).toEqual(["opened"]);
     expect(created).toHaveLength(1);
-    expect(outcome.secondPr).toEqual(outcome.firstPr);
-    expect(outcome.forgeHead).toBe(outcome.secondCommit);
-    expect(pushes.at(-1)).toEqual({ branch, commit: outcome.secondCommit });
+    // The card's PR, recorded at the commit each run published it at.
+    expect(outcome.firstPr?.commit).toBe(outcome.firstCommit);
+    expect(outcome.secondPr).toEqual({
+      ...outcome.firstPr,
+      commit: outcome.secondCommit,
+    });
+    expect(outcome.forgeAfterSecond).toBe(outcome.secondCommit);
+    expect(outcome.lastPushAfterSecond).toEqual({
+      branch,
+      commit: outcome.secondCommit,
+    });
     expect(outcome.asked).toEqual({
       number: outcome.firstPr?.number,
       url: outcome.firstPr?.url,
@@ -408,6 +455,15 @@ describe("a card's runs share one branch and one PR (C19)", () => {
       "change-1.txt",
       "change-2.txt",
     ]);
+    // The review run's fix reached the card's PR: adopted, pushed, no second PR.
+    expect(outcome.reviewCommit).not.toBe(outcome.secondCommit);
+    expect(outcome.reviewDecision).toEqual(["opened"]);
+    expect(outcome.reviewPr).toEqual({
+      ...outcome.firstPr,
+      commit: outcome.reviewCommit,
+    });
+    expect(outcome.forgeHead).toBe(outcome.reviewCommit);
+    expect(created).toHaveLength(1);
     // Every run after the first is bound to the first's branch by name.
     expect(outcome.runs).toEqual([
       { id: outcome.first, branch: null },
@@ -415,5 +471,131 @@ describe("a card's runs share one branch and one PR (C19)", () => {
       { id: outcome.followUp, branch },
       { id: outcome.reviewRun, branch },
     ]);
+  }, 240_000);
+
+  /**
+   * The review's P1 and its busy hand-over (C19): an earlier run's PR stands for the card only while
+   * the branch is where it was published, and a start that would take the branch from under a busy
+   * run is refused. On a card pinned to default version 4, which declares no caps, so the busy run
+   * is the only thing that stops a second start.
+   *
+   * Mutations this catches: let `pr_link` stand on the earlier run's PR whatever the branch's tip —
+   * the move with the busy run's unpublished commit goes through; drop `refuseBusyHolder` — the third
+   * start takes the branch over from under the busy run.
+   */
+  it("refuses a move while a later run's commits are unpublished, and a start while a run on the branch is busy", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const service = yield* SessionService;
+        const tasks = yield* TaskService;
+        const sql = yield* SqlClient;
+        yield* service.registerRepo({
+          repo: gadgetRepo,
+          url: `https://github.com/${gadgetRepo}.git`,
+          localPath: checkout,
+        });
+        const board = yield* tasks.createBoard({
+          repo: gadgetRepo,
+          definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
+        });
+        const card = yield* tasks.create({
+          boardId: BoardInstanceId.make(board.id),
+          title: "ship the gadget",
+          actor: "person:c19",
+        });
+        yield* sql`
+          UPDATE tasks SET "column" = 'building', definition_version = 4 WHERE id = ${card.id}
+        `;
+
+        const first = yield* runOnCard(card.id, "building", "build it");
+        const firstDecision = yield* decided(first);
+        const branch = `factory/${first}`;
+
+        // The second run is held busy before it commits anything.
+        writeFileSync(hold, "");
+        const second = yield* service.create({
+          taskId: card.id,
+          taskColumn: "building",
+        });
+        yield* service.send({ sessionId: second.id, content: "fix it up" });
+        yield* waitUntil(
+          service.get(second.id),
+          (snapshot) => snapshot.live.busy,
+          "the second run to turn busy",
+        );
+        const thirdStart = yield* service
+          .create({ taskId: card.id, taskColumn: "building" })
+          .pipe(Effect.flip);
+
+        // A commit on the card's branch nothing published yet: the card's PR lacks it.
+        writeFileSync(
+          join(worktreeOf(second.id, gadgetRepo), "manual.txt"),
+          "manual\n",
+        );
+        git(worktreeOf(second.id, gadgetRepo), "add", "manual.txt");
+        git(
+          worktreeOf(second.id, gadgetRepo),
+          "commit",
+          "-q",
+          "-m",
+          "unpublished",
+        );
+        const before = yield* tasks.get(card.id);
+        const refused = yield* tasks
+          .move({
+            taskId: card.id,
+            expectedRevision: before.revision,
+            to: "review",
+            actor: "person:c19",
+          })
+          .pipe(Effect.flip);
+
+        // The run finishes, and its settle pushes the branch onto the card's PR.
+        rmSync(hold);
+        const secondDecision = yield* decided(second.id);
+        const tip = git(checkout, "rev-parse", branch);
+        const again = yield* tasks.get(card.id);
+        const moved = yield* tasks.move({
+          taskId: card.id,
+          expectedRevision: again.revision,
+          to: "review",
+          actor: "person:c19",
+        });
+        return {
+          first,
+          second: second.id,
+          branch,
+          firstDecision,
+          thirdStart,
+          refused,
+          secondDecision,
+          tip,
+          forgeHead: git(forgeRepo, "rev-parse", `refs/heads/${branch}`),
+          secondPr: yield* recordedPr(second.id),
+          moved,
+          runs: yield* sql<{ id: string }>`
+            SELECT session_id AS id FROM task_runs WHERE task_id = ${card.id}
+          `,
+        };
+      }),
+    );
+
+    expect(outcome.firstDecision).toEqual(["opened"]);
+    expect(outcome.thirdStart).toMatchObject({ code: "busy" });
+    expect(outcome.thirdStart.message).toContain(
+      `run ${outcome.second} of task`,
+    );
+    // The refused start wrote no run.
+    expect(outcome.runs).toHaveLength(2);
+    expect(outcome.refused).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: "pr_link",
+    });
+    expect(outcome.refused.message).toContain(`where run ${outcome.first}`);
+    expect(outcome.secondDecision).toEqual(["opened"]);
+    expect(outcome.forgeHead).toBe(outcome.tip);
+    expect(outcome.secondPr?.commit).toBe(outcome.tip);
+    expect(outcome.secondPr?.head).toBe(outcome.branch);
+    expect(outcome.moved.column).toBe("review");
   }, 240_000);
 });
