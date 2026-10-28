@@ -616,7 +616,7 @@ describe("the actor every write records is the credential's, not the body's (LOB
     expect(rows.map((row) => row.actor)).toEqual(["amy"]);
   }, 60_000);
 
-  it("records amy on every board write — create, move, block, unblock, comment — and on the run board start opens", async () => {
+  it("records amy on every board write — create, move, block, unblock, update, comment — and on the run board start opens", async () => {
     const outcome = await asAmy((client) =>
       Effect.gen(function* () {
         const board = yield* client.createBoard({
@@ -652,9 +652,16 @@ describe("the actor every write records is the credential's, not the body's (LOB
           expectedRevision: blocked.revision,
           actor: MALLORY,
         });
-        const commented = yield* client.commentTask({
+        const updated = yield* client.updateTask({
           taskId: created.id,
           expectedRevision: unblocked.revision,
+          title: "a better card",
+          priority: "urgent",
+          actor: MALLORY,
+        });
+        const commented = yield* client.commentTask({
+          taskId: created.id,
+          expectedRevision: updated.revision,
           body: "looks right",
           actor: MALLORY,
         });
@@ -690,6 +697,8 @@ describe("the actor every write records is the credential's, not the body's (LOB
       "moved",
       "blocked",
       "unblocked",
+      "retitled",
+      "priorityChanged",
       "commented",
       "moved",
       "moved",

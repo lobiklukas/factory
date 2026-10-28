@@ -82,6 +82,9 @@ export const projectTask = (
       case "priorityChanged":
         card = { ...card, priority: event.to, revision };
         break;
+      case "retitled":
+        card = { ...card, title: event.to, revision };
+        break;
       case "commented":
       case "specified":
         card = { ...card, revision };

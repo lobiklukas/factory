@@ -809,8 +809,8 @@ export type Actor = typeof Actor.Type;
  *
  * The kinds are exactly the ones the board decisions name: a move (B5), a block and an unblock
  * (B4, B7), a comment (B7 — the question a run ended with, and the answer to one), the spec a
- * specifying run declared (B4's `specifying` exit, LOB-238), and a priority change (B9, "priority
- * changes are recorded as events"). A run starting or finishing is a later
+ * specifying run declared (B4's `specifying` exit, LOB-238), a priority change (B9, "priority
+ * changes are recorded as events") and a retitle (C11). A run starting or finishing is a later
  * issue's event: LOB-60 owns the run-start and run-finish events and the `factory.task` log
  * document; this file already carries `TaskRun` and migration 0007 already creates `task_runs`,
  * because B1 makes a run a first-class thing a task owns.
@@ -882,6 +882,14 @@ export const TaskEvent = Schema.TaggedUnion({
     taskId: TaskId,
     from: TaskPriority,
     to: TaskPriority,
+    actor: Actor,
+    revision: Schema.Int,
+  },
+  /** A person fixed the card's title (C11); `updateTask` writes one per field it changed. */
+  retitled: {
+    taskId: TaskId,
+    from: Schema.String,
+    to: Schema.String,
     actor: Actor,
     revision: Schema.Int,
   },
@@ -1220,11 +1228,31 @@ export type MoveTaskInput = typeof MoveTaskInput.Type;
 export const BlockTaskInput = Schema.Struct({
   taskId: TaskId,
   expectedRevision: Schema.Int,
-  reason: Schema.String,
+  reason: BlockReason,
   note: Schema.optional(Schema.String),
   actor: Schema.String,
 });
 export type BlockTaskInput = typeof BlockTaskInput.Type;
+
+/**
+ * The longest title a card takes on an edit, in characters (C11). A title heads a lane card, a
+ * session and a PR, so it is a line, not a document.
+ */
+export const MAX_TASK_TITLE_CHARS = 300;
+
+/**
+ * Fix a card's title and/or priority (C11). At least one is named; a value the card already has is
+ * no change. One call moves the revision on by one however many fields it changes, and writes one
+ * event per changed field, each at the revision the call expected.
+ */
+export const UpdateTaskInput = Schema.Struct({
+  taskId: TaskId,
+  expectedRevision: Schema.Int,
+  title: Schema.optional(Schema.String),
+  priority: Schema.optional(TaskPriority),
+  actor: Schema.String,
+});
+export type UpdateTaskInput = typeof UpdateTaskInput.Type;
 
 export const UnblockTaskInput = Schema.Struct({
   taskId: TaskId,

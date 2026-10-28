@@ -63,6 +63,19 @@ start` does, then `sendMessage` with the field's text, so the run is busy when t
   such a card through `createTask` (the fields the Linear card path sets) and requires the link, its
   target and rel, no external ref on the seeded card, and a `javascript:` link refused by the API
   (evidence `card-pane-external-link.png`).
+- **State controls (C11).** The pane writes the card's state, each at the revision on screen, as a
+  move is: **Block** (`[data-card-block-open]`) opens `form[data-card-block-form]` — a reason
+  (`dependency`, `capability`, `transient`; `needs_input` is a run's question and `setup_failed` a
+  run's, so a person is not offered them, though `factory board block` takes every reason) and an
+  optional note — and a blocked card shows what it waits on and **Unblock** (`[data-card-unblock]`);
+  the pencil (`[data-card-title-edit]`) turns the title into an input (Enter saves, Escape leaves; a
+  blank, over-long or unchanged title cannot be sent); the priority badge
+  (`button[data-card-priority=normal|urgent]`) flags the card urgent or clears the flag. They are
+  `blockTask`, `unblockTask` and the new `updateTask` (title and/or priority; one revision, one
+  `retitled` / `priorityChanged` event per changed field; a value the card already has is no edit).
+  A refusal is `[data-card-edit-refusal=<tag>]` in the server's own words, kept while the card is at
+  the revision it refused at. They share the pane's write hold with Moves and Thread. The CLI twin is
+  `factory board update`. Driven by `card-edit.sh` ([card-edit.md](card-edit.md)).
 - Selection is in the URL only; nothing is kept in the browser's storage.
 
 ## How to get to it (user POV)
