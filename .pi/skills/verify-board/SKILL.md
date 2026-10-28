@@ -1,6 +1,6 @@
 ---
 name: verify-board
-description: Drive and prove the factory board — create a board and a card, move it, assert the three refusals (undeclared transition, stale revision, a run crossing a human gate), and take the card through specify → ask → answer → the next run → build → PR with evidence → review → merge, through `factory board create|add|ls|show|move|comment|start|block|unblock|attention|runs` and `factory pr`, read definitions and a board's configuration through `factory board definitions|definition show|list|config`, in apps/cli against a real control plane in a real tmux terminal, then read the board back in the dashboard, and cross-check the CLI and the browser on one card both ways (`equivalence.sh` runs verify-cli and verify-web too); includes the ask on the task across a restart. Use when asked to verify, test, or show evidence that the board works from the command line, or after changing apps/cli, packages/domain, packages/core's TaskService, or apps/api.
+description: Drive and prove the factory board — create a board and a card, move it, assert the three refusals (undeclared transition, stale revision, a run crossing a human gate), and take the card through specify → ask → answer → the next run → build → PR with evidence → review → merge, through `factory board create|add|ls|show|move|comment|start|block|unblock|attention|runs`, the run's PR opened in the browser, read definitions and a board's configuration through `factory board definitions|definition show|list|config`, in apps/cli against a real control plane in a real tmux terminal, then read the board back in the dashboard, and cross-check the CLI and the browser on one card both ways (`equivalence.sh` runs verify-cli and verify-web too); includes the ask on the task across a restart. Use when asked to verify, test, or show evidence that the board works from the command line, or after changing apps/cli, packages/domain, packages/core's TaskService, or apps/api.
 ---
 
 # Verify the board
@@ -42,7 +42,7 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 | the refusals wrote nothing       | `board show` after them: the last accepted column and revision                                  | a refused move is not a half-applied one                             |
 | the dashboard agrees (LOB-84)    | `web.mjs`: lane, pane revision, and `building` marked `plan approval`                           | the browser shows what the CLI left, and offers a person the gate    |
 | CLI ⇄ browser (LOB-87)           | `both-ways.mjs`: an open page follows `board move`; its plan approval is what `show` prints     | the CLI and the browser are one board, on the drive's own card       |
-| build, PR, merge (LOB-86)        | a diff; `factory pr`'s link in the fake's ledger, its body's evidence; merge refusal            | the PR and its evidence are real, and only a person reaches `done`   |
+| build, PR, merge (LOB-86)        | a diff; the browser-opened PR's link in the fake's ledger, its body's evidence; merge refusal   | the PR and its evidence are real, and only a person reaches `done`   |
 | the reviewer's verdict (LOB-241) | `drive.sh`: merge refused, no review ran; signed `opened` → `review.ts`'s reviewer passes; done | `done` takes a reviewer run's pass on the PR's head, not a note      |
 | the ask on the task (B7)         | `ask.sh`: busy, then parked; block + question; restart; answer; next prompt                     | a run that needs a person ends, and the answer reaches the next run  |
 | `requires[]` on exit (B8)        | `requires.sh`: building refused with no diff, then no PR; review refused, then per-head review  | a refusal names the requirement; evidence is a condition of the move |
@@ -210,7 +210,7 @@ both ways for a move; see `features/equivalence.md`) → **both ways, a new card
 `card-create.sh`): a card made with the board page's New card is what `board ls` and `board show` list,
 its twin made at the terminal with the same inputs reaches the still-open page, and the server holds
 the two alike → `board start` in `building`, the run's `verify` record (`build.ts`), a
-non-empty `git diff main...factory/<run>`, `factory pr <run>` and its link checked against the fake's
+non-empty `git diff main...factory/<run>`, the PR opened in the browser from the card pane's run row (C7, `pr-browser.mjs`; no `factory pr`) and its link checked against the fake's
 ledger and body (`build.ts`), `factory ls` showing it → **review**: the run's own `building → review`,
 a person's `review → done` refused naming `review_verdict` (no review ran), then a signed
 `pull_request` `opened` for the PR (`review.ts`, LOB-241) whose reviewer run records a pass on its head,

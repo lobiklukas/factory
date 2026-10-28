@@ -22,6 +22,11 @@ reads the default card's expected moves from its pinned definition over the API.
 failed only the busy-compaction race named
 under Known gaps.
 
+`pr.sh` (Open pull request on the session pane and a card's run row, C7) last passed on 2026-10-28
+from the `agent/C7` worktree, API `:9570` / web `:3570` / the GitHub fake `:9571`, and
+`.pi/skills/verify-board`'s `drive.sh` opened its build run's PR in the browser there
+([pr-open.md](pr-open.md)).
+
 `model.sh` (the New session model picker, LOB-274) last passed **11/11** on 2026-10-28 from the
 `agent/LOB-274` worktree, API `:9505` / web `:3505`.
 
@@ -45,6 +50,7 @@ re-passed there beside it, as the strip and the form sit on their pages.
 | What needs a person        | passing | [attention.md](attention.md)                                                  |
 | The card's thread          | passing | [thread.md](thread.md) (`thread.sh`)                                          |
 | The session's PR link      | passing | [pr-link.md](pr-link.md)                                                      |
+| Open pull request          | passing | [pr-open.md](pr-open.md) (`pr.sh`)                                            |
 | Spend by repo and actor    | passing | [spend.md](spend.md) (`spend.sh`)                                             |
 | Repositories               | passing | [repos.md](repos.md) (`repos.sh`)                                             |
 | New card (board page)      | passing | [card-create.md](card-create.md) (verify-board's `card-create.sh`)            |
