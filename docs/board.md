@@ -120,14 +120,17 @@ itself, is the recorded move that starts the first run.
 Built (C20): the merge gate reads the merge. `human_merge` is a checked requirement on a move into
 `done`: a person's move is refused naming it until a run of the card recorded GitHub's merge of the
 card's PR (`factory.merge`, LOB-44) — so a card cannot reach `done` while its PR is open or was closed
-unmerged. The merge itself completes the card: a signed `pull_request` closed delivery
+unmerged. A card no run opened a PR for has no merge to wait on and meets it (a box with no forge,
+work that needed no PR): the actor gate holds that move alone, as before. The merge itself completes the card: a signed `pull_request` closed delivery
 (`POST /webhooks/github`) moves the card whose current PR it names — the newest PR a run of the card
 recorded — to `done`, from whichever column it is in and without its exit requirements (the work is on
 the base already), recorded by the actor `merge:<PR page>`, and its runs' workspaces are released; an
 unmerged close blocks it `pr_closed`, the note naming the PR. Both happen once however often GitHub
-redelivers (`TaskService.settlePullRequest`, under the card's row lock). A box GitHub cannot deliver to
+redelivers (`TaskService.settlePullRequest`, under the card's row lock), and a close blocks the card
+once per PR, so a person who unblocks it carries on without the PR-state read blocking it again. A box GitHub cannot deliver to
 learns the same by asking: opening the card (`getTaskExit`, the card pane's checklist and `factory board
-show`) reads the PR's state (`GET …/pulls/{n}`, each answer kept 30 s) and settles the card the way the
+show`) reads the PR's state (`GET …/pulls/{n}`, each answer kept 30 s, a failure 2 min, and a
+read that takes over 5 s given up on) and settles the card the way the
 delivery would, and a move into `done` reads it afresh and records a merge it finds, so the person's
 move goes through (`packages/core/src/cardPullRequest.ts`).
 

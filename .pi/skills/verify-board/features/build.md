@@ -123,6 +123,14 @@ stays in `building` (a check that passes only when there is no link says so).
 
 ## What proves it works
 
+C20 (2026-10-28, `agent/C20`, API `:9500`, web `:3500`, the fake on `:9503`, `.verify/evidence/c20/board/`):
+`./drive.sh` exit 0, **156** PASS. `move-merge-open.txt`: the person's review → done refused naming
+`human_merge` and the PR while it was open; `merge-drive.json`: the PR merged on the fake, the signed
+close answered `cards: {done: 1, blocked: 0}`, its redelivery no `cards`, the card in `done` one
+revision on, one `moved` into `done` by `merge:<PR page>`. `./definitions.sh` exit 0, 31 PASS, its
+golden now marking `human_merge (checked)` (and carrying C22's `asks`/`writes`/`pushes` rows, which
+the golden had not been updated for).
+
 C18 (2026-10-28, `agent/C18`, API `:9500`, web `:3500`, the fake on `:9503`): `./drive.sh` exit 0, **150**
 PASS, with the PR opened when the build run settled — no `factory pr`, nothing pressed (`pr.txt`,
 `build-settled.json`, `pr-browser.json` in recorded mode). Under `BOARD_GITHUB=off` exit 1: `pr.txt` says

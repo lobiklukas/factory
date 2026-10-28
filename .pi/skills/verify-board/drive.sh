@@ -850,8 +850,11 @@ fresh
 run_cmd merge-open "$FACTORY board move --task $TASK_ID --to done --expect-revision ${MERGE_REVISION:-0} --actor person:reviewer --api $API_URL" || true
 capture move-merge-open.txt
 OPEN_MESSAGE="requirement_unmet: the move review → done needs \"human_merge\" (a human merge (B5's merge gate)), which is not met: no merge of the card's PR ${PR_URL:-none} is on record"
+# The refusal is longer than the pane is wide, so it is compared with the pane's wraps (and the
+# spaces tmux trims at them) taken out of both sides.
+squeeze() { tr -d ' \n'; }
 check "with the reviewer's pass and the PR open, a person's review → done is refused naming human_merge and the PR" \
-  "$([ -n "$PR_URL" ] && [ "$(exit_code merge-open)" != "0" ] && [ -n "$(exit_code merge-open)" ] && grep -qF "$OPEN_MESSAGE" "$EVIDENCE_DIR/move-merge-open.txt" && echo 0 || echo 1)" \
+  "$([ -n "$PR_URL" ] && [ "$(exit_code merge-open)" != "0" ] && [ -n "$(exit_code merge-open)" ] && squeeze < "$EVIDENCE_DIR/move-merge-open.txt" | grep -qF "$(printf '%s' "$OPEN_MESSAGE" | squeeze)" && echo 0 || echo 1)" \
   "exit=$(exit_code merge-open), $(grep -m1 -o 'needs "[a-z_]*"' "$EVIDENCE_DIR/move-merge-open.txt" 2>/dev/null)"
 
 # The merge is GitHub's: the PR merged on the fake, and the signed delivery GitHub sends for it, twice.

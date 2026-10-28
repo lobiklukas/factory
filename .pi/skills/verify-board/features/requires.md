@@ -135,8 +135,11 @@ be a path in no package that nothing verifies.
 
 ## Evidence
 
-`.verify/evidence/latest/board/` (last run: `.verify/evidence/c19/requires-board/`, 68/68, C19,
-2026-10-28; before it `.verify/evidence/lob-241/board/`, 56/56, LOB-241): `requires-observed.json`
+`.verify/evidence/latest/board/` (last run: `.verify/evidence/c20/board/`, 75/75, C20, 2026-10-28,
+`REQUIRES_PORT=9502`, `REQUIRES_GITHUB_PORT=9504` — `requires-unmerged.txt`, the move held on
+`human_merge` with the PR open, `requires-forge-merge.json`, the merge on the fake, and
+`requires-done.txt`, the move through on the state it read, 8 `GET …/pulls/1` in the ledger; before
+it `.verify/evidence/c19/requires-board/`, 68/68, C19, 2026-10-28; before it `.verify/evidence/lob-241/board/`, 56/56, LOB-241): `requires-observed.json`
 (every check, and the three heads), `requires-unreviewed.txt`, `requires-refused-review.txt`,
 `requires-refused-back.txt`, `review-requires-{a,b,c,b-again,c-again}.json` (each delivery, its
 reviewer session and the review its log records; a replay's answer only),
