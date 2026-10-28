@@ -50,7 +50,7 @@ export const REVIEW_EXTENSION = "factory.review";
 
 /**
  * The roles whose column a review run joins (B4's `review` column): the trigger picks the card's
- * column whose role is here. Keyed by role, as `SPEC_ROLES` is, so a board that renames the column
+ * column whose role is here. Keyed by role, as the role policy table (`./rolePolicy`) is, so a board that renames the column
  * keeps its reviews; a set so free text cannot find a prototype's key.
  */
 export const REVIEW_ROLES: ReadonlySet<string> = new Set(["reviewer"]);

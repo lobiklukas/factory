@@ -20,7 +20,7 @@
  *   B6 says a role is: the model the run talks to and the tools it is offered (LOB-207). Both halves
  *   are read here and nowhere else, so changing a role's model is one edit to the deployment's
  *   table (`RoleModels`, read from `ROLE_MODELS` at boot) and changing what a role may use is one
- *   edit to `./policy`'s `READ_ONLY_ROLES` (LOB-74). `openSession` takes the model, the withheld
+ *   row of `./rolePolicy`'s table (LOB-74, D10), which a deployment extends (`ROLE_POLICIES`). `openSession` takes the model, the withheld
  *   tools and the read-only stage from that one answer.
  */
 import type { Extension } from "@earendil-works/pi-durable";
@@ -37,7 +37,11 @@ import {
   STAGE_REFUSED_TOOLS,
   type ReadOnlyStage,
 } from "./policy";
-import { SPEC_ROLES } from "./specify";
+import {
+  DEFAULT_ROLE_POLICIES,
+  rolePolicyOf,
+  type RolePolicies,
+} from "./rolePolicy";
 
 /** A column names a skill the factory does not hold. */
 export class MissingSkill extends Schema.TaggedError<MissingSkill>()(
@@ -302,10 +306,15 @@ export type RoleResolution = {
   /** The read-only stage the role makes the run (LOB-74), when it is one. */
   readonly stage?: ReadOnlyStage;
   /**
-   * Whether the run is offered the `spec` tool (LOB-238, `./specify`'s `SPEC_ROLES`): the specifier
-   * declares the card's spec, and no other role is offered a way to.
+   * Whether the run is offered the `spec` tool (LOB-238): its role's row says `writesSpec`
+   * (`./rolePolicy`) — the specifier declares the card's spec, and no other role is offered a way to.
    */
   readonly writesSpec: boolean;
+  /**
+   * Whether the run is offered the `plan` tool (D10, `./planning`): its role's row says `writesPlan`
+   * — the planner declares the card's plan, and no other role is offered a way to.
+   */
+  readonly writesPlan: boolean;
   /**
    * Whether the run is offered the `review` tool (LOB-36, `./review`): a review run records and
    * posts its verdict, and no other run is offered a way to.
@@ -318,28 +327,31 @@ const NO_TOOLS_WITHHELD: ReadonlySet<string> = new Set();
 /**
  * Resolve the run's role to its model and its tool policy — the one place B6 says that happens.
  *
- * The model is the role's row in `roles`, or `deployment` when there is none. The tool policy is
- * the read-only stage's (`READ_ONLY_ROLES`): a read-only role is not offered the tools the stage
- * refuses (`STAGE_REFUSED_TOOLS`), and every other role is offered every tool — except `spec`, which
- * only a role in `SPEC_ROLES` is offered (LOB-238), and `review`, which only a review run is (LOB-36).
- * A review run is read-only whatever its role. Pure, so the whole mapping is a table in a test.
+ * The model is the role's row in `roles`, or `deployment` when there is none. The tool policy is the
+ * role's row in `policies` (`./rolePolicy`, the factory's table unless the deployment extended it): a
+ * read-only role is not offered the tools the stage refuses (`STAGE_REFUSED_TOOLS`), and every other
+ * role is offered every tool — except `spec` and `plan`, which only a role whose row says so is
+ * offered (LOB-238, D10), and `review`, which only a review run is (LOB-36). Each stage tool also
+ * needs a column: a session with no card has no card to post on. A review run is read-only whatever
+ * its role. Pure, so the whole mapping is a table in a test.
  */
 export const resolveRole = (
   run: RunProfile | undefined,
   deployment: ModelAccess,
   roles: RoleModels = NO_ROLE_MODELS,
+  policies: RolePolicies = DEFAULT_ROLE_POLICIES,
 ): RoleResolution => {
   const model = run?.role === undefined ? undefined : roles.get(run.role);
-  const stage = readOnlyStageOf(run);
+  const stage = readOnlyStageOf(run, policies);
+  const policy =
+    run?.column === undefined ? undefined : rolePolicyOf(run.role, policies);
   return {
     model: model ?? deployment,
     withheldTools:
       stage === undefined ? NO_TOOLS_WITHHELD : STAGE_REFUSED_TOOLS,
     ...(stage === undefined ? {} : { stage }),
-    writesSpec:
-      run?.column !== undefined &&
-      run.role !== undefined &&
-      SPEC_ROLES.has(run.role),
+    writesSpec: policy?.writesSpec === true,
+    writesPlan: policy?.writesPlan === true,
     writesReview: run?.reviewing === true,
   };
 };

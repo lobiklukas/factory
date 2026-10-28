@@ -32,6 +32,7 @@
         "FAUX_COST",
         "SESSION_BUDGET",
         "ROLE_MODELS",
+        "ROLE_POLICIES",
         "DEFAULT_MODEL",
         "FAUX_VERIFY",
         "FAUX_SLEEP_MS",

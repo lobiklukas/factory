@@ -109,8 +109,10 @@ check "board attention exits 0" "$([ "$rc" = "0" ] && echo 0 || echo 1)" "exit=$
 check "the blocked card is a question row, its note on the line under it" \
   "$(grep -A1 -E "^question  $ASKED  " "$ATT" | grep -qF "blocked needs_input since " && grep -A1 -E "^question  $ASKED  " "$ATT" | grep -qF ": Which Postgres major?" && echo 0 || echo 1)" \
   "$(grep -E "^question  $ASKED  " "$ATT" | cut -c1-120)"
-check "the idle run's card is a gate row naming the gate, the run and the next column" \
-  "$(grep -A1 -E "^gate  $GATED  " "$ATT" | grep -qF "  plan approval: ${GATE_SESSION:-none} is idle; planning → building is a person's" && echo 0 || echo 1)" \
+# The idle run posted no plan (`--idle` sends nothing), so the gate's move would be refused naming
+# plan_doc (D10): the row says what is needed first rather than inviting the approval.
+check "the idle run's card is a gate row naming the gate, the run, the next column and the missing plan" \
+  "$(grep -A1 -E "^gate  $GATED  " "$ATT" | grep -qF "  plan approval: ${GATE_SESSION:-none} is idle; planning → building needs plan_doc first (start or prompt a run), then is a person's" && echo 0 || echo 1)" \
   "$(grep -E "^gate  $GATED  " "$ATT" | cut -c1-120)"
 Q_LINE="$(grep -nE "^question  $ASKED  " "$ATT" | head -1 | cut -d: -f1)"
 G_LINE="$(grep -nE "^gate  $GATED  " "$ATT" | head -1 | cut -d: -f1)"

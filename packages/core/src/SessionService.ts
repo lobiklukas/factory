@@ -128,7 +128,9 @@ import type {
   Harness,
   ModelAccess,
   OpenSession,
+  PlanOptions,
   RoleModels,
+  RolePolicies,
   RunColumn,
   RepoContext,
   ReviewOptions,
@@ -138,6 +140,7 @@ import type {
   ThreadReader,
 } from "@repo/harness";
 import {
+  DEFAULT_ROLE_POLICIES,
   EMPTY_RUN_PROFILE,
   isMissionTask,
   loadRun,
@@ -766,6 +769,12 @@ export type SessionServiceShape = {
    */
   readonly roles: ReadonlySet<string>;
   /**
+   * What each role may do (D10, `@repo/harness`'s `./rolePolicy`): the factory's table, extended by
+   * this layer's `rolePolicies`. What every run's tools and read-only stage are resolved from, and
+   * the roles an authored definition may always name.
+   */
+  readonly rolePolicies: RolePolicies;
+  /**
    * Reopen every session that had a mission in flight when the last process stopped, and schedule
    * its log again (LOB-231): the boot's half of "a mission resumes in the phase it died in".
    *
@@ -834,6 +843,11 @@ export type SessionServiceOptions = {
    * fails the boot rather than a run. Absent: every run talks to `model`.
    */
   readonly roleModels?: RoleModels;
+  /**
+   * What each role may do (D10): the factory's role policy table with the deployment's rows added
+   * (`@repo/harness`'s `extendRolePolicies` over `ROLE_POLICIES`). Absent: the factory's own.
+   */
+  readonly rolePolicies?: RolePolicies;
   /** Where a session's working directory is created, one directory per session. */
   readonly sessionRoot: string;
   /**
@@ -1793,6 +1807,32 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               gaps: spec.gaps,
               openQuestions: spec.openQuestions,
               specId: `${sessionId}:${callId}`,
+            }),
+          ).then((card) => ({ taskId: card.id, revision: card.revision })),
+      });
+
+      /**
+       * How a planning run posts its plan (D10): a `planned` event on its card, by the run itself,
+       * keyed by the session and the tool call so a replayed call posts nothing twice — `specFor`'s
+       * shape. Handed to every run of a card and used by the planner's alone (the harness offers the
+       * tool only to a role that writes the plan); the plan records the run's own column.
+       */
+      const planFor = (
+        sessionId: SessionId,
+        taskId: string,
+        column: string | undefined,
+      ): PlanOptions => ({
+        post: ({ plan, callId }) =>
+          forHarness(
+            tasks.declarePlan({
+              taskId,
+              actor: sessionId,
+              ...(column === undefined ? {} : { column }),
+              summary: plan.summary,
+              steps: plan.steps,
+              surfaces: plan.surfaces,
+              risks: plan.risks,
+              planId: `${sessionId}:${callId}`,
             }),
           ).then((card) => ({ taskId: card.id, revision: card.revision })),
       });
@@ -2957,6 +2997,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly body?: string;
         /** How a specifying run posts its spec (LOB-238); absent for a session with no card. */
         readonly spec?: SpecOptions;
+        /** How a planning run posts its plan (D10); absent for a session with no card. */
+        readonly plan?: PlanOptions;
         /** How a reviewer run posts its review (LOB-36); absent for a session with no card. */
         readonly review?: ReviewOptions;
         /**
@@ -3171,6 +3213,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     thread: threadFor(card),
                     ...(body === undefined ? {} : { body }),
                     spec: specFor(id, card, run.column),
+                    plan: planFor(id, card, run.column),
                   }),
               ...(reviews ? { review: reviewFor() } : {}),
             }).pipe(
@@ -3323,6 +3366,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             thread,
             body,
             spec,
+            plan,
             review,
             resume,
           }) =>
@@ -3338,6 +3382,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ...(options.roleModels === undefined
                 ? {}
                 : { roles: options.roleModels }),
+              // What the run's role may do (D10): the factory's table, with the deployment's rows.
+              ...(options.rolePolicies === undefined
+                ? {}
+                : { rolePolicies: options.rolePolicies }),
               // A session created on a model runs it, whatever its role's row says (LOB-274).
               ...(acquisition.model === undefined
                 ? {}
@@ -3353,6 +3401,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ...(thread === undefined ? {} : { thread }),
               ...(body === undefined ? {} : { body }),
               ...(spec === undefined ? {} : { spec }),
+              ...(plan === undefined ? {} : { plan }),
               ...(review === undefined ? {} : { review }),
               // A mission is a durable task, so the kind has to be installed in the registry this
               // session's harness runs: an uninstalled kind settles `orphaned` (LOB-230). Its
@@ -7810,8 +7859,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         outcomes: (input) =>
           readOutcomes(input).pipe(Effect.provideService(SqlClient, sql)),
         roleModel,
-        columnAutonomy: (column) => columnAutonomy(policy.config, column),
+        columnAutonomy: (column) =>
+          columnAutonomy(
+            policy.config,
+            column,
+            options.rolePolicies ?? DEFAULT_ROLE_POLICIES,
+          ),
         roles: new Set((options.roleModels ?? NO_ROLE_MODELS).keys()),
+        rolePolicies: options.rolePolicies ?? DEFAULT_ROLE_POLICIES,
         resumeMissions,
         resumeRuns,
         close: closeAll,

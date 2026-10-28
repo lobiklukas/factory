@@ -124,7 +124,7 @@ export const DEFAULT_BOARD_CAPS: BoardCaps = { board: 2, task: 1, repo: 2 };
  * - `docs` — documentation only, the docs rule (`DOCS_WRITE_ALLOWLIST`, LOB-195) a column that holds
  *   the `docs` skill already runs under;
  * - `none` — nothing: the run is a read-only stage named after its column, as a column whose role is
- *   read-only (`READ_ONLY_ROLES`, LOB-74) already is.
+ *   read-only (a `readOnly` row of the role policy table, LOB-74, D10) already is.
  */
 export const ColumnWriteScope = Schema.Literals(["worktree", "docs", "none"]);
 export type ColumnWriteScope = typeof ColumnWriteScope.Type;
@@ -272,6 +272,13 @@ export const REVIEW_VERDICT_REQUIREMENT = "review_verdict";
  * `specifying` declares it from version 1.
  */
 export const SPEC_DOC_REQUIREMENT = "spec_doc";
+
+/**
+ * The requirement a column declares when leaving it takes a plan: the card holds a `planned` event,
+ * which a planning run's `plan` tool writes (D10). The default pipeline's `planning` declares it from
+ * version 1, beside the plan approval gate's label: the plan is what the person approves.
+ */
+export const PLAN_DOC_REQUIREMENT = "plan_doc";
 
 /**
  * The requirement a column declares when leaving it takes a run that finished: the card's latest
@@ -937,6 +944,33 @@ export const TaskSpec = Schema.Struct({
 export type TaskSpec = typeof TaskSpec.Type;
 
 /**
+ * The plan a card's planning run declared (D10), the card half of the run's `factory.plan`: shaped as
+ * `TaskSpec` is, for the same reason — the card's plan is one read over `task_events`, the newest
+ * `planned` event, rather than a fold of every run's log. A later planning run replaces an earlier
+ * one's plan without erasing it from the history.
+ *
+ * The fields are the harness's `Plan` as its validator accepted it (`@repo/harness`'s `./plan`: at
+ * least one step and one surface, `risks` declared), so this shape only carries the result.
+ * `sessionId` is the run that declared it, and `column` the column that run was started in.
+ */
+export const TaskPlanFields = {
+  summary: Schema.String,
+  steps: Schema.Array(Schema.String),
+  surfaces: Schema.Array(Schema.String),
+  risks: Schema.Array(Schema.String),
+} as const;
+
+export const TaskPlan = Schema.Struct({
+  taskId: TaskId,
+  sessionId: SessionId,
+  column: Schema.String,
+  ...TaskPlanFields,
+  revision: Schema.Int,
+  createdAt: Timestamp,
+});
+export type TaskPlan = typeof TaskPlan.Type;
+
+/**
  * The column a move abandons a card into: it checks no exit requirement, because a card nobody will
  * finish cannot be asked to prove the work it is abandoning (`exitRequirements`).
  */
@@ -995,6 +1029,10 @@ export const unmetFor = (
 /** The spec a card holds, or `null` when no run on it has declared one (LOB-238). */
 export const GetTaskSpecInput = Schema.Struct({ taskId: TaskId });
 export type GetTaskSpecInput = typeof GetTaskSpecInput.Type;
+
+/** The plan a card holds, or `null` when no run on it has declared one (D10). */
+export const GetTaskPlanInput = Schema.Struct({ taskId: TaskId });
+export type GetTaskPlanInput = typeof GetTaskPlanInput.Type;
 
 /**
  * One card on a board (B1, B3).
@@ -1078,7 +1116,8 @@ export type Actor = typeof Actor.Type;
  *
  * The kinds are exactly the ones the board decisions name: a move (B5), a block and an unblock
  * (B4, B7), a comment (B7 — the question a run ended with, and the answer to one), the spec a
- * specifying run declared (B4's `specifying` exit, LOB-238), a priority change (B9, "priority
+ * specifying run declared (B4's `specifying` exit, LOB-238), the plan a planning run declared
+ * (B4's `planning` exit, D10), a priority change (B9, "priority
  * changes are recorded as events"), a retitle (C11) and a repin to a newer definition version (D5). A run starting or finishing is a later
  * issue's event: LOB-60 owns the run-start and run-finish events and the `factory.task` log
  * document; this file already carries `TaskRun` and migration 0007 already creates `task_runs`,
@@ -1146,6 +1185,18 @@ export const TaskEvent = Schema.TaggedUnion({
     column: Schema.String,
     ...TaskSpecFields,
     specId: Schema.optional(Schema.String),
+  },
+  /**
+   * A planning run declared the card's plan (D10). `actor` is the run's session id; `planId` is
+   * `<session id>:<tool call id>`, so a `plan` call replayed after a crash posts nothing twice.
+   */
+  planned: {
+    taskId: TaskId,
+    actor: Actor,
+    revision: Schema.Int,
+    column: Schema.String,
+    ...TaskPlanFields,
+    planId: Schema.optional(Schema.String),
   },
   priorityChanged: {
     taskId: TaskId,
@@ -1650,7 +1701,11 @@ export const gatedColumns = (
  * - `gate` — the card is not blocked, it sits in a column whose exit crosses a human gate (B5), it has
  *   a run started in that column, and none of its runs is busy or holds an undecided approval: the
  *   run is idle, and the next move is the one only a person can make. `sessionId` is the newest
- *   run in the column.
+ *   run in the column. `unmet` names the documents the exit requires that the card does not hold yet
+ *   (`spec_doc`, `plan_doc`), in declaration order (D10: a planning run that settled without a plan
+ *   leaves `plan_doc`): the gate's move would be refused naming them, so what the person must do
+ *   first is get them written. Absent when the card holds them. The log-judged keys are not judged
+ *   here; the card's exit checklist (`getTaskExit`) shows those.
  *
  * A card blocked for any other reason — a dependency, a capability, a transient failure — is waiting
  * on that, not on a person, so it is never a `gate`; it is listed only for an approval its run holds.
@@ -1671,6 +1726,7 @@ export const AttentionReason = Schema.TaggedUnion({
     gate: Schema.String,
     to: Schema.String,
     sessionId: SessionId,
+    unmet: Schema.optional(Schema.Array(Schema.String)),
   },
 });
 export type AttentionReason = typeof AttentionReason.Type;

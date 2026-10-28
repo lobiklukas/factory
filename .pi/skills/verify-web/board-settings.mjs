@@ -10,7 +10,7 @@
 //             (the oracle, read over the RPC from this process, never the page)
 //   facts     on the default pipeline's newest version: planning → building is the human gate "plan
 //             approval", specifying's role is `specifier` on the role's model, an unchecked
-//             requirement (plan_doc where the version declares it) is labelled "not yet checked",
+//             requirement (human_move where the version declares it) is labelled "not yet checked",
 //             and the page says the version is the newest
 //   pinned    a board pinned to v2 says v3 exists, and its columns are v2's, not the newest's
 //   autonomy  (C22) a definition authored with `defineBoard` whose `careful` column gates `sleep` and
@@ -397,7 +397,7 @@ try {
       .map((requirement) => ({ column: column.name, key: requirement.key })),
   );
   const named =
-    unchecked.find((entry) => entry.key === "plan_doc") ?? unchecked[0];
+    unchecked.find((entry) => entry.key === "human_move") ?? unchecked[0];
   const namedState =
     named === undefined
       ? null
@@ -407,7 +407,7 @@ try {
           )
           .textContent();
   assert(
-    "an unchecked requirement (plan_doc where declared) is labelled 'not yet checked'",
+    "an unchecked requirement (human_move where declared) is labelled 'not yet checked'",
     named !== undefined && namedState?.trim() === "not yet checked",
     `${named?.column}.${named?.key}: ${namedState}`,
   );

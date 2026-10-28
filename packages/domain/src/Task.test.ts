@@ -460,6 +460,15 @@ describe("a card, a run and an event", () => {
         openQuestions: [],
       },
       {
+        _tag: "planned",
+        taskId: A_TASK_ID,
+        column: "planning",
+        summary: "export the card count",
+        steps: ["add the export"],
+        surfaces: ["web"],
+        risks: [],
+      },
+      {
         _tag: "priorityChanged",
         taskId: A_TASK_ID,
         from: "normal",

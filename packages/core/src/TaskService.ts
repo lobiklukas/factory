@@ -1,7 +1,8 @@
 /**
  * Tasks: create, read, list, move, block, unblock and update (title, priority) cards on a board (docs/board.md B1–B5, B7, B9),
  * the thread on each card — a run's question, a person's answer, a note (B7, LOB-73) — and the spec
- * a specifying run declared on it (LOB-238, a `specified` event the run's `spec` tool writes). The boards
+ * a specifying run declared on it (LOB-238, a `specified` event the run's `spec` tool writes) and the
+ * plan a planning run declared (D10, a `planned` event its `plan` tool writes). The boards
  * themselves are read here and created here (`createBoard`, LOB-208), because B2 makes an instance
  * exist before any card and this service is the one that reads it back for every card; so are the
  * definitions they bind (`listDefinitions`, `getDefinition`, LOB-270), which migrations seed and
@@ -97,12 +98,14 @@ import {
   MAX_TASK_REF_CHARS,
   MAX_TASK_TITLE_CHARS,
   NON_EMPTY_DIFF_REQUIREMENT,
+  PLAN_DOC_REQUIREMENT,
   RUN_COMPLETED_REQUIREMENT,
   SPEC_DOC_REQUIREMENT,
   Task,
   TaskExit,
   TaskEvent,
   TaskId,
+  TaskPlan,
   TaskRun,
   TaskSpec,
   transitionOf,
@@ -472,6 +475,19 @@ export type DeclareSpecInput = {
   readonly specId?: string;
 };
 
+/** A planning run's plan, as its `plan` tool posts it on the card (D10); `DeclareSpecInput`'s shape. */
+export type DeclarePlanInput = {
+  readonly taskId: string;
+  readonly actor: Actor;
+  readonly summary: string;
+  readonly steps: ReadonlyArray<string>;
+  readonly surfaces: ReadonlyArray<string>;
+  readonly risks: ReadonlyArray<string>;
+  /** The column the declaring run was started in; absent, the card's current column. */
+  readonly column?: string;
+  readonly planId?: string;
+};
+
 export type CommentTaskInput = {
   readonly taskId: string;
   readonly expectedRevision: number;
@@ -591,6 +607,18 @@ export type TaskServiceShape = {
   readonly spec: (
     taskId: string,
   ) => Effect.Effect<TaskSpec | undefined, TaskError>;
+  /**
+   * A planning run's plan, recorded on the card as a `planned` event (D10): what `plan_doc` is met
+   * by, and what a person reads before the plan approval. The card's revision moves on by one, a
+   * blocked card stays blocked, and a replayed post (the same `planId`) writes nothing.
+   */
+  readonly declarePlan: (
+    input: DeclarePlanInput,
+  ) => Effect.Effect<Task, TaskError>;
+  /** The card's plan: its newest `planned` event, or `undefined` when no run declared one. */
+  readonly plan: (
+    taskId: string,
+  ) => Effect.Effect<TaskPlan | undefined, TaskError>;
   /**
    * What the card needs to leave its column, judged now (D9): the column's whole `requires[]`
    * under the card's pinned definition, each key met, unmet with the reason `move` would refuse
@@ -2209,6 +2237,14 @@ export const TaskServiceLive = Layer.effect(
               LIMIT 1
             `)[0]
           : undefined;
+        // Whether the card has a plan: any `planned` event (D10).
+        const planned = keys.has(PLAN_DOC_REQUIREMENT)
+          ? (yield* sql<{ id: number }>`
+              SELECT id FROM task_events
+              WHERE task_id = ${taskId} AND kind = 'planned'
+              LIMIT 1
+            `)[0]
+          : undefined;
         // Where the latest run's branch is, for `pr_link` standing on an earlier run's PR (C19):
         // read from the registered checkout, as `non_empty_diff` reads it.
         const branchTip =
@@ -2227,6 +2263,7 @@ export const TaskServiceLive = Layer.effect(
           reviews,
           reviewHeads,
           ...(specified === undefined ? {} : { specified: true }),
+          ...(planned === undefined ? {} : { planned: true }),
           ...(keys.has(NON_EMPTY_DIFF_REQUIREMENT) && latest !== undefined
             ? { diff: yield* branchDiff(latest) }
             : {}),
@@ -2893,6 +2930,110 @@ export const TaskServiceLive = Layer.effect(
         }),
       );
 
+    const declarePlan = (
+      input: DeclarePlanInput,
+    ): Effect.Effect<Task, TaskError> =>
+      withStorage(
+        sql.withTransaction(
+          Effect.gen(function* () {
+            const found = yield* lockTask(input.taskId);
+            if (Option.isNone(found)) {
+              return yield* new TaskNotFound({
+                taskId: input.taskId,
+                message: `no task ${input.taskId}`,
+              });
+            }
+            const row = found.value;
+            if (input.planId !== undefined) {
+              // Read under the card's lock, as the spec's id is, so two replays cannot both miss.
+              const posted = yield* sql<{ n: number }>`
+                SELECT count(*)::int AS n FROM task_events
+                WHERE task_id = ${input.taskId} AND kind = 'planned'
+                  AND payload->>'planId' = ${input.planId}
+              `;
+              if ((posted[0]?.n ?? 0) > 0) return yield* toTask(row);
+            }
+            yield* appendEvent({
+              _tag: "planned",
+              taskId: TaskId.make(input.taskId),
+              actor: input.actor,
+              revision: row.revision,
+              column: input.column ?? row.column,
+              summary: input.summary,
+              steps: [...input.steps],
+              surfaces: [...input.surfaces],
+              risks: [...input.risks],
+              ...(input.planId === undefined ? {} : { planId: input.planId }),
+            });
+            const rows = yield* sql<TaskRow>`
+              UPDATE tasks SET revision = revision + 1, updated_at = now()
+              WHERE id = ${input.taskId}
+              RETURNING ${sql.literal(TASK_COLUMNS)}
+            `;
+            return yield* toTask(rows[0] as TaskRow);
+          }),
+        ),
+      );
+
+    const decodePlanView = Schema.decodeUnknownEffect(TaskPlan);
+
+    const plan = (
+      taskId: string,
+    ): Effect.Effect<TaskPlan | undefined, TaskError> =>
+      withStorage(
+        Effect.gen(function* () {
+          const exists = yield* sql<{ id: string }>`
+            SELECT id FROM tasks WHERE id = ${taskId}
+          `;
+          if (exists[0] === undefined) {
+            return yield* new TaskNotFound({
+              taskId,
+              message: `no task ${taskId}`,
+            });
+          }
+          // The newest by write order, as the spec is read.
+          const rows = yield* sql<{
+            id: string;
+            payload: string;
+            createdAt: Date | string;
+          }>`
+            SELECT id::text AS id, payload::text AS payload, created_at
+            FROM task_events
+            WHERE task_id = ${taskId} AND kind = 'planned'
+            ORDER BY task_events.id DESC
+            LIMIT 1
+          `;
+          const row = rows[0];
+          if (row === undefined) return undefined;
+          return yield* Effect.gen(function* () {
+            const event = yield* decodeEvent(row.payload);
+            if (event._tag !== "planned") {
+              return yield* Effect.fail(
+                `event ${row.id} is stored as planned but is ${event._tag}`,
+              );
+            }
+            return yield* decodePlanView({
+              taskId: event.taskId,
+              sessionId: event.actor,
+              column: event.column,
+              summary: event.summary,
+              steps: event.steps,
+              surfaces: event.surfaces,
+              risks: event.risks,
+              revision: event.revision,
+              createdAt: iso(row.createdAt),
+            });
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new TaskStorageError({
+                  message: `task ${taskId} holds an unreadable plan ${row.id}: ${String(cause)}`,
+                }),
+            ),
+          );
+        }),
+      );
+
     const decodeRun = Schema.decodeUnknownEffect(TaskRun);
     const decodeCard = Schema.decodeUnknownEffect(BoardCard);
 
@@ -3223,6 +3364,29 @@ export const TaskServiceLive = Layer.effect(
                 : { question: row.question }),
             }),
           );
+          // A gate whose exit still misses a document the card must hold (a planning run that
+          // settled without a plan: `plan_doc`, D10) is still a person's — someone must start or
+          // prompt a run — but not yet the gate's move, which `move` would refuse naming the key.
+          // The item names it, judged by the same `requirementVerdict`, so the view says "needs a
+          // plan" rather than inviting an approval the service refuses. Only the keys a card's own
+          // events settle (`spec_doc`, `plan_doc`) are judged here, in one read for every gate row:
+          // the log-judged keys (`verified`, `review_verdict`, …) would read every run's log on
+          // every attention poll, and are the exit checklist's (`exit`) to show.
+          const documentKeys: ReadonlySet<string> = new Set([
+            SPEC_DOC_REQUIREMENT,
+            PLAN_DOC_REQUIREMENT,
+          ]);
+          const documents =
+            gates.length === 0
+              ? []
+              : yield* sql<{ taskId: string; kind: string }>`
+                  SELECT DISTINCT task_id, kind FROM task_events
+                  WHERE task_id = ANY(${gates.map((row) => row.id)}::text[])
+                    AND kind IN ('specified', 'planned')
+                `;
+          const held = new Set(
+            documents.map((row) => `${row.taskId}:${row.kind}`),
+          );
           const gateItems = yield* Effect.forEach(gates, (row) => {
             const definition = definitions.get(
               `${row.definitionId}@${row.definitionVersion}`,
@@ -3231,11 +3395,33 @@ export const TaskServiceLive = Layer.effect(
               definition === undefined
                 ? undefined
                 : gatedExit(definition, row.column);
+            const evidence: CardEvidence = {
+              column: row.column,
+              runs: [],
+              ...(held.has(`${row.id}:specified`) ? { specified: true } : {}),
+              ...(held.has(`${row.id}:planned`) ? { planned: true } : {}),
+            };
+            const unmet =
+              exit === undefined
+                ? []
+                : exitRequirements(
+                    definition?.columns.find(
+                      (column) => column.name === row.column,
+                    ),
+                    exit.to,
+                  )
+                    .filter(
+                      (requirement) =>
+                        documentKeys.has(requirement.key) &&
+                        !requirementVerdict(requirement, evidence).met,
+                    )
+                    .map((requirement) => requirement.key);
             return toAttention(row, {
               _tag: "gate",
               gate: exit?.gate,
               to: exit?.to,
               sessionId: row.runSession,
+              ...(unmet.length === 0 ? {} : { unmet }),
             });
           });
           return [
@@ -3269,6 +3455,8 @@ export const TaskServiceLive = Layer.effect(
       comments,
       declareSpec,
       spec,
+      declarePlan,
+      plan,
       exit,
       replay,
       listCards,

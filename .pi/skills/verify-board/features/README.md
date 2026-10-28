@@ -3,7 +3,12 @@
 One file per user-facing feature of the board's CLI surface. Each answers: what it is, how a user
 reaches it, how the skill drives it, and what observable end state proves it works.
 
-Status reflects the last verified runs: the PR opened when the build run settles (C18, 2026-10-28,
+Status reflects the last verified runs: the planning run's plan (D10, 2026-10-28, `agent/D10`), API
+on `:9550`, web on `:3550`, the GitHub fake on `:9553`: `./drive.sh` exit 0 (**169** PASS) with the
+planner run's refusal-then-plan, `plan.ts` and `plan-pane.mjs` folded in ([plan.md](plan.md));
+`./requires.sh` exit 0 (**75** PASS, `:9551`) with `planning → building` refused naming `plan_doc`;
+`./definitions.sh` exit 0 (**31**), its golden now reading `plan_doc (checked)`, `faux/planner (role)`
+and C22's autonomy lines; `./board-create.sh`, `./define.sh` and `./triage.sh` green. Before it, the PR opened when the build run settles (C18, 2026-10-28,
 `agent/C18`), API on `:9500`, web on `:3500`, the GitHub fake on `:9503`: `./drive.sh` exit 0
 (**150** PASS) with no `factory pr` and nothing pressed — `build.ts MODE=settled` read the link, the
 card pane showed it with no control (`pr-browser.mjs` `PR_MODE=recorded`) — and exit 1 under
@@ -77,6 +82,7 @@ Evidence: `.verify/evidence/latest/board/`.
 | specify, ask, answer (the card)         | passing | [specify.md](specify.md)         |
 | build, PR + evidence, merge             | passing | [build.md](build.md)             |
 | the specifying run's spec               | passing | [specify.md](specify.md)         |
+| the planning run's plan (D10)           | passing | [plan.md](plan.md)               |
 | the ask on the task                     | passing | [ask.md](ask.md)                 |
 | `requires[]` on exit                    | passing | [requires.md](requires.md)       |
 | CLI ⇄ browser, one board                | passing | [equivalence.md](equivalence.md) |

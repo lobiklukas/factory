@@ -108,4 +108,4 @@ read the card's pinned version's `kind` (Follow-up (D4)). Authoring the id `defa
 races the seed migrations: each seeds `default` at a fixed version with `ON CONFLICT (id, version) DO
 NOTHING` (0026 v4, 0038 v5), so an operator's `default` v6 makes a later seed of v6 a silent no-op. A
 future seed of an existing id must insert at the newest version + 1, not a fixed number
-(docs/board.md, D4; Follow-up (D4)). The drive never authors `default`.
+(docs/board.md, D4; Follow-up (D4)); 0044 (D10, the `plan` skill) is the first that does. The drive never authors `default`.

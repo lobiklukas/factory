@@ -40,6 +40,7 @@ import {
   GetTaskInput,
   GetTaskExitInput,
   GetTaskSpecInput,
+  GetTaskPlanInput,
   HumanGateRequired,
   InvalidDefinition,
   InvalidTaskInput,
@@ -60,6 +61,7 @@ import {
   TaskRun,
   TaskExit,
   TaskSpec,
+  TaskPlan,
   TaskStorageError,
   UndeclaredTransition,
   UnblockTaskInput,
@@ -564,6 +566,13 @@ export class TasksRpc extends RpcGroup.make(
   Rpc.make("getTaskSpec", {
     payload: GetTaskSpecInput,
     success: Schema.NullOr(TaskSpec),
+    error: TaskErrorSchema,
+  }),
+  // The card's plan (D10): what its newest planning run declared with the `plan` tool, or `null`
+  // when none has. Written in-process by the run, like the spec, so this group only reads it.
+  Rpc.make("getTaskPlan", {
+    payload: GetTaskPlanInput,
+    success: Schema.NullOr(TaskPlan),
     error: TaskErrorSchema,
   }),
   // What the card needs to leave its column (D9): each exit requirement met, unmet with the reason

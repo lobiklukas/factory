@@ -40,6 +40,7 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 | body and base ref (LOB-260)      | `start-body.sh`: `show` prints them; the run's `task_body` verbatim, its worktree on `release`                                                                                                             | a run starts from the task as filed, at the ref the card names        |
 | specify, ask, answer (LOB-85)    | busy, then parked; `needs_input` + question; `comment`; unblocked; next run told                                                                                                                           | the drive's own card is specified and answered before `planning`      |
 | the run's spec (LOB-238)         | `spec.ts`: refused without `gaps`, retried; log + `getTaskSpec`; `show`; `spec-pane.mjs`                                                                                                                   | a specifying run writes the typed spec, and the card shows it         |
+| the run's plan (D10)             | `drive.sh`: no plan refused naming `plan_doc`; `plan.ts`: no write tools, refused without `risks`; `plan-pane.mjs`                                                                                         | a planning run declares a plan a person can approve, and only reads   |
 | refusal: a run at a gate (B5)    | that session as `--actor` on `planning → building`: code + message verbatim                                                                                                                                | only a person crosses plan approval, and the refusal names the gate   |
 | the refusals wrote nothing       | `board show` after them: the last accepted column and revision                                                                                                                                             | a refused move is not a half-applied one                              |
 | the dashboard agrees (LOB-84)    | `web.mjs`: lane, pane revision, and `building` marked `plan approval`                                                                                                                                      | the browser shows what the CLI left, and offers a person the gate     |
@@ -47,7 +48,7 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 | build, PR, merge (LOB-86, C18)   | a diff; the PR opened on settle (no call) in the fake's ledger, its body's evidence; merge refusal                                                                                                         | the PR and its evidence are real, and only a person reaches `done`    |
 | the reviewer's verdict (LOB-241) | `drive.sh`: merge refused, no review ran; signed `opened` → `review.ts`'s reviewer passes; done                                                                                                            | `done` takes a reviewer run's pass on the PR's head, not a note       |
 | the ask on the task (B7)         | `ask.sh`: busy, then parked; block + question; restart; answer (`comment --start`) and next run                                                                                                            | a run that needs a person ends, and the answer reaches the next run   |
-| `requires[]` on exit (B8)        | `requires.sh`: specifying refused with no spec; building refused with no run, no diff; PR on settle; review per-head                                                                                       | a refusal names the requirement; evidence is a condition of the move  |
+| `requires[]` on exit (B8)        | `requires.sh`: specifying refused with no spec; planning with no plan; building refused with no run, no diff; PR on settle; review per-head                                                                | a refusal names the requirement; evidence is a condition of the move  |
 | a card's one branch + PR (C19)   | `requires.sh`: a 2nd building run on the 1st's branch, its PR `already-open`; review run has diff                                                                                                          | a later run works on the card's change, and the card keeps one PR     |
 | a new card, both ways (LOB-275)  | `card-create.sh`: the board page's New card is what `ls`/`show` list; `board add`'s twin shows                                                                                                             | a card made in either surface is the same card in the other           |
 | the surfaces' drives (LOB-87)    | `equivalence.sh`: verify-cli, verify-web, then this drive, one at a time                                                                                                                                   | the equivalence holds with both surfaces' own drives green            |
@@ -58,7 +59,7 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 
 Every check is required: `drive.sh`, `ask.sh`, `requires.sh`, `board-create.sh`, `definitions.sh`, `define.sh`, `triage.sh`, `start-body.sh`, `upgrade.sh`,
 `start-prompt.sh`, `budget.sh`, `caps.sh`, `card-create.sh` and `equivalence.sh` each exit non-zero when one fails, and `drive.sh` folds `add.ts`'s, `ask.ts`'s and `spec.ts`'s (its
-specify phase), `spec-pane.mjs`'s, `web.mjs`'s, `both-ways.mjs`'s, `card-create.sh`'s (itself folding
+specify phase), `spec-pane.mjs`'s, `plan.ts`'s and `plan-pane.mjs`'s (its planning phase, D10), `web.mjs`'s, `both-ways.mjs`'s, `card-create.sh`'s (itself folding
 `card-create.mjs`'s) and `build.ts`'s (its build phase) exit codes into its own.
 
 ## Launch
@@ -119,6 +120,11 @@ webhooks, so `review.ts` signs the PR's `pull_request` itself with the instance'
 `GITHUB_WEBHOOK_SECRET` — a fresh value per `up.sh`, in `.verify/run/webhook-secret` — and the review
 trigger opens the reviewer run on the card exactly as for GitHub's own delivery. The instance has no
 reviewer identity (`GITHUB_REVIEWER_*` unset with the rest), and a clean pass posts nothing anyway.
+
+The planning phase (D10) needs a fourth: `ROLE_MODELS`' `planner=faux/planner` row, whose
+`FAUX_MODEL_SCRIPTS` row reads the checkout (`ls`) and calls the `plan` tool — first without `risks`,
+refused naming the field, then the plan recorded in `.verify/run/faux-plan`. Only a run whose role
+writes the plan is offered the tool, and the planner is offered no `write`, `edit` or `verify`.
 
 The dashboard (`apps/web`'s `bun run dev`, pid in `.verify/run/web.pid`) points at this API, whose
 `ALLOWED_ORIGINS` names the web origin. `up.sh` waits for both. Override the ports with `API_PORT` and

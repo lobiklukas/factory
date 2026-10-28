@@ -18,13 +18,16 @@ import {
   CHECKED_REQUIREMENTS,
   exitRequirements,
   exitView,
+  KNOWN_REQUIREMENTS,
   nonEmptyDiffVerdict,
+  planDocVerdict,
   prLinkVerdict,
   requirementVerdict,
   type ReviewRunEvidence,
   reviewVerdictVerdict,
   runCompletedVerdict,
   specDocVerdict,
+  UNCHECKED_REQUIREMENTS,
   VERIFIABLE_REMEDY,
   verifiedVerdict,
   type RunEvidence,
@@ -112,6 +115,7 @@ describe("exitRequirements", () => {
       "pr_link",
       "review_verdict",
       "spec_doc",
+      "plan_doc",
       "run_completed",
     ]);
     // `human_merge` is the merge gate, enforced by actor, not by a check of evidence.
@@ -137,10 +141,10 @@ describe("exitRequirements", () => {
   it("names a key without a checker as unchecked rather than met", () => {
     expect(
       requirementVerdict(
-        { key: "plan_doc", description: "a plan doc" },
+        { key: "human_move", description: "a human move" },
         { runs: [] },
       ),
-    ).toEqual({ met: false, reason: '"plan_doc" has no checker' });
+    ).toEqual({ met: false, reason: '"human_move" has no checker' });
   });
 });
 
@@ -175,6 +179,45 @@ describe("the spec_doc requirement (D9)", () => {
       requirementVerdict(
         { key: "spec_doc", description: "a spec doc" },
         { runs: [turned("ses_a", "completed")] },
+      ),
+    ).toMatchObject({ met: false });
+  });
+});
+
+describe("the plan_doc requirement (D10)", () => {
+  /** Mutation: treat a card with no `planned` event as met — the first case passes it. */
+  it("is unmet for a card no run planned, naming the plan tool, and met once one did", () => {
+    expect(unmet(planDocVerdict({ runs: [] }))).toBe(
+      "the card has no plan: no run has declared one with its plan tool (start a run from the card in planning and let it post the plan, then approve it)",
+    );
+    // A spec is not a plan.
+    expect(planDocVerdict({ runs: [], specified: true }).met).toBe(false);
+    expect(planDocVerdict({ runs: [], planned: true })).toEqual({ met: true });
+  });
+
+  /** Mutation: leave `plan_doc` out of the checked set — the move would not check it at all. */
+  it("is checked on the way out of planning, and dispatched by key", () => {
+    expect(CHECKED_REQUIREMENTS.has("plan_doc")).toBe(true);
+    expect(UNCHECKED_REQUIREMENTS.has("plan_doc")).toBe(false);
+    expect(KNOWN_REQUIREMENTS.has("plan_doc")).toBe(true);
+    const planning: BoardColumn = {
+      name: "planning",
+      kind: "working",
+      role: "planner",
+      skills: [],
+      requires: [
+        { key: "plan_doc", description: "a plan doc" },
+        { key: "human_move", description: "a human move" },
+      ],
+    };
+    expect(exitRequirements(planning, "building")).toEqual([
+      { key: "plan_doc", description: "a plan doc" },
+    ]);
+    expect(exitRequirements(planning, "canceled")).toEqual([]);
+    expect(
+      requirementVerdict(
+        { key: "plan_doc", description: "a plan doc" },
+        { runs: [turned("ses_a", "completed")], specified: true },
       ),
     ).toMatchObject({ met: false });
   });
@@ -255,7 +298,7 @@ describe("the run_completed requirement (D9)", () => {
 });
 
 describe("exitView (D9)", () => {
-  /** Mutation: mark an unchecked key `met` — `plan_doc` or `human_merge` would read as satisfied. */
+  /** Mutation: mark an unchecked key `met` — `human_move` would read as satisfied. */
   it("lists every declared key in order: judged ones met or unmet with a reason, the rest unchecked", () => {
     const planning: BoardColumn = {
       name: "planning",
@@ -268,7 +311,12 @@ describe("exitView (D9)", () => {
       ],
     };
     expect(exitView(planning, { runs: [] })).toEqual([
-      { key: "plan_doc", description: "a plan doc", status: "unchecked" },
+      {
+        key: "plan_doc",
+        description: "a plan doc",
+        status: "unmet",
+        reason: expect.stringContaining("no plan"),
+      },
       {
         key: "spec_doc",
         description: "a spec",
@@ -287,6 +335,11 @@ describe("exitView (D9)", () => {
         specified: true,
       })[1],
     ).toEqual({ key: "spec_doc", description: "a spec", status: "met" });
+    expect(exitView(planning, { runs: [], planned: true })[0]).toEqual({
+      key: "plan_doc",
+      description: "a plan doc",
+      status: "met",
+    });
   });
 });
 

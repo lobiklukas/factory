@@ -245,6 +245,21 @@ export const taskSpecAtom = Atom.family((taskId: TaskId) =>
 );
 
 /**
+ * A card's plan (D10): what its newest planning run declared with the `plan` tool, or `null`. Polled
+ * with the board, as the spec is: the run that declares it is not this pane's doing.
+ */
+export const taskPlanAtom = Atom.family((taskId: TaskId) =>
+  runtime
+    .atom(
+      Effect.gen(function* () {
+        const rpc = yield* RpcClient;
+        return yield* rpc.client.getTaskPlan({ taskId });
+      }),
+    )
+    .pipe(Atom.withRefresh(BOARD_POLL)),
+);
+
+/**
  * What a card needs to leave its column (D9): `getTaskExit`, each of the column's requirements met,
  * unmet with the reason a move would be refused with, or not checked.
  *

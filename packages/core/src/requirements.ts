@@ -11,19 +11,20 @@
  * promotes from a PR body artifact into a condition of the move, `building`'s `non_empty_diff`
  * and `pr_link` (LOB-240), whose evidence the PR step already records, and `review`'s
  * `review_verdict` (LOB-241), whose evidence is the reviewer run's `factory.review` (LOB-36),
- * `spec_doc` (D9), whose evidence is a `specified` event on the card (LOB-238), and `run_completed`
- * (D9), whose evidence is how the card's latest run's log ends. The other keys the default pipeline
- * declares are not checked here, and each for a stated reason: `human_move` and `human_merge` label
- * B5's human gates, which `TaskService` enforces by actor on a move whose transition names a `gate`
- * (the key itself is read by nothing); `plan_doc` has no recorded artifact to check yet, and
- * refusing every move on a key nothing can satisfy would turn the pipeline off rather than gate it.
- * A key gains a checker when its evidence is recorded. A reader is told which are which:
+ * `spec_doc` (D9), whose evidence is a `specified` event on the card (LOB-238), `plan_doc` (D10),
+ * whose evidence is a `planned` event (a planning run's `plan` tool), and `run_completed` (D9),
+ * whose evidence is how the card's latest run's log ends. The other keys the default pipeline
+ * declares are not checked here, for a stated reason: `human_move` and `human_merge` label B5's human
+ * gates, which `TaskService` enforces by actor on a move whose transition names a `gate` (the key
+ * itself is read by nothing). A key gains a checker when its evidence is recorded. A reader is told which are which:
  * `./boardConfig`'s `describeDefinition` marks each declared key `checked` from this set (LOB-270).
  *
  * **What `spec_doc` and `run_completed` mean (D9).** `spec_doc` is met when a specifying run declared
  * the card's spec: the card holds a `specified` event (`getTaskSpec`'s record), whichever run posted
  * it and whichever column the card was in. A spec with open gaps still meets it — a gap parks the card
- * through `ask`, it is not this key's to refuse. `run_completed` reads the newest run *started in the
+ * through `ask`, it is not this key's to refuse. `plan_doc` (D10) is met the same way by a `planned`
+ * event: a planning run declared the card's plan, which is what the person crossing the plan approval
+ * gate reads. `run_completed` reads the newest run *started in the
  * column being left* (an earlier column's run, a planner's say, is not the builder's), and is met
  * when its newest turn ended on its own (`runTurnOf`): a run that is still working, died
  * mid-tool-call, ended on a failed or aborted model answer or one cut off at the output limit
@@ -130,6 +131,7 @@ import type {
 import {
   ABANDON_COLUMN,
   NON_EMPTY_DIFF_REQUIREMENT,
+  PLAN_DOC_REQUIREMENT,
   PR_LINK_REQUIREMENT,
   REVIEW_VERDICT_REQUIREMENT,
   RUN_COMPLETED_REQUIREMENT,
@@ -154,6 +156,7 @@ export const CHECKED_REQUIREMENTS: ReadonlySet<string> = new Set([
   PR_LINK_REQUIREMENT,
   REVIEW_VERDICT_REQUIREMENT,
   SPEC_DOC_REQUIREMENT,
+  PLAN_DOC_REQUIREMENT,
   RUN_COMPLETED_REQUIREMENT,
 ]);
 
@@ -169,15 +172,13 @@ export const HUMAN_GATE_REQUIREMENTS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The keys a definition may declare that nothing checks yet (module doc): the default pipeline's
- * `plan_doc`, whose artifact is not recorded, and the human-gate labels (`HUMAN_GATE_REQUIREMENTS`),
- * whose gate is the transition's `gate`, not the key. A reader is told they are unchecked
- * (`describeDefinition`).
+ * The keys a definition may declare that nothing checks (module doc): the human-gate labels
+ * (`HUMAN_GATE_REQUIREMENTS`), whose gate is the transition's `gate`, not the key. A reader is told
+ * they are unchecked (`describeDefinition`). `plan_doc` was here until D10 recorded its artifact.
  */
-export const UNCHECKED_REQUIREMENTS: ReadonlySet<string> = new Set([
-  "plan_doc",
-  ...HUMAN_GATE_REQUIREMENTS,
-]);
+export const UNCHECKED_REQUIREMENTS: ReadonlySet<string> = new Set(
+  HUMAN_GATE_REQUIREMENTS,
+);
 
 /**
  * Every key the factory knows (D4): the checked ones and the declared-but-unchecked ones. An authored
@@ -249,7 +250,8 @@ export type ReportedHead = {
  * one's branch diff — measured only when the move checks `non_empty_diff` and the card has a run —
  * its review runs, oldest first by when each started (absent: it has none), and the head each of
  * its PRs was last reported at (absent: none was). `specified` is whether the card has a spec, read only when
- * the move checks `spec_doc` (absent: it has none, or the move did not read).
+ * the move checks `spec_doc` (absent: it has none, or the move did not read), and `planned` the same for
+ * its plan and `plan_doc`.
  */
 export type CardEvidence = {
   /** The column being left; absent: `run_completed` judges the newest run whatever column started it. */
@@ -257,6 +259,8 @@ export type CardEvidence = {
   readonly runs: readonly RunEvidence[];
   /** The card has a `specified` event; read only when the move checks `spec_doc` (D9). */
   readonly specified?: boolean;
+  /** The card has a `planned` event; read only when the move checks `plan_doc` (D10). */
+  readonly planned?: boolean;
   readonly diff?: BranchDiff;
   readonly reviews?: readonly ReviewRunEvidence[];
   readonly reviewHeads?: readonly ReportedHead[];
@@ -488,6 +492,16 @@ export const specDocVerdict = (evidence: CardEvidence): RequirementVerdict =>
       }
     : { met: true };
 
+/** The `plan_doc` requirement over the card's plan (module doc, D10). */
+export const planDocVerdict = (evidence: CardEvidence): RequirementVerdict =>
+  evidence.planned !== true
+    ? {
+        met: false,
+        reason:
+          "the card has no plan: no run has declared one with its plan tool (start a run from the card in planning and let it post the plan, then approve it)",
+      }
+    : { met: true };
+
 /** What a run that has not completed says, by how its turn stands. */
 const UNCOMPLETED: Record<
   Exclude<RunTurn, "completed">,
@@ -619,6 +633,8 @@ export const requirementVerdict = (
       return reviewVerdictVerdict(evidence);
     case SPEC_DOC_REQUIREMENT:
       return specDocVerdict(evidence);
+    case PLAN_DOC_REQUIREMENT:
+      return planDocVerdict(evidence);
     case RUN_COMPLETED_REQUIREMENT:
       return runCompletedVerdict(evidence);
     default:
@@ -629,7 +645,7 @@ export const requirementVerdict = (
 /**
  * A column's whole `requires[]` as the card's pane lists it (D9), in declaration order: each checked
  * key judged by `requirementVerdict` — the verdict a refusal of the move carries — and each key
- * nothing checks (`plan_doc`, the human-gate labels) marked `unchecked`, never `met`.
+ * nothing checks (the human-gate labels) marked `unchecked`, never `met`.
  */
 export const exitView = (
   column: BoardColumn,
