@@ -34,3 +34,4 @@ export * from "./PullRequestMerge";
 export * from "./metrics";
 export * from "./outcomes";
 export * from "./admission";
+export * from "./Notifier";

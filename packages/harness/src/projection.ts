@@ -407,7 +407,17 @@ export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
   const message = entry.model?.[0];
   const toolName =
     message?.role === "toolResult" ? message.toolName : undefined;
-  const isError = message?.role === "toolResult" ? message.isError : undefined;
+  // A tool result says whether the tool failed; an assistant entry is an error when its model
+  // request failed (`stopReason: "error"`), which is what ends a run `model_error` once Pi Durable
+  // stops retrying it — the activity projection records that run as failed (S-notifications).
+  const failedRequest =
+    message?.role === "assistant" && message.stopReason === "error";
+  const isError =
+    message?.role === "toolResult"
+      ? message.isError
+      : failedRequest
+        ? true
+        : undefined;
   // The title, no-change, budget, interrupted and inherited-PR entries carry no model content, so
   // their text comes from their data — which is what makes a no-op PR step or a budget stop a
   // readable line, not an empty entry.
@@ -420,7 +430,9 @@ export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
         ? (stringAt(asObject(entry.data), "text") ?? "")
         : entry.kind === PR_INHERITED_ENTRY_KIND
           ? inheritedPrText(stringAt(asObject(entry.data), "url") ?? "")
-          : messageText(message);
+          : failedRequest && messageText(message) === ""
+            ? (message.errorMessage ?? "the model request failed")
+            : messageText(message);
   return {
     id: String(entry.id),
     kind: entryKind(entry.kind),

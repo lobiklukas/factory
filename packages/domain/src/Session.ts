@@ -208,7 +208,9 @@ export type ToolCallRef = typeof ToolCallRef.Type;
 
 /**
  * One transcript entry, projected from a Pi Durable `EntryRecord` (`packages/harness` maps the
- * kinds). `text` is the model-facing text, flattened; `toolName` is set on tool results.
+ * kinds). `text` is the model-facing text, flattened; `toolName` is set on tool results. `isError` is
+ * a tool result's own flag, and on an assistant entry it marks a model request that failed — its
+ * `text` is then the provider's error message when the answer carried no text.
  * `inherited` is a line a fork copied from the session it was forked from that is history, not
  * its own (LOB-211): the parent's PR, which the fork does not have.
  */
