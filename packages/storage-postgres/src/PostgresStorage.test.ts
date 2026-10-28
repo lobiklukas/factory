@@ -1915,9 +1915,12 @@ describe("the board's tables and seed", () => {
  * seeded document the contract rejects fails here instead of at the loader that would inject it.
  *
  * Mutation checked: deleting the INSERT from `0015_seed_docs_skill.ts` fails the first case (no
- * `docs` row to decode) and the second (the snapshot loses the only row 0015 adds); dropping the
- * `ON CONFLICT (name) DO NOTHING` fails neither, because the migration is not re-run through the
- * migrator — the second case runs the export directly and asserts the table does not move.
+ * `docs` row to decode) and the second (the snapshot loses the only row 0015 adds). Since 0037 keys
+ * the table by `(name, version)`, dropping the seed's `WHERE NOT EXISTS` guard fails the second case
+ * too: the direct re-run inserts `docs` version 1 again and meets the primary key.
+ *
+ * The snapshots read version 1 only — what every seed writes. A later version is an operator's (or
+ * another suite's) put, which no seed may move and none of these cases is about.
  */
 describe("the skills table and its seeds", () => {
   const AttachmentsJson = Schema.fromJsonString(Schema.Array(Schema.String));
@@ -1925,18 +1928,18 @@ describe("the skills table and its seeds", () => {
   /** One `skills` row as the driver returns it; `attachments` is selected as text. */
   type SkillRow = {
     readonly name: string;
-    readonly version: string;
+    readonly version: number;
     readonly description: string;
     readonly body: string;
     readonly attachments: string;
   };
 
-  /** Every skill row, as a comparable snapshot; `attachments` is selected as text. */
+  /** Every seeded (version 1) skill row, as a comparable snapshot; `attachments` is selected as text. */
   const skills = () =>
     Effect.runPromise(
       sql<SkillRow>`
         SELECT name, version, description, body, attachments::text AS attachments
-        FROM skills ORDER BY name
+        FROM skills WHERE version = 1 ORDER BY name
       `,
     );
 
@@ -1969,7 +1972,7 @@ describe("the skills table and its seeds", () => {
 
       const docs = decode(row);
       expect(docs.name).toBe("docs");
-      expect(docs.version).toBe("1");
+      expect(docs.version).toBe(1);
       expect(docs.description.length).toBeGreaterThan(0);
       expect(docs.body.length).toBeGreaterThan(0);
       // The body has to say *what* a docs run does, or the row is the wrong prompt: it edits
@@ -2037,9 +2040,9 @@ describe("the skills table and its seeds", () => {
         const seeded = byName.get(name);
         expect(seeded).toBeDefined();
         if (seeded === undefined) continue;
-        // 0009 wrote `version: "1"` and a body headed by the stage's own name; 0015 adds a row and
+        // 0009 wrote version 1 (0037 kept it as 1) and a body headed by the stage's own name; 0015 adds a row and
         // must not have rewritten one of these.
-        expect(seeded.version).toBe("1");
+        expect(seeded.version).toBe(1);
         expect(seeded.body).toContain(
           name.charAt(0).toUpperCase() + name.slice(1),
         );
@@ -2060,7 +2063,7 @@ describe("the skills table and its seeds", () => {
       if (row === undefined) return;
 
       const decompose = decode(row);
-      expect(decompose.version).toBe("1");
+      expect(decompose.version).toBe(1);
       expect(decompose.description.length).toBeGreaterThan(0);
       // The body has to say the rules `decodeProposedIssues` refuses on, or the model is held to
       // rules it was never told: a unique title, an acceptance line, edges only where real.
@@ -2107,7 +2110,7 @@ describe("the skills table and its seeds", () => {
       expect(row).toBeDefined();
       if (row === undefined) return;
       const skill = decode(row);
-      expect(skill.version).toBe("1");
+      expect(skill.version).toBe(1);
       const body = skill.body.toLowerCase();
       // The rules `validatePlanProposals` refuses on: the three kinds, only issues shown, once each,
       // never a closed one, a reason for a close, and the empty answer that says "still fresh".
@@ -2145,6 +2148,68 @@ describe("the skills table and its seeds", () => {
         after.filter((skill) => skill.name === "plan-freshness"),
       ).toHaveLength(1);
       expect(after).toEqual(before);
+    },
+  );
+
+  /**
+   * 0037 (D7): one row per edit. Mutation: keep `name` the primary key — the second version is
+   * refused. Mutation: drop `skills_version_positive` — version 0 is stored.
+   */
+  it(
+    "keys skills by name and version: a new version is a new row, a repeated one or version 0 is refused",
+    { timeout: 30_000 },
+    async () => {
+      const name = `test-versions-${randomBytes(6).toString("hex")}`;
+      /** The SQLSTATE a refused insert carries, found through Effect's `SqlError` causes. */
+      const refusedWith = async (version: number) => {
+        const error = await Effect.runPromise(
+          Effect.flip(
+            sql`
+              INSERT INTO skills (name, version, description, body)
+              VALUES (${name}, ${version}, '', '# again')
+            `,
+          ),
+        );
+        let current: unknown = error;
+        for (
+          let depth = 0;
+          depth < 5 && typeof current === "object";
+          depth += 1
+        ) {
+          const code = (current as { code?: unknown } | null)?.code;
+          if (typeof code === "string") return code;
+          current = (current as { cause?: unknown } | null)?.cause;
+        }
+        return undefined;
+      };
+      try {
+        await Effect.runPromise(
+          sql`
+            INSERT INTO skills (name, version, description, body)
+            VALUES (${name}, 1, 'first', '# One'), (${name}, 2, 'second', '# Two')
+          `,
+        );
+        const rows = await Effect.runPromise(
+          sql<{
+            version: number;
+            body: string;
+            createdAt: Date;
+            author: string;
+          }>`
+            SELECT version, body, created_at, author FROM skills
+            WHERE name = ${name} ORDER BY version
+          `,
+        );
+        expect(rows.map((row) => [row.version, row.body, row.author])).toEqual([
+          [1, "# One", ""],
+          [2, "# Two", ""],
+        ]);
+        expect(rows.every((row) => row.createdAt instanceof Date)).toBe(true);
+        expect(await refusedWith(1)).toBe("23505");
+        expect(await refusedWith(0)).toBe("23514");
+      } finally {
+        await Effect.runPromise(sql`DELETE FROM skills WHERE name = ${name}`);
+      }
     },
   );
 });
@@ -2971,6 +3036,141 @@ describe("the migrations directory", () => {
       expect(ids).toEqual(
         Array.from({ length: ids.length }, (_, at) => at + 1),
       );
+    },
+  );
+});
+
+/**
+ * 0037 (D7) over the table 0009 created, on a scratch database this suite migrates by hand: the
+ * configured database already ran 0037, so only a table that has not can show what the conversion
+ * does. 0009 and the three seeds after it run first, as a real migrate runs them.
+ *
+ * Mutation: `USING version::int` — the edited row below keeps 3, not 1. Mutation: drop the `text`
+ * guard — the second pass rewrites version 2 to 1 and meets the primary key.
+ */
+describe("0037 keys the skills 0009 created by name and version", () => {
+  let scratchName: string;
+  let disposeScratch: () => Promise<void> = async () => {};
+  let scratchSql: SqlClient;
+
+  /** The migrations this case runs, imported statically so the bundler resolves each one. */
+  const MIGRATIONS = {
+    "0009_create_skills": () => import("./migrations/0009_create_skills"),
+    "0015_seed_docs_skill": () => import("./migrations/0015_seed_docs_skill"),
+    "0022_seed_decompose_skill": () =>
+      import("./migrations/0022_seed_decompose_skill"),
+    "0036_seed_plan_freshness_skill": () =>
+      import("./migrations/0036_seed_plan_freshness_skill"),
+    "0037_version_skills": () => import("./migrations/0037_version_skills"),
+  } as const;
+
+  const run = async (file: keyof typeof MIGRATIONS) => {
+    const migration = (await MIGRATIONS[file]()).default;
+    await Effect.runPromise(
+      migration.pipe(Effect.provideService(SqlClient, scratchSql)),
+    );
+  };
+
+  const rows = () =>
+    Effect.runPromise(
+      scratchSql<{ name: string; version: number }>`
+        SELECT name, version FROM skills ORDER BY name, version
+      `,
+    );
+
+  beforeAll(async () => {
+    const configured = new URL(
+      Redacted.value((await runtime.runPromise(DatabaseConfig)).url),
+    );
+    scratchName = `factory_d7_skills_${randomBytes(4).toString("hex")}`;
+    const scratchUrl = new URL(configured.toString());
+    scratchUrl.pathname = `/${scratchName}`;
+    await Effect.runPromise(sql`CREATE DATABASE ${sql(scratchName)}`);
+    const client = ManagedRuntime.make(
+      PgClient.layer({
+        url: Redacted.make(scratchUrl.toString()),
+        maxConnections: 2,
+        transformQueryNames: EffectString.camelToSnake,
+        transformResultNames: EffectString.snakeToCamel,
+      }).pipe(Layer.provide(BunServices.layer)),
+    );
+    disposeScratch = () => client.dispose();
+    scratchSql = await client.runPromise(SqlClient);
+  }, 120_000);
+
+  afterAll(async () => {
+    await disposeScratch();
+    await Effect.runPromise(
+      sql`DROP DATABASE IF EXISTS ${sql(scratchName)} WITH (FORCE)`,
+    );
+  });
+
+  it(
+    "turns every existing row into version 1, keys the table by both, and a second pass moves nothing",
+    { timeout: 60_000 },
+    async () => {
+      for (const file of [
+        "0009_create_skills",
+        "0015_seed_docs_skill",
+        "0022_seed_decompose_skill",
+        "0036_seed_plan_freshness_skill",
+      ] as const) {
+        await run(file);
+      }
+      // An operator's in-place edit under 0009's key: one row, whatever version text it wrote.
+      await Effect.runPromise(
+        scratchSql`UPDATE skills SET version = '3', body = '# Edited' WHERE name = 'specify'`,
+      );
+
+      await run("0037_version_skills");
+
+      const column = await Effect.runPromise(
+        scratchSql<{ dataType: string }>`
+          SELECT data_type FROM information_schema.columns
+          WHERE table_name = 'skills' AND column_name = 'version'
+        `,
+      );
+      expect(column[0]?.dataType).toBe("integer");
+      const key = await Effect.runPromise(
+        scratchSql<{ column: string }>`
+          SELECT a.attname AS column
+          FROM pg_index i
+          JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey)
+          WHERE i.indrelid = 'skills'::regclass AND i.indisprimary
+          ORDER BY array_position(i.indkey, a.attnum)
+        `,
+      );
+      expect(key.map((row) => row.column)).toEqual(["name", "version"]);
+      const migrated = await rows();
+      expect(migrated).toEqual(
+        [
+          "decompose",
+          "docs",
+          "implement",
+          "plan-freshness",
+          "review",
+          "specify",
+        ].map((name) => ({ name, version: 1 })),
+      );
+
+      // A second version, then every migration again: nothing moves, nothing is refused.
+      await Effect.runPromise(
+        scratchSql`INSERT INTO skills (name, version, body) VALUES ('specify', 2, '# Two')`,
+      );
+      await run("0037_version_skills");
+      for (const file of [
+        "0015_seed_docs_skill",
+        "0022_seed_decompose_skill",
+        "0036_seed_plan_freshness_skill",
+      ] as const) {
+        await run(file);
+      }
+      const again = await rows();
+      expect(again.filter((row) => row.name === "specify")).toEqual([
+        { name: "specify", version: 1 },
+        { name: "specify", version: 2 },
+      ]);
+      expect(again).toHaveLength(migrated.length + 1);
     },
   );
 });
