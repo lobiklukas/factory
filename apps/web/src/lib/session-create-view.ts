@@ -48,6 +48,24 @@ export const EMPTY_SESSION_FORM: SessionForm = {
   capped: false,
 };
 
+/**
+ * The form after one field is changed. Ticking "Cap at predicted high" agrees to one range's high,
+ * and the prediction is keyed on the model and the repo as well as the prompt (`predictionKey`): a
+ * change of either is another range, so it unticks the cap rather than moving it to a number the
+ * person never saw. A prompt edit keeps it — the box shows the new high as it settles, and a prompt
+ * is refined while the cap is meant to follow it.
+ */
+export const editSessionForm = <K extends keyof SessionForm>(
+  form: SessionForm,
+  field: K,
+  value: SessionForm[K],
+): SessionForm => {
+  const next = { ...form, [field]: value };
+  const rescoped =
+    (field === "model" || field === "repo") && form[field] !== value;
+  return rescoped ? { ...next, capped: false } : next;
+};
+
 /** Which field a problem is about, so the form marks that one and no other. */
 export type SessionField = "prompt" | "budget" | "cap";
 

@@ -22,7 +22,7 @@ reads the default card's expected moves from its pinned definition over the API.
 failed only the busy-compaction race named
 under Known gaps.
 
-`session-new.sh` (the New session form, E6) last passed **12/12** on 2026-10-28 from the `agent/E6`
+`session-new.sh` (the New session form, E6) last passed **16/16** on 2026-10-28 from the `agent/E6`
 worktree, API `:9501` / web `:3501`; there `drive.mjs` (119/119, its session-stream case now typing its
 own prompt into the form), `cost.sh` (12/12), `model.sh` (11/11), `spend.sh` (18/18) and `auth.sh`
 (6/6) re-passed beside it, as each opens the same form.

@@ -14,9 +14,14 @@
 //             and base ref, and a snapshot `workspace.path` that is a git worktree of the checkout
 //             on `factory/<session-id>`
 //   refuse    a repo whose base ref the checkout does not have is refused by the server, and the form
-//             shows the server's own message inline, keeps the prompt, and stays on `/sessions`
+//             shows the server's own message inline, keeps the prompt, and stays on `/sessions`; the
+//             refused create leaves no `sessions` row on that repo (read from the table over TCP)
+//   late      an answer to an opening the person closed is a toast: a refusal says no session was
+//             created in the server's words, and a session landing while a later opening is being
+//             typed into leaves that form open and its text kept, with a toast whose Open opens it
+//             (the page's `createSession` is held for a moment so the close lands first)
 //
-// Env: WEB_URL, API_URL, EVIDENCE_DIR, RUN_DIR.
+// Env: WEB_URL, API_URL, EVIDENCE_DIR, RUN_DIR, DATABASE_URL.
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
@@ -30,6 +35,9 @@ const EVIDENCE_DIR =
 const RUN_DIR = path.resolve(
   process.env["RUN_DIR"] ?? ".verify/run/session-new",
 );
+const DATABASE_URL =
+  process.env["DATABASE_URL"] ??
+  "postgres://factory:factory@localhost:5442/factory";
 
 const TAG = randomBytes(4).toString("hex");
 const WIDGETS = `verify-session-new-${TAG}/widgets`;
@@ -128,6 +136,45 @@ const rpc = async (tag, payload) => {
 };
 const sessionIds = async () =>
   (await rpc("listSessions", { limit: 100 })).sessions.map((row) => row.id);
+
+/**
+ * The ids of every `sessions` row bound to `repo`, read from the table over TCP. Not `listSessions`:
+ * it pages (a database with 100 sessions hides a 101st) and lists only sessions with activity, which
+ * a create that failed before its owner opened never wrote. The repo is this run's own slug, so any
+ * row on it is this run's.
+ */
+const SESSION_ROWS_ON = `
+  const sql = new Bun.SQL(process.argv[1]);
+  try {
+    const rows = await sql\`SELECT id FROM sessions WHERE repo = \${process.argv[2]}\`;
+    console.log(JSON.stringify(rows.map((row) => row.id)));
+  } finally {
+    await sql.close();
+  }
+`;
+const sessionRowsOn = (repo) => {
+  const result = spawnSync("bun", ["-e", SESSION_ROWS_ON, DATABASE_URL, repo], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0)
+    throw new Error(`reading the sessions on ${repo}: ${result.stderr}`);
+  return JSON.parse(result.stdout.trim());
+};
+
+/** The `message` of a refused `createSession`'s answer, as the server worded it. */
+const answerMessage = (create) => {
+  const quoted = /"message":"((?:[^"\\]|\\.)*)"/.exec(
+    create?.answer ?? "",
+  )?.[1];
+  return quoted === undefined ? undefined : JSON.parse(`"${quoted}"`);
+};
+
+/** Wait for `create`'s answer to have been read. */
+const answered = async (create) => {
+  for (let attempt = 0; attempt < 100 && create?.answer == null; attempt += 1)
+    await sleep(100);
+  return create;
+};
 
 const browser = await chromium.launch({ channel: "chrome", headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
@@ -439,19 +486,9 @@ try {
   await prompt().fill(brokenPrompt);
   await page.locator("#new-session-repo").selectOption(BROKEN);
   const sentBefore = creates.length;
-  const listedBefore = await sessionIds();
   await submit().click();
   await page.waitForSelector("[data-session-refusal]", { timeout: 20_000 });
-  for (
-    let attempt = 0;
-    attempt < 50 && creates.at(-1)?.answer == null;
-    attempt += 1
-  )
-    await sleep(100);
-  const answer = creates.at(-1)?.answer ?? "";
-  const quoted = /"message":"((?:[^"\\]|\\.)*)"/.exec(answer)?.[1];
-  const serverMessage =
-    quoted === undefined ? undefined : JSON.parse(`"${quoted}"`);
+  const serverMessage = answerMessage(await answered(creates.at(-1)));
   const inline =
     (await page.locator("[data-session-refusal]").textContent())?.trim() ?? "";
   observed.refuse = {
@@ -459,9 +496,8 @@ try {
     inline,
     path: new URL(page.url()).pathname,
     prompt: await prompt().inputValue(),
-    // Recorded, not asserted: whether the server's refused create left an index row is the server's
-    // behavior (`SessionService.create` writes the row before it cuts the worktree), not the form's.
-    listedDelta: (await sessionIds()).length - listedBefore.length,
+    // The table itself, not `listSessions`: see `sessionRowsOn`.
+    rowsOnBroken: sessionRowsOn(BROKEN),
   };
   assert(
     "an invalid repo shows the server's error inline, and the form keeps the prompt",
@@ -474,10 +510,146 @@ try {
       observed.refuse.path === "/sessions",
     JSON.stringify(observed.refuse),
   );
+  assert(
+    "the refused create left no session row behind",
+    observed.refuse.rowsOnBroken.length === 0,
+    JSON.stringify(observed.refuse.rowsOnBroken),
+  );
   await page.screenshot({
     path: path.join(EVIDENCE_DIR, "session-new-refused.png"),
     fullPage: true,
   });
+
+  // --- late: an answer to an opening the person closed ---------------------------------------------
+  // The page's next `createSession` is held for HOLD_MS before it goes on to the server, so the close
+  // (and the reopen) land while it is pending, as they would on a slow cut.
+  const HOLD_MS = 2_500;
+  let holdNext = false;
+  await page.route("**/rpc**", async (route) => {
+    if (
+      holdNext &&
+      (route.request().postData() ?? "").includes('"tag":"createSession"')
+    ) {
+      holdNext = false;
+      await sleep(HOLD_MS);
+    }
+    await route.continue();
+  });
+  const sent = async (count) => {
+    for (let attempt = 0; attempt < 100 && creates.length < count; attempt += 1)
+      await sleep(50);
+    return creates.length >= count;
+  };
+  const cancel = async () => {
+    await dialog().getByRole("button", { name: "Cancel" }).click();
+    await dialog().waitFor({ state: "hidden", timeout: 5_000 });
+  };
+  const toastWith = (text) =>
+    page.locator("[data-sonner-toast]", { hasText: text });
+
+  // A refusal for a closed form is a toast in the server's words, not dropped with the form.
+  await openForm();
+  await page.waitForSelector(`#new-session-repo option[value='${BROKEN}']`, {
+    state: "attached",
+    timeout: 15_000,
+  });
+  await prompt().fill(`Fix the broken repo, then walk away (${TAG}).`);
+  await page.locator("#new-session-repo").selectOption(BROKEN);
+  const beforeLateRefusal = creates.length;
+  holdNext = true;
+  await submit().click();
+  const lateRefusalSent = await sent(beforeLateRefusal + 1);
+  await cancel();
+  const refusedToast = toastWith("No session was created");
+  await refusedToast.waitFor({ timeout: 20_000 });
+  const lateMessage = answerMessage(await answered(creates.at(-1)));
+  observed.lateRefusal = {
+    sent: lateRefusalSent,
+    serverMessage: lateMessage,
+    toast: (await refusedToast.textContent())?.trim() ?? "",
+    path: new URL(page.url()).pathname,
+    rowsOnBroken: sessionRowsOn(BROKEN),
+  };
+  assert(
+    "a refusal answered after the form was closed is a toast in the server's words",
+    lateRefusalSent &&
+      lateMessage !== undefined &&
+      lateMessage.includes(BROKEN) &&
+      observed.lateRefusal.toast.includes(lateMessage) &&
+      observed.lateRefusal.path === "/sessions" &&
+      observed.lateRefusal.rowsOnBroken.length === 0,
+    JSON.stringify(observed.lateRefusal),
+  );
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "session-new-late-refused.png"),
+    fullPage: true,
+  });
+
+  // A session landing while a later opening is being typed into neither closes it nor navigates.
+  await openForm();
+  const latePrompt = `Start, then think better of it (${TAG}).`;
+  await prompt().fill(latePrompt);
+  const beforeLate = creates.length;
+  holdNext = true;
+  await submit().click();
+  const lateSent = await sent(beforeLate + 1);
+  await cancel();
+  await page.getByRole("button", { name: "New session" }).click();
+  await dialog().waitFor({ timeout: 10_000 });
+  const nextTask = `The next task, half typed (${TAG})`;
+  await prompt().fill(nextTask);
+  const startedToast = toastWith("Session started");
+  await startedToast.waitFor({ timeout: 20_000 });
+  const toastText = (await startedToast.textContent())?.trim() ?? "";
+  const lateId = /ses_[0-9a-z]{26}/.exec(toastText)?.[0];
+  observed.lateSession = {
+    sent: lateSent,
+    toast: toastText,
+    path: new URL(page.url()).pathname,
+    dialogOpen: await dialog().isVisible(),
+    prompt: await prompt().inputValue(),
+  };
+  assert(
+    "a session landing on a later opening leaves that form open with its text, and toasts the session",
+    lateSent &&
+      lateId !== undefined &&
+      observed.lateSession.path === "/sessions" &&
+      observed.lateSession.dialogOpen &&
+      observed.lateSession.prompt === nextTask,
+    JSON.stringify(observed.lateSession),
+  );
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "session-new-late-session.png"),
+    fullPage: true,
+  });
+  // The toast's Open is the way to it: the session it names, whose first entry is the first prompt.
+  await startedToast.getByRole("button", { name: "Open" }).click();
+  await page.waitForURL(/\/sessions\/ses_[0-9a-z]{26}$/, { timeout: 10_000 });
+  const opened = /\/sessions\/(ses_[0-9a-z]{26})$/.exec(page.url())?.[1];
+  const lateSnapshot =
+    lateId === undefined ? undefined : await withFirstEntry(lateId);
+  observed.lateSession.opened = opened;
+  observed.lateSession.closedOnOpen = await dialog()
+    .waitFor({ state: "hidden", timeout: 5_000 })
+    .then(
+      () => true,
+      () => false,
+    );
+  observed.lateSession.firstEntry = lateSnapshot?.entries.find(
+    (entry) => entry.kind === "user",
+  )?.text;
+  assert(
+    "the toast's Open opens the session it names, which ran the prompt it was sent",
+    opened === lateId &&
+      observed.lateSession.firstEntry === latePrompt &&
+      observed.lateSession.closedOnOpen,
+    JSON.stringify({
+      opened,
+      lateId,
+      firstEntry: observed.lateSession.firstEntry,
+    }),
+  );
+  await page.unroute("**/rpc**");
 
   assert(
     "the page logged no console error",

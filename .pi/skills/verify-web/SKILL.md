@@ -192,8 +192,9 @@ API and dashboard and `session-new.mjs` makes two (E6). It requires **New sessio
 create nothing, an empty prompt to send no `createSession` (the page's own requests are the oracle),
 the typed multi-line prompt to be the session's first user entry verbatim, a session on a picked repo
 and base ref to be listed with both and to work in a `factory/<session-id>` worktree cut from that
-ref, and a repo whose base ref the checkout lacks to be refused inline in the server's words
-(`features/session-new.md`). Evidence goes to `.verify/evidence/latest/session-new/`.
+ref, a repo whose base ref the checkout lacks to be refused inline in the server's words and to leave
+no `sessions` row (read from the table over TCP), and an answer to a form the person closed to be a
+toast rather than lost or pulled into a later form (`features/session-new.md`). Evidence goes to `.verify/evidence/latest/session-new/`.
 
 ### The New session model picker
 

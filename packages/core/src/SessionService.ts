@@ -2618,7 +2618,23 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             reviewing: input.review !== undefined,
             ...(model === undefined ? {} : { model }),
             slot,
-          });
+          }).pipe(
+            // A refused open (a base ref the checkout lacks, a mirror that would not fetch) leaves
+            // no session behind, as a refused fork or replay leaves none: otherwise the operator is
+            // told "refused" beside an untitled row in the list, and every retry adds another. The
+            // id was minted by this call, so the run row under it is this call's too; one statement
+            // takes both. A process that dies here still leaves the row, which a retry under its
+            // request id repairs.
+            Effect.tapError(() =>
+              paper(
+                "remove the refused session's index row",
+                sql`
+                  WITH run AS (DELETE FROM task_runs WHERE session_id = ${id})
+                  DELETE FROM sessions WHERE id = ${id}
+                `,
+              ).pipe(Effect.ignore),
+            ),
+          );
           if (input.review !== undefined && binding.repo !== undefined) {
             // What the reviewer reviews is a fact in its log before it is told anything (LOB-36), and
             // it is the first: a reopen reads the read-only stage from it alone, so no other write

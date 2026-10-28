@@ -12,6 +12,7 @@ import type { RepoSummary } from "@repo/domain/Session";
 import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import {
+  editSessionForm,
   EMPTY_SESSION_FORM,
   newSessionInput,
   NO_REPO,
@@ -150,6 +151,38 @@ describe("newSessionInput", () => {
       undefined,
     );
     expect(!result.ok && result.problem.field).toBe("cap");
+  });
+});
+
+describe("editSessionForm", () => {
+  const capped = form({ prompt: "Fix it", capped: true, budget: "9" });
+
+  it("unticks the cap when the model or the repo changes: either is another predicted range", () => {
+    expect(editSessionForm(capped, "model", "faux/faux-2")).toEqual({
+      ...capped,
+      model: "faux/faux-2",
+      capped: false,
+    });
+    expect(editSessionForm(capped, "repo", slug("acme/widgets"))).toEqual({
+      ...capped,
+      repo: slug("acme/widgets"),
+      capped: false,
+    });
+    const onRepo = form({ ...capped, repo: slug("acme/widgets") });
+    expect(editSessionForm(onRepo, "repo", undefined).capped).toBe(false);
+  });
+
+  it("keeps the cap on a prompt or base ref edit, and on choosing the repo or model already chosen", () => {
+    expect(editSessionForm(capped, "prompt", "Fix it now").capped).toBe(true);
+    expect(editSessionForm(capped, "baseRef", "release/1.2").capped).toBe(true);
+    expect(editSessionForm(capped, "model", capped.model).capped).toBe(true);
+    expect(editSessionForm(capped, "repo", undefined).capped).toBe(true);
+  });
+
+  it("changes the field it was given and no other", () => {
+    expect(editSessionForm(form(), "budget", "2.50")).toEqual(
+      form({ budget: "2.50" }),
+    );
   });
 });
 

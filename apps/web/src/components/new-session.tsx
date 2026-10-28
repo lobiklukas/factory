@@ -12,6 +12,7 @@ import { reposAtom } from "@/lib/atoms/repos-atom";
 import { predictionKey, predictionText } from "@/lib/cost-view";
 import { modelChoices } from "@/lib/model-picker-view";
 import {
+  editSessionForm,
   EMPTY_SESSION_FORM,
   newSessionInput,
   NO_REPO,
@@ -49,9 +50,12 @@ const SELECT_CLASS =
  * The "New session" dialog (E6): delegate the operator's own task, on the repo they pick.
  *
  * Opening it creates nothing; only a submit does, with `createSession` exactly as the form built it
- * (`newSessionInput`) and then the prompt as the first message. `onCreated` gets the server's
- * session while the form is still open; a session that lands after the person closed it is a toast
- * that links to it, so an answer never pulls anyone into a pane they left.
+ * (`newSessionInput`) and then the prompt as the first message. An answer lands where it was asked
+ * only while the opening that sent it is still on screen (`NewSessionForm`): there `onCreated` gets
+ * the server's session and a refusal is shown inline. An answer that arrives after the person closed
+ * that opening, or after a later one replaced it, is a toast instead: a session with a link to it, or
+ * the refusal in the server's words. So an answer never pulls anyone into a pane they left, never
+ * closes a form they have since started typing into, and a refusal is never dropped unseen.
  */
 export const NewSessionDialog = ({
   open,
@@ -62,24 +66,15 @@ export const NewSessionDialog = ({
   readonly onOpenChange: (open: boolean) => void;
   readonly onCreated: (session: SessionSummary) => void;
 }) => {
-  // Read when the create answers, not when it was sent: whether the person is still on this form.
-  const live = useRef(open);
+  // Whether the dialog is open now. During the close animation the form is still mounted, so its own
+  // mount alone does not say the person is still on it.
+  const shown = useRef(open);
   useEffect(() => {
-    live.current = open;
+    shown.current = open;
     return () => {
-      live.current = false;
+      shown.current = false;
     };
   }, [open]);
-  const landed = (session: SessionSummary) => {
-    if (live.current) {
-      onCreated(session);
-      return;
-    }
-    toast.success("Session started", {
-      description: session.id,
-      action: { label: "Open", onClick: () => onCreated(session) },
-    });
-  };
   return (
     <Dialog open={open} onOpenChange={(next) => onOpenChange(next)}>
       <DialogContent data-new-session-dialog className="sm:max-w-lg">
@@ -93,7 +88,7 @@ export const NewSessionDialog = ({
           </DialogDescription>
         </DialogHeader>
         {/* Mounted only while the dialog is open, so each opening starts from an empty form. */}
-        <NewSessionForm onCreated={landed} />
+        <NewSessionForm shown={() => shown.current} onCreated={onCreated} />
       </DialogContent>
     </Dialog>
   );
@@ -107,11 +102,23 @@ export const NewSessionDialog = ({
  * instead of retyping the task.
  */
 const NewSessionForm = ({
+  shown,
   onCreated,
 }: {
+  readonly shown: () => boolean;
   readonly onCreated: (session: SessionSummary) => void;
 }) => {
   const start = useAtomSet(startSessionAtom, { mode: "promiseExit" });
+  // This opening of the dialog: each opening mounts a form of its own, so an answer to a submit made
+  // here is this form's to show only while this form is still mounted and the dialog still open.
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const stillHere = () => mounted.current && shown();
   const [form, setForm] = useState<SessionForm>(EMPTY_SESSION_FORM);
   const [problem, setProblem] = useState<SessionProblem | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
@@ -154,7 +161,7 @@ const NewSessionForm = ({
     field: K,
     value: SessionForm[K],
   ) => {
-    setForm((previous) => ({ ...previous, [field]: value }));
+    setForm((previous) => editSessionForm(previous, field, value));
     setProblem(null);
     setRefusal(null);
   };
@@ -180,15 +187,26 @@ const NewSessionForm = ({
               description: sendFailure,
             });
           }
-          onCreated(session);
+          if (stillHere()) {
+            onCreated(session);
+            return;
+          }
+          toast.success("Session started", {
+            description: session.id,
+            action: { label: "Open", onClick: () => onCreated(session) },
+          });
           return;
         }
-        setRefusal(
-          startRefusal(
-            Option.getOrUndefined(Cause.findErrorOption(exit.cause)),
-            Cause.pretty(exit.cause),
-          ),
+        const refused = startRefusal(
+          Option.getOrUndefined(Cause.findErrorOption(exit.cause)),
+          Cause.pretty(exit.cause),
         );
+        if (stillHere()) {
+          setRefusal(refused);
+          return;
+        }
+        // The form that would show it is gone: the refusal is still the person's to see.
+        toast.error("No session was created", { description: refused });
       })
       .finally(() => setPending(false));
   };
@@ -233,6 +251,7 @@ const NewSessionForm = ({
               const chosen = repos.find(
                 (choice) => choice.value === event.currentTarget.value,
               );
+              // A cap ticked for the old repo's range is unticked (`editSessionForm`).
               if (chosen !== undefined) edit("repo", chosen.repo);
             }}
             className={SELECT_CLASS}
@@ -275,11 +294,8 @@ const NewSessionForm = ({
             id="new-session-model"
             name="model"
             value={form.model}
-            onChange={(event) => {
-              // A cap was asked of the old model's range: the new model's is another number.
-              edit("model", event.currentTarget.value);
-              edit("capped", false);
-            }}
+            // A cap ticked for the old model's range is unticked (`editSessionForm`).
+            onChange={(event) => edit("model", event.currentTarget.value)}
             className={SELECT_CLASS}
           >
             {models.map((choice) => (
