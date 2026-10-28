@@ -74,11 +74,15 @@ import {
   CompactSessionResult,
   CreateSessionInput,
   ForkSessionInput,
+  GetRepoInput,
+  ListReposInput,
+  ListReposOutput,
   ListSessionsInput,
   ListSessionsOutput,
   ListSpendInput,
   RegisterRepoInput,
   ReplaySessionInput,
+  RepoNotFound,
   RepoSummary,
   ResetSessionInput,
   SendMessageInput,
@@ -198,6 +202,19 @@ export class SessionRpc extends RpcGroup.make(
     payload: RegisterRepoInput,
     success: RepoSummary,
     error: SessionError,
+  }),
+  // The registry read every repo picker needs (LOB-253): each row carries what its checkout says
+  // about itself, read when it is answered. An unknown slug is `RepoNotFound`, not a session's
+  // `not_found`.
+  Rpc.make("listRepos", {
+    payload: ListReposInput,
+    success: ListReposOutput,
+    error: SessionError,
+  }),
+  Rpc.make("getRepo", {
+    payload: GetRepoInput,
+    success: RepoSummary,
+    error: Schema.Union([SessionError, RepoNotFound]),
   }),
   // A mission is a session's, not a client's: starting one answers its id, and the phase it
   // reached is read off `getSession`'s snapshot rather than off a second call (LOB-230). The
