@@ -2,6 +2,7 @@ import {
   CredentialProvider,
   SessionService,
   TaskServiceLive,
+  TriggerRoutesLive,
 } from "@repo/core";
 import { RpcApi, SessionRpc } from "@repo/domain/Rpc";
 import { Effect, Layer } from "effect";
@@ -9,6 +10,7 @@ import { HttpClient } from "effect/http";
 import { RpcSerialization, RpcServer } from "effect/rpc";
 import { ApprovalsRpcHandlers } from "./Approvals";
 import { TaskRpcHandlers } from "./Task";
+import { TriggerRoutesRpcHandlers } from "./TriggerRoutes";
 
 /**
  * The session RPC surface (docs/design.md D9).
@@ -74,8 +76,14 @@ export const SessionRpcLive = RpcServer.layerHttp({
   protocol: "http",
 }).pipe(
   Layer.provide(
-    Layer.mergeAll(SessionRpcHandlers, ApprovalsRpcHandlers, TaskRpcHandlers),
+    Layer.mergeAll(
+      SessionRpcHandlers,
+      ApprovalsRpcHandlers,
+      TaskRpcHandlers,
+      TriggerRoutesRpcHandlers,
+    ),
   ),
   Layer.provide(RpcSerialization.layerNdjson),
   Layer.provide(TaskServiceLive),
+  Layer.provide(TriggerRoutesLive),
 );

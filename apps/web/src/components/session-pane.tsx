@@ -35,6 +35,7 @@ import {
 import { sessionListAtom } from "@/lib/atoms/session-list";
 import { prLink } from "@/lib/pr-link";
 import { SessionsBackLink } from "@/components/sessions-back-link";
+import { CheckoutWarning } from "@/components/checkout-warning";
 import { CompactButton } from "@/components/compact-button";
 import { TaskPanel } from "@/components/task-panel";
 import { TranscriptRow } from "@/components/transcript-entry";
@@ -460,6 +461,7 @@ export const SessionPane = ({
           </Button>
         </div>
       </header>
+      <CheckoutWarning warning={view?.workspaceWarning} />
 
       {/*
        * What the run is doing right now, before what it said (LOB-184). The list is the stream's

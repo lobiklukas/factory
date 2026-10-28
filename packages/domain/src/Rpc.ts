@@ -21,6 +21,7 @@ import {
   BoardView,
   CommentTaskInput,
   CreateBoardInput,
+  CreatedBoard,
   CreateTaskInput,
   DefinitionConfig,
   DefinitionNotFound,
@@ -58,6 +59,15 @@ import {
   ListPagesOutput,
 } from "@repo/domain/Page";
 import { StartMissionInput, StartMissionResult } from "@repo/domain/Mission";
+import {
+  AddTriggerRouteInput,
+  ListTriggerRoutesInput,
+  ListTriggerRoutesOutput,
+  RemoveTriggerRouteInput,
+  TriggerRoute,
+  TriggerRouteError,
+  TriggerRouteNotFound,
+} from "@repo/domain/Trigger";
 import {
   ProposalsRefused,
   ProposeDecompositionInput,
@@ -323,7 +333,7 @@ export class TasksRpc extends RpcGroup.make(
   // (LOB-208): the instance every card and run on the board reads its columns through (B2).
   Rpc.make("createBoard", {
     payload: CreateBoardInput,
-    success: BoardInstance,
+    success: CreatedBoard,
     error: TaskErrorSchema,
   }),
   // Which definitions exist and the versions each holds (LOB-270): what `createBoard` can name.
@@ -415,5 +425,32 @@ export class TasksRpc extends RpcGroup.make(
   }),
 ) {}
 
+/**
+ * The stored trigger routes (LOB-266): which label or team starts work on which registered repo,
+ * read by the trigger seam per delivery, so a change takes effect on the next delivery with no env
+ * edit and no restart. `TRIGGER_RULES` stays the fallback when no stored route claims an event, and
+ * is not listed here (the boot log names it). Its own group, not `SessionRpc`'s: a route is a trigger
+ * fact, not a session's.
+ */
+export class TriggerRoutesRpc extends RpcGroup.make(
+  Rpc.make("addTriggerRoute", {
+    payload: AddTriggerRouteInput,
+    success: TriggerRoute,
+    error: TriggerRouteError,
+  }),
+  Rpc.make("listTriggerRoutes", {
+    payload: ListTriggerRoutesInput,
+    success: ListTriggerRoutesOutput,
+    error: TriggerRouteError,
+  }),
+  Rpc.make("removeTriggerRoute", {
+    payload: RemoveTriggerRouteInput,
+    success: TriggerRoute,
+    error: Schema.Union([TriggerRouteError, TriggerRouteNotFound]),
+  }),
+) {}
+
 // NOTE: The sandbox and sandbox-status groups merge in here next.
-export const RpcApi = SessionRpc.merge(ApprovalsRpc).merge(TasksRpc);
+export const RpcApi = SessionRpc.merge(ApprovalsRpc)
+  .merge(TasksRpc)
+  .merge(TriggerRoutesRpc);

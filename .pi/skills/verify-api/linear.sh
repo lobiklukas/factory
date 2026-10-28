@@ -6,6 +6,9 @@
 #
 #   ./linear.sh
 #
+# After the drive it greps the API's boot log for the trigger-rules line and one armed/unarmed line per
+# webhook route (LOB-266), and the driver adds and removes a stored route over RPC mid-run.
+#
 # Isolation is `up.sh`'s: its own port, its own session root, its own pid. The rule is per run (its
 # repo carries a stamp), so the session count the drive asserts is this run's alone, and the API
 # reads the rule once when it boots, which is why it is set here and not in the driver:
@@ -46,5 +49,22 @@ API_URL="http://localhost:$API_PORT" \
   bun linear.ts 2>&1 | tee "$EVIDENCE_DIR/linear.log" || status=$?
 
 cp "$ROOT/.verify/run/api.log" "$EVIDENCE_DIR/api.log" 2>/dev/null || true
+
+# The boot says what it mapped and which routes answer 503 (LOB-266): the rules line names both of
+# this run's rules, and every webhook route logs armed or unarmed. This run sets only the Linear
+# secret, so Linear is armed and the other three are not.
+for expected in \
+  "trigger rules: 2 (factory→$LINEAR_TRIGGER_REPO, factory-later→$LINEAR_LATER_REPO)" \
+  "webhook /webhooks/linear: armed" \
+  "webhook /webhooks/generic: unarmed: TRIGGER_SECRET unset" \
+  "webhook /webhooks/sentry: unarmed: SENTRY_CLIENT_SECRET unset" \
+  "webhook /webhooks/github: unarmed: GITHUB_WEBHOOK_SECRET unset"; do
+  if grep -qF "$expected" "$EVIDENCE_DIR/api.log"; then
+    echo "  ok: boot log: $expected"
+  else
+    echo "  FAIL: boot log lacks: $expected" >&2
+    status=1
+  fi
+done
 ./down.sh
 exit "$status"

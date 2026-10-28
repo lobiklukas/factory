@@ -256,6 +256,15 @@ shutdown, and the restarted read cuts a fresh one at the base. See [lifecycle.md
 | The PR step over RPC     | passing | [pr-rpc.md](pr-rpc.md)                     |
 | The pages surface        | passing | [pages.md](pages.md)                       |
 | Propose child issues     | passing | [decompose.md](decompose.md)               |
+| The model backend        | passing | [model-backend.md](model-backend.md)       |
+
+The model-backend checks (LOB-258) were run from the `agent/LOB-258` worktree on 2026-10-28
+(`BACKEND_BOOT_PORT=9542`, the worktree's own database on 5442, no repo-root `.env`):
+`./backend-boot.sh` **18/18** (faux by `MODEL_BACKEND`, a forced anthropic refused with no
+credential and with a federation token file that does not exist, a dummy OAuth token, a dummy
+bearer token through turbo), evidence `.verify/evidence/lob-258/api/`.
+With `ANTHROPIC_AUTH_TOKEN` dropped from `apps/api/turbo.json`'s `passThroughEnv`, the turbo boot's
+`auth token passed through` check fails (`.verify/evidence/lob-258/mutation-no-passthrough/`). See [model-backend.md](model-backend.md).
 
 ## Deliberately absent
 

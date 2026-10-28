@@ -29,11 +29,7 @@ import type {
 import { Effect, Layer } from "effect";
 import { HttpRouter } from "effect/http";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  WebhookRateLimiterLive,
-  WebhookRoutes,
-  webhookRoutesFor,
-} from "./Webhook";
+import { WebhookRateLimiterLive, WebhookRoutes } from "./Webhook";
 
 const SECRETS = ["TRIGGER_SECRET", "LINEAR_WEBHOOK_SECRET"] as const;
 const saved = new Map(SECRETS.map((name) => [name, process.env[name]]));
@@ -50,14 +46,17 @@ const SKIPPED: TriggerOutcome = {
 let answer: TriggerOutcome = SKIPPED;
 
 /** The routes served over the recording fake seam. */
-const serve = (routes: typeof WebhookRoutes) =>
+const serve = (rules: ReadonlyArray<TriggerRule> = []) =>
   HttpRouter.toWebHandler(
-    routes.pipe(
+    WebhookRoutes.pipe(
       HttpRouter.provideRequest(
         Layer.mergeAll(
           Layer.succeed(
             TriggerService,
             TriggerService.of({
+              // What the routes normalize against: the seam's own set, which a deployment's rules
+              // (and its stored routes) make up.
+              rules: Effect.succeed(rules),
               deliver: (delivery) =>
                 Effect.sync(() => {
                   delivered.push(delivery);
@@ -72,7 +71,7 @@ const serve = (routes: typeof WebhookRoutes) =>
     { disableLogger: true },
   );
 
-const { handler, dispose } = serve(WebhookRoutes);
+const { handler, dispose } = serve();
 
 /**
  * A deployment whose rule admits an action that is not one of the two lifecycle actions: a
@@ -87,7 +86,7 @@ const widenedRules: ReadonlyArray<TriggerRule> = [
     startsWorkFor: ["release", "create"],
   },
 ];
-const widened = serve(webhookRoutesFor(widenedRules));
+const widened = serve(widenedRules);
 
 const sign = (body: string, secret: string): string =>
   createHmac("sha256", secret).update(body).digest("hex");

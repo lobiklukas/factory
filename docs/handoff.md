@@ -128,14 +128,15 @@ passes ten.
   `lsof -nP -iTCP:5442 -sTCP:LISTEN` rather than assuming a Docker context, and create databases
   over TCP (`docs/parallel-work.md`), not with `docker exec`. Port 5432 is held by an unrelated `ssh`
   tunnel, hence 5442.
-- **Model key:** `ANTHROPIC_API_KEY` in the repo-root `.env` (gitignored). Turborepo does not load
+- **Model key:** `ANTHROPIC_API_KEY` (or another mode pi-ai accepts, README "Model credentials") in the repo-root `.env` (gitignored). Turborepo does not load
   `.env` files into a task, so every dev entry point names the root file itself: `bun run dev` for
   `apps/api` (`dev` and `dev:watch`) and `apps/cli` passes `bun --env-file=../../.env`, `apps/web`
   sets Vite's `envDir` to the root, and `bun run m0` does the same from `packages/harness`. A value
   exported in the shell wins over the file; a missing file is a no-op. `--env-file` turns off Bun's
   working-directory autoload, so a package-local `.env` is no longer read under `bun run dev`. The API's boot log says
-  `env files loaded: <paths>` (never values) and `model backend: anthropic|faux`, with
-  `(MODEL_BACKEND)` when the backend was chosen rather than inferred (LOB-256).
+  `env files loaded: <paths>` (never values) and `model backend: anthropic (auth: <variable>)` or
+  `model backend: faux (selected by MODEL_BACKEND | no Anthropic credential resolved)` (LOB-256,
+  LOB-258).
 - **Browser verification:** `.pi/skills/verify-web/up.sh`, then `node drive.mjs`, then `down.sh`.
 - **API verification:** `.pi/skills/verify-api/up.sh`, then `bun drive.ts`, then `down.sh`. Both
   skills need Postgres and both pin `MODEL_BACKEND=faux`, so neither needs a key or the network.
@@ -364,7 +365,8 @@ How a session works now, so the next agent does not have to re-derive it:
   `sessions`, `session_activity`, and any repo slug it finds. Operator input survives: `repos.url`
   and `repos.local_path` are kept, and a slug the log names is inserted with no URL.
 - **The model backend is configuration.** `MODEL_BACKEND=anthropic|faux`, defaulting by whether
-  `ANTHROPIC_API_KEY` is set. `faux` is pi-ai's scripted provider: it runs a _real_ `bash` tool call
+  pi-ai's `checkAuth` resolves an Anthropic credential (`apps/api/src/ModelBackend.ts`, LOB-258); a
+  forced `anthropic` with none fails the boot with `AnthropicCredentialMissing`. `faux` is pi-ai's scripted provider: it runs a _real_ `bash` tool call
   and answers with that output, so the tool path, the log, and the stream are real while the model
   is not. Every verification run uses it, and `FAUX_COMMAND` overrides the command it runs — which
   is how a verification run holds a turn open long enough to be busy.

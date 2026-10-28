@@ -31,6 +31,14 @@
 //  13. a wrong `Linear-Signature` is 401
 //  14. the rule's repo has exactly the two sessions the two labeled issues earned, and the later
 //      rule's repo the one its issue earned
+//  15. the delivery of check 1 is recorded as routed by `env:TRIGGER_RULES[0]` (LOB-266)
+//  16. an issue carrying a label no env rule names is skipped; a stored route for that label, added
+//      over RPC while the API runs, routes the same issue's next delivery — no env edit, no restart —
+//      and the recorded reason names the route's id; the session lands on the route's repo
+//  17. removing the route over RPC sends the next such issue back to "no rule matches"
+//
+// `linear.sh` also reads the API's boot log after the drive: the rules line and one armed/unarmed
+// line per webhook route (LOB-266).
 //
 // Why HTTP and not the service: `packages/core/src/Linear.test.ts` proves the key and the seam with
 // a counting fake; this adds the route, the signature, the real `SessionService`, and a real session
@@ -38,7 +46,7 @@
 import { createHmac, randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { SessionRpc } from "@repo/domain/Rpc";
+import { SessionRpc, TriggerRoutesRpc } from "@repo/domain/Rpc";
 import { RepoSlug, SessionId } from "@repo/domain/Session";
 import { Effect, Option, Schema } from "effect";
 import { RpcClient } from "effect/rpc";
@@ -52,6 +60,8 @@ const REPO = RepoSlug.make(
 const LATER_REPO = RepoSlug.make(
   process.env["LINEAR_LATER_REPO"] ?? "acme/verify-api-linear-later",
 );
+/** The repo a stored route (LOB-266) sends work to: registered mid-drive, so its count is this run's. */
+const STORED_REPO = RepoSlug.make(`${REPO}-stored`);
 const SECRET = process.env["LINEAR_WEBHOOK_SECRET"] ?? "";
 const STAMP = process.env["LINEAR_RUN_STAMP"] ?? String(Date.now());
 
@@ -69,6 +79,12 @@ const FACTORY = { id: "lbl-factory", name: "factory", color: "#5e6ad2" };
 const BUG = { id: "lbl-bug", name: "Bug", color: "#eb5757" };
 const FRONTEND = { id: "lbl-frontend", name: "Frontend", color: "#26b5ce" };
 const LATER = { id: "lbl-later", name: "factory-later", color: "#f2c94c" };
+/** A label no env rule names; only the stored route the drive adds claims it. Per run, like the ids. */
+const STORED = {
+  id: "lbl-stored",
+  name: `factory-stored-${STAMP}`,
+  color: "#4cb782",
+};
 
 /** A Linear `Issue` data-change webhook body, shaped from Linear's webhook docs. */
 const issueBody = (over: {
@@ -148,6 +164,7 @@ const deliver = async (
 
 const program = Effect.gen(function* () {
   const client = yield* RpcClient.make(SessionRpc);
+  const routes = yield* RpcClient.make(TriggerRoutesRpc);
 
   // `unregistered-repo` is a separate refusal; the mapping is what this drive is testing.
   yield* client.registerRepo({ repo: REPO, defaultBaseRef: "main" });
@@ -179,6 +196,13 @@ const program = Effect.gen(function* () {
       first.body?.["replayed"] === false &&
       sessionId !== undefined,
     `status=${first.status} body=${JSON.stringify(first.body)}`,
+  );
+
+  assert(
+    "the delivery is recorded as routed by the first TRIGGER_RULES entry",
+    first.body?.["reason"] ===
+      `rule "factory" (env:TRIGGER_RULES[0]) mapped it to ${REPO}`,
+    `reason=${JSON.stringify(first.body?.["reason"])}`,
   );
 
   if (sessionId !== undefined) {
@@ -429,6 +453,94 @@ const program = Effect.gen(function* () {
     "each rule's repo has exactly one session per labeled issue",
     sessions.length === 2 && later.length === 1,
     `sessions=${JSON.stringify(sessions.map((entry) => ({ id: entry.id, title: entry.title })))} later=${later.length}`,
+  );
+
+  // 16–17: a stored route, added and removed while the API runs (LOB-266).
+  yield* client.registerRepo({ repo: STORED_REPO, defaultBaseRef: "main" });
+  const storedIssue = {
+    id: `lin-${STAMP}-stored`,
+    identifier: `VER-${STAMP}7`,
+    title: `Stored ${STAMP}`,
+  };
+  const beforeRoute = yield* Effect.promise(() =>
+    deliver(
+      "stored-before-route",
+      issueBody({ ...storedIssue, labels: [STORED] }),
+    ),
+  );
+  const route = yield* routes.addTriggerRoute({
+    label: STORED.name,
+    repo: STORED_REPO,
+    prompt: "Stored route {{key}}",
+  });
+  const afterRoute = yield* Effect.promise(() =>
+    deliver(
+      "stored-after-route",
+      issueBody({
+        ...storedIssue,
+        action: "update",
+        labels: [STORED],
+        updatedFrom: { labelIds: [] },
+      }),
+    ),
+  );
+  const storedSessionId = Option.getOrUndefined(
+    Schema.decodeUnknownOption(SessionId)(afterRoute.body?.["sessionId"]),
+  );
+  assert(
+    "a stored route added over RPC routes the next delivery, and the reason names the route",
+    beforeRoute.body?.["status"] === "skipped" &&
+      afterRoute.status === 200 &&
+      afterRoute.body?.["status"] === "processed" &&
+      afterRoute.body?.["reason"] ===
+        `rule "${STORED.name}" (route ${route.id}) mapped it to ${STORED_REPO}` &&
+      storedSessionId !== undefined,
+    `before=${JSON.stringify(beforeRoute.body)} after=${JSON.stringify(afterRoute.body)}`,
+  );
+  const onStored = yield* sessionsOn(STORED_REPO);
+  assert(
+    "the stored route's session is on the route's repo",
+    onStored.length === 1 && onStored[0]?.id === storedSessionId,
+    `sessions=${JSON.stringify(onStored.map((entry) => entry.id))}`,
+  );
+
+  // The reason is recorded with the delivery, so the same delivery again still names the route.
+  const replayedRoute = yield* Effect.promise(() =>
+    deliver(
+      "stored-after-route",
+      issueBody({
+        ...storedIssue,
+        action: "update",
+        labels: [STORED],
+        updatedFrom: { labelIds: [] },
+      }),
+    ),
+  );
+  assert(
+    "a replay of the stored route's delivery still names the route that started it",
+    replayedRoute.body?.["replayed"] === true &&
+      replayedRoute.body?.["status"] === "processed" &&
+      replayedRoute.body?.["reason"] ===
+        `rule "${STORED.name}" (route ${route.id}) mapped it to ${STORED_REPO}`,
+    `replay=${JSON.stringify(replayedRoute.body)}`,
+  );
+
+  yield* routes.removeTriggerRoute({ id: route.id });
+  const afterRemoval = yield* Effect.promise(() =>
+    deliver(
+      "stored-after-removal",
+      issueBody({
+        id: `lin-${STAMP}-stored-2`,
+        identifier: `VER-${STAMP}8`,
+        labels: [STORED],
+      }),
+    ),
+  );
+  assert(
+    "removing the route sends the next such issue back to no rule matches",
+    afterRemoval.body?.["status"] === "skipped" &&
+      String(afterRemoval.body?.["reason"] ?? "").startsWith("no rule matches"),
+    `body=${JSON.stringify(afterRemoval.body)}`,
   );
 });
 

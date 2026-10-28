@@ -356,6 +356,33 @@ describe("the dev tasks' environment", () => {
     ).toBe(false);
   }, 90_000);
 
+  it("passes every Anthropic auth mode pi-ai accepts through to @repo/api#dev without declaring it (LOB-258)", () => {
+    // pi-ai reads these itself, not through `Config`, so the scanning guard below cannot see them:
+    // a name Strict Mode stripped would boot `bun run dev` on faux with the credential in .env, or
+    // refuse a forced anthropic for a credential that was set. None may enter the task hash.
+    const dryRun = resolveScript(
+      "dev",
+      "@repo/api",
+      databaseUrl("factory_probe"),
+    );
+    const passThrough =
+      taskOf(dryRun, DEV_TASK).resolvedTaskDefinition.passThroughEnv ?? [];
+    for (const name of [
+      "ANTHROPIC_AUTH_TOKEN",
+      "ANTHROPIC_OAUTH_TOKEN",
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_FEDERATION_RULE_ID",
+      "ANTHROPIC_ORGANIZATION_ID",
+      "ANTHROPIC_IDENTITY_TOKEN_FILE",
+      "ANTHROPIC_SERVICE_ACCOUNT_ID",
+      "ANTHROPIC_WORKSPACE_ID",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+    ]) {
+      expect(passThrough).toContain(name);
+      expect(declared(dryRun, DEV_TASK)).not.toContain(name);
+    }
+  }, 90_000);
+
   it("passes GITHUB_WEBHOOK_SECRET through to @repo/api#dev without declaring it (LOB-234)", () => {
     // `POST /webhooks/github` refuses every delivery without it, so a secret Strict Mode stripped
     // would turn the docs push into a `503` with nothing in the shell to say why.

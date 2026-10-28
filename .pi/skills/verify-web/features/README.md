@@ -34,6 +34,8 @@ under Known gaps.
 
 ## Known gaps
 
+- **The no-checkout banner (`[data-checkout-warning]`) is unit-tested, not driven (LOB-263).** It sits
+  under a board's header ([board.md](board.md)) and a session's ([session-stream.md](session-stream.md)).
 - **The board follows moves by polling, every 2 s.** LOB-76's card pane moves cards and starts runs;
   a move made elsewhere reaches an open board within one interval, not instantly; the attention view
   (LOB-77) and the card's thread (LOB-239) poll on the same interval.

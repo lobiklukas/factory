@@ -1,0 +1,138 @@
+/* oxlint-disable effecttsgo/process-env effecttsgo/process-env-in-effect */
+/**
+ * What the process says about its trigger configuration at boot (LOB-266).
+ *
+ * Two things used to surface only as "every delivery skipped" or "every delivery 503": a typo in
+ * `TRIGGER_RULES` and a missing webhook secret. The first answered `skipped, no rule matches` for
+ * every delivery, and the second `503 not-configured`; an operator found out from the sender's
+ * dashboard. Now the boot says both, once, where the operator is already looking:
+ *
+ * - `trigger rules: N (label→repo, …)` names what `TRIGGER_RULES` mapped, or, for a value that does
+ *   not decode, an error naming the variable and the decode message. A malformed value **refuses
+ *   the boot** (`InvalidTriggerRules`): the old "empty rather than fatal" kept the API up and made
+ *   the typo invisible, and a stored route is now the way to route without this variable, so an
+ *   operator who set one and got it wrong wants to hear that before the first delivery, not after.
+ *   An unset or blank variable is not malformed: it is no fallback rules, which is a valid choice.
+ * - one line per webhook route: `armed`, or `unarmed: <VAR> unset`. The route answers every delivery
+ *   `503` while unarmed (`handle`'s secret check), so this is the same fact stated before a sender
+ *   hits it. Only whether a secret is set is logged, never its value.
+ *
+ * Pure `describe…` functions build the lines so a test names them exactly; `logTriggerBoot` is the
+ * effect `index.ts` runs. Both read the environment through the `env` they are given, so a test
+ * does not mutate the process's.
+ */
+import { ENV_RULES_ORIGIN } from "@repo/core";
+import { ruleName, TriggerRules, type TriggerRule } from "@repo/domain/Trigger";
+import { Effect, Schema } from "effect";
+
+/** The variable the fallback rules come from. */
+export const TRIGGER_RULES_VARIABLE = "TRIGGER_RULES";
+
+/** The environment these functions read: `process.env` in production, a record in a test. */
+export type Env = Readonly<Record<string, string | undefined>>;
+
+/**
+ * `TRIGGER_RULES` is set and does not decode: not JSON, not an array, or an entry that is not a rule
+ * (a label that is not a string, no repo, a repo that is not `owner/name`). `message` carries the
+ * decode message and the variable's name.
+ */
+export class InvalidTriggerRules extends Schema.TaggedError<InvalidTriggerRules>()(
+  "InvalidTriggerRules",
+  { variable: Schema.String, message: Schema.String },
+) {}
+
+/**
+ * `TRIGGER_RULES` as the fallback rules: unset or blank is none; a JSON array of rules is those; a
+ * value that is neither is `InvalidTriggerRules` naming the variable and why.
+ */
+export const readTriggerRules = (
+  env: Env,
+): Effect.Effect<ReadonlyArray<TriggerRule>, InvalidTriggerRules> => {
+  const raw = env[TRIGGER_RULES_VARIABLE];
+  if (raw === undefined || raw.trim() === "") return Effect.succeed([]);
+  // Every fault, not the first: an operator fixing a typo should not need a boot per entry.
+  return Schema.decodeEffect(Schema.fromJsonString(TriggerRules))(raw, {
+    errors: "all",
+  }).pipe(
+    Effect.mapError(
+      (cause) =>
+        new InvalidTriggerRules({
+          variable: TRIGGER_RULES_VARIABLE,
+          message: `${TRIGGER_RULES_VARIABLE} is not a valid rule list: ${cause.message}`,
+        }),
+    ),
+  );
+};
+
+/** `trigger rules: 2 (factory→acme/widgets, team ENG→acme/api)` */
+export const describeTriggerRules = (
+  rules: ReadonlyArray<TriggerRule>,
+): string =>
+  `trigger rules: ${rules.length}${
+    rules.length === 0
+      ? ""
+      : ` (${rules.map((rule) => `${ruleName(rule)}→${rule.repo}`).join(", ")})`
+  } from ${ENV_RULES_ORIGIN}; stored routes are read per delivery and win over them`;
+
+/**
+ * Every inbound webhook route and the variable that arms it. A route whose variable is unset or blank
+ * refuses every delivery `503` (`Webhook.ts`'s `handle`, `GitHubWebhook.ts`), so this table is what
+ * the boot reports and what a new route adds a row to.
+ */
+export const WEBHOOK_ROUTES: ReadonlyArray<{
+  readonly route: string;
+  readonly variable: string;
+}> = [
+  { route: "/webhooks/linear", variable: "LINEAR_WEBHOOK_SECRET" },
+  { route: "/webhooks/generic", variable: "TRIGGER_SECRET" },
+  { route: "/webhooks/sentry", variable: "SENTRY_CLIENT_SECRET" },
+  { route: "/webhooks/github", variable: "GITHUB_WEBHOOK_SECRET" },
+];
+
+/** One line per route: `webhook /webhooks/linear: armed` or `…: unarmed: LINEAR_WEBHOOK_SECRET unset`. */
+export const describeWebhookRoutes = (env: Env): ReadonlyArray<string> =>
+  WEBHOOK_ROUTES.map(({ route, variable }) => {
+    const set = (env[variable] ?? "") !== "";
+    return `webhook ${route}: ${set ? "armed" : `unarmed: ${variable} unset`}`;
+  });
+
+/**
+ * Read `TRIGGER_RULES`, say what it mapped (or why it did not decode), say which webhook routes are
+ * armed, and answer the rules. A malformed value is logged at error level with the decode message and
+ * then fails the boot; the log line is what an operator greps, and the failure is what stops the API.
+ */
+export const logTriggerBoot = (
+  env: Env,
+): Effect.Effect<ReadonlyArray<TriggerRule>, InvalidTriggerRules> =>
+  Effect.gen(function* () {
+    const rules = yield* readTriggerRules(env).pipe(
+      Effect.tapError((error) => Effect.logError(error.message)),
+    );
+    yield* Effect.logInfo(describeTriggerRules(rules));
+    for (const line of describeWebhookRoutes(env)) {
+      // An unarmed route is a configuration the operator may have chosen, but it is also the one
+      // that answers every delivery `503`; a warning is what stands out from the armed ones.
+      yield* line.includes("unarmed")
+        ? Effect.logWarning(line)
+        : Effect.logInfo(line);
+    }
+    return rules;
+  });
+
+/**
+ * The live environment, for `index.ts`: the rules variable and every route's secret, each read by
+ * name. A read through a variable (`process.env[name]`) is invisible to the scan that keeps
+ * `apps/api/turbo.json` declaring everything the API reads (LOB-257), so every name is a literal
+ * here, and `WebhookBoot.test.ts` checks the snapshot covers every row of `WEBHOOK_ROUTES`.
+ */
+export const bootEnvFromProcess = (): Env => ({
+  TRIGGER_RULES: process.env["TRIGGER_RULES"],
+  LINEAR_WEBHOOK_SECRET: process.env["LINEAR_WEBHOOK_SECRET"],
+  TRIGGER_SECRET: process.env["TRIGGER_SECRET"],
+  SENTRY_CLIENT_SECRET: process.env["SENTRY_CLIENT_SECRET"],
+  GITHUB_WEBHOOK_SECRET: process.env["GITHUB_WEBHOOK_SECRET"],
+});
+
+export const logTriggerBootFromProcess = Effect.suspend(() =>
+  logTriggerBoot(bootEnvFromProcess()),
+);
