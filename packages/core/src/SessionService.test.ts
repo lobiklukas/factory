@@ -3590,13 +3590,21 @@ describe("an empty diff", () => {
     expect(result.second.answer).toEqual({ outcome: "no-change" });
     expect(result.first.prUrl).toBeUndefined();
     expect(result.first.prEntries).toBe(0);
-    // What a person watching the run reads: one line saying nothing needed documenting, and the base
-    // it was measured against. Without it a no-op run is silence.
+    // What a person watching the run reads: one line saying nothing changed, and the base it was
+    // measured against, worded for any run rather than for documentation. Without it a no-op run is
+    // silence.
     const said = result.second.entries.filter((entry) =>
-      entry.text.includes("no documentation change"),
+      entry.text.startsWith("no change: "),
     );
     expect(said).toHaveLength(1);
-    expect(said[0]?.text).toContain("main");
+    expect(said[0]?.text).toBe(
+      "no change: the branch has nothing to publish against main",
+    );
+    expect(
+      result.second.entries.some((entry) =>
+        entry.text.includes("documentation"),
+      ),
+    ).toBe(false);
   }, 120_000);
 
   it("opens the PR when a run does change a file, because the guard records nothing", async () => {
