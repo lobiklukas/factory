@@ -243,9 +243,134 @@ describe("authoredDefinitionFaults (D4)", () => {
     const typo = withColumn(1, (column) => ({ ...column, role: "buidler" }));
     expect(fields(typo)).toEqual(["columns[1].role"]);
     expect(authoredDefinitionFaults(typo, LIBRARY)[0]?.message).toBe(
-      'column "doing" names role "buidler", which is not in the deployment\'s role table (ROLE_MODELS: builder, reviewer)',
+      'column "doing" names role "buidler", which is not in the deployment\'s role table (ROLE_MODELS: builder, reviewer), not a role the harness knows, and not one any definition declares (reviewer, specifier)',
     );
     expect(fields(typo, { ...LIBRARY, roles: new Set() })).toEqual([]);
+  });
+
+  /**
+   * `ROLE_MODELS` is a partial override table: a role it does not name runs on the deployment's model.
+   * A copy of the default pipeline (specifier, planner, builder, reviewer) is authored under a table
+   * that names only `reviewer`, as the API's boot warning recommends. Mutation: check against the
+   * table alone — `specifier` and `planner` are refused. Mutation: drop `HARNESS_ROLES` —
+   * `specifier`, which carries tool policy with no table row, is refused.
+   */
+  it("accepts a role the harness gives meaning to, or one a held definition declares, under a partial table", () => {
+    const pipeline = (roles: ReadonlyArray<string>): AuthoredDefinition => ({
+      ...VALID,
+      columns: [
+        ...roles.map((role, at): BoardColumn => ({
+          name: `stage${at}`,
+          kind: "working",
+          role,
+          skills: [],
+          requires: [],
+          transitions: [
+            { to: at + 1 < roles.length ? `stage${at + 1}` : "done" },
+          ],
+        })),
+        {
+          name: "done",
+          kind: "terminal",
+          skills: [],
+          requires: [],
+          transitions: [],
+        },
+      ],
+      initialColumn: "stage0",
+    });
+    const reviewerOnly = {
+      skills: LIBRARY.skills,
+      roles: new Set(["reviewer"]),
+    };
+    expect(fields(pipeline(["specifier", "reviewer"]), reviewerOnly)).toEqual(
+      [],
+    );
+    expect(
+      fields(pipeline(["specifier", "planner", "builder", "reviewer"]), {
+        ...reviewerOnly,
+        knownRoles: new Set(["specifier", "planner", "builder", "reviewer"]),
+      }),
+    ).toEqual([]);
+    expect(
+      fields(pipeline(["specifier", "planner", "buidler"]), {
+        ...reviewerOnly,
+        knownRoles: new Set(["specifier", "planner", "builder", "reviewer"]),
+      }),
+    ).toEqual(["columns[2].role"]);
+  });
+
+  /**
+   * The workspace release and the caps' in-flight count decide "finished" by the names `done` and
+   * `canceled`, not by `kind`. Mutation: drop the check — a terminal `shipped` never releases its
+   * cards' worktrees, and a working `done` tears a live card's down on arrival.
+   */
+  it("refuses a terminal column not named done or canceled, and a non-terminal one so named", () => {
+    const renamed = authoredDefinitionFaults(
+      {
+        ...VALID,
+        columns: [
+          ...VALID.columns.slice(0, 2),
+          { ...VALID.columns[2]!, name: "shipped" },
+          VALID.columns[3]!,
+        ].map((column) =>
+          column.name === "doing"
+            ? {
+                ...column,
+                transitions: [{ to: "shipped" }, { to: "canceled" }],
+              }
+            : column,
+        ),
+      },
+      LIBRARY,
+    );
+    expect(renamed.map((fault) => fault.field)).toEqual(["columns[2].name"]);
+    expect(renamed[0]?.message).toContain(
+      'column "shipped" is terminal but not named done or canceled',
+    );
+    const workingDone = fields({
+      ...VALID,
+      columns: [
+        VALID.columns[0]!,
+        { ...DOING, transitions: [{ to: "done" }] },
+        {
+          name: "done",
+          kind: "working",
+          skills: [],
+          requires: [],
+          transitions: [{ to: "canceled" }],
+        },
+        VALID.columns[3]!,
+      ],
+    });
+    expect(workingDone).toEqual(["columns[2].kind"]);
+  });
+
+  /**
+   * Nothing reads `human_move` or `human_merge`: a move is a person's only when its transition names a
+   * `gate`. Mutation: accept the key anywhere — `todo`, whose moves name no gate, would show a gate
+   * nothing holds a card to.
+   */
+  it("refuses a human-gate key on a column none of whose moves names a gate", () => {
+    const labelled = (key: string) =>
+      withColumn(0, (column) => ({
+        ...column,
+        requires: [{ key, description: "a human gate" }],
+      }));
+    expect(fields(labelled("human_move"))).toEqual([
+      "columns[0].requires[0].key",
+    ]);
+    expect(fields(labelled("human_merge"))).toEqual([
+      "columns[0].requires[0].key",
+    ]);
+    expect(
+      fields(
+        withColumn(1, (column) => ({
+          ...column,
+          requires: [{ key: "human_merge", description: "a human merge" }],
+        })),
+      ),
+    ).toEqual([]);
   });
 
   it("refuses a blank name for the definition or a column", () => {

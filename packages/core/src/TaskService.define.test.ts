@@ -306,10 +306,23 @@ describe("TaskService.defineBoard (D4)", () => {
       {
         columns: [
           ...COLUMNS,
-          { name: "todo", kind: "terminal", skills: [], requires: [] },
+          { name: "done", kind: "terminal", skills: [], requires: [] },
         ],
       },
       "columns[3].name",
+    ],
+    [
+      "a terminal column not named done or canceled",
+      {
+        columns: COLUMNS.map((column) =>
+          column.name === "done"
+            ? { ...column, name: "shipped" }
+            : column.name === "doing"
+              ? { ...column, transitions: [{ to: "shipped" }] }
+              : column,
+        ),
+      },
+      "columns[2].name",
     ],
     [
       "no initial column",
@@ -418,6 +431,40 @@ describe("TaskService.defineBoard (D4)", () => {
       expect(await versionsOf(existing)).toEqual([1]);
     });
   }
+
+  /**
+   * `ROLE_MODELS` is a partial override table: the roles the definitions the factory holds declare —
+   * the seeded default pipeline's `specifier` and `planner` — are accepted under a table that names
+   * only `builder`, so the default pipeline can be re-authored on such a deployment. Mutation: hand
+   * the rules the role table alone — `planner` is refused.
+   */
+  it("accepts a role a held definition declares under a partial role table, and still refuses a typo", async () => {
+    const staged = (role: string) => ({
+      columns: COLUMNS.map((column) =>
+        column.name === "doing" ? { ...column, role } : column,
+      ),
+    });
+    const id = newId();
+    const planner = await withService((s) =>
+      s.defineBoard(input(id, staged("planner")), LIBRARY),
+    );
+    expect([planner.outcome, planner.definition.version]).toEqual([
+      "created",
+      1,
+    ]);
+    const specifier = await withService((s) =>
+      s.defineBoard(input(id, staged("specifier")), LIBRARY),
+    );
+    expect(specifier.definition.version).toBe(2);
+    const typo = await refusal((s) =>
+      s.defineBoard(input(id, staged("plannr")), LIBRARY),
+    );
+    expect(typo).toMatchObject({
+      _tag: "InvalidDefinition",
+      field: "columns[1].role",
+    });
+    expect(await versionsOf(id)).toEqual([1, 2]);
+  });
 
   /**
    * The version is one the rest of the board reads: `listDefinitions` lists it, `createBoard` pins it

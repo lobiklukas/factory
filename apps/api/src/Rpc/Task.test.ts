@@ -670,7 +670,7 @@ describe("authoring a definition over RPC (D4)", () => {
 
   /**
    * Mutation: check skills against a fixed list, or read the library once when the handler is built
-   * — the skill put here is still unknown. Mutation: hand the rules no role table — `planner` passes.
+   * — the skill put here is still unknown. Mutation: hand the rules no role table — `buidler` passes.
    */
   it("refuses a skill the library lacks until it is put, and a role the role table lacks, writing nothing", async () => {
     const skill = `authoring-${run}`;
@@ -702,7 +702,7 @@ describe("authoring a definition over RPC (D4)", () => {
         client.defineBoard({
           id,
           name: "Refused",
-          columns: columns(["implement"], "planner"),
+          columns: columns(["implement"], "buidler"),
           initialColumn: "todo",
         }),
       ),

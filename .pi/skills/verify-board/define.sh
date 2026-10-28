@@ -201,7 +201,7 @@ refuse terminal-exits 'columns[2].transitions' 's/"kind": "terminal", "skills": 
 refuse no-terminal 'columns' 's/"kind": "terminal"/"kind": "resting"/g'
 refuse unknown-requirement 'columns[1].requires[0].key' 's/"key": "pr_link"/"key": "signed_off"/'
 refuse unknown-skill 'columns[1].skills[0]' 's/\["implement"\]/["deploy-'"$HEX"'"]/'
-refuse unknown-role 'columns[1].role' 's/"role": "builder"/"role": "planner"/'
+refuse unknown-role 'columns[1].role' 's/"role": "builder"/"role": "buidler"/'
 refuse unknown-skill-dry 'columns[1].skills[0]' 's/\["implement"\]/["deploy-'"$HEX"'"]/' --dry-run
 check "after every refusal $ID still holds v1 and v2 only" \
   "$([ "$(versions "$ID")" = "1 2" ] && echo 0 || echo 1)" "versions=[$(versions "$ID")]"

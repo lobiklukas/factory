@@ -12,7 +12,8 @@
  * and `pr_link` (LOB-240), whose evidence the PR step already records, and `review`'s
  * `review_verdict` (LOB-241), whose evidence is the reviewer run's `factory.review` (LOB-36). The
  * other keys the default pipeline declares are not checked here, and each for a stated reason:
- * `human_move` and `human_merge` are B5's human gates, which `TaskService` already enforces by actor;
+ * `human_move` and `human_merge` label B5's human gates, which `TaskService` enforces by actor on a
+ * move whose transition names a `gate` (the key itself is read by nothing);
  * `spec_doc`, `plan_doc` and `run_completed` have no recorded artifact to check yet, and refusing
  * every move on a key nothing can satisfy would turn the pipeline off rather than gate it.
  * A key gains a checker when its evidence is recorded. A reader is told which are which:
@@ -125,17 +126,27 @@ export const CHECKED_REQUIREMENTS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The default pipeline's human-gate keys (B5). Nothing reads them: what makes a move a person's is
+ * the transition's `gate` (`TaskService.move` refuses a run actor crossing one), and these keys only
+ * label the column that has one. An authored version may declare one only on a column whose moves
+ * out name a gate (`./boardDefine`), so the label never promises a gate nothing enforces.
+ */
+export const HUMAN_GATE_REQUIREMENTS: ReadonlySet<string> = new Set([
+  "human_move",
+  "human_merge",
+]);
+
+/**
  * The keys a definition may declare that nothing checks yet (module doc): the default pipeline's
- * `spec_doc`, `plan_doc` and `run_completed`, whose artifacts are not recorded, and B5's human gates
- * `human_move` and `human_merge`, which the move's actor check enforces. A reader is told they are
- * unchecked (`describeDefinition`).
+ * `spec_doc`, `plan_doc` and `run_completed`, whose artifacts are not recorded, and the human-gate
+ * labels (`HUMAN_GATE_REQUIREMENTS`), whose gate is the transition's `gate`, not the key. A reader is
+ * told they are unchecked (`describeDefinition`).
  */
 export const UNCHECKED_REQUIREMENTS: ReadonlySet<string> = new Set([
   "spec_doc",
   "plan_doc",
   "run_completed",
-  "human_move",
-  "human_merge",
+  ...HUMAN_GATE_REQUIREMENTS,
 ]);
 
 /**

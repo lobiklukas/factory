@@ -19,20 +19,46 @@
  *   leave), and at least one column is terminal (a card could never finish). An authored version
  *   therefore always declares its own moves, so it is never read through the default pipeline's
  *   table (`columnTransitions`) — what the file says is what a card meets;
- * - **known requirement keys** (`KNOWN_REQUIREMENTS`), each declared once per column;
+ * - **terminal by name as well as by kind**: a terminal column is named `done` or `canceled`, and a
+ *   column so named is terminal (`TERMINAL_COLUMNS`). Two readers still decide "finished" by the
+ *   column's name rather than its `kind` — the workspace release on arrival (`./WorkspaceRelease`)
+ *   and the caps' count of runs in flight (`./boardCaps`) — so a terminal `shipped` would never
+ *   release its cards' worktrees and its runs would count against caps forever, and a working `done`
+ *   would tear a live card's worktrees down on arrival. Lifted when those readers read `kind`;
+ * - **known requirement keys** (`KNOWN_REQUIREMENTS`), each declared once per column, and the human
+ *   gate keys (`HUMAN_GATE_REQUIREMENTS`) only on a column with a gated move out: nothing reads
+ *   `human_move` or `human_merge` — a move is a person's only when its transition names a `gate` — so
+ *   one on a column with no gate is a gate the board would show and never hold a card to;
  * - **known skills**: every name a column binds is one the skill library holds (D7's `SkillService`),
  *   so a run never fails to start on `MissingSkill`;
  * - **known roles**, when the deployment's role table (`ROLE_MODELS`, B6) has any rows: a role
- *   outside it would silently run on the deployment's model, which is the typo this catches. With no
- *   table every role runs on the deployment's model, and any role is accepted.
+ *   outside it, that the harness gives no meaning to (`HARNESS_ROLES`) and that no definition the
+ *   factory holds already declares, is the typo this catches — it would silently run on the
+ *   deployment's model. `ROLE_MODELS` is a partial override table (any role it does not name runs on
+ *   the deployment's model), so a role it does not list is not by itself a fault: the default
+ *   pipeline's `specifier` and `planner` are authored under `ROLE_MODELS=reviewer=…`. With no table
+ *   every role runs on the deployment's model, and any role is accepted.
  *
- * Pure: the skill library and the role table are passed in by the caller, who holds them
- * (`apps/api`'s `defineBoard` handler reads `SkillService.list` and `SessionService.roles`), so every
- * rule is a case in a test without a database.
+ * Pure: the skill library, the role table and the known roles are passed in by the caller, who holds
+ * them (`apps/api`'s `defineBoard` handler reads `SkillService.list` and `SessionService.roles`;
+ * `TaskService.defineBoard` adds the roles the definitions it holds declare), so every rule is a case
+ * in a test without a database.
  */
 import type { DefineBoardInput, DefinitionFault } from "@repo/domain/Task";
-import { definitionFaults } from "@repo/domain/Task";
-import { KNOWN_REQUIREMENTS } from "./requirements";
+import { definitionFaults, TERMINAL_COLUMNS } from "@repo/domain/Task";
+import { READ_ONLY_ROLES, REVIEW_ROLES, SPEC_ROLES } from "@repo/harness";
+import { HUMAN_GATE_REQUIREMENTS, KNOWN_REQUIREMENTS } from "./requirements";
+
+/**
+ * The roles the harness itself gives meaning to, with or without a `ROLE_MODELS` row: the read-only
+ * stages' (`READ_ONLY_ROLES`), the specifying stage's (`SPEC_ROLES`) and the reviewer's
+ * (`REVIEW_ROLES`). An authored column may always name one.
+ */
+export const HARNESS_ROLES: ReadonlySet<string> = new Set([
+  ...READ_ONLY_ROLES.keys(),
+  ...SPEC_ROLES,
+  ...REVIEW_ROLES,
+]);
 
 /** What an authored version's skills and roles are checked against. */
 export type DefinitionLibrary = {
@@ -40,6 +66,12 @@ export type DefinitionLibrary = {
   readonly skills: ReadonlySet<string>;
   /** The roles the deployment's role table names; empty is a deployment with no table. */
   readonly roles: ReadonlySet<string>;
+  /**
+   * Roles accepted whether or not the role table names them: `HARNESS_ROLES`, and the roles the
+   * definitions the factory already holds declare (the default pipeline's `planner` and `builder`
+   * among them). Absent is `HARNESS_ROLES` alone.
+   */
+  readonly knownRoles?: ReadonlySet<string>;
 };
 
 /** The fields of `DefineBoardInput` the rules read: everything but the dry-run flag. */
@@ -51,6 +83,7 @@ export const authoredDefinitionFaults = (
   library: DefinitionLibrary,
 ): ReadonlyArray<DefinitionFault> => {
   const faults: Array<DefinitionFault> = [];
+  const knownRoles = library.knownRoles ?? HARNESS_ROLES;
   if (definition.name.trim() === "")
     faults.push({
       field: "name",
@@ -103,6 +136,22 @@ export const authoredDefinitionFaults = (
         field: `${at}.transitions`,
         message: `column "${column.name}" is not terminal and declares no moves out: a card in it could never leave`,
       });
+    const terminalName = TERMINAL_COLUMNS.includes(column.name);
+    if (
+      column.kind === "terminal" &&
+      !terminalName &&
+      column.name.trim() !== ""
+    )
+      faults.push({
+        field: `${at}.name`,
+        message: `column "${column.name}" is terminal but not named ${TERMINAL_COLUMNS.join(" or ")}: the factory releases a finished card's worktrees, and stops counting its runs against caps, only in a column of those names (a terminal column of another name is not supported yet)`,
+      });
+    if (column.kind !== "terminal" && terminalName)
+      faults.push({
+        field: `${at}.kind`,
+        message: `column "${column.name}" is named as a terminal column but is ${column.kind}: a card arriving in a column named ${TERMINAL_COLUMNS.join(" or ")} has its runs' worktrees released, so make it terminal or rename it`,
+      });
+    const gated = moves.some((move) => move.gate !== undefined);
     const keys = new Set<string>();
     column.requires.forEach((requirement, position) => {
       const field = `${at}.requires[${position}].key`;
@@ -110,6 +159,11 @@ export const authoredDefinitionFaults = (
         faults.push({
           field,
           message: `column "${column.name}" requires "${requirement.key}", which is not a requirement the factory knows (${[...KNOWN_REQUIREMENTS].join(", ")})`,
+        });
+      if (HUMAN_GATE_REQUIREMENTS.has(requirement.key) && !gated)
+        faults.push({
+          field,
+          message: `column "${column.name}" requires "${requirement.key}" but none of its moves out names a gate: a move is a person's only when its transition declares one ({ "to": …, "gate": … }), and nothing reads "${requirement.key}"`,
         });
       if (keys.has(requirement.key))
         faults.push({
@@ -128,11 +182,12 @@ export const authoredDefinitionFaults = (
     if (
       column.role !== undefined &&
       library.roles.size > 0 &&
-      !library.roles.has(column.role)
+      !library.roles.has(column.role) &&
+      !knownRoles.has(column.role)
     )
       faults.push({
         field: `${at}.role`,
-        message: `column "${column.name}" names role "${column.role}", which is not in the deployment's role table (ROLE_MODELS: ${[...library.roles].sort().join(", ")})`,
+        message: `column "${column.name}" names role "${column.role}", which is not in the deployment's role table (ROLE_MODELS: ${[...library.roles].sort().join(", ")}), not a role the harness knows, and not one any definition declares (${[...knownRoles].sort().join(", ")})`,
       });
   });
 

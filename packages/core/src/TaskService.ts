@@ -117,6 +117,7 @@ import { mintBoardId, mintTaskId } from "./ids";
 import {
   authoredDefinitionFaults,
   type DefinitionLibrary,
+  HARNESS_ROLES,
 } from "./boardDefine";
 import { projectTask, type TaskProjection } from "./taskProjection";
 import { branchDiffSize } from "./prStep";
@@ -431,7 +432,8 @@ export type TaskServiceShape = {
    * the factory does not hold), never over a row that exists (B2). Content identical to the newest
    * version writes nothing and answers that version (`unchanged`); a dry run validates and answers
    * the version it would write (`validated`). A version the rules refuse (`./boardDefine`, against
-   * `library`'s skills and roles) is `InvalidDefinition`, naming the field, and nothing is written.
+   * `library`'s skills and roles, plus the roles the definitions held already declare) is
+   * `InvalidDefinition`, naming the field, and nothing is written.
    */
   readonly defineBoard: (
     input: DefineBoardInput,
@@ -1217,7 +1219,29 @@ export const TaskServiceLive = Layer.effect(
     > =>
       Effect.gen(function* () {
         const { dryRun, ...authored } = input;
-        const faults = authoredDefinitionFaults(authored, library);
+        // The roles the definitions the factory holds already declare are accepted as known (the
+        // default pipeline's `planner` and `builder` among them): `ROLE_MODELS` is a partial override
+        // table, so re-authoring a version under one that names only `reviewer` must not be refused
+        // for the roles the version it replaces runs with today. A row whose `columns` is not an
+        // array (0007 leaves it unconstrained) contributes nothing rather than failing the read.
+        const declared = yield* withStorage(
+          sql<{ readonly role: string }>`
+            SELECT DISTINCT c ->> 'role' AS role
+            FROM board_definitions d
+            CROSS JOIN LATERAL jsonb_array_elements(
+              CASE WHEN jsonb_typeof(d.columns) = 'array' THEN d.columns ELSE '[]'::jsonb END
+            ) AS c
+            WHERE jsonb_typeof(c) = 'object' AND c ->> 'role' IS NOT NULL
+          `,
+        );
+        const knownRoles: ReadonlySet<string> = new Set([
+          ...(library.knownRoles ?? HARNESS_ROLES),
+          ...declared.map((row) => row.role),
+        ]);
+        const faults = authoredDefinitionFaults(authored, {
+          ...library,
+          knownRoles,
+        });
         const first = faults[0];
         if (first !== undefined) {
           return yield* new InvalidDefinition({

@@ -165,7 +165,9 @@ export const DECLARED_TRANSITIONS: Readonly<
  * The default definition's terminal columns (B4): a card in one is finished, and its runs' worktrees
  * and branches are torn down when it gets there (LOB-268). Hard-coded by name: `BoardColumn.kind`
  * says it per definition, and moves read the card's definition since LOB-267, but the workspace
- * release still decides "finished" from the column's name alone, which is the default pipeline's.
+ * release still decides "finished" from the column's name alone, which is the default pipeline's, and
+ * so does the caps' count of runs in flight. An authored version (D4) is therefore held to it: its
+ * terminal columns carry these names, and a column so named is terminal (`authoredDefinitionFaults`).
  */
 export const TERMINAL_COLUMNS: ReadonlyArray<string> = ["done", "canceled"];
 

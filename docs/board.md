@@ -46,10 +46,21 @@ Built (D4): a new definition version is authored without a migration — `define
 over a row (one transaction under an advisory lock on the id); content identical to the newest version
 writes nothing and answers it; a dry run validates only. A version is refused as `InvalidDefinition`,
 naming the field, for a duplicate column, no (or a terminal, or an undeclared) initial column, a move to
-an undeclared column, a terminal column with exits, a non-terminal one with none, no terminal column, an
-unknown requires key, a skill the skill library lacks, or a role outside `ROLE_MODELS` when it has rows
-(`authoredDefinitionFaults` in `packages/core`). An authored version therefore always declares its own
-moves and its initial column.
+an undeclared column, a terminal column with exits, a non-terminal one with none, no terminal column, a
+terminal column not named `done`/`canceled` or a non-terminal one so named (the workspace release and
+the caps' in-flight count still decide "finished" by name), an unknown requires key, `human_move` or
+`human_merge` on a column with no gated move (the transition's `gate` is what gates), a skill the skill
+library lacks, or — when `ROLE_MODELS` has rows — a role it does not name that is neither one the
+harness gives meaning to nor one a held definition declares (`ROLE_MODELS` is a partial override
+table, so a typo is what this catches) (`authoredDefinitionFaults` in `packages/core`). An authored
+version therefore always declares its own moves and its initial column.
+
+**Seed migrations and authored versions share one id space.** The default pipeline's seeds write
+`default` at a fixed version with `ON CONFLICT (id, version) DO NOTHING` (0026 v4, 0038 v5). Since D4
+an operator may author `default` v6, and a later seed that writes `default` v6 would then do nothing,
+silently. A seed migration of an id that already exists must insert at the id's newest version + 1
+(read in the migration), never at a fixed number, and must not assume the newest version is the one
+an earlier seed wrote.
 
 Built (LOB-267): transitions, human gates and the initial column are definition data. A column
 declares `transitions: [{ to, gate? }]` and a definition its `initialColumn`
