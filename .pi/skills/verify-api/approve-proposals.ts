@@ -27,7 +27,7 @@ import { RpcClient } from "effect/rpc";
 import { makeChecker, protocolFor, waitUntil } from "./harness.ts";
 import type { CheckRecord } from "./harness.ts";
 
-const API_URL = process.env["API_URL"] ?? "http://localhost:9425";
+const API_URL = process.env["API_URL"] ?? "http://localhost:9428";
 const EVIDENCE_DIR =
   process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest/api";
 const LEDGER = process.env["LINEAR_FAKE_LEDGER"] ?? "";

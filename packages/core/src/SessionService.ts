@@ -757,11 +757,37 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        */
       const prGate = yield* Semaphore.make(1);
       /**
-       * Serializes approvals, for the reason `prGate` serializes PR opens: two overlapping calls would
-       * each read a proposal as not yet created and each create it. The tracker's own marker is what
+       * Serializes the approvals of one session, for the reason `prGate` serializes PR opens: two
+       * overlapping calls would each read a proposal as not yet created and each create it. Keyed by
+       * session, because a slow or unreachable tracker must hold up only the session that asked, and
+       * an entry lives only while someone holds or awaits it. The tracker's own marker is what
        * excludes a second process.
        */
-      const proposalGate = yield* Semaphore.make(1);
+      const proposalLocks = new Map<
+        SessionId,
+        { readonly semaphore: Semaphore.Semaphore; users: number }
+      >();
+      const withProposalGate = <A, E>(
+        sessionId: SessionId,
+        effect: Effect.Effect<A, E>,
+      ): Effect.Effect<A, E> =>
+        Effect.acquireUseRelease(
+          Effect.sync(() => {
+            const entry = proposalLocks.get(sessionId) ?? {
+              semaphore: Semaphore.makeUnsafe(1),
+              users: 0,
+            };
+            entry.users += 1;
+            proposalLocks.set(sessionId, entry);
+            return entry;
+          }),
+          (entry) => entry.semaphore.withPermits(1)(effect),
+          (entry) =>
+            Effect.sync(() => {
+              entry.users -= 1;
+              if (entry.users === 0) proposalLocks.delete(sessionId);
+            }),
+        );
       /** One activity projection per owned session; releasing an owner interrupts its fiber. */
       const projectors = yield* FiberMap.make<SessionId, void, never>();
       /**
@@ -3400,7 +3426,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         ApproveProposalsResult,
         SessionError | ApproveProposalsError
       > =>
-        proposalGate.withPermits(1)(
+        withProposalGate(
+          input.sessionId,
           Effect.gen(function* () {
             const refuse = (
               reason: ApproveProposalsError["reason"],
@@ -3446,6 +3473,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               const recorded = yield* recordCreatedIssue(
                 owner.root,
                 index,
+                proposal.title,
                 issue,
               );
               if (!recorded) {

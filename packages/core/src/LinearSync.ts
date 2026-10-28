@@ -83,7 +83,7 @@ import {
 } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
-import type { SessionId } from "@repo/domain/Session";
+import { SessionError, type SessionId } from "@repo/domain/Session";
 import type { VerifyRecord } from "@repo/harness";
 import { ApproveProposalsError } from "@repo/domain/Decomposition";
 import { linearIssueOfDelivery } from "./Linear";
@@ -1141,16 +1141,20 @@ const storageError =
  * opened. The session's own request id is the record — `trigger:linear:<issue>:mapped`, written by
  * the seam when the issue's delivery opened it — so the binding needs no table of its own.
  */
-const issueOfSession = (
-  sql: SqlClient,
-  sessionId: SessionId,
-): Effect.Effect<string | undefined, LinearSyncError> =>
+const readIssueOfSession = (sql: SqlClient, sessionId: SessionId) =>
   sql<{ readonly requestId: string | null }>`
     SELECT request_id FROM sessions WHERE id = ${sessionId}
   `.pipe(
     Effect.map((rows) =>
       linearIssueOfDelivery(deliveryIdOfSession(rows[0]?.requestId)),
     ),
+  );
+
+const issueOfSession = (
+  sql: SqlClient,
+  sessionId: SessionId,
+): Effect.Effect<string | undefined, LinearSyncError> =>
+  readIssueOfSession(sql, sessionId).pipe(
     Effect.mapError(storageError(sessionId, "read the session's issue")),
   );
 
@@ -1225,8 +1229,14 @@ export const LinearProposalTracker = Layer.effect(
     return {
       open: (sessionId) =>
         Effect.gen(function* () {
-          const issueId = yield* issueOfSession(sql, sessionId).pipe(
-            Effect.mapError(failed),
+          const issueId = yield* readIssueOfSession(sql, sessionId).pipe(
+            Effect.mapError(
+              (cause) =>
+                new SessionError({
+                  code: "storage",
+                  message: `read session ${sessionId}'s delegating issue: ${cause.message}`,
+                }),
+            ),
           );
           if (issueId === undefined) {
             return yield* new ApproveProposalsError({

@@ -50,6 +50,8 @@ export type FakeOptions = {
   readonly refuse?: string;
   /** Answer this mutation with `success: false`. */
   readonly unsuccessful?: string;
+  /** Answer this mutation with `success: false` the first time only, applying nothing. */
+  readonly unsuccessfulOnce?: string;
   /** Answer this operation the way Linear rate-limits: HTTP 400, `RATELIMITED`, this many times. */
   readonly rateLimit?: { readonly operation: string; readonly times: number };
   /** Never answer this operation, this many times (`Infinity`: never at all). */
@@ -106,6 +108,7 @@ export const makeLinear = (options: FakeOptions = {}) => {
   const counts = new Map<string, number>();
   const seen: Seen[] = [];
   const lost = new Set<string>();
+  const refusedOnce = new Set<string>();
   let limitsLeft = options.rateLimit?.times ?? 0;
   let hangsLeft = options.hang?.times ?? 0;
 
@@ -292,6 +295,15 @@ export const makeLinear = (options: FakeOptions = {}) => {
         return yield* reply(200, {
           data: null,
           errors: [{ message: "Entity not found" }],
+        });
+      }
+      if (
+        options.unsuccessfulOnce === operation &&
+        !refusedOnce.has(operation)
+      ) {
+        refusedOnce.add(operation);
+        return yield* reply(200, {
+          data: { [operation]: { success: false } },
         });
       }
       if (options.unsuccessful === operation) {

@@ -21,6 +21,7 @@ import {
   decodeProposedIssues,
   type ProposalsRefused,
   type ProposedIssues,
+  titleKey,
 } from "@repo/domain/Decomposition";
 import { SessionError } from "@repo/domain/Session";
 import { ProposedIssuesDoc } from "./docs";
@@ -210,6 +211,12 @@ export const decompositionProposals = (
 /**
  * Commit `issues` as the conversation's `factory.proposedIssues` inside `tx`, replacing what was
  * there. Takes a value the validator accepted; `writeProposedIssues` is the writer that decodes.
+ *
+ * A proposal the previous set had already created (LOB-202) keeps its `created` when the new set
+ * has a proposal with the same normalized title: that title is the tracker's marker, so it is the
+ * same child, and dropping the record would make the next approval look for it by marker alone.
+ * A proposal whose title changed is a new proposal; the issue made for the old title stays in the
+ * tracker, unrecorded.
  */
 export const commitProposedIssues = (
   tx: Tx,
@@ -217,13 +224,26 @@ export const commitProposedIssues = (
   issues: ProposedIssues,
 ): Promise<void> =>
   tx.doc(ProposedIssuesDoc, conversationId).then((doc) => {
-    doc.proposals = issues.proposals.map((proposal) => ({
-      title: proposal.title,
-      goal: proposal.goal,
-      change: proposal.change,
-      acceptance: [...proposal.acceptance],
-      blockedBy: [...proposal.blockedBy],
-    }));
+    const createdByTitle = new Map(
+      doc.proposals.flatMap((proposal) =>
+        proposal.created === undefined
+          ? []
+          : [[titleKey(proposal.title), proposal.created] as const],
+      ),
+    );
+    doc.proposals = issues.proposals.map((proposal) => {
+      const created = createdByTitle.get(titleKey(proposal.title));
+      return {
+        title: proposal.title,
+        goal: proposal.goal,
+        change: proposal.change,
+        acceptance: [...proposal.acceptance],
+        blockedBy: [...proposal.blockedBy],
+        ...(created === undefined
+          ? {}
+          : { created: { id: created.id, identifier: created.identifier } }),
+      };
+    });
   });
 
 /**
@@ -247,37 +267,47 @@ export const writeProposedIssues = (
   });
 
 /**
- * Record, inside `tx`, that proposal `index` became the tracker issue `created` (LOB-202). The one
+ * Record, inside `tx`, that proposal `index`, titled `title` when the approval read it, became the
+ * tracker issue `created` (LOB-202). The one
  * writer of a proposal's `created`: `approveProposals` calls it as soon as the tracker answers and
  * before it sends the next request, so a crash between two creations loses at most the one whose
  * answer never arrived, and the tracker's own marker (`LinearSync`) finds that one again.
  *
- * Answers `false`, writing nothing, when the document has no such proposal — a re-decomposition
- * replaced the set while the approval was in flight — so a stale index cannot mark another proposal
- * created.
+ * Answers `false`, writing nothing, unless slot `index` still holds a proposal with that normalized
+ * title. A re-decomposition can replace the set while the approval is in flight; the title, not the
+ * index, is what the tracker's issue was made for, so a stale index cannot mark another proposal
+ * created, whether the new set is shorter or the same length. The check and the write share one
+ * transaction, so no gate is needed for it to hold.
  */
 export const commitCreatedIssue = (
   tx: Tx,
   conversationId: ConversationId,
   index: number,
+  title: string,
   created: CreatedIssue,
 ): Promise<boolean> =>
   tx.doc(ProposedIssuesDoc, conversationId).then((doc) => {
     const proposal = doc.proposals[index];
-    if (proposal === undefined) return false;
+    if (
+      proposal === undefined ||
+      titleKey(proposal.title) !== titleKey(title)
+    ) {
+      return false;
+    }
     proposal.created = { id: created.id, identifier: created.identifier };
     return true;
   });
 
-/** Record one created proposal on the session's log; `false` is `commitCreatedIssue`'s stale index. */
+/** Record one created proposal on the session's log; `false` is `commitCreatedIssue`'s stale slot. */
 export const recordCreatedIssue = (
   conversation: Conversation,
   index: number,
+  title: string,
   created: CreatedIssue,
 ): Effect.Effect<boolean, SessionError> =>
   attempt("record created issue", () =>
     conversation.commit(
-      (tx) => commitCreatedIssue(tx, conversation.id, index, created),
+      (tx) => commitCreatedIssue(tx, conversation.id, index, title, created),
       BACKGROUND_CONTEXT,
     ),
   );

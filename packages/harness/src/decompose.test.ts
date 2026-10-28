@@ -334,7 +334,7 @@ describe("the proposed-issues document", () => {
 });
 
 describe("a proposal's created issue (LOB-202)", () => {
-  it("is recorded on the one proposal it names, read back live and folded, and dropped by a re-decomposition", async () => {
+  it("is recorded on the one proposal it names, read back live and folded, and kept only for a proposal whose title survives a re-decomposition", async () => {
     const storage = new MemoryStorage();
     const cwd = mkdtempSync(join(tmpdir(), "factory-decompose-created-"));
     const { harness, root } = await Effect.runPromise(
@@ -348,32 +348,58 @@ describe("a proposal's created issue (LOB-202)", () => {
             proposals: [proposal("A"), proposal("B"), proposal("C")],
           };
           yield* writeProposedIssues(root, set);
-          const recorded = yield* recordCreatedIssue(root, 1, created);
+          const recorded = yield* recordCreatedIssue(root, 1, "B", created);
+          // The title is compared normalized, as the validator and the tracker's marker do.
+          const respaced = yield* recordCreatedIssue(root, 1, "  b ", created);
           // An index the document does not have is not written, so it cannot mark another proposal.
-          const stale = yield* recordCreatedIssue(root, 3, created);
+          const stale = yield* recordCreatedIssue(root, 3, "B", created);
+          // Nor is a slot that now holds a different proposal: a same-length replacement.
+          const wrongSlot = yield* recordCreatedIssue(root, 0, "B", created);
           const after = yield* readProposedIssues(harness, root);
           const folded = yield* readHistoricalSnapshot(storage, ref(cwd));
-          yield* writeProposedIssues(root, set);
+          // The same titles again, reordered and re-worded: B's issue is still B's.
+          yield* writeProposedIssues(root, {
+            proposals: [
+              proposal("C"),
+              proposal("b", { change: "a new change" }),
+              proposal("A"),
+            ],
+          });
+          const sameTitles = yield* readProposedIssues(harness, root);
+          // A new title is a new proposal: nothing says it was created.
+          yield* writeProposedIssues(root, {
+            proposals: [proposal("C"), proposal("B2"), proposal("A")],
+          });
           return {
             recorded,
+            respaced,
             stale,
+            wrongSlot,
             after,
             folded,
-            redecomposed: yield* readProposedIssues(harness, root),
+            sameTitles,
+            renamed: yield* readProposedIssues(harness, root),
           };
         }),
       );
       expect(outcome.recorded).toBe(true);
+      expect(outcome.respaced).toBe(true);
       expect(outcome.stale).toBe(false);
+      expect(outcome.wrongSlot).toBe(false);
       expect(outcome.after?.proposals.map((p) => p.created)).toEqual([
         undefined,
         created,
         undefined,
       ]);
       expect(outcome.folded.proposedIssues).toEqual(outcome.after);
-      // A decomposition replaces the draft whole: what it proposes has been created nowhere.
+      expect(outcome.sameTitles?.proposals.map((p) => p.created)).toEqual([
+        undefined,
+        created,
+        undefined,
+      ]);
+      expect(outcome.sameTitles?.proposals[1]?.change).toBe("a new change");
       expect(
-        outcome.redecomposed?.proposals.every((p) => p.created === undefined),
+        outcome.renamed?.proposals.every((p) => p.created === undefined),
       ).toBe(true);
     } finally {
       await Effect.runPromise(closeHarness(harness));

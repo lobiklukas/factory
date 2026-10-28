@@ -33,8 +33,8 @@ the title>`). A retry reads the parent's children before it creates, so an `issu
 
 ## What proves it
 
-`./approve-proposals.sh` — its own API on `APPROVE_PORT` (9425 when unset) with `LINEAR_API_KEY` set
-and `LINEAR_API_URL` on its own loopback Linear (`linear-api-fake.ts`, `APPROVE_LINEAR_PORT`, 9426),
+`./approve-proposals.sh` — its own API on `APPROVE_PORT` (9428 when unset) with `LINEAR_API_KEY` set
+and `LINEAR_API_URL` on its own loopback Linear (`linear-api-fake.ts`, `APPROVE_LINEAR_PORT`, 9429),
 a faux specifier and a scripted decomposition (`FAUX_DECOMPOSITION`: three proposals, B blocked by A,
 C by A and B), and its own database. `approve-proposals.ts` is a client of `RpcApi` and reads the
 fake's ledger file between calls:

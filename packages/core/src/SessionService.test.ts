@@ -6738,7 +6738,7 @@ describe("approving proposals into tracker issues (LOB-202)", () => {
 
   it("refuses success: false as a typed error that records nothing, and a retry then creates the issue once", async () => {
     const { fake, key, runtime } = withApproval({
-      unsuccessful: "issueCreate",
+      unsuccessfulOnce: "issueCreate",
     });
     try {
       const outcome = await runtime.runPromise(
@@ -6746,7 +6746,10 @@ describe("approving proposals into tracker issues (LOB-202)", () => {
           const sessions = yield* SessionService;
           const sessionId = yield* decomposed(key);
           const failed = yield* Effect.exit(approve(sessions, sessionId, [0]));
-          return { failed, after: yield* sessions.get(sessionId) };
+          const after = yield* sessions.get(sessionId);
+          const requestsAtFailure = fake.writes("issueCreate").length;
+          const retried = yield* approve(sessions, sessionId, [0]);
+          return { failed, after, requestsAtFailure, retried };
         }),
       );
       expect(outcomeOf(outcome.failed)).toMatchObject({
@@ -6760,7 +6763,11 @@ describe("approving proposals into tracker issues (LOB-202)", () => {
           (proposal) => proposal.created !== undefined,
         ),
       ).toBe(false);
-      expect(fake.children).toHaveLength(0);
+      expect(outcome.requestsAtFailure).toBe(1);
+      // The retry creates the one issue: two `issueCreate` requests in all, one child in Linear.
+      expect(outcome.retried.created).toEqual([0]);
+      expect(fake.writes("issueCreate")).toHaveLength(2);
+      expect(fake.children).toHaveLength(1);
     } finally {
       await runtime.dispose();
     }

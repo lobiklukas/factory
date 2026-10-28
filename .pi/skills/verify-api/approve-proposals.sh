@@ -13,7 +13,7 @@
 #   DATABASE_URL=… APPROVE_PORT=9521 APPROVE_LINEAR_PORT=9522 ./approve-proposals.sh
 #
 # Env: DATABASE_URL (required — it names the *server*; the drive mints its own database on it),
-# APPROVE_PORT (the API, 9425 when unset), APPROVE_LINEAR_PORT (the Linear fake, 9426), EVIDENCE_DIR.
+# APPROVE_PORT (the API, 9428 when unset), APPROVE_LINEAR_PORT (the Linear fake, 9429), EVIDENCE_DIR.
 #
 # What the fake cannot prove: that Linear accepts these documents as spelled, validates the team and
 # parent as it does, or renders the children as sub-issues. See `docs/testing-third-parties.md`.
@@ -24,8 +24,8 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PORT="${APPROVE_PORT:-9425}"
-LINEAR_PORT="${APPROVE_LINEAR_PORT:-9426}"
+PORT="${APPROVE_PORT:-9428}"
+LINEAR_PORT="${APPROVE_LINEAR_PORT:-9429}"
 API_URL="http://127.0.0.1:$PORT"
 RUN_DIR="$ROOT/.verify/run/approve-proposals"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/latest}/api"

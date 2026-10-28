@@ -25,7 +25,7 @@ import {
   type CreatedIssue,
   type ProposedIssue,
 } from "@repo/domain/Decomposition";
-import type { SessionId } from "@repo/domain/Session";
+import type { SessionError, SessionId } from "@repo/domain/Session";
 
 /** The tracker, bound to one session's delegating issue. */
 export type ProposalTarget = {
@@ -45,10 +45,12 @@ export type ProposalTrackerShape = {
   /**
    * Bind the tracker to the session's delegating issue. Refuses — `no_tracker` or
    * `no_delegating_issue`, before any request is made — when there is nowhere to create under.
+   * A failure to read the session's own record is a `SessionError` (`storage`): the tracker was
+   * never contacted, and must not read as though it had failed.
    */
   readonly open: (
     sessionId: SessionId,
-  ) => Effect.Effect<ProposalTarget, ApproveProposalsError>;
+  ) => Effect.Effect<ProposalTarget, ApproveProposalsError | SessionError>;
 };
 
 export const ProposalTracker = Context.Reference<ProposalTrackerShape>(

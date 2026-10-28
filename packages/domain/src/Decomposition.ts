@@ -141,7 +141,7 @@ export class ProposalsRefused extends Schema.TaggedError<ProposalsRefused>()(
 ) {}
 
 /** Two titles are one when a person could not tell them apart in a list. */
-const titleKey = (title: string): string =>
+export const titleKey = (title: string): string =>
   title.trim().replaceAll(/\s+/g, " ").toLowerCase();
 
 /**
@@ -396,10 +396,11 @@ export const ApproveProposalsReason = Schema.Literals([
 export type ApproveProposalsReason = typeof ApproveProposalsReason.Type;
 
 /**
- * An approval that did not complete. For every reason but `tracker_failed` nothing was sent and the
- * document is unchanged. For `tracker_failed` and `proposals_changed`, `created` lists the proposals the call had already
- * created (each recorded in the document before the next request, so a retry does not repeat them);
- * the rest, and the edges, are what the retry does.
+ * An approval that did not complete. For `no_proposals`, `unknown_proposal`, `no_tracker` and
+ * `no_delegating_issue` nothing was sent and the document is unchanged. `tracker_failed` and
+ * `proposals_changed` may follow requests that were sent and answered: `created` lists the
+ * proposals the call had already created (each recorded in the document before the next request,
+ * so a retry does not repeat them); the rest, and the edges, are what the retry does.
  */
 export class ApproveProposalsError extends Schema.TaggedError<ApproveProposalsError>()(
   "ApproveProposalsError",
