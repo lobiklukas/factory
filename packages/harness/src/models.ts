@@ -32,7 +32,8 @@ import {
   type CompactionPolicy,
 } from "@earendil-works/pi-durable";
 import { Effect, Option, Schema } from "effect";
-import { MAX_PROPOSALS } from "@repo/domain/Decomposition";
+import { MAX_PROPOSALS, titleKey } from "@repo/domain/Decomposition";
+import { MAX_PLAN_PROPOSALS } from "@repo/domain/PlanFreshness";
 import { VERIFY_TOOL } from "./verify";
 import { ASK_TOOL, THREAD_SECTION_KEY } from "./ask";
 import { SPEC_TOOL } from "./specify";
@@ -68,6 +69,12 @@ export type ModelAccess = {
    * compaction thresholds are derived from; `0` when the catalog does not say.
    */
   readonly contextWindow: number;
+  /**
+   * What every answer costs on top of the catalog's price, in US dollars: the faux backend's flat
+   * `fauxCost`, which its catalog cannot express. A caller that bounds a call's cost before making it
+   * (LOB-45's plan-freshness pass) adds it to the worst case. Absent: the catalog's price is all.
+   */
+  readonly flatCost?: number;
 };
 
 /** The text of the newest `toolName` result in the transcript, or `undefined` if it has not run. */
@@ -308,6 +315,81 @@ const derivedDecompositionAnswer = (prompt: string): AssistantMessage => {
 };
 
 /**
+ * How a plan-freshness prompt opens (LOB-45, `planFreshness.ts`), so the scripted model can tell the
+ * pass from a turn, a curation and a decomposition. The goal and acceptance headings are the
+ * decomposition's; the issues follow under their own heading, one JSON object per line.
+ */
+export const PLAN_PROMPT_PREFIX = "<plan-freshness>";
+export const PLAN_ISSUES_HEADING = "## tracker issues";
+
+/**
+ * What the scripted model answers to a plan-freshness prompt: an `add` for each acceptance criterion
+ * no tracker issue is titled by, and a `close` for each open issue whose title is no criterion — the
+ * plan read the way a literal-minded agent would read it. Capped at `MAX_PLAN_PROPOSALS`, so the
+ * derived answer is always one the validator accepts. Derived rather than queued, as the
+ * decomposition's is; `fauxPlanFreshness` scripts it verbatim when a suite needs a refusal.
+ */
+const derivedPlanAnswer = (prompt: string): AssistantMessage => {
+  let section = "";
+  let goal = "";
+  const acceptance: string[] = [];
+  const issues: { issue: string; title: string; closed: boolean }[] = [];
+  for (const line of prompt.split("\n")) {
+    if (line.startsWith("## ")) {
+      section = line.trim();
+      continue;
+    }
+    if (section === DECOMPOSITION_GOAL_HEADING && line.trim() !== "") {
+      goal = line.trim();
+    }
+    if (section === DECOMPOSITION_ACCEPTANCE_HEADING && line.startsWith("- ")) {
+      acceptance.push(line.slice(2).trim());
+    }
+    if (section === PLAN_ISSUES_HEADING && line.startsWith("- {")) {
+      const parsed = Option.getOrUndefined(
+        Schema.decodeOption(
+          Schema.fromJsonString(
+            Schema.Struct({
+              issue: Schema.String,
+              title: Schema.String,
+              closed: Schema.Boolean,
+            }),
+          ),
+        )(line.slice(2)),
+      );
+      if (parsed !== undefined) issues.push(parsed);
+    }
+  }
+  const titled = new Set(issues.map((issue) => titleKey(issue.title)));
+  const wanted = new Set(acceptance.map(titleKey));
+  const proposals: unknown[] = [];
+  const added = new Set<string>();
+  for (const criterion of acceptance) {
+    const key = titleKey(criterion);
+    if (titled.has(key) || added.has(key)) continue;
+    added.add(key);
+    proposals.push({
+      kind: "add",
+      title: criterion,
+      goal,
+      change: `Make this hold: ${criterion}`,
+      acceptance: [criterion],
+    });
+  }
+  for (const issue of issues) {
+    if (issue.closed || wanted.has(titleKey(issue.title))) continue;
+    proposals.push({
+      kind: "close",
+      issue: issue.issue,
+      reason: "no acceptance criterion of the spec asks for it",
+    });
+  }
+  return fauxAssistantMessage(
+    JSON.stringify({ proposals: proposals.slice(0, MAX_PLAN_PROPOSALS) }),
+  );
+};
+
+/**
  * The answer a faux session gives, derived from its own transcript rather than from a queue: the
  * first turn calls `bash`, every later turn replies with exactly what that command printed. Two
  * steps, repeatable for the life of a session, and it exercises the tool path a real turn uses.
@@ -348,6 +430,7 @@ export const fauxAnswer = (
   spec: readonly FauxSpecAttempt[] = [],
   decomposition?: string,
   review: readonly FauxSpecAttempt[] = [],
+  plan?: string,
 ): AssistantMessage => {
   // A compaction asks for a summary of a transcript rather than for a turn: it has to answer with
   // text, because a tool call there fails the compaction and the run that waited for it.
@@ -369,6 +452,11 @@ export const fauxAnswer = (
     return decomposition === undefined
       ? derivedDecompositionAnswer(lastUserText(messages))
       : fauxAssistantMessage(decomposition);
+  }
+  if (lastUserText(messages).trimStart().startsWith(PLAN_PROMPT_PREFIX)) {
+    return plan === undefined
+      ? derivedPlanAnswer(lastUserText(messages))
+      : fauxAssistantMessage(plan);
   }
   const turn = everyTurn ? sinceLastUser(messages) : messages;
   const output = toolResultText(turn, "bash");
@@ -423,7 +511,8 @@ export const isFauxTurnStep = (messages: readonly Message[]): boolean => {
   return (
     !text.startsWith(SUMMARY_PROMPT_PREFIX) &&
     !text.startsWith(CURATION_PROMPT_PREFIX) &&
-    !text.startsWith(DECOMPOSITION_PROMPT_PREFIX)
+    !text.startsWith(DECOMPOSITION_PROMPT_PREFIX) &&
+    !text.startsWith(PLAN_PROMPT_PREFIX)
   );
 };
 
@@ -480,6 +569,12 @@ export type ModelAccessOptions = {
    * spec the prompt carries.
    */
   readonly fauxDecomposition?: string | undefined;
+  /**
+   * The body a scripted model answers a plan-freshness prompt with (LOB-45), verbatim. Absent, the
+   * faux derives an `add` per criterion no issue is titled by and a `close` per open issue no
+   * criterion names.
+   */
+  readonly fauxPlanFreshness?: string | undefined;
   /**
    * The context window the faux model is published with (pi-ai's default is 128k). Lowering it is
    * how a test drives a session past a compaction threshold without a 100k-token transcript.
@@ -770,6 +865,7 @@ export const createFauxModelAccess = (
         options.fauxSpec ?? [],
         options.fauxDecomposition,
         options.fauxReview ?? [],
+        options.fauxPlanFreshness,
       );
     return sleepMs > 0 && isFauxTurnStep(context.messages)
       ? fauxNap(sleepMs, streamOptions?.signal).then(answer)
@@ -784,6 +880,9 @@ export const createFauxModelAccess = (
       provider: "faux",
       modelId,
       contextWindow: windowOf(models, "faux", modelId),
+      ...(options.fauxCost === undefined || options.fauxCost === 0
+        ? {}
+        : { flatCost: options.fauxCost }),
     },
     faux,
   };

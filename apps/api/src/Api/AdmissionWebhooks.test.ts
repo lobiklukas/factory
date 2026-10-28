@@ -24,6 +24,7 @@ import { BunServices } from "@effect/platform-bun";
 import {
   CredentialProvider,
   LinearIssueSync,
+  PlanFreshnessPassesLive,
   SessionService,
   SessionServiceLive,
 } from "@repo/core";
@@ -114,8 +115,13 @@ const services = Layer.mergeAll(
       merged: () => Effect.void,
       createChild: () => Effect.die("the webhook does not create issues"),
       blocks: () => Effect.die("the webhook does not relate issues"),
+      children: () => Effect.die("the webhook does not read a plan"),
+      rescope: () => Effect.die("the webhook does not rescope issues"),
+      close: () => Effect.die("the webhook does not close issues"),
     }),
   ),
+  // The process's plan-freshness passes (LOB-45): the route hands each claimed pass to it.
+  PlanFreshnessPassesLive,
   Layer.succeed(
     CredentialProvider,
     CredentialProvider.of({

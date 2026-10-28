@@ -92,6 +92,10 @@ import { SqlClient } from "effect/sql/SqlClient";
 import { SessionError, type SessionId } from "@repo/domain/Session";
 import type { VerifyRecord } from "@repo/harness";
 import { ApproveProposalsError } from "@repo/domain/Decomposition";
+import {
+  acceptanceOfDescription,
+  type PlanIssue,
+} from "@repo/domain/PlanFreshness";
 import { linearIssueOfDelivery, linearIssueOfExternalRef } from "./Linear";
 import { ProposalTracker, proposalMarker } from "./ProposalTracker";
 import { pullRequestReport, SessionWriteBack } from "./SessionWriteBack";
@@ -284,6 +288,19 @@ export const LINEAR_ISSUE_CREATE = `mutation FactoryIssueCreate($input: IssueCre
   issueCreate(input: $input) { success issue { id identifier } }
 }`;
 
+/**
+ * The plan under an issue (LOB-45): its children as a person reads them — title, state, and the
+ * description whose checklist is their acceptance. One page of 250, Linear's maximum, as the parent
+ * read above.
+ */
+export const LINEAR_PLAN_QUERY = `query FactoryPlan($id: String!) {
+  issue(id: $id) {
+    id
+    identifier
+    children(first: 250) { nodes { id identifier title description state { name type } } }
+  }
+}`;
+
 /** An issue's own relations: where `blocks` looks for the edge before it creates it. */
 export const LINEAR_RELATIONS_QUERY = `query FactoryRelations($id: String!) {
   issue(id: $id) {
@@ -309,6 +326,26 @@ const ParentData = Schema.Struct({
             id: Schema.String,
             identifier: Schema.String,
             description: Schema.optional(Schema.NullOr(Schema.String)),
+          }),
+        ),
+      }),
+    }),
+  ),
+});
+
+const PlanData = Schema.Struct({
+  issue: Schema.NullOr(
+    Schema.Struct({
+      id: Schema.String,
+      identifier: Schema.String,
+      children: Schema.Struct({
+        nodes: Schema.Array(
+          Schema.Struct({
+            id: Schema.String,
+            identifier: Schema.String,
+            title: Schema.String,
+            description: Schema.optional(Schema.NullOr(Schema.String)),
+            state: Schema.Struct({ name: Schema.String, type: Schema.String }),
           }),
         ),
       }),
@@ -549,6 +586,34 @@ export type LinearIssueSyncShape = {
     readonly blocker: LinearIssueRef;
     readonly blocked: LinearIssueRef;
   }) => Effect.Effect<{ readonly created: boolean }, LinearSyncError>;
+  /**
+   * The children of `issueId` as the plan (LOB-45): each child's title, state and acceptance
+   * checklist. A read only.
+   */
+  readonly children: (input: {
+    readonly issueId: string;
+  }) => Effect.Effect<readonly PlanIssue[], LinearSyncError>;
+  /**
+   * Re-scope `issue` (LOB-45): read it, and unless a comment already carries `marker`, update its
+   * title and description and then post `comment` — the comment last, so it is the record that the
+   * update landed and a retry after a lost answer updates again (to the same values) before it posts.
+   */
+  readonly rescope: (input: {
+    readonly issue: LinearIssueRef;
+    readonly title: string;
+    readonly description: string;
+    readonly marker: string;
+    readonly comment: string;
+  }) => Effect.Effect<void, LinearSyncError>;
+  /**
+   * Close `issue` as obsolete (LOB-45): read it, post `comment` unless one already carries `marker`,
+   * and move it to its team's first `canceled` state unless it is already `completed` or `canceled`.
+   */
+  readonly close: (input: {
+    readonly issue: LinearIssueRef;
+    readonly marker: string;
+    readonly comment: string;
+  }) => Effect.Effect<void, LinearSyncError>;
 };
 
 export class LinearIssueSync extends Context.Service<
@@ -1014,9 +1079,129 @@ export const LinearIssueSyncLive = (
           }),
         );
 
+      const retried = <A>(effect: Effect.Effect<A, LinearSyncError>) =>
+        effect.pipe(
+          Effect.retry({
+            ...RETRY,
+            while: (error: LinearSyncError) => error.transient,
+          }),
+        );
+
+      /** The parent's children, read once: what a plan-freshness pass is shown. */
+      const children: LinearIssueSyncShape["children"] = (input) =>
+        retried(
+          Effect.gen(function* () {
+            const { issue } = yield* read(
+              "issuePlan",
+              input.issueId,
+              LINEAR_PLAN_QUERY,
+              PlanData,
+              { id: input.issueId },
+            );
+            if (issue === null)
+              return yield* noIssue("issuePlan", input.issueId);
+            return issue.children.nodes.map((child): PlanIssue => ({
+              id: child.id,
+              identifier: child.identifier,
+              title: child.title,
+              state: child.state.name,
+              closed:
+                child.state.type === "completed" ||
+                child.state.type === "canceled",
+              acceptance: [...acceptanceOfDescription(child.description ?? "")],
+            }));
+          }),
+        );
+
+      const commented = (issue: LinearIssueView, marker: string) =>
+        issue.comments.nodes.some((node) => node.body.includes(marker));
+
+      const rescope: LinearIssueSyncShape["rescope"] = (input) =>
+        retried(
+          withIssueLock(
+            input.issue.id,
+            Effect.gen(function* () {
+              const issue = yield* readIssue(input.issue.id);
+              if (commented(issue, input.marker)) return;
+              yield* mutate(
+                "issueUpdate",
+                input.issue.identifier,
+                LINEAR_ISSUE_UPDATE,
+                {
+                  id: issue.id,
+                  input: { title: input.title, description: input.description },
+                },
+              );
+              yield* mutate(
+                "commentCreate",
+                input.issue.identifier,
+                LINEAR_COMMENT_CREATE,
+                {
+                  input: { issueId: issue.id, body: input.comment },
+                },
+              );
+              yield* Effect.logInfo(
+                `linear: ${issue.identifier} re-scoped (${input.marker})`,
+              );
+            }),
+          ),
+        );
+
+      const close: LinearIssueSyncShape["close"] = (input) =>
+        retried(
+          withIssueLock(
+            input.issue.id,
+            Effect.gen(function* () {
+              const issue = yield* readIssue(input.issue.id);
+              if (!commented(issue, input.marker)) {
+                yield* mutate(
+                  "commentCreate",
+                  input.issue.identifier,
+                  LINEAR_COMMENT_CREATE,
+                  {
+                    input: { issueId: issue.id, body: input.comment },
+                  },
+                );
+              }
+              if (
+                issue.state.type === "completed" ||
+                issue.state.type === "canceled"
+              ) {
+                return;
+              }
+              const canceled = issue.team.states.nodes.find(
+                (state) => state.type === "canceled",
+              );
+              if (canceled === undefined) {
+                return yield* new LinearSyncError({
+                  issueId: input.issue.identifier,
+                  operation: "issueUpdate",
+                  message: `${issue.identifier}'s team has no canceled state (it has: ${issue.team.states.nodes.map((state) => state.name).join(", ")})`,
+                  transient: false,
+                });
+              }
+              yield* mutate(
+                "issueUpdate",
+                input.issue.identifier,
+                LINEAR_ISSUE_UPDATE,
+                {
+                  id: issue.id,
+                  input: { stateId: canceled.id },
+                },
+              );
+              yield* Effect.logInfo(
+                `linear: ${issue.identifier} ${issue.state.name} → ${canceled.name} (closed as obsolete)`,
+              );
+            }),
+          ),
+        );
+
       return LinearIssueSync.of({
         createChild,
         blocks,
+        children,
+        rescope,
+        close,
         started: (input) =>
           apply("started", input.issueId, { phase: "started" }),
         pullRequestOpened: (input) =>
@@ -1126,6 +1311,33 @@ export const NoLinearIssueSync = Layer.succeed(
           issueId: input.blocker.identifier,
           operation: "issueRelationCreate",
           message: "no Linear key is configured; nothing was related",
+          transient: false,
+        }),
+      ),
+    children: (input) =>
+      Effect.fail(
+        new LinearSyncError({
+          issueId: input.issueId,
+          operation: "issuePlan",
+          message: "no Linear key is configured; nothing was read",
+          transient: false,
+        }),
+      ),
+    rescope: (input) =>
+      Effect.fail(
+        new LinearSyncError({
+          issueId: input.issue.identifier,
+          operation: "issueUpdate",
+          message: "no Linear key is configured; nothing was re-scoped",
+          transient: false,
+        }),
+      ),
+    close: (input) =>
+      Effect.fail(
+        new LinearSyncError({
+          issueId: input.issue.identifier,
+          operation: "issueUpdate",
+          message: "no Linear key is configured; nothing was closed",
           transient: false,
         }),
       ),
@@ -1286,6 +1498,33 @@ export const LinearProposalTracker = Layer.effect(
                 Effect.map((result) => result.created),
                 Effect.mapError(failed),
               ),
+            issues: sync.children({ issueId }).pipe(Effect.mapError(failed)),
+            rescope: (input) =>
+              sync
+                .rescope({
+                  issue: input.issue,
+                  title: input.title,
+                  description: input.body,
+                  marker: input.marker,
+                  comment: [
+                    `Re-scoped by a plan-freshness pass of ${code(sessionId)}, approved by a person.`,
+                    "",
+                    code(input.marker),
+                  ].join("\n"),
+                })
+                .pipe(Effect.mapError(failed)),
+            close: (input) =>
+              sync
+                .close({
+                  issue: input.issue,
+                  marker: input.marker,
+                  comment: [
+                    `Closed as obsolete by a plan-freshness pass of ${code(sessionId)}, approved by a person: ${input.reason}`,
+                    "",
+                    code(input.marker),
+                  ].join("\n"),
+                })
+                .pipe(Effect.mapError(failed)),
           };
         }),
     };

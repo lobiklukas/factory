@@ -26,6 +26,7 @@ export * from "./RepoMirror";
 export * from "./Linear";
 export * from "./LinearSync";
 export * from "./ProposalTracker";
+export * from "./PlanFreshness";
 export * from "./SessionWriteBack";
 export * from "./WorkspaceRelease";
 export * from "./PullRequestMerge";

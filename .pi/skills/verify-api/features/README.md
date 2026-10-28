@@ -232,6 +232,13 @@ faux with `FAUX_SPEC` and `FAUX_DECOMPOSITION`, the API on `APPROVE_PORT=9681` a
 on `APPROVE_LINEAR_PORT=9682`): `./approve-proposals.sh` **11/11** (8 driver checks, 3 shell checks),
 evidence `.verify/evidence/lob-202/api/`. See [approve-proposals.md](approve-proposals.md).
 
+The plan-freshness checks (LOB-45) were run from the `agent/LOB-45` worktree on 2026-10-28
+(`DATABASE_URL` the worktree's own `factory_agent_lob_45` on 5442, a scratch database minted on it,
+faux with `FAUX_SPEC` and `FAUX_COST=0.01`, `PLAN_FRESHNESS=merged`, the API on `PLAN_PORT=9530` and
+the loopback Linear on `PLAN_LINEAR_PORT=9531`): `./plan-freshness.sh` **18/18** (15 driver checks,
+3 shell checks), evidence `.verify/evidence/latest/api/plan-freshness*.json`. See
+[plan-freshness.md](plan-freshness.md).
+
 The replay checks (LOB-215) were added to `bun drive.ts` and run from the `agent/LOB-215` worktree
 on 2026-10-27 (API on `:9550`, faux with `faux/faux-2` published by `up.sh`, the worktree's own
 database on 5442): **58/58** (52 before, 6 replay checks), evidence `.verify/evidence/lob-215/`,
@@ -320,6 +327,7 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | The pages surface        | passing | [pages.md](pages.md)                         |
 | Propose child issues     | passing | [decompose.md](decompose.md)                 |
 | Approve proposals        | passing | [approve-proposals.md](approve-proposals.md) |
+| Plan freshness           | passing | [plan-freshness.md](plan-freshness.md)       |
 | The model backend        | passing | [model-backend.md](model-backend.md)         |
 | What the server runs     | passing | [server-info.md](server-info.md)             |
 | Metrics to a collector   | passing | [metrics.md](metrics.md)                     |

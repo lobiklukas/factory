@@ -14,6 +14,7 @@ import { ApprovalRequest } from "@repo/domain/Approval";
 import { SessionId, Timestamp } from "@repo/domain/Ids";
 import { ProposedIssues } from "@repo/domain/Decomposition";
 import { MissionSnapshot, ModelUsage } from "@repo/domain/Mission";
+import { PlanRevision } from "@repo/domain/PlanFreshness";
 
 // The two scalars every contract names. They are defined in `Ids` so `Approval` can name a session
 // without importing this module, which imports it back for the snapshot's pending approvals; the
@@ -632,6 +633,13 @@ export const SessionSnapshotFields = {
    * confused. A proposal is not an issue — nothing exists in any tracker until it is approved.
    */
   proposedIssues: Schema.optional(ProposedIssues),
+  /**
+   * The plan-freshness passes run against this session's spec (LOB-45), oldest first: each proposes
+   * issues to add, re-scope or close against the tracker's issue set after a merge, and waits for a
+   * person. Absent when no pass ever ran — a pass that found the plan fresh is a revision with no
+   * proposals, so absent and "nothing to change" cannot be confused.
+   */
+  planRevisions: Schema.optional(Schema.Array(PlanRevision)),
 } as const;
 
 export const SessionSnapshot = Schema.Struct(SessionSnapshotFields);

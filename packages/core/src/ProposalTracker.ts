@@ -25,6 +25,7 @@ import {
   type CreatedIssue,
   type ProposedIssue,
 } from "@repo/domain/Decomposition";
+import type { PlanIssue } from "@repo/domain/PlanFreshness";
 import type { SessionError, SessionId } from "@repo/domain/Session";
 
 /** The tracker, bound to one session's delegating issue. */
@@ -39,6 +40,31 @@ export type ProposalTarget = {
     readonly blocker: CreatedIssue;
     readonly blocked: CreatedIssue;
   }) => Effect.Effect<boolean, ApproveProposalsError>;
+  /**
+   * The plan as the tracker holds it now (LOB-45): the delegating issue's children, each with its
+   * state and the acceptance checklist its description carries. A read, and the only thing a
+   * plan-freshness pass asks of the tracker.
+   */
+  readonly issues: Effect.Effect<readonly PlanIssue[], ApproveProposalsError>;
+  /**
+   * Re-scope `issue` (LOB-45): its title and description become the revised ones, and one comment
+   * carrying `marker` says so. A retry finds the comment and sends nothing.
+   */
+  readonly rescope: (input: {
+    readonly issue: CreatedIssue;
+    readonly title: string;
+    readonly body: string;
+    readonly marker: string;
+  }) => Effect.Effect<void, ApproveProposalsError>;
+  /**
+   * Close `issue` as obsolete (LOB-45): one comment carrying `marker` and the reason, and a move to
+   * the team's canceled state. An issue already closed is not moved; a retry repeats nothing.
+   */
+  readonly close: (input: {
+    readonly issue: CreatedIssue;
+    readonly reason: string;
+    readonly marker: string;
+  }) => Effect.Effect<void, ApproveProposalsError>;
 };
 
 export type ProposalTrackerShape = {
@@ -80,6 +106,21 @@ export const proposalMarker = (sessionId: SessionId, title: string): string =>
     .update(title.trim().replaceAll(/\s+/g, " ").toLowerCase())
     .digest("hex")
     .slice(0, 12)}`;
+
+/**
+ * The line a plan revision's re-scope or close is recognized by on a retry (LOB-45): this session,
+ * the revision's key and the issue. One per revision and issue, so a later revision's change to the
+ * same issue is a change of its own, and a retried approval of this one sends nothing.
+ */
+export const planMarker = (
+  sessionId: SessionId,
+  key: string,
+  identifier: string,
+): string =>
+  `factory:${sessionId}:plan:${createHash("sha256")
+    .update(key)
+    .digest("hex")
+    .slice(0, 12)}:${identifier}`;
 
 /** The issue text a proposal becomes: the goal, the change, and the acceptance lines as a checklist. */
 export const proposalIssueBody = (proposal: ProposedIssue): string =>

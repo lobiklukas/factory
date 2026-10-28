@@ -12,6 +12,7 @@ export * from "./readiness";
 export * from "./replay";
 export * from "./curate";
 export * from "./decompose";
+export * from "./planFreshness";
 export * from "./mission";
 export * from "./mission-worker";
 export * from "./verify";

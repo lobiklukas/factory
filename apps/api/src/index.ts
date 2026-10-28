@@ -7,6 +7,7 @@ import {
   DEFAULT_DIFF_CAP,
   githubReviewPoster,
   gitRepoMirror,
+  PlanFreshnessPassesLive,
   ReviewerCredentialConfig,
   selectReviewerCredentialProvider,
   runDocsSchedule,
@@ -211,6 +212,7 @@ const ModelConfig = Config.all({
    * (`.pi/skills/verify-api/approve-proposals.sh`) scripts edges here.
    */
   fauxDecomposition: Config.option(Config.String("FAUX_DECOMPOSITION")),
+  fauxPlanFreshness: Config.option(Config.String("FAUX_PLAN_FRESHNESS")),
   /**
    * The `review` calls the faux script makes, in order (LOB-36's `fauxReview`): a JSON array of the
    * tool's arguments, each sent only when the one before it was refused. Unset: the faux never
@@ -654,6 +656,7 @@ const HttpLive = Effect.gen(function* () {
     fauxAsk: Option.getOrUndefined(model.fauxAsk),
     fauxSpec: Option.getOrUndefined(model.fauxSpec),
     fauxDecomposition: Option.getOrUndefined(model.fauxDecomposition),
+    fauxPlanFreshness: Option.getOrUndefined(model.fauxPlanFreshness),
     fauxReview: Option.getOrUndefined(model.fauxReview),
     fauxCost: model.fauxCost,
     fauxVerify: model.fauxVerify,
@@ -799,16 +802,21 @@ const HttpLive = Effect.gen(function* () {
           "missions: resume at boot off (MISSION_RESUME=false); a mission or a run in flight waits for its next caller",
         ),
       );
-  const SessionDaemons = Option.match(docsSchedule.repo, {
-    onNone: () => MissionResume,
-    onSome: (repo) =>
-      docsEveryMs > 0
-        ? Layer.mergeAll(
-            MissionResume,
-            DocsScheduleDaemon({ everyMs: docsEveryMs, repo }),
-          )
-        : MissionResume,
-  }).pipe(Layer.provideMerge(SessionShutdown));
+  // The plan-freshness passes (LOB-45) sit there too: a pass a merged PR's delivery claimed runs on
+  // this fiber set, past the request, and shutdown interrupts it before the owners are released.
+  const SessionDaemons = Layer.mergeAll(
+    Option.match(docsSchedule.repo, {
+      onNone: () => MissionResume,
+      onSome: (repo) =>
+        docsEveryMs > 0
+          ? Layer.mergeAll(
+              MissionResume,
+              DocsScheduleDaemon({ everyMs: docsEveryMs, repo }),
+            )
+          : MissionResume,
+    }),
+    PlanFreshnessPassesLive,
+  ).pipe(Layer.provideMerge(SessionShutdown));
   if (docsEveryMs <= 0) {
     yield* Effect.logInfo("docs schedule: off (DOCS_SCHEDULE_MS unset)");
   }

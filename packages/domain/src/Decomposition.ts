@@ -603,6 +603,8 @@ export const ApproveProposalsReason = Schema.Literals([
   "tracker_failed",
   /** A decomposition replaced the proposals while the approval was in flight; approve again. */
   "proposals_changed",
+  /** A person declined the plan revision (LOB-45): nothing of it is applied. */
+  "declined",
 ]);
 export type ApproveProposalsReason = typeof ApproveProposalsReason.Type;
 

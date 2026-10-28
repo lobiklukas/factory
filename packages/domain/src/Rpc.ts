@@ -87,6 +87,12 @@ import {
   ProposeDecompositionResult,
 } from "@repo/domain/Decomposition";
 import {
+  ApprovePlanRevisionInput,
+  ApprovePlanRevisionResult,
+  DeclinePlanRevisionInput,
+  PlanRevision,
+} from "@repo/domain/PlanFreshness";
+import {
   CredentialError,
   OpenPullRequestPayload,
   PrError,
@@ -260,6 +266,20 @@ export class SessionRpc extends RpcGroup.make(
   Rpc.make("approveProposals", {
     payload: ApproveProposalsInput,
     success: ApproveProposalsResult,
+    error: Schema.Union([SessionError, ApproveProposalsError]),
+  }),
+  // A plan-freshness revision (LOB-45) — proposals to add, re-scope or close that a merged PR's pass
+  // filed on the spec's session — is a person's to decline or approve. Declining sends nothing and
+  // makes no call; approving goes through the same tracker port as `approveProposals`, and a
+  // declined revision is refused (`ApproveProposalsError`, `declined`).
+  Rpc.make("declinePlanRevision", {
+    payload: DeclinePlanRevisionInput,
+    success: PlanRevision,
+    error: Schema.Union([SessionError, ApproveProposalsError]),
+  }),
+  Rpc.make("approvePlanRevision", {
+    payload: ApprovePlanRevisionInput,
+    success: ApprovePlanRevisionResult,
     error: Schema.Union([SessionError, ApproveProposalsError]),
   }),
   // A registration that names a URL and no checkout clones the repo into the factory's cache (LOB-265):

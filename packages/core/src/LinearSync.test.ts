@@ -876,6 +876,126 @@ describe("child issues under a delegating issue (LOB-202)", () => {
   });
 });
 
+describe("the plan under a delegating issue (LOB-45)", () => {
+  const PLAN = [
+    { title: "Schema", state: DONE, description: "- [x] it exists" },
+    {
+      title: "Dashboard",
+      description: "goal\n\n- [ ] it renders\n- [ ] it loads",
+    },
+  ];
+
+  it("reads the children as the plan — title, state, closed, acceptance — and writes nothing", async () => {
+    const fake = makeLinear({ children: PLAN });
+    const exit = await withSync(fake, (sync) =>
+      sync.children({ issueId: "ENG-42" }),
+    );
+    expect(exit).toEqual(
+      Exit.succeed([
+        {
+          id: "iss-seed-1",
+          identifier: "ENG-11",
+          title: "Schema",
+          state: "Done",
+          closed: true,
+          acceptance: ["it exists"],
+        },
+        {
+          id: "iss-seed-2",
+          identifier: "ENG-12",
+          title: "Dashboard",
+          state: "Todo",
+          closed: false,
+          acceptance: ["it renders", "it loads"],
+        },
+      ]),
+    );
+    expect(fake.seen.map((one) => one.operation)).toEqual(["issuePlan"]);
+  });
+
+  it("fails an issue this key cannot read as a LinearSyncError", async () => {
+    const fake = makeLinear({ children: PLAN });
+    const exit = await withSync(fake, (sync) =>
+      sync.children({ issueId: "ENG-404" }),
+    );
+    expect(Option.getOrThrow(Exit.findErrorOption(exit))).toMatchObject({
+      operation: "issuePlan",
+    });
+  });
+
+  const dashboard = { id: "iss-seed-2", identifier: "ENG-12" };
+
+  it("re-scopes once: the title and description, then the marked comment; a retry sends nothing", async () => {
+    const fake = makeLinear({ children: PLAN });
+    const rescope = {
+      issue: dashboard,
+      title: "Dashboard, read-only",
+      description: "- [ ] it renders",
+      marker: "factory:ses_x:plan:abc:ENG-12",
+      comment: "re-scoped\n`factory:ses_x:plan:abc:ENG-12`",
+    };
+    const first = await withSync(fake, (sync) => sync.rescope(rescope));
+    const again = await withSync(fake, (sync) => sync.rescope(rescope));
+    expect(Exit.isSuccess(first) && Exit.isSuccess(again)).toBe(true);
+    expect(fake.writes().map((one) => one.operation)).toEqual([
+      "issueUpdate",
+      "commentCreate",
+    ]);
+    expect(fake.children[1]).toMatchObject({
+      title: "Dashboard, read-only",
+      description: "- [ ] it renders",
+      comments: [rescope.comment],
+    });
+  });
+
+  it("closes once: the marked comment and the move to the team's canceled state; a closed issue is not moved", async () => {
+    const fake = makeLinear({ children: PLAN });
+    const close = {
+      issue: dashboard,
+      marker: "factory:ses_x:plan:abc:ENG-12",
+      comment: "obsolete\n`factory:ses_x:plan:abc:ENG-12`",
+    };
+    await withSync(fake, (sync) => sync.close(close));
+    await withSync(fake, (sync) => sync.close(close));
+    expect(fake.writes().map((one) => one.operation)).toEqual([
+      "commentCreate",
+      "issueUpdate",
+    ]);
+    expect(fake.children[1]?.state).toEqual(CANCELED);
+    // An issue a person already finished keeps its state: only the comment says why.
+    const done = makeLinear({ children: PLAN });
+    await withSync(done, (sync) =>
+      sync.close({
+        ...close,
+        issue: { id: "iss-seed-1", identifier: "ENG-11" },
+      }),
+    );
+    expect(done.writes().map((one) => one.operation)).toEqual([
+      "commentCreate",
+    ]);
+    expect(done.children[0]?.state).toEqual(DONE);
+  });
+
+  it("refuses to close into a team with no canceled state, after saying why", async () => {
+    const fake = makeLinear({
+      children: PLAN,
+      states: TEAM.filter((one) => one.type !== "canceled"),
+    });
+    const exit = await withSync(fake, (sync) =>
+      sync.close({
+        issue: dashboard,
+        marker: "factory:ses_x:plan:abc:ENG-12",
+        comment: "obsolete",
+      }),
+    );
+    expect(Option.getOrThrow(Exit.findErrorOption(exit))).toMatchObject({
+      operation: "issueUpdate",
+      transient: false,
+    });
+    expect(fake.writes("issueUpdate")).toEqual([]);
+  });
+});
+
 describe("the proposal marker and body (LOB-202)", () => {
   it("names a proposal by its session and its title, not by its position", () => {
     const marker = proposalMarker(sessionId, "Add the schema");

@@ -19,6 +19,7 @@ export const MISSION_BINDING_DOC_KIND = "factory.mission.binding";
 export const PROPOSED_ISSUES_DOC_KIND = "factory.proposedIssues";
 export const REVIEW_DOC_KIND = "factory.review";
 export const APPROVALS_DOC_KIND = "factory.approvals";
+export const PLAN_REVISIONS_DOC_KIND = "factory.planRevisions";
 
 /** What `SpecDoc` holds before anything was written, and what a version-1 value migrates to. */
 const unspecified = () => ({
@@ -351,6 +352,26 @@ export const ProposedIssuesDoc = defineDoc({
   history: "latest",
   fork: "current",
   initial: (): StoredProposedIssues => ({ proposals: [] }),
+});
+
+/**
+ * The plan-freshness passes run against this session's spec (LOB-45, `./planFreshness`), oldest
+ * first: each a `PlanRevision` (`@repo/domain/PlanFreshness`) as JSON, keyed by the merge it answers.
+ *
+ * On the **spec's** session, because the spec is what a revision is derived from: the session that
+ * holds the goal of record is the one that lists the proposals against it. One document rather than
+ * a family because the snapshot lists every revision in one read, and a revision is small — the
+ * proposals, and the issue set it was shown. `history: "latest"` and bounded (`MAX_PLAN_REVISIONS`):
+ * the newest answer to each merge is the record, and the oldest ones age out. The seed holds none,
+ * which the snapshot reports as absent.
+ */
+export const PlanRevisionsDoc = defineDoc({
+  kind: PLAN_REVISIONS_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({ revisions: [] as JsonValue[] }),
 });
 
 /**

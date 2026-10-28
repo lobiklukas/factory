@@ -74,6 +74,10 @@ import {
   type ProposedIssues,
 } from "@repo/domain/Decomposition";
 import {
+  projectPlanRevisions,
+  type PlanRevision,
+} from "@repo/domain/PlanFreshness";
+import {
   PrEvidence as PrEvidenceSchema,
   SessionError as SessionErrorClass,
 } from "@repo/domain/Session";
@@ -105,6 +109,8 @@ import {
   REVIEW_DOC_KIND,
   ReviewDoc,
   ReplayDoc,
+  PLAN_REVISIONS_DOC_KIND,
+  PlanRevisionsDoc,
   PROPOSED_ISSUES_DOC_KIND,
   ProposedIssuesDoc,
   SpecDoc,
@@ -2600,6 +2606,7 @@ const snapshotOf = (
   usage: SessionUsage,
   replayDoc: JsonValue | undefined,
   proposedIssues: ProposedIssues | undefined,
+  planRevisions: readonly PlanRevision[] | undefined,
 ): SessionSnapshot => {
   const projection = projectView(view, entries);
   const budget = projectBudgetDoc(budgetDoc, usage);
@@ -2637,6 +2644,8 @@ const snapshotOf = (
     ...(replayComparisons.length === 0 ? {} : { replayComparisons }),
     // Absent for a session that never decomposed its spec (LOB-201).
     ...(proposedIssues === undefined ? {} : { proposedIssues }),
+    // Absent for a session no plan-freshness pass ever ran against (LOB-45).
+    ...(planRevisions === undefined ? {} : { planRevisions }),
   };
 };
 
@@ -2652,6 +2661,18 @@ export const readProposedIssues = (
   attempt("read proposed issues", () =>
     harness.snapshot(ProposedIssuesDoc, conversation.id, BACKGROUND_CONTEXT),
   ).pipe(Effect.map(projectProposedIssues));
+
+/**
+ * The plan-freshness revisions of a session this process owns (LOB-45), read through the same
+ * projection the fold uses (`projectPlanRevisions`), so the seed reads as none.
+ */
+export const readPlanRevisions = (
+  harness: Harness,
+  conversation: Conversation,
+): Effect.Effect<readonly PlanRevision[] | undefined, SessionError> =>
+  attempt("read plan revisions", () =>
+    harness.snapshot(PlanRevisionsDoc, conversation.id, BACKGROUND_CONTEXT),
+  ).pipe(Effect.map(projectPlanRevisions));
 
 /**
  * The budget document of a session this process owns (LOB-163), as JSON for `projectBudgetDoc` —
@@ -2827,6 +2848,7 @@ export const readLiveSnapshot = (
       const usage = yield* readSessionUsage(session.harness);
       const replay = yield* readReplayDoc(session.harness, session.root);
       const proposed = yield* readProposedIssues(session.harness, session.root);
+      const plans = yield* readPlanRevisions(session.harness, session.root);
       return snapshotOf(
         state.value,
         tasks,
@@ -2837,6 +2859,7 @@ export const readLiveSnapshot = (
         usage,
         replay,
         proposed,
+        plans,
       );
     }).pipe(Effect.ensuring(Effect.sync(() => state.dispose())));
   });
@@ -2934,6 +2957,7 @@ export const liveSessionEvents = (
       const budget = yield* readBudgetDoc(session.harness, session.root);
       const replay = yield* readReplayDoc(session.harness, session.root);
       const proposed = yield* readProposedIssues(session.harness, session.root);
+      const plans = yield* readPlanRevisions(session.harness, session.root);
       yield* Queue.offer(
         queue,
         snapshotEvent(
@@ -2947,6 +2971,7 @@ export const liveSessionEvents = (
             reported,
             replay,
             proposed,
+            plans,
           ),
         ),
       );
@@ -3157,6 +3182,9 @@ export const readFoldedSnapshot = (
     const proposedIssues = projectProposedIssues(
       yield* readDocument(storage, PROPOSED_ISSUES_DOC_KIND),
     );
+    const planRevisions = projectPlanRevisions(
+      yield* readDocument(storage, PLAN_REVISIONS_DOC_KIND),
+    );
     const budget = projectBudgetDoc(
       yield* readDocument(storage, BUDGET_DOC_KIND),
       log.usage,
@@ -3209,6 +3237,8 @@ export const readFoldedSnapshot = (
         : { replayComparisons: log.replayComparisons }),
       // Proposals are document state too (LOB-201): a released session still reports them.
       ...(proposedIssues === undefined ? {} : { proposedIssues }),
+      // So are the plan-freshness revisions (LOB-45).
+      ...(planRevisions === undefined ? {} : { planRevisions }),
     };
   });
 

@@ -39,6 +39,13 @@
  *   (`GitHubWriteBack`). Which repo, and which prompt, is a `TRIGGER_RULES` rule on the label; the
  *   repo is the payload's own, and has to be registered.
  *
+ * - A signed `pull_request` **merge** also reads the plan again when `PLAN_FRESHNESS=merged` (LOB-45,
+ *   `@repo/core`'s `handlePlanFreshnessDelivery`): one plan-freshness pass per spec of record, its
+ *   proposals filed on the spec's session for a person to approve, its worst-case cost bounded by
+ *   `PLAN_FRESHNESS_MAX_COST`. Off by default, when nothing reads the payload for it; a redelivery of
+ *   the same merge runs no second pass. Each claimed pass runs on `PlanFreshnessPasses`, past the
+ *   answer, which carries each pass as `accepted` (or `replayed`) under `planFreshness`.
+ *
  * Any other event is answered `202` and ignored.
  */
 import { Effect, Stream } from "effect";
@@ -50,7 +57,11 @@ import {
   handleDocsPushWebhook,
   handleGitHubPullRequestWebhook,
   handleGitHubIssueWebhook,
+  handlePlanFreshnessDelivery,
   handlePullRequestReviewWebhook,
+  PLAN_FRESHNESS_OFF,
+  PlanFreshnessPasses,
+  planFreshnessConfigOf,
   recordMergedDelivery,
   releaseMergedDelivery,
   TriggerService,
@@ -123,6 +134,21 @@ const mention = (): string | undefined => {
   return configured === undefined || configured === "" ? undefined : configured;
 };
 
+/**
+ * The plan-freshness cadence (LOB-45), read per delivery like the secret: `PLAN_FRESHNESS` (`off` or
+ * `merged`, `off` when unset) and `PLAN_FRESHNESS_MAX_COST` (US dollars per pass). A value that does
+ * not read is logged and the cadence stays off: a typo must not start paying for model calls.
+ */
+const planFreshnessConfig = Effect.gen(function* () {
+  const read = planFreshnessConfigOf({
+    cadence: process.env["PLAN_FRESHNESS"],
+    maxCost: process.env["PLAN_FRESHNESS_MAX_COST"],
+  });
+  if (read.ok) return read.config;
+  yield* Effect.logWarning(`plan freshness: off, because ${read.error}`);
+  return PLAN_FRESHNESS_OFF;
+});
+
 const GitHubWebhookRoute = HttpRouter.add(
   "POST",
   "/webhooks/github",
@@ -188,6 +214,9 @@ const GitHubWebhookRoute = HttpRouter.add(
     // (the release checks the signature itself), not on the mirror: a Linear write-back that failed
     // is a `500` GitHub does not retry by itself, and must not leave the merge's workspaces behind.
     // A redelivery finds them released and releases nothing.
+    // The plan is read again after a merge (LOB-45), gated as the release is: on the signed delivery
+    // alone, not on the mirror. Off by default; a redelivery runs no second pass.
+    let planFreshness: unknown = undefined;
     if (event === "pull_request") {
       const released = yield* releaseMergedDelivery({ secret, raw, signature });
       if (released > 0) {
@@ -195,6 +224,18 @@ const GitHubWebhookRoute = HttpRouter.add(
           `github: a merged pull request released ${released} session workspace(s)`,
         );
       }
+      // Each claimed pass runs on the process's own fiber set, not on this request: its model call
+      // can outlast the 10 s GitHub waits, and a closed connection interrupts the request. The
+      // answer says which passes were `accepted`; the revision lands on the spec's session.
+      const passes = yield* PlanFreshnessPasses;
+      const plan = yield* handlePlanFreshnessDelivery({
+        secret,
+        raw,
+        signature,
+        config: yield* planFreshnessConfig,
+        fork: passes.run,
+      });
+      if (plan.status === "merged") planFreshness = plan;
       // The factory's own record of the merge (LOB-44): on the PR's sessions, and — when the merged
       // PR reverts another — on that one's, so the outcome metrics read merges from the log rather
       // than from GitHub. After the release, so the log is opened as a released session's is: in no
@@ -209,9 +250,10 @@ const GitHubWebhookRoute = HttpRouter.add(
     // Only a signed `pull_request` the mirror read reaches the review: every refusal before it (no
     // secret, a bad signature, another event, a payload naming no PR) is the mirror's answer alone.
     if (event !== "pull_request" || mirrored.status !== 200) {
-      return HttpServerResponse.setStatus(
-        HttpServerResponse.jsonUnsafe(mirrored.body),
-        mirrored.status,
+      return respond(
+        planFreshness === undefined
+          ? mirrored
+          : { ...mirrored, body: { ...mirrored.body, planFreshness } },
       );
     }
     // A head the registered checkout lacks (a push nobody made here) is fetched with the worker's
@@ -223,7 +265,11 @@ const GitHubWebhookRoute = HttpRouter.add(
       fetch: yield* gitReviewFetch,
     });
     return respond({
-      body: { ...mirrored.body, review: reviewed.body },
+      body: {
+        ...mirrored.body,
+        review: reviewed.body,
+        ...(planFreshness === undefined ? {} : { planFreshness }),
+      },
       status:
         reviewed.status === 200 || reviewed.status === 400
           ? 200

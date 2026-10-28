@@ -25,6 +25,7 @@
     "./Mission": "./src/Mission.ts",
     "./Outcomes": "./src/Outcomes.ts",
     "./Page": "./src/Page.ts",
+    "./PlanFreshness": "./src/PlanFreshness.ts",
     "./PullRequest": "./src/PullRequest.ts",
     "./Rpc": "./src/Rpc.ts",
     "./Server": "./src/Server.ts",
