@@ -38,6 +38,7 @@ import {
   Layer,
   Option,
   Path,
+  Redacted,
   Ref,
   Schedule,
   Schema,
@@ -156,6 +157,8 @@ import {
   stageRefusalOf,
   repoPolicyWidening,
   resolveRole,
+  mcpGrants,
+  type McpServerAccess,
   // `startMission` is the harness's: it creates the task and commits the documents. The service
   // method below resolves the workspace and the owner first, so the two names mark which layer
   // owns which half.
@@ -2637,6 +2640,78 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
+       * The MCP servers a session's run may call (S-agent-mcp-tools): the deployment's
+       * registrations (`AutonomyConfig.mcpServers`) the repository's pinned policy allows, each
+       * with the bearer token read from the repository secret its registration names. The token
+       * is a header on the control plane's own client, never in the session's commands; it is
+       * also handed back to be masked in every tool result, in case a server echoes it.
+       *
+       * A server whose secret the store does not hold for the repo — no store, no such secret, or
+       * one this key cannot read — is not offered, with a warning: a call without its credential
+       * would fail, or be made as nobody the operator chose. A released session runs no work, so
+       * it connects to nothing.
+       */
+      const mcpFor = (
+        id: SessionId,
+        workspace: SessionWorkspace,
+        repoPolicy: RepoPolicy,
+      ): Effect.Effect<{
+        readonly servers: readonly McpServerAccess[];
+        readonly secrets: InjectedSecrets;
+      }> =>
+        Effect.gen(function* () {
+          const grants = mcpGrants(
+            policy.config.mcpServers ?? [],
+            repoPolicy.mcp,
+          );
+          if (grants.length === 0 || workspace.released !== undefined)
+            return { servers: [], secrets: [] };
+          const repo = workspace.repo;
+          const names = grants.flatMap((grant) =>
+            grant.secret === undefined ? [] : [grant.secret],
+          );
+          const revealed =
+            names.length === 0 ||
+            secretStore === undefined ||
+            repo === undefined
+              ? { values: [], unreadable: [] }
+              : yield* secretStore
+                  .reveal(repo, names)
+                  .pipe(
+                    Effect.catch((error) =>
+                      Effect.logWarning(
+                        `session ${id}: the MCP servers' secrets could not be read (${error.message})`,
+                      ).pipe(Effect.as({ values: [], unreadable: [] })),
+                    ),
+                  );
+          const servers: McpServerAccess[] = [];
+          const secrets: Array<InjectedSecrets[number]> = [];
+          for (const grant of grants) {
+            if (grant.secret === undefined) {
+              servers.push(grant);
+              continue;
+            }
+            const secret = revealed.values.find(
+              (value) => value.name === grant.secret,
+            );
+            if (secret === undefined) {
+              yield* Effect.logWarning(
+                `session ${id}: MCP server ${grant.name} is not offered: its credential is the secret ${grant.secret}, which ${repo ?? "the session's repo"} does not hold${revealed.unreadable.includes(grant.secret) ? " in a form this server's FACTORY_SECRETS_KEY can read" : ""}`,
+              );
+              continue;
+            }
+            servers.push({
+              ...grant,
+              headers: {
+                Authorization: `Bearer ${Redacted.value(secret.value)}`,
+              },
+            });
+            secrets.push(secret);
+          }
+          return { servers, secrets };
+        });
+
+      /**
        * The repository's policy a session's open runs under (S-factory-config-as-code,
        * `./repoPolicy`), and where it came from.
        *
@@ -2693,6 +2768,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ...(recorded.repo.allowedHosts === null
                 ? {}
                 : { allowedHosts: recorded.repo.allowedHosts }),
+              ...(recorded.repo.mcp == null ? {} : { mcp: recorded.repo.mcp }),
             };
             const widening = repoPolicyWidening(policy.config, pinned);
             if (widening.length > 0)
@@ -3287,6 +3363,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly verify: VerifyOptions;
         /** Every secret value the session's commands are given, masked in its log (S-agent-secrets). */
         readonly secrets: InjectedSecrets;
+        /** The MCP servers the run may call, with their credentials (S-agent-mcp-tools). */
+        readonly mcp: readonly McpServerAccess[];
         /** How the run asks on its card (LOB-73); absent for a session with no card. */
         readonly ask?: AskOptions;
         /** How the run reads its card's thread (LOB-73); absent for a session with no card. */
@@ -3480,6 +3558,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // declares at that same base as the session first resolved it — never the branch's, and
             // never a ref moved since — and the store's values for them.
             const granted = yield* secretsFor(id, workspace, verifyBase);
+            // The MCP servers the repository's pinned policy allows (S-agent-mcp-tools), with the
+            // credentials the control plane holds for them.
+            const mcp = yield* mcpFor(id, workspace, repoPolicy.repo);
             // The card's thread and the means to add to it (B7, LOB-73), for a session that is a run
             // of a card. A fork or a replay has no run row of its own, so it gets neither.
             const card = yield* runTaskFor(id);
@@ -3513,7 +3594,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 secrets: granted.verify.values,
                 missingSecrets: granted.verify.missing,
               },
-              secrets: granted.all,
+              secrets: [...granted.all, ...mcp.secrets],
+              mcp: mcp.servers,
               ...(card === undefined
                 ? {}
                 : {
@@ -3672,6 +3754,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             repo,
             verify,
             secrets,
+            mcp,
             ask,
             thread,
             body,
@@ -3705,6 +3788,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ...(repo === undefined ? {} : { repo }),
               verify,
               secrets,
+              mcp,
               // A gated call (D15, LOB-52) records its ask through this session's approvals
               // service, so the request lands in the same log and index the pending list reads.
               approvalAsker: askerFor(id),
@@ -5612,6 +5696,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               repo,
               verify,
               secrets,
+              mcp,
             }) =>
               Effect.acquireUseRelease(
                 openStorage(input.sessionId, "reader"),
@@ -5626,6 +5711,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     ...(repo === undefined ? {} : { repo }),
                     verify,
                     secrets,
+                    mcp,
                     approvalAsker: askerFor(id),
                     ...(binding.repo === undefined ||
                     binding.baseRef === undefined
@@ -5733,6 +5819,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               repo,
               verify,
               secrets,
+              mcp,
             }) =>
               replaySession({
                 source: origin,
@@ -5752,6 +5839,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 ...(repo === undefined ? {} : { repo }),
                 verify,
                 secrets,
+                mcp,
                 approvalAsker: askerFor(id),
                 // A replay keeps its source's cap, at no spend; an uncapped source's replay gets
                 // the default a create would (LOB-163).

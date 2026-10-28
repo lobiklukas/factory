@@ -45,9 +45,11 @@ import type {
   ContentBlock,
   Tool as McpTool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
+import { SecretName } from "@repo/domain/Secret";
 import {
   approvalRequestId,
+  MCP_SERVER_NAME,
   type McpServerDeclaration,
   type RepoMcp,
   type RepoMcpServer,
@@ -75,6 +77,77 @@ const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
  */
 export const mcpToolName = (server: string, tool: string): string =>
   `mcp__${server}__${tool.replace(/[^A-Za-z0-9_-]/g, "_")}`;
+
+/** A deployment's `MCP_SERVERS` that is not a list of servers it can register. */
+export class InvalidMcpServers extends Schema.TaggedError<InvalidMcpServers>()(
+  "InvalidMcpServers",
+  { message: Schema.String },
+) {}
+
+const McpServersJson = Schema.fromJsonString(
+  Schema.Array(
+    Schema.Struct({
+      name: Schema.String,
+      url: Schema.String,
+      secret: Schema.optional(SecretName),
+    }),
+  ),
+);
+
+const isLoopback = (host: string): boolean =>
+  host === "localhost" || host === "[::1]" || /^127(\.\d{1,3}){3}$/.test(host);
+
+/**
+ * Read the deployment's registrations as it writes them (`MCP_SERVERS`): a JSON array of
+ * `{ "name", "url", "secret"? }`. Blank is no server. A name that is not `MCP_SERVER_NAME`'s shape
+ * or is given twice, a URL that does not parse or is not `https` — plain `http` only on loopback,
+ * since the bearer token rides on every request — a secret that is not a secret's name, and an
+ * unknown key are refused rather than guessed at, so a typo fails the boot rather than every run.
+ */
+export const parseMcpServers = (
+  text: string,
+): Effect.Effect<readonly McpServerDeclaration[], InvalidMcpServers> =>
+  Effect.gen(function* () {
+    if (text.trim().length === 0) return [];
+    const declared = yield* Schema.decodeUnknownEffect(McpServersJson)(text, {
+      onExcessProperty: "error",
+    }).pipe(
+      Effect.mapError(
+        (error) =>
+          new InvalidMcpServers({
+            message: `MCP_SERVERS is not a JSON array of { name, url, secret? }: ${error.message.replace(/\n\s*/g, " ")}`,
+          }),
+      ),
+    );
+    const seen = new Set<string>();
+    for (const server of declared) {
+      if (!MCP_SERVER_NAME.test(server.name))
+        return yield* new InvalidMcpServers({
+          message: `MCP server name "${server.name}" is not lower-case letters, digits and dashes (at most 24)`,
+        });
+      if (seen.has(server.name))
+        return yield* new InvalidMcpServers({
+          message: `MCP server ${server.name} is registered twice`,
+        });
+      seen.add(server.name);
+      const url = URL.canParse(server.url) ? new URL(server.url) : undefined;
+      if (
+        url === undefined ||
+        !(
+          url.protocol === "https:" ||
+          (url.protocol === "http:" && isLoopback(url.hostname))
+        )
+      )
+        return yield* new InvalidMcpServers({
+          message: `MCP server ${server.name}: ${server.url} is not an https URL (plain http is allowed on loopback only)`,
+        });
+    }
+    return declared.map((server) =>
+      server.secret === undefined
+        ? { name: server.name, url: server.url }
+        : { name: server.name, url: server.url, secret: server.secret },
+    );
+  });
 
 /** One registered server as a session may reach it: the deployment's half and the repository's. */
 export type McpServerGrant = McpServerDeclaration & RepoMcpServer;

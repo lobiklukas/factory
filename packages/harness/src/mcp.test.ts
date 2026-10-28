@@ -32,7 +32,7 @@ import {
   type FauxResponseFactory,
 } from "@earendil-works/pi-ai/providers/faux";
 import { MemoryStorage } from "@earendil-works/pi-durable";
-import { Effect } from "effect";
+import { Effect, Exit } from "effect";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { TranscriptEntry } from "@repo/domain/Session";
 import type { RunProfile } from "./loader";
@@ -41,6 +41,7 @@ import {
   mcpGrants,
   mcpPolicy,
   mcpToolName,
+  parseMcpServers,
   type McpServerAccess,
 } from "./mcp";
 import { startFakeMcpServer, type FakeMcpServer } from "./mcpFake";
@@ -131,7 +132,7 @@ const WRITE_NAME = mcpToolName("tracker", WRITE);
 const scripted = (
   calls: readonly {
     readonly name: string;
-    readonly args: Record<string, unknown>;
+    readonly args: Record<string, string>;
   }[],
 ): { readonly access: ModelAccess; readonly offered: string[][] } => {
   const models = createModels();
@@ -193,7 +194,7 @@ const pending = (ask: ApprovalAsk): ApprovalAnswer => ({
 const turn = async (options: {
   readonly calls: readonly {
     readonly name: string;
-    readonly args: Record<string, unknown>;
+    readonly args: Record<string, string>;
   }[];
   readonly mcp: readonly McpServerAccess[];
   readonly ask?: ApprovalAsker;
@@ -569,5 +570,79 @@ describe("connecting at open", () => {
     expect(connection.problems[0]).toContain(
       `MCP server tracker (${url}) could not be reached, so none of its tools is offered`,
     );
+  });
+});
+
+describe("MCP_SERVERS, as a deployment writes it", () => {
+  const parsed = (text: string) => Effect.runPromiseExit(parseMcpServers(text));
+  const refused = async (text: string) => {
+    const exit = await parsed(text);
+    if (Exit.isSuccess(exit)) throw new Error("expected a refusal");
+    const failure = exit.cause.reasons[0];
+    if (failure?._tag !== "Fail") throw new Error("expected a typed failure");
+    return failure.error;
+  };
+
+  it("reads a JSON list of registrations, and blank as none", async () => {
+    expect(await Effect.runPromise(parseMcpServers("  "))).toEqual([]);
+    expect(
+      await Effect.runPromise(
+        parseMcpServers(
+          JSON.stringify([
+            {
+              name: "tracker",
+              url: "https://mcp.example/mcp",
+              secret: "TRACKER_TOKEN",
+            },
+            { name: "local", url: "http://127.0.0.1:9511/local" },
+          ]),
+        ),
+      ),
+    ).toEqual([
+      {
+        name: "tracker",
+        url: "https://mcp.example/mcp",
+        secret: "TRACKER_TOKEN",
+      },
+      { name: "local", url: "http://127.0.0.1:9511/local" },
+    ]);
+  });
+
+  it.each([
+    ["not JSON", "tracker=https://mcp.example", "not a JSON array"],
+    [
+      "an unknown key",
+      JSON.stringify([{ name: "a", url: "https://x.example", token: "t" }]),
+      "not a JSON array",
+    ],
+    [
+      "a bad name",
+      JSON.stringify([{ name: "Tracker", url: "https://x.example" }]),
+      "is not lower-case",
+    ],
+    [
+      "a name twice",
+      JSON.stringify([
+        { name: "a", url: "https://x.example" },
+        { name: "a", url: "https://y.example" },
+      ]),
+      "registered twice",
+    ],
+    [
+      "plain http off loopback",
+      JSON.stringify([{ name: "a", url: "http://x.example/mcp" }]),
+      "not an https URL",
+    ],
+    [
+      "a secret that is not a secret's name",
+      JSON.stringify([
+        { name: "a", url: "https://x.example", secret: "lower" },
+      ]),
+      "not a JSON array",
+    ],
+  ])("refuses %s", async (_case, text, message) => {
+    const error = await refused(text);
+    expect(error._tag).toBe("InvalidMcpServers");
+    expect(error.message).toContain(message);
   });
 });

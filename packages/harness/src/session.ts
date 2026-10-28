@@ -3022,6 +3022,8 @@ export type ForkSessionOptions = {
   readonly policy?: SessionPolicy;
   /** How the fork's gated calls ask a person (D15, LOB-52); see `OpenSessionOptions.approvalAsker`. */
   readonly approvalAsker?: ApprovalAsker;
+  /** The MCP servers its run may call (S-agent-mcp-tools), as `OpenSessionOptions.mcp`. */
+  readonly mcp?: readonly McpServerAccess[];
   /**
    * What the run's column gives the fork's prompt (B6). A fork carries no task binding, so this is
    * `EMPTY_RUN_PROFILE` in practice; it is a parameter so a fork opens exactly as any other session
@@ -3088,6 +3090,7 @@ export const forkSession = (
       ...(options.repo === undefined ? {} : { repo: options.repo }),
       ...(options.verify === undefined ? {} : { verify: options.verify }),
       ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
+      ...(options.mcp === undefined ? {} : { mcp: options.mcp }),
     });
     const lineage = yield* attempt(
       "copy the parent's entries",

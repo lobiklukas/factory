@@ -24,6 +24,8 @@
         "FAUX_COMMAND",
         "FAUX_EVERY_TURN",
         "APPROVAL_REQUIRED",
+        "MCP_SERVERS",
+        "FAUX_MCP_CALLS",
         "FAUX_ASK",
         "FAUX_SPEC",
         "FAUX_DECOMPOSITION",
