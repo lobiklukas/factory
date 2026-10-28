@@ -70,19 +70,36 @@ const parseCursor = (
       );
 };
 
-/** A stored row, checked: a status or id this build does not know is a broken row, not a delivery. */
+/**
+ * A stored row, checked. The source, session and card columns are free text a newer build or an
+ * older backfill may have written in a shape this build does not know, so a row that fails whole
+ * is read again without them: one odd row degrades to a delivery with fewer facts (and a logged
+ * warning) rather than failing every page that includes it. A row whose id, instant or status do not
+ * decode even so is a broken row, and fails.
+ */
 const toRecord = (
   row: DeliveryRow,
-): Effect.Effect<DeliveryRecord, Schema.SchemaError> =>
-  Schema.decodeUnknownEffect(DeliveryRecord)({
+): Effect.Effect<DeliveryRecord, Schema.SchemaError> => {
+  const base = {
     deliveryId: row.requestId,
     receivedAt: row.receivedAt,
     status: row.status,
-    ...(row.source === null ? {} : { source: row.source }),
     ...(row.skipReason === null ? {} : { reason: row.skipReason }),
+  };
+  const decode = Schema.decodeUnknownEffect(DeliveryRecord);
+  return decode({
+    ...base,
+    ...(row.source === null ? {} : { source: row.source }),
     ...(row.sessionId === null ? {} : { sessionId: row.sessionId }),
     ...(row.taskId === null ? {} : { taskId: row.taskId }),
-  });
+  }).pipe(
+    Effect.catch(() =>
+      Effect.logWarning(
+        `trigger deliveries: delivery ${row.requestId} has a source, session or card this build cannot read (source ${row.source}, session ${row.sessionId}, card ${row.taskId}); listing it without them`,
+      ).pipe(Effect.andThen(decode(base))),
+    ),
+  );
+};
 
 const storage =
   (what: string) =>

@@ -170,7 +170,15 @@ const deliveriesCommand = (name: "ls" | "deliveries") =>
         }
       });
 
-      yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
+      // `TriggerDeliveryError` keeps its `code` (`invalid_input`: fix the cursor; `storage`: retry),
+      // as `SessionError` does, rather than the tag's snake_case a script cannot branch on.
+      yield* reportFailures(
+        Effect.provide(program, BoardClient.layer(apiUrl)).pipe(
+          Effect.catchTag("TriggerDeliveryError", (error) =>
+            reportFailure(error.code, error.message),
+          ),
+        ),
+      );
     }),
   ).pipe(
     Command.withDescription(

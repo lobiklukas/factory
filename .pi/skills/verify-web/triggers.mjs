@@ -18,6 +18,7 @@
 //             emptied the list; **All** brings everything back
 //   older     "Show older" appends the next page (the RPC's own cursor walk is the oracle), shows each
 //             delivery once, and goes away when the last page is in
+//             a delivery arriving after "Show older" joins the top and drops none of the rows held
 //   poll      with the page open, a new delivery appears at the top without a reload
 //
 // Env: WEB_URL, API_URL, EVIDENCE_DIR, RUN_DIR, TRIGGER_SECRET, TRIGGERS_REPO, TRIGGERS_GHOST.
@@ -28,8 +29,8 @@ import os from "node:os";
 import path from "node:path";
 import { chromium } from "@playwright/test";
 
-const WEB_URL = process.env["WEB_URL"] ?? "http://localhost:3461";
-const API_URL = process.env["API_URL"] ?? "http://localhost:9461";
+const WEB_URL = process.env["WEB_URL"] ?? "http://localhost:3475";
+const API_URL = process.env["API_URL"] ?? "http://localhost:9475";
 const EVIDENCE_DIR =
   process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest/triggers";
 const SECRET = process.env["TRIGGER_SECRET"] ?? "";
@@ -274,6 +275,19 @@ try {
     JSON.stringify(afterOlder) === JSON.stringify(expectedAfter) &&
       new Set(afterOlder).size === afterOlder.length,
     `shown=${afterOlder.length} expected=${expectedAfter.length}`,
+  );
+  // A delivery that arrives after "Show older" pushes the head's last row out of the polled head and
+  // into the gap before the older pages: it must stay listed, between the head and the older rows.
+  const PAGED_LATE = id("paged-late");
+  await deliver(PAGED_LATE, "t4-nothing", `Paged late ${TAG}`);
+  await page.waitForSelector(rowSel(PAGED_LATE), { timeout: 20_000 });
+  const afterArrival = await rowIds();
+  assert(
+    "a delivery arriving after Show older is added at the top and no listed delivery vanishes or repeats",
+    afterArrival[0] === PAGED_LATE &&
+      JSON.stringify(afterArrival.slice(1)) === JSON.stringify(afterOlder) &&
+      new Set(afterArrival).size === afterArrival.length,
+    `before=${afterOlder.length} after=${afterArrival.length}`,
   );
   await loadAll();
   const everything = await rowIds();

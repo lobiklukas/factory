@@ -271,8 +271,8 @@ check "a source that is not one is invalid_input before any request" \
   "$(failed_with badsource triggers-bad-source.txt invalid_input && echo 0 || echo 1)" \
   "exit=$(exit_code badsource)"
 drive badcursor triggers-bad-cursor.txt "$FACTORY triggers ls --cursor nope --api $API_URL"
-check "a cursor the server did not mint is a typed refusal, non-zero" \
-  "$(failed_with badcursor triggers-bad-cursor.txt trigger_delivery_error && echo 0 || echo 1)" \
+check "a cursor the server did not mint is invalid_input, non-zero" \
+  "$(failed_with badcursor triggers-bad-cursor.txt invalid_input && echo 0 || echo 1)" \
   "exit=$(exit_code badcursor)"
 
 {

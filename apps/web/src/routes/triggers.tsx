@@ -3,7 +3,7 @@ import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
 import { Cause, Exit, Option } from "effect";
 import { WebhookIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { DeliveryRecord } from "@repo/domain/Trigger";
 import {
   olderDeliveriesAtom,
@@ -136,6 +136,14 @@ const DeliveryList = ({
   // As on the repositories view: a failed poll keeps the last answer on screen with a marker; only
   // a first read that fails replaces the list.
   const last = Option.getOrUndefined(AsyncResult.value(result));
+
+  // Once older pages are held, every head the poll reads is held too. A delivery that arrives
+  // pushes the head's last row out of the head, and the older pages start after the head as it was
+  // when they were asked for, so without this that row is in neither list and silently vanishes.
+  useEffect(() => {
+    if (last === undefined || olderCursor === undefined) return;
+    setOlder((held) => mergeDeliveries(last.deliveries, held));
+  }, [last, olderCursor]);
   const stale = AsyncResult.isFailure(result) ? result.cause : undefined;
 
   if (AsyncResult.isInitial(result)) {
@@ -164,12 +172,19 @@ const DeliveryList = ({
 
   const showOlder = () => {
     if (cursor === undefined || cursor === null) return;
+    const headAtClick = last.deliveries;
     setLoading(true);
     setFailure(null);
     void loadOlder({ ...filterInput(status, source), cursor })
       .then((exit) => {
         if (Exit.isSuccess(exit)) {
-          setOlder((held) => mergeDeliveries(held, exit.value.deliveries));
+          // The head as it was when the page was asked for is held with it: the page starts after it.
+          setOlder((held) =>
+            mergeDeliveries(
+              mergeDeliveries(headAtClick, held),
+              exit.value.deliveries,
+            ),
+          );
           setOlderCursor(exit.value.nextCursor ?? null);
           return;
         }

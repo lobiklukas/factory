@@ -64,6 +64,22 @@ describe("mergeDeliveries", () => {
     ]);
   });
 
+  it("drops no row when arrivals push the head's last rows out after older pages were loaded", () => {
+    const ids = (rows: ReadonlyArray<DeliveryRecord>) =>
+      rows.map((r) => r.deliveryId);
+    const range = (from: number, to: number) =>
+      Array.from({ length: from - to + 1 }, (_, i) => row(`d${from - i}`));
+    // The head showed d100..d51 and "Show older" loaded d50..d1, after the head was held.
+    let held = mergeDeliveries(range(100, 51), range(50, 1));
+    // Ten deliveries arrive; the next poll's head is d110..d61, and the page folds it in.
+    const head = range(110, 61);
+    held = mergeDeliveries(head, held);
+    const shown = ids(mergeDeliveries(head, held));
+    expect(shown).toEqual(ids(range(110, 1)));
+    // Another poll with the same head changes nothing.
+    expect(ids(mergeDeliveries(head, held))).toEqual(shown);
+  });
+
   it("prefers the head's copy of a row the poll re-read", () => {
     const fresh = row("b", { status: "processed" });
     const merged = mergeDeliveries([fresh], [row("b")]);

@@ -155,7 +155,7 @@ behind the registry's back flipping its row on the poll (`features/repos.md`). E
 ### The triggers page
 
 ```sh
-TRIGGERS_API_PORT=9461 TRIGGERS_WEB_PORT=3461 ./triggers.sh   # its own instance, secret and rules; leaves nothing running
+TRIGGERS_API_PORT=9475 TRIGGERS_WEB_PORT=3475 ./triggers.sh   # its own instance, secret and rules; leaves nothing running
 ```
 
 `/triggers` lists what the trigger seam recorded for each delivery, so `triggers.sh` boots its own API

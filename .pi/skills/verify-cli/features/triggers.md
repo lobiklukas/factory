@@ -37,7 +37,7 @@ piped (the tab is the separator). Checks, all required:
     `--source linear` drops this run's generic rows; `triggers deliveries` is the same command.
 11. `--limit 1` prints one row and a stderr cursor; `--cursor` continues with the next row.
 12. A bad `--status`, a bad `--source` (refused with `--api` pointing at a dead port: no request) and a
-    cursor the server did not mint (`trigger_delivery_error`) fail non-zero.
+    cursor the server did not mint (`invalid_input`) fail non-zero.
 
 Evidence: `.verify/evidence/latest/cli/triggers-*.txt` and `triggers.json`. The rendering is unit
 tested in `apps/cli/src/commands/triggers.test.ts`.

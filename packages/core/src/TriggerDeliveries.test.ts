@@ -203,6 +203,29 @@ describe("listTriggerDeliveries", () => {
     );
   }, 60_000);
 
+  it("lists a row whose source or session this build cannot read, without those facts, and the rest of the page", async () => {
+    const sql = await runtime.runPromise(
+      Effect.gen(function* () {
+        return yield* SqlClient;
+      }),
+    );
+    const odd = mine("odd-row");
+    await runtime.runPromise(
+      sql`INSERT INTO webhook_deliveries (request_id, status, skip_reason, source, session_id)
+          VALUES (${odd}, 'processed', 'rule t4', 'fax-machine', 'ses_lws_not_a_session_id')`,
+    );
+    await deliver("odd-neighbour", { labels: ["t4-nothing"] });
+    const record = await recordOf("odd-row");
+    expect(record).toMatchObject({
+      deliveryId: odd,
+      status: "processed",
+      reason: "rule t4",
+    });
+    expect(record.source).toBeUndefined();
+    expect(record.sessionId).toBeUndefined();
+    expect((await recordOf("odd-neighbour")).status).toBe("skipped");
+  }, 60_000);
+
   it("filters by status and by source, and only by what it is asked", async () => {
     await deliver("generic-skip", { source: "generic", labels: ["t4-none"] });
     const skipped = await listed({ status: "skipped", limit: 200 });

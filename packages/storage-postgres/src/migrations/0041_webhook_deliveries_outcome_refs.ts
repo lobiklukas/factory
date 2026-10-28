@@ -39,6 +39,7 @@ export default Effect.gen(function* () {
     WHERE d.session_id IS NULL
       AND d.status = 'processed'
       AND s.request_id = 'trigger:' || d.request_id
+      AND s.id ~ '^ses_[0-9abcdefghjkmnpqrstvwxyz]{26}$'
   `;
   yield* sql`
     CREATE INDEX IF NOT EXISTS webhook_deliveries_by_received_desc

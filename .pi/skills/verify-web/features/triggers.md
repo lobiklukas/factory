@@ -26,8 +26,8 @@ section (the webhook icon) opens it. It is the dashboard's face for `listTrigger
 
 ## Driving it with triggers.sh
 
-`./triggers.sh` owns its own API and dashboard (`TRIGGERS_API_PORT`, default 9461, and
-`TRIGGERS_WEB_PORT`, default 3461), the API booted with `TRIGGER_SECRET` and two rules (a registered
+`./triggers.sh` owns its own API and dashboard (`TRIGGERS_API_PORT`, default 9475, and
+`TRIGGERS_WEB_PORT`, default 3475), the API booted with `TRIGGER_SECRET` and two rules (a registered
 repo, and one nobody registered). It posts signed generic webhooks from the drive; nothing leaves
 loopback. `triggers.mjs` requires, in a real browser:
 
@@ -35,8 +35,9 @@ loopback. `triggers.mjs` requires, in a real browser:
    unregistered repo are skipped; 55 more unmapped ones make a second page; a wrong signature is `401`.
 2. **Navigation.** The rail's **Triggers** opens `/triggers` and is marked `aria-current`.
 3. **List.** The shown ids are the RPC's first page, in its order; the forged delivery is nowhere.
-4. **Show older.** Appends the RPC's next page in order with no repeats; after the last page the
-   button is gone and the three seeded deliveries are listed.
+4. **Show older.** Appends the RPC's next page in order with no repeats; a delivery that arrives
+   after it joins the top and drops no row held (the head's last rows leave the polled head); after
+   the last page the button is gone and the three seeded deliveries are listed.
 5. **Verbatim reasons.** `no rule matches labels [t4-nothing]` and `repo <ghost> is not registered`,
    character for character; the processed row shows its routing reason and names its session, equal
    to the RPC's.

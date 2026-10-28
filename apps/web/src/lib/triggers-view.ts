@@ -74,9 +74,13 @@ export const inputOfKey = (
 export const PAGE_SIZE = 50;
 
 /**
- * The list as the page shows it: the head the poll just read, then the older pages the person asked
- * for. A delivery that moved from the older pages into the head meanwhile (more arrived, so the page
- * boundary shifted) is shown once, at the head's position.
+ * The list as the page shows it: the head the poll just read, then every other row the page holds
+ * (the older pages the person asked for and the heads it read before). A row in both is shown once,
+ * at the head's position and as the head read it.
+ *
+ * The page folds each poll's head into what it holds (`mergeDeliveries(head, held)`) once older pages
+ * are loaded: a new arrival pushes the head's last row out of the head, and the older pages start
+ * after the head as it was, so that row stays shown only because an earlier head was held.
  */
 export const mergeDeliveries = (
   head: ReadonlyArray<DeliveryRecord>,

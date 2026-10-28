@@ -275,7 +275,8 @@ export const handlePlanFreshnessDelivery = (input: {
             claim,
             status,
             reason,
-            sessionId,
+            // A skip names no session, as on every other source: only a pass that ran is linked.
+            status === "processed" ? sessionId : undefined,
           ).pipe(Effect.ignore);
         const release = releaseDeliveryClaim(sql, requestId, claim).pipe(
           Effect.ignore,

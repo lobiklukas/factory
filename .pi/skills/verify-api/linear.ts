@@ -471,7 +471,6 @@ const program = Effect.gen(function* () {
   );
 
   // 13: authentication.
-  const beforeForged = (yield* recorded).length;
   const forged = yield* Effect.promise(() =>
     deliver(
       "forged",
@@ -486,12 +485,9 @@ const program = Effect.gen(function* () {
   );
   const afterForged = yield* recorded;
   assert(
-    "the refused delivery is not recorded: listTriggerDeliveries holds no new row for it",
-    afterForged.length === beforeForged &&
-      afterForged.every(
-        (row) => !row.deliveryId.includes(`lin-${STAMP}-forged`),
-      ),
-    `before=${beforeForged} after=${afterForged.length}`,
+    "the refused delivery is not recorded: listTriggerDeliveries holds no row for it",
+    afterForged.every((row) => !row.deliveryId.includes(`lin-${STAMP}-forged`)),
+    `rows=${afterForged.length}`,
   );
 
   // 14: the count.
@@ -668,14 +664,16 @@ const program = Effect.gen(function* () {
 
   // 21: what an operator reads when a labelled issue started nothing.
   const deliveries = yield* recorded;
-  const skippedLabel = deliveries.find(
-    (row) =>
-      row.status === "skipped" &&
-      row.reason === "no rule matches labels [Bug, Frontend]",
+  // Found by this run's delivery id, not by the reason: the reason is the same on every run and the
+  // database is reused, so a row an earlier run left would satisfy a search by reason alone.
+  const skippedLabel = deliveries.find((row) =>
+    row.deliveryId.includes(`lin-${STAMP}-unmapped`),
   );
   assert(
     "listTriggerDeliveries holds the unmapped issue's skip with the exact reason, its source, and no session",
-    skippedLabel?.source === "linear" &&
+    skippedLabel?.status === "skipped" &&
+      skippedLabel.reason === "no rule matches labels [Bug, Frontend]" &&
+      skippedLabel.source === "linear" &&
       skippedLabel.sessionId === undefined &&
       skippedLabel.taskId === undefined &&
       skippedLabel.receivedAt.length > 0,

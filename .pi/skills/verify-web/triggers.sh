@@ -20,8 +20,8 @@ set -uo pipefail
 unset FACTORY_API_TOKEN FACTORY_API_TOKENS VITE_FACTORY_API_TOKEN FACTORY_API_AUTH
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-API_PORT="${TRIGGERS_API_PORT:-9461}"
-WEB_PORT="${TRIGGERS_WEB_PORT:-3461}"
+API_PORT="${TRIGGERS_API_PORT:-9475}"
+WEB_PORT="${TRIGGERS_WEB_PORT:-3475}"
 RUN_DIR="$ROOT/.verify/run/triggers"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/latest}/triggers"
 SECRET="verify-web-triggers-secret"
