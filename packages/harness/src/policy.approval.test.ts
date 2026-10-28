@@ -516,7 +516,12 @@ const crashAndRecover = async (options: {
       approvalAsker: asker.ask,
     }),
   );
-  second.harness.resume();
+  // The open is the recovery (LOB-25): it continues the run the crash left placed, before anything
+  // here asks Pi Durable for progress — `waitForIdle` would enable the scheduler by itself.
+  expect(second.resumed).toHaveLength(1);
+  expect((await second.harness.inspect(BACKGROUND_CONTEXT)).scheduling).toBe(
+    "running",
+  );
   await second.harness.waitForIdle(BACKGROUND_CONTEXT);
   const view = await second.root.viewState(BACKGROUND_CONTEXT);
   const entries = projectView(view.value).entries;

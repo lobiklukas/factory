@@ -10,7 +10,12 @@
         "VITE_PORT",
         "VITE_SERVER_URL",
         "VITE_ENABLE_DEVTOOLS",
-        "VITE_DEVTOOLS_URL"
+        "VITE_DEVTOOLS_URL",
+        // The dashboard's control-plane credential (LOB-20). Declared, so it is hashed, and on
+        // purpose: Vite inlines every VITE_ value into the bundle, so a build made with one token
+        // must not be restored from cache for another. Turbo records only the value's SHA-256, and
+        // its Vite framework inference would hash it anyway; passThroughEnv cannot keep it out.
+        "VITE_FACTORY_API_TOKEN"
       ]
     }
   }

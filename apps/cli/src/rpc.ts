@@ -1,7 +1,16 @@
 import { RpcApi, SessionRpc } from "@repo/domain/Rpc";
-import { Context, Effect, Layer } from "effect";
-import { FetchHttpClient } from "effect/http";
+import { Config, Context, Effect, Layer, Option, Redacted } from "effect";
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 import { RpcClient as EffectRpcClient, RpcSerialization } from "effect/rpc";
+
+/**
+ * The control-plane credential (LOB-20): `FACTORY_API_TOKEN`, sent as `Authorization: Bearer` on
+ * every call. It is the same variable the API reads as its shared token, so one export runs both
+ * locally. Unset (or empty), no header is sent, which only a control plane with auth off serves;
+ * one with auth on answers `unauthenticated`. Never a flag: a token on the command line is in every
+ * process listing.
+ */
+const ApiTokenConfig = Config.option(Config.Redacted("FACTORY_API_TOKEN"));
 
 /**
  * The session RPC client, built the way `apps/web/src/lib/rpc-client.ts` builds it: the same
@@ -9,10 +18,33 @@ import { RpcClient as EffectRpcClient, RpcSerialization } from "effect/rpc";
  *
  * The difference is the URL. The dashboard reads it once at module load from its build config; a
  * CLI run is one shot with a URL chosen by `--api` or the environment, so the layer is a function
- * of the URL rather than a module constant.
+ * of the URL rather than a module constant. Both send the control-plane credential (LOB-20).
  */
 const protocolLive = (apiUrl: string) =>
-  EffectRpcClient.layerProtocolHttp({ url: `${apiUrl}/rpc` }).pipe(
+  Layer.unwrap(
+    Effect.gen(function* () {
+      const token = Option.filter(
+        yield* ApiTokenConfig,
+        (value) => Redacted.value(value).trim() !== "",
+      );
+      return EffectRpcClient.layerProtocolHttp({
+        url: `${apiUrl}/rpc`,
+        ...(Option.isSome(token)
+          ? {
+              transformClient: <E, R>(
+                client: HttpClient.HttpClient.With<E, R>,
+              ) =>
+                HttpClient.mapRequest(
+                  client,
+                  HttpClientRequest.bearerToken(
+                    Redacted.value(token.value).trim(),
+                  ),
+                ),
+            }
+          : {}),
+      });
+    }),
+  ).pipe(
     Layer.provide(FetchHttpClient.layer),
     Layer.provide(RpcSerialization.layerNdjson),
   );

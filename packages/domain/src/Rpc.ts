@@ -1,5 +1,6 @@
 import { Schema } from "effect";
 import { Rpc, RpcGroup } from "effect/rpc";
+import { ControlPlaneAuth } from "@repo/domain/Auth";
 import {
   DecideApprovalInput,
   DecideApprovalOutput,
@@ -290,7 +291,7 @@ export class SessionRpc extends RpcGroup.make(
     error: SessionError,
     stream: true,
   }),
-) {}
+).middleware(ControlPlaneAuth) {}
 
 /**
  * The approval surface (docs/design.md D11, LOB-146): request, decide, and the pending list — one
@@ -319,7 +320,7 @@ export class ApprovalsRpc extends RpcGroup.make(
     success: ListPendingApprovalsOutput,
     error: SessionError,
   }),
-) {}
+).middleware(ControlPlaneAuth) {}
 
 const TaskErrorSchema = Schema.Union([
   TaskNotFound,
@@ -448,7 +449,7 @@ export class TasksRpc extends RpcGroup.make(
     success: Schema.Array(AttentionItem),
     error: TaskErrorSchema,
   }),
-) {}
+).middleware(ControlPlaneAuth) {}
 
 /**
  * The stored trigger routes (LOB-266): which label or team starts work on which registered repo,
@@ -473,7 +474,7 @@ export class TriggerRoutesRpc extends RpcGroup.make(
     success: TriggerRoute,
     error: Schema.Union([TriggerRouteError, TriggerRouteNotFound]),
   }),
-) {}
+).middleware(ControlPlaneAuth) {}
 
 /**
  * What the control plane is running (LOB-269): the model backend and what chose it, the default and
@@ -487,9 +488,12 @@ export class ServerRpc extends RpcGroup.make(
     payload: GetServerInfoInput,
     success: ServerInfo,
   }),
-) {}
+).middleware(ControlPlaneAuth) {}
 
-// NOTE: The sandbox and sandbox-status groups merge in here next.
+// Every group carries `ControlPlaneAuth` (LOB-20), so every member — `watchSession`'s stream too —
+// is refused as `Unauthenticated` without a credential the server knows, and a handler that records
+// an actor reads it from the `Caller` the middleware provides, not from the body.
+// NOTE: The sandbox and sandbox-status groups merge in here next; each carries the middleware too.
 export const RpcApi = SessionRpc.merge(ApprovalsRpc)
   .merge(TasksRpc)
   .merge(TriggerRoutesRpc)

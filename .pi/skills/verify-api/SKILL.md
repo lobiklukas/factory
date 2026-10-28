@@ -43,6 +43,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | A mission (LOB-230)                     | `startMission` → an id, then `getSession().mission` reports `verify` with `entered`, live and folded                                                                                                                                                                                                                        | a mission's phase is the session's state, not a call                               |
 | A mission's fan-out (LOB-193)           | two `workers` live, owned, two conversations, `waiting` failFast; a failing worker stops its sibling's running check; a check outside the policy is refused                                                                                                                                                                 | a failing subtask stops its siblings, per policy                                   |
 | A mission across a kill (LOB-231)       | `mission-restart.sh`: SIGTERM while the checkpoint is `implement` and both workers are on a tool call; a fresh process resumes it at boot, unasked, in `implement`, and the same workers finish                                                                                                                             | a mission resumes in the phase it died in                                          |
+| A run across a kill (LOB-25)            | `run-restart.sh`: SIGKILL (or `KILL_SIGNAL=TERM`) while a run is on a tool call; a fresh process resumes it at boot, unasked: the same submission, the call settled as interrupted, an answer, a retry that submits nothing                                                                                                 | a run continues after its process dies                                             |
 | Per-worker cost (LOB-194)               | `mission-cost.sh`: two workers report two separate costs (two requests each) whose sum is the session's total and the list's `costTotal`; the same breakdown from the fold and from a restarted API; a mission with no workers reports none                                                                                 | a finished mission says what each worker spent                                     |
 | A docs trigger (LOB-197)                | `docs-trigger.sh`: a push starts one docs session on `factory/doc-<id>`, the schedule one per interval, the ledger no write to main                                                                                                                                                                                         | a docs run starts without a person, off the trunk                                  |
 | Docs trigger callers (LOB-234)          | `docs-trigger-http.sh`: `DOCS_SCHEDULE_MS=400` ticks sessions, unset none; a signed push processed, a redelivery replayed, another branch 400, a bad signature 401                                                                                                                                                          | a deployment starts docs runs with no script                                       |
@@ -61,10 +62,19 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | Approving proposals (LOB-202)           | `approve-proposals.sh`: `approveProposals` creates only the approved proposals in a loopback Linear, under the delegating issue and in its team, with the edges whose ends exist, and nothing twice — a rerun of the same spec included (LOB-203)                                                                           | approved proposals become tracker issues, once                                     |
 | The model backend (LOB-258)             | `backend-boot.sh`: faux by `MODEL_BACKEND`; forced anthropic with no credential or no federation token file exits non-zero, naming why; a dummy token boots anthropic, value unlogged                                                                                                                                       | a wrong backend fails the boot, not the first request                              |
 | What the server runs (LOB-269)          | `server-info.sh`: `getServerInfo` answers faux by `MODEL_BACKEND`, `faux/faux-1`, the `ROLE_MODELS` rows, gate, budget and armed routes; no dummy credential in the raw body or the log; a session names `faux/faux-1` on create, get and list                                                                              | a client can ask which backend and model it is on                                  |
+| Control-plane identity (LOB-20)         | `identity.sh`: no credential or a wrong one is `Unauthenticated` for `listSessions` and the `watchSession` stream; amy's create, decide, card create and move, and the CLI's move record `amy` over a body's `mallory`; `listSpend` by those; a signed delivery needs no credential                                         | the actor is the one the control plane authenticated                               |
 | Jira, Slack and GitHub issues (LOB-259) | `jira.sh`, `slack.sh`, `github-issues.sh`: signed deliveries at `/webhooks/jira`, `/webhooks/slack` and the issue events of `/webhooks/github` open one session and one comment; an unset secret answers 503                                                                                                                | three more sources arrive over HTTP, each armed by its own secret                  |
 |                                         |                                                                                                                                                                                                                                                                                                                             |                                                                                    |     |     |     | 579ff10 |
 
 Every check is required: the driver exits non-zero when one fails.
+
+**With auth on (LOB-20).** Export `FACTORY_API_TOKEN` (16+ characters) before a script and the API it
+boots requires it on every RPC; every driver's client (`harness.ts`'s `protocolFor`, and its
+`authHeaders()` for a raw `fetch`) and the CLI send the same variable, and the checks that read an
+approval's actor expect the token's (`recordedActor`: `FACTORY_API_ACTOR`, `operator` by default).
+Unset, the API runs with auth off and every driver behaves as before; every script binds
+`HOST=127.0.0.1`, the only kind of address an open control plane boots on without
+`FACTORY_API_AUTH=off`.
 
 ## Launch
 
@@ -111,6 +121,7 @@ running, and writes its own evidence:
 ./approval-restart.sh  # api on :9416 — a gated call parks on an approval, SIGKILL, a fresh process re-asks nothing
 ./mission-cost.sh     # api on :9430 (MISSION_COST_PORT), a priced faux — two workers' costs add up to the session's, live, folded and after a restart (features/mission.md)
 ./mission-restart.sh  # api on :9418 (MISSION_RESTART_PORT or API_PORT), its own database minted on DATABASE_URL's server — SIGTERM mid-implement, a fresh process resumes the mission at boot (features/mission.md)
+./run-restart.sh      # api on :9430 (RUN_RESTART_PORT or API_PORT), its own database minted on DATABASE_URL's server — SIGKILL mid-run (KILL_SIGNAL=TERM for the graceful path), a fresh process resumes the run at boot (features/lifecycle.md)
 ./degraded.sh    # api on :9500 — Postgres stopped: /livez 200, /readyz 503, typed errors; then back
 ./pr-once.sh     # fake GitHub on :9411 — SIGKILL between the PR call and its acknowledgement
 ./webhook.sh     # api on :9400 — signed trigger deliveries: one session, replays, skips, 401, 413, a stale claim reclaimed, 503 in-flight, a generic `push` refused
@@ -133,6 +144,7 @@ DATABASE_URL=… ./backend-boot.sh  # api on :9426 (BACKEND_BOOT_PORT), booted f
 ./review.sh      # api on :9200, fake GitHub on :9201 — a pull_request starts the reviewer; one comment as its own identity (features/review.md)
 ./decompose.sh   # api on :9424, a faux specifier — a spec becomes proposed child issues, and nothing else is written (features/decompose.md)
 DATABASE_URL=… ./server-info.sh  # api on :9200 (API_PORT), via up.sh — getServerInfo and each session's model; no credential's value in the answer (features/server-info.md)
+DATABASE_URL=… ./identity.sh     # api on :9200 (API_PORT), via up.sh with a token table — unauthenticated calls refused, every write records the credential's actor (features/identity.md)
 ./approve-proposals.sh   # api on :9428, loopback Linear on :9429 — approved proposals become child issues, once (features/approve-proposals.md)
 DATABASE_URL=… ./metrics.sh  # api on :9200 (API_PORT), OTLP receiver on API_PORT+1 (OTLP_RECEIVER_PORT) — the documented metric set reaches a loopback collector, never motel (features/metrics.md)
 ```
@@ -215,6 +227,10 @@ order you want the evidence to end in.
   its checks, and the script's own
 - `mission-restart-process.json`, `mission-restart-api.log` — what the process did: the exit, the
   shutdown and boot-resume log lines, and the row the next boot reads, set while nothing ran
+- `run-restart-arm.json` / `run-restart-verify.json` — from `./run-restart.sh`: the run on its tool
+  call before the kill, and the same run resumed by the boot and settled, with its transcript
+- `run-restart-process.json`, `run-restart-api.log` — what the process did: the signal and exit, no
+  shutdown line under SIGKILL, the row the next boot reads, and the boot's resume lines
 - `degraded-down.json`, `degraded-up.json`, `degraded-process.json`, `degraded-api.log` — from
   `./degraded.sh`: the probes with Postgres stopped and back, and the process facts (one pid served
   both phases)

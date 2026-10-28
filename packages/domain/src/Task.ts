@@ -656,9 +656,13 @@ export const Task = Schema.Struct({
 export type Task = typeof Task.Type;
 
 /**
- * Who did this. A string, not a typed actor, because the actor is LOB-20's to define — control-plane
- * identity and the per-session actor are uncut, and inventing a shape here would either collide
- * with that issue or force it to migrate this one.
+ * Who did this: a run's session id (B1), a signed trigger's `trigger:<source>`, or the actor a
+ * person's credential authenticated as (LOB-20, `@repo/domain/Auth`). A string, because the
+ * credential changed where a person's actor comes from, not what is recorded.
+ *
+ * The `actor` a board write's input carries is what the caller declares; the server replaces it with
+ * its authenticated `Caller` before the service sees it, so a body naming someone else — or a run —
+ * changes nothing. Only a control plane running with auth off keeps the declared one.
  */
 export const Actor = Schema.String;
 export type Actor = typeof Actor.Type;

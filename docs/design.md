@@ -236,6 +236,21 @@ mission and both own its log until Postgres poisons one of them on `PRIMARY KEY 
 second process sets `MISSION_RESUME=false`. The presence lease above replaces both the root scoping
 and the flag when replicas arrive.
 
+_As built (LOB-25)._ The same rule now covers a run in a conversation, not only a mission. Any owner
+that opens a log continues the submissions its root conversation holds unsettled (`openSession` →
+`resumePending`), so a run whose process died — a SIGTERM's close or a SIGKILL — carries on as the
+same submission rather than waiting for the next message. Only the root's submissions decide it: a
+mission worker's own conversation holds a placed submission while it talks to the model, and that
+alone does not resume a log. But Pi Durable has one scheduler per harness, so once a root submission
+is pending the reopen resumes everything pending in the log, a mission included — as any submit or
+wait on that log always has. The boot finds those logs the way it finds missions: the owner's
+projection writes `sessions.run_session_root` while a run is in flight, and `resumeRuns` reopens the
+rows marked under its own root. `MISSION_RESUME=false` turns off only these two boot sweeps, for a
+second process on the same database and root; an owner that process opens later still continues
+what its root left unsettled. A released session's open does not resume: its run has no directory.
+`interrupt` and `withdraw` take the owner paused, act, and then continue what is left, so a stop
+lands on the dead run rather than racing a resumed one.
+
 ### D13 — Sandbox image: generic base, then templates where they pay
 
 Bun, Node, git, gh, ripgrep, plus Pi Durable and the harness. Repo-specific toolchains install
@@ -464,12 +479,28 @@ most one request. A stop the log refuses to commit fails closed: the request is 
 fork keeps its parent's cap and carries its spend; a replay keeps its source's cap at no spend; a fork
 or a replay of an uncapped session gets `SESSION_BUDGET`, as a create does. The full stop semantics
 are that module's header.
-_As built (LOB-162)._ Spend is keyed by repo and actor. The actor is caller-declared, the way an
-approval decision's is (`createSession({ actor })`; `cli`, `dashboard`, `trigger:<source>`; a fork or
-a replay takes its source's). It is committed as `factory.actor` and indexed as `sessions.actor`.
-`listSpend` groups the list's own `cost_total` by the pair, and the dashboard's `/spend` shows it per
-repo, per actor and per pair. LOB-20's credential replaces the declaration as the actor's source; the
-column, the document and the read stay.
+_As built (LOB-162)._ Spend is keyed by repo and actor. It is committed as `factory.actor` and
+indexed as `sessions.actor`. `listSpend` groups the list's own `cost_total` by the pair, and the
+dashboard's `/spend` shows it per repo, per actor and per pair.
+_As built (LOB-20)._ The actor is the one the control plane authenticated, not the one the caller
+typed. Every RPC group carries one middleware, `ControlPlaneAuth` (`@repo/domain/Auth`), which reads
+`Authorization: Bearer <token>`, looks it up in the deployment's token table and hands the handler a
+`Caller`; a call with no credential or an unknown one — unary or the `watchSession` stream — fails
+with the typed `Unauthenticated` before its handler runs. The table is `FACTORY_API_TOKEN` (one shared
+token, the actor `FACTORY_API_ACTOR`, `operator` by default — the whole local setup, and the variable
+the CLI sends) plus `FACTORY_API_TOKENS` (`actor=token,…`, one per person or service); the dashboard
+sends `VITE_FACTORY_API_TOKEN`. `createSession`, a fork and a replay (which now take the caller's actor
+rather than their source's), `decideApproval`, and the board's create / move / block / unblock /
+comment record the `Caller`'s actor and ignore a body `actor`; the board's `start` is `createSession`
+with a card. A token's actor may be neither a session id (a run's actor, B5) nor `trigger:<source>`:
+a trigger's credential is its route's signing secret, checked before the in-process trigger seam
+mints `trigger:<source>`, so neither namespace can be claimed over RPC. The webhook routes are not
+behind the middleware and keep their own signatures (LOB-81). A deployment with no token runs with
+auth **off** — every call is served and a declared actor is recorded, as before — and its boot says so
+in a warning. An open control plane is a loopback one: `HOST` defaults to `127.0.0.1`, and no token on
+a `HOST` beyond loopback refuses the boot (`ApiAuthRequired`) unless `FACTORY_API_AUTH=off` declares
+it on purpose. This is the seam where GitHub OAuth or SSO fills `Caller` later (D1 rules out SSO/SCIM
+for now, not identity).
 
 **R5 — `Sandbox` CRD is `v1beta1`.** We inherit a SIG Apps controller and its API may shift.
 Accepted because it replaces exactly the boring, bug-prone machinery (stable identity, pause

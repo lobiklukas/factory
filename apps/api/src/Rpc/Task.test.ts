@@ -58,6 +58,11 @@ import type { RpcClientError } from "effect/rpc/RpcClientError";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import { SessionRpcLive } from "./Session";
+import {
+  sendingToken,
+  TEST_TOKEN,
+  TestControlPlaneAuth,
+} from "./Auth.test-fake";
 import { FauxServerFacts } from "../ServerInfo.test-fake";
 
 const sessionRoot = mkdtempSync(join(tmpdir(), "factory-api-rpc-board-"));
@@ -120,6 +125,7 @@ const { handler, dispose } = HttpRouter.toWebHandler(
   SessionRpcLive.pipe(
     Layer.provide(
       Layer.mergeAll(
+        TestControlPlaneAuth,
         Layer.succeed(
           HttpClient.HttpClient,
           HttpClient.make(() => Effect.die("no forge in this file")),
@@ -150,6 +156,7 @@ afterAll(async () => {
 
 const ClientProtocol = RpcClient.layerProtocolHttp({
   url: "http://factory.test/rpc",
+  transformClient: sendingToken(TEST_TOKEN),
 }).pipe(
   Layer.provide(
     Layer.succeed(

@@ -60,6 +60,11 @@ import type { RpcClientError } from "effect/rpc/RpcClientError";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import { SessionRpcLive } from "./Session";
+import {
+  sendingToken,
+  TEST_TOKEN,
+  TestControlPlaneAuth,
+} from "./Auth.test-fake";
 import { FauxServerFacts } from "../ServerInfo.test-fake";
 
 const sessionRoot = mkdtempSync(join(tmpdir(), "factory-api-rpc-"));
@@ -207,6 +212,7 @@ const { handler, dispose } = HttpRouter.toWebHandler(
   SessionRpcLive.pipe(
     Layer.provide(
       Layer.mergeAll(
+        TestControlPlaneAuth,
         Layer.succeed(HttpClient.HttpClient, forge),
         Layer.succeed(CredentialProvider, credentials),
         FauxServerFacts,
@@ -242,6 +248,7 @@ afterAll(async () => {
 /** The client the CLI builds, whose HTTP client is the router's web handler instead of a socket. */
 const ClientProtocol = RpcClient.layerProtocolHttp({
   url: "http://factory.test/rpc",
+  transformClient: sendingToken(TEST_TOKEN),
 }).pipe(
   Layer.provide(
     Layer.succeed(
@@ -352,7 +359,10 @@ describe("openPullRequest over RPC (LOB-213)", () => {
     const response = await handler(
       new Request("http://factory.test/rpc", {
         method: "POST",
-        headers: { "content-type": "application/ndjson" },
+        headers: {
+          "content-type": "application/ndjson",
+          authorization: `Bearer ${TEST_TOKEN}`,
+        },
         body: `${line}\n`,
       }),
     );

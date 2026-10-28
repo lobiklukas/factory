@@ -246,6 +246,16 @@ With the boot's resume query made to find nothing, the verify phase times out wa
 resumed workers and four checks fail, in `.verify/evidence/lob-231/mutation-no-boot-resume/`. See
 [mission.md](mission.md).
 
+The run-restart checks (LOB-25) were run from the `agent/LOB-25` worktree on 2026-10-28 (faux, a
+scratch database minted on the worktree's own server on 5442): `./run-restart.sh` **17/17** under
+`SIGKILL` (`RUN_RESTART_PORT=9511`, evidence `.verify/evidence/lob-25/api/`) and **17/17** under
+`KILL_SIGNAL=TERM` (`RUN_RESTART_PORT=9512`, evidence `.verify/evidence/lob-25-term/api/`): the
+run on its tool call, the signal, no shutdown line under `SIGKILL`, the row the next boot reads, the
+same submission resumed at boot with its call settled as interrupted, and the boot's and the
+reopen's resume lines. Re-run after review scoped the reopen's resume to the root conversation's
+submissions. No drive mutation was run; the root scoping is mutation-checked in `packages/harness`'s
+`resume.test.ts`. See [lifecycle.md](lifecycle.md).
+
 | Feature                  | Status  | File                                         |
 | ------------------------ | ------- | -------------------------------------------- |
 | Create a session         | passing | [create.md](create.md)                       |
@@ -286,6 +296,7 @@ resumed workers and four checks fail, in `.verify/evidence/lob-231/mutation-no-b
 | The model backend        | passing | [model-backend.md](model-backend.md)         |
 | What the server runs     | passing | [server-info.md](server-info.md)             |
 | Metrics to a collector   | passing | [metrics.md](metrics.md)                     |
+| Control-plane identity   | passing | [identity.md](identity.md)                   |
 
 The model-backend checks (LOB-258) were run from the `agent/LOB-258` worktree on 2026-10-28
 (`BACKEND_BOOT_PORT=9542`, the worktree's own database on 5442, no repo-root `.env`):
@@ -310,6 +321,15 @@ with its unit, read from a loopback OTLP/HTTP receiver — and the boot log nami
 evidence `.verify/evidence/lob-69/api/`. With the endpoint left out of the boot, the receiver is sent
 nothing and the set check fails (`.verify/evidence/lob-69/mutation-no-endpoint/`). See
 [metrics.md](metrics.md).
+
+The identity checks (LOB-20) were run from the `agent/LOB-20` worktree on 2026-10-28
+(`API_PORT=9520`, the worktree's own database on 5442): `./identity.sh` **15/15** plus the shell's
+two (unauthenticated `listSessions` and `watchSession` refused with `missing` and `invalid`; amy's
+`createSession`, `decideApproval`, `createTask`, `moveTask` and the CLI's `board move` all recorded
+`amy` over a body naming `mallory`; `listSpend` by the authenticated actors; a signed delivery with no
+credential accepted as `trigger:generic`), evidence `.verify/evidence/latest/api/identity.json`. With
+the `createSession` handler passing the body through, or the middleware serving every call as auth
+off, `apps/api/src/Rpc/Auth.test.ts` fails (2 and 7 cases). See [identity.md](identity.md).
 
 ## Deliberately absent
 

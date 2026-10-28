@@ -27,6 +27,7 @@ import { RepoSlug, SessionId, type SessionError } from "@repo/domain/Session";
 import { Effect } from "effect";
 import { RpcClient } from "effect/rpc";
 import type { RpcClientError } from "effect/rpc/RpcClientError";
+import type { Unauthenticated } from "@repo/domain/Auth";
 import { makeChecker, protocolFor } from "./harness.ts";
 import type { CheckRecord } from "./harness.ts";
 
@@ -67,7 +68,12 @@ const linkOf = (answer: PullRequestStep) =>
 
 /** A refusal as the client decoded it: a `SessionError` with its code, or what arrived instead. */
 const refusalOf = (
-  error: SessionError | PrError | CredentialError | RpcClientError,
+  error:
+    | SessionError
+    | PrError
+    | CredentialError
+    | Unauthenticated
+    | RpcClientError,
 ): { readonly _tag: string; readonly code?: string } =>
   error._tag === "SessionError"
     ? { _tag: error._tag, code: error.code }

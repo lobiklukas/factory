@@ -37,6 +37,11 @@ import {
   webhookRouteStates,
 } from "../ServerInfo";
 import { ServerRpcHandlers } from "./Server";
+import {
+  sendingToken,
+  TEST_TOKEN,
+  TestControlPlaneAuth,
+} from "./Auth.test-fake";
 
 /** Dummy credentials, each distinct, so a leak names which one leaked. */
 const ANTHROPIC_KEY = "sk-ant-dummy-lob269-0123456789abcdef";
@@ -105,6 +110,7 @@ const ask = async (facts: ServerFactsShape, forge: CredentialSource) => {
       Layer.provide(ServerRpcHandlers),
       Layer.provide(
         Layer.mergeAll(
+          TestControlPlaneAuth,
           Layer.succeed(ServerFacts, facts),
           Layer.succeed(
             CredentialProvider,
@@ -123,6 +129,7 @@ const ask = async (facts: ServerFactsShape, forge: CredentialSource) => {
   const bodies: string[] = [];
   const protocol = RpcClient.layerProtocolHttp({
     url: "http://factory.test/rpc",
+    transformClient: sendingToken(TEST_TOKEN),
   }).pipe(
     Layer.provide(
       Layer.succeed(

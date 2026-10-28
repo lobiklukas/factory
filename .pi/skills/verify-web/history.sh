@@ -16,6 +16,11 @@
 # history.json, api.log, web.log.
 set -uo pipefail
 
+# This suite runs its API with auth off (LOB-20): its clients send no credential, and it declares
+# actors (a run's session id) that only an open control plane keeps. A token exported for the
+# rest of the verify skills must not turn auth on here.
+unset FACTORY_API_TOKEN FACTORY_API_TOKENS VITE_FACTORY_API_TOKEN FACTORY_API_AUTH
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 API_PORT="${HISTORY_API_PORT:-9437}"
 WEB_PORT="${HISTORY_WEB_PORT:-3437}"

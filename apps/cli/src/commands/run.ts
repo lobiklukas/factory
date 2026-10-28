@@ -13,12 +13,13 @@ import { runModelLines } from "./status";
  *
  * `--repo` binds the session to a repository (and registers it on first use); `--base-ref` picks
  * the ref it starts from, `--actor` who its spend is attributed to (LOB-162; `cli` unless named, as
- * `factory approve` decides as `cli`), and `--model` the model it runs on (LOB-274; one of
- * `getServerInfo`'s models, otherwise the server's default or the column role's). The workspace line is
- * the server's own answer for where the work will live, so the run proves the read path as well as the
- * write. The `model` line is the model the session is pinned to (LOB-272), and under the faux backend a
- * `warning: faux backend` line follows it: a scripted answer reads exactly like a real one, so the run
- * says which it is getting.
+ * `factory approve` decides as `cli`; a declaration only an open control plane keeps: one that
+ * authenticates records the actor of the `FACTORY_API_TOKEN` the call carried, LOB-20), and `--model` the
+ * model it runs on (LOB-274; one of `getServerInfo`'s models, otherwise the server's default or the
+ * column role's). The workspace line is the server's own answer for where the work will live, so the
+ * run proves the read path as well as the write. The `model` line is the model the session is pinned
+ * to (LOB-272), and under the faux backend a `warning: faux backend` line follows it: a scripted answer
+ * reads exactly like a real one, so the run says which it is getting.
  */
 export const runCommand = Command.make(
   "run",
@@ -49,7 +50,9 @@ export const runCommand = Command.make(
       Flag.optional,
     ),
     actor: Flag.String("actor").pipe(
-      Flag.withDescription("Who the session's spend is attributed to"),
+      Flag.withDescription(
+        "Who the session's spend is attributed to; ignored by a control plane that authenticates (FACTORY_API_TOKEN), which records the token's actor",
+      ),
       Flag.withSchema(SessionActor),
       Flag.withDefault("cli"),
     ),

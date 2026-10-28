@@ -1,6 +1,7 @@
 import { SessionService } from "@repo/core";
 import { ApprovalsRpc } from "@repo/domain/Rpc";
 import { Effect } from "effect";
+import { attributed } from "./Auth";
 
 /**
  * The approval RPC handlers (docs/design.md D11). Each one is a call into `SessionService`, which
@@ -15,7 +16,9 @@ export const ApprovalsRpcHandlers = ApprovalsRpc.toLayer(
     const sessions = yield* SessionService;
     return ApprovalsRpc.of({
       requestApproval: (input) => sessions.requestApproval(input),
-      decideApproval: (input) => sessions.decideApproval(input),
+      // The decision is the credential's actor's, not the body's (LOB-20).
+      decideApproval: (input) =>
+        attributed(input).pipe(Effect.flatMap(sessions.decideApproval)),
       listApprovals: (input) => sessions.listApprovals(input.sessionId),
       listPendingApprovals: (input) => sessions.listPendingApprovals(input),
     });
