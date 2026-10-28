@@ -984,11 +984,12 @@ describe("TaskService — a card's repository (LOB-255)", () => {
   const sessionRoot = mkdtempSync(join(tmpdir(), "factory-task-repo-"));
 
   /** A board over a fresh repository. */
-  const boardOver = () =>
+  const boardOver = (definitionVersion?: number) =>
     withService((s) =>
       s.createBoard({
         repo: newRepo(),
         definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
+        ...(definitionVersion === undefined ? {} : { definitionVersion }),
       }),
     );
 
@@ -1066,7 +1067,9 @@ describe("TaskService — a card's repository (LOB-255)", () => {
    * Mutation: read `t.repo` alone — the legacy card's run is a scratch session.
    */
   it("binds every run on the card to the board's repository, in a factory/<session-id> worktree", async () => {
-    const board = await boardOver();
+    // Two runs open on one card at once, which default version 5's task cap of 1 refuses (LOB-71):
+    // version 4 is the newest that caps nothing, and this case is about the binding, not the caps.
+    const board = await boardOver(4);
     const checkout = mkdtempSync(join(tmpdir(), "factory-task-repo-checkout-"));
     const git = (command: string, cwd = checkout) =>
       execSync(command, { cwd, encoding: "utf8" }).trim();

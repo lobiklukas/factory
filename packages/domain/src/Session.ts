@@ -1003,7 +1003,10 @@ export type CompactSessionResult = typeof CompactSessionResult.Type;
  *   server runs at once, so nothing was written and nothing opened. The message names the cap and
  *   where it is configured (`SESSION_MAX_CONCURRENT`). Transient: the same request succeeds once a
  *   session is released (the idle sweep), and a retried create with the same `requestId` is a fresh
- *   attempt, because the refused one left no row behind.
+ *   attempt, because the refused one left no row behind. A card's start is refused the same way past
+ *   one of its board definition's run caps (B9, LOB-71): the message names the cap, the board, task,
+ *   repository or column it counts, and the definition version it is configured in, and `cap` says
+ *   which it was.
  */
 export const SessionErrorCode = Schema.Literals([
   "not_found",
@@ -1017,10 +1020,39 @@ export const SessionErrorCode = Schema.Literals([
 ]);
 export type SessionErrorCode = typeof SessionErrorCode.Type;
 
+/**
+ * Which cap an `at_capacity` refusal hit (LOB-70, LOB-71): the server's own (`SESSION_MAX_CONCURRENT`)
+ * or one of a board definition's run caps (B9) — runs in flight on one board, on one task, in one
+ * repository, or started in one column.
+ */
+export const CapacityCapKind = Schema.Literals([
+  "server",
+  "board",
+  "task",
+  "repo",
+  "column",
+]);
+export type CapacityCapKind = typeof CapacityCapKind.Type;
+
+/**
+ * The cap an `at_capacity` refusal names, typed: its kind, its limit, where an operator changes it
+ * (`source`: a configuration key, or a definition version's field), and the board, task, repository
+ * or column it counted (`scope`; absent for the server's cap, which counts the whole process).
+ */
+export const CapacityCap = Schema.Struct({
+  kind: CapacityCapKind,
+  limit: Schema.Int,
+  source: Schema.String,
+  scope: Schema.optional(Schema.String),
+});
+export type CapacityCap = typeof CapacityCap.Type;
+
 export class SessionError extends Schema.TaggedError<SessionError>()(
   "SessionError",
   {
     code: SessionErrorCode,
     message: Schema.String,
+    /** Set on an `at_capacity` refusal only: the cap that was hit (LOB-70, LOB-71). */
+    cap: Schema.optional(CapacityCap),
   },
 ) {}
