@@ -179,8 +179,9 @@ evidence `.verify/evidence/lob-194/api/`. See [mission.md](mission.md).
 
 The worktree setup checks (S-env-setup) were run from the `agent/S-env-setup` worktree on
 2026-10-28 (`API_PORT=9520`, faux, `DATABASE_URL=…/factory_agent_s_env_setup` on 5442):
-`./setup.sh` **12/12** (11 driver checks, among them a card run's retry refused and an abandoned
-send whose install ran once, and `factory board show` on the parked card), evidence
+`./setup.sh` **16/16** (15 driver checks, among them a card run's retry refused, an abandoned
+send whose install ran once, a webhook delivery answered before its install finished, and a session
+on this repo running its own `bun install`; and `factory board show` on the parked card), evidence
 `.verify/evidence/latest/api/setup.json` and `setup-board-show.txt`. See [setup.md](setup.md).
 
 The `verify` tool checks (LOB-78) were run from the `agent/LOB-78` worktree on 2026-10-27

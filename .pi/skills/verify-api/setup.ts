@@ -15,11 +15,17 @@
 //             A second message to that run is refused the same way and runs no install: it ended.
 //   abandoned the install sleeps; the first send's client goes away mid-install and a second send
 //             follows at once. The install runs once, is recorded, and the second send waits for it.
+//   triggered a generic webhook delivery on a repo whose install sleeps: the route answers
+//             `processed` while the install runs, and the server sends the prompt once it is done.
+//   self      a clone of this checkout, whose own `.factory/config` declares `install: bun install`:
+//             a session on the factory repo itself runs it in its fresh worktree (exit 0) before the
+//             agent's first turn, which finds the monorepo's `node_modules` there.
 //   readiness the registry answers each checkout's agent-readiness score on registration, and
 //             `listRepos` the same score.
 //
 // Env: API_URL, DATABASE_URL (to read the session logs), SETUP_REPOS, EVIDENCE_DIR.
 import { execSync } from "node:child_process";
+import { createHmac } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -30,11 +36,11 @@ import {
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { RpcApi } from "@repo/domain/Rpc";
-import { RepoSlug } from "@repo/domain/Session";
+import { RepoSlug, SessionId } from "@repo/domain/Session";
 import { BoardInstanceId, DefinitionId, TaskId } from "@repo/domain/Task";
 import { readLoggedSetup, readVerifyRecords } from "@repo/harness";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
-import { Effect, Exit, Fiber, Layer } from "effect";
+import { Clock, Effect, Exit, Fiber, Layer } from "effect";
 import { RpcClient } from "effect/rpc";
 import { SqlClient } from "effect/sql/SqlClient";
 import { makeChecker, protocolFor, waitUntil } from "./harness.ts";
@@ -48,6 +54,13 @@ const EVIDENCE_DIR = path.resolve(
   process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest/api",
 );
 const RUN = `${Date.now().toString(36)}`;
+/** The repo setup.sh's `TRIGGER_RULES` maps the `factory` label to, and the generic route's secret. */
+const TRIGGER_REPO = RepoSlug.make(
+  process.env["SETUP_TRIGGER_REPO"] ?? "verify-setup/triggered",
+);
+const TRIGGER_SECRET = process.env["TRIGGER_SECRET"] ?? "";
+/** This checkout: the `self` scenario clones it, so a session runs on the factory repo itself. */
+const SELF = path.resolve(import.meta.dirname, "..", "..", "..");
 
 const observed: {
   apiUrl: string;
@@ -55,6 +68,8 @@ const observed: {
   ok?: unknown;
   broken?: unknown;
   abandoned?: unknown;
+  triggered?: unknown;
+  self?: unknown;
   readiness?: unknown;
   checks: Record<string, CheckRecord>;
 } = { apiUrl: API_URL, run: RUN, checks: {} };
@@ -95,6 +110,27 @@ const PACKAGE = {
 };
 const BUILD = `bun -e "require('fs').writeFileSync('dist.txt', require('local-dep'))"`;
 const VERIFY = `bun -e "console.log('verify:', require('local-dep'), require('fs').readFileSync('dist.txt', 'utf8'))"`;
+
+/** One delivery to the generic webhook route, signed as a sender signs it; its status and answer. */
+const postSigned = async (delivery: string) => {
+  const response = await fetch(`${API_URL}/webhooks/generic`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-trigger-signature": createHmac("sha256", TRIGGER_SECRET)
+        .update(delivery)
+        .digest("hex"),
+    },
+    body: delivery,
+  });
+  return {
+    status: response.status,
+    body: (await response.json().catch(() => null)) as {
+      readonly status?: string;
+      readonly sessionId?: string;
+    } | null,
+  };
+};
 
 /** The session's `factory.setup` and `verify` records, read from its log like any reader would. */
 const logged = (sessionId: string) =>
@@ -381,6 +417,192 @@ const program = Effect.gen(function* () {
       abandonedSetup?.outcome === "succeeded" &&
       JSON.stringify(abandonedUsers) === JSON.stringify(["retry"]),
     `${JSON.stringify(abandonedAttempts)}; ${abandonedSetup?.outcome}; ${JSON.stringify(abandonedUsers)}`,
+  );
+
+  // --- triggered: a webhook delivery is answered before its session's setup finishes -----------
+  // The sender (GitHub's timeout is 10 s) must not hold the request while an install runs: the
+  // delivery is answered with the setup still running, and its prompt is sent once the setup is
+  // done, by the server, with no request open.
+  const triggeredLog = path.join(REPOS, "triggered-attempts.txt");
+  yield* client.registerRepo({
+    repo: TRIGGER_REPO,
+    defaultBaseRef: "main",
+    localPath: fixtureRepo("triggered", {
+      ...PACKAGE,
+      ".factory/config": JSON.stringify({
+        install: `echo start >> ${triggeredLog}; sleep 4; bun install; echo done >> ${triggeredLog}`,
+        verify: "true",
+      }),
+    }),
+  });
+  const deliveryId = `verify-setup-${RUN}`;
+  const delivery = JSON.stringify({
+    requestId: deliveryId,
+    key: `verify-setup-${deliveryId}`,
+    action: "create",
+    label: "factory",
+    title: `delivery ${deliveryId}`,
+    body: "opened by verify-api setup",
+  });
+  const postedAt = yield* Clock.currentTimeMillis;
+  const answered = yield* Effect.promise(() => postSigned(delivery));
+  const answeredInMs = (yield* Clock.currentTimeMillis) - postedAt;
+  const installWhenAnswered = existsSync(triggeredLog)
+    ? readFileSync(triggeredLog, "utf8")
+    : "";
+  const triggeredId = answered.body?.sessionId;
+  const triggeredSnapshot =
+    triggeredId === undefined
+      ? undefined
+      : yield* waitUntil(
+          Effect.map(
+            client.getSession({ sessionId: SessionId.make(triggeredId) }),
+            (snapshot) =>
+              !snapshot.live.busy &&
+              snapshot.entries.some(
+                (entry) => entry.kind === "assistant" && entry.text !== "",
+              )
+                ? snapshot
+                : undefined,
+          ),
+          "the triggered session's run to answer",
+        );
+  const triggeredUsers = (triggeredSnapshot?.entries ?? [])
+    .filter((entry) => entry.kind === "user")
+    .map((entry) => entry.text);
+  const triggeredProbe = triggeredSnapshot?.entries.find(
+    (entry) => entry.kind === "toolResult" && entry.toolName === "bash",
+  );
+  const triggeredSetup =
+    triggeredId === undefined ? undefined : (yield* logged(triggeredId)).setup;
+  observed.triggered = {
+    status: answered.status,
+    answer: answered.body,
+    answeredInMs,
+    installWhenAnswered,
+    setup: triggeredSetup,
+    users: triggeredUsers,
+  };
+  assert(
+    "triggered: the webhook is answered processed while the session's install still runs",
+    answered.status === 200 &&
+      answered.body?.status === "processed" &&
+      triggeredId !== undefined &&
+      answeredInMs < 3_000 &&
+      // Started, or about to: the setup is forked before the answer, and its shell may not have
+      // written its first line yet. Never finished.
+      !installWhenAnswered.includes("done"),
+    `${answered.status} ${answered.body?.status} in ${answeredInMs}ms; install log ${JSON.stringify(installWhenAnswered)}`,
+  );
+  assert(
+    "triggered: its prompt is sent once the setup succeeds, once, and the run starts with the deps",
+    triggeredSetup?.outcome === "succeeded" &&
+      readFileSync(triggeredLog, "utf8") === "start\ndone\n" &&
+      triggeredUsers.length === 1 &&
+      triggeredUsers[0]?.startsWith(`Work on delivery ${deliveryId}`) ===
+        true &&
+      triggeredProbe?.text.includes("deps-present") === true,
+    `${triggeredSetup?.outcome}; ${JSON.stringify(triggeredUsers)}; ${triggeredProbe?.text.trim().slice(0, 40)}`,
+  );
+
+  // --- self: a session on this repo, whose own `.factory/config` declares `bun install` ----------
+  // A clone of this checkout rather than the checkout itself: a session cuts its worktree and branch
+  // in the repository it is registered at, and this one's `.git` is shared with every other checkout
+  // of the factory on the machine. The clone has this checkout's HEAD and its `.factory/config`.
+  const selfPath = path.join(REPOS, "self");
+  rmSync(selfPath, { recursive: true, force: true });
+  execSync(`git clone -q "${SELF}" "${selfPath}"`, { stdio: "ignore" });
+  mkdirSync(path.join(selfPath, ".factory"), { recursive: true });
+  writeFileSync(
+    path.join(selfPath, ".factory", "config"),
+    readFileSync(path.join(SELF, ".factory", "config"), "utf8"),
+  );
+  const selfBase = execSync("git rev-parse --abbrev-ref HEAD", {
+    cwd: selfPath,
+    encoding: "utf8",
+  }).trim();
+  const selfRepo = RepoSlug.make(`verify-setup-${RUN}/factory`);
+  const selfRegistered = yield* client.registerRepo({
+    repo: selfRepo,
+    defaultBaseRef: selfBase,
+    localPath: selfPath,
+  });
+  const selfSession = yield* client.createSession({
+    repo: selfRepo,
+    title: "verify-setup self",
+  });
+  // A cold install can outlast one send's wait (`setup_running`): sent again, each waits for it.
+  const selfStarted = yield* Clock.currentTimeMillis;
+  let selfRetries = 0;
+  for (;;) {
+    const sent = yield* Effect.exit(
+      client.sendMessage({
+        sessionId: selfSession.id,
+        content: "look around the worktree",
+      }),
+    );
+    if (Exit.isSuccess(sent)) break;
+    const code = sent.cause.reasons.find(
+      (reason) => reason._tag === "Fail",
+    )?.error;
+    if (
+      code === undefined ||
+      !("code" in code) ||
+      code.code !== "setup_running" ||
+      selfRetries >= 10
+    ) {
+      return yield* Effect.die(new Error(`self send: ${String(sent.cause)}`));
+    }
+    selfRetries += 1;
+  }
+  const selfSnapshot = yield* waitUntil(
+    Effect.map(client.getSession({ sessionId: selfSession.id }), (snapshot) =>
+      !snapshot.live.busy &&
+      snapshot.entries.some(
+        (entry) => entry.kind === "assistant" && entry.text !== "",
+      )
+        ? snapshot
+        : undefined,
+    ),
+    "the self run to answer",
+  );
+  const selfLog = yield* logged(selfSession.id);
+  const selfProbe = selfSnapshot.entries.find(
+    (entry) => entry.kind === "toolResult" && entry.toolName === "bash",
+  );
+  observed.self = {
+    sessionId: selfSession.id,
+    checkout: selfPath,
+    baseRef: selfBase,
+    hasFactoryConfig: selfRegistered.hasFactoryConfig,
+    worktree: selfSnapshot.workspace.path,
+    sendRetries: selfRetries,
+    firstAnswerMs: (yield* Clock.currentTimeMillis) - selfStarted,
+    setup: selfLog.setup,
+    probe: selfProbe?.text.slice(0, 200),
+  };
+  assert(
+    "self: a session on this repo runs its declared `bun install` in its worktree, exit 0, before the first turn",
+    selfRegistered.hasFactoryConfig &&
+      selfLog.setup?.outcome === "succeeded" &&
+      selfLog.setup.steps.length === 1 &&
+      selfLog.setup.steps[0]?.step === "install" &&
+      selfLog.setup.steps[0].command === "bun install" &&
+      selfLog.setup.steps[0]._tag === "SetupStepRan" &&
+      selfLog.setup.steps[0].exitCode === 0 &&
+      selfLog.setup.directory.endsWith(selfSession.id),
+    JSON.stringify(
+      selfLog.setup?.steps.map((step) => [
+        step.step,
+        step.command,
+        step._tag === "SetupStepRan" ? step.exitCode : step.code,
+      ]),
+    ),
+  );
+  assert(
+    "self: the agent's first command found this repo's node_modules installed",
+    selfProbe?.text.includes("deps-present") === true,
+    selfProbe?.text.trim().slice(0, 80) ?? "no bash result",
   );
 
   // --- readiness: scored at registration and on read ----------------------------------------------

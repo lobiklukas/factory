@@ -6,7 +6,13 @@
 import { BunServices } from "@effect/platform-bun";
 import { Effect, Exit, FileSystem, Path } from "effect";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -69,5 +75,39 @@ describe("resolveWorkspace's worktree cut (LOB-260)", () => {
         git(local, "rev-parse", "main"),
       );
     }
+  });
+});
+
+describe("resolveWorkspace's commands (S-env-setup)", () => {
+  /**
+   * A checkout registered at a subdirectory of its work tree — a verify skill's fixture inside the
+   * factory's monorepo — reads its own config from that place in the session's worktree, not the
+   * enclosing repo's root config. Mutation: read `directory` alone again — `install` is the root's.
+   */
+  it("reads a subdirectory checkout's config at its place in the worktree, not the root's", async () => {
+    const mono = join(root, "mono");
+    git(root, "init", "-q", "-b", "main", mono);
+    mkdirSync(join(mono, ".factory"), { recursive: true });
+    writeFileSync(
+      join(mono, ".factory", "config"),
+      JSON.stringify({ install: "bun install" }),
+    );
+    const fixture = join(mono, "fixtures", "repo");
+    mkdirSync(join(fixture, ".factory"), { recursive: true });
+    writeFileSync(
+      join(fixture, ".factory", "config"),
+      JSON.stringify({ verify: "fixture-verify" }),
+    );
+    git(mono, "add", "-A");
+    git(mono, "commit", "-q", "-m", "seed");
+
+    const sub = await cut(fixture, "ses_sub_config", "main");
+    const top = await cut(mono, "ses_root_config", "main");
+    expect(Exit.isSuccess(sub) && sub.value.commands).toEqual({
+      verify: "fixture-verify",
+    });
+    expect(Exit.isSuccess(top) && top.value.commands).toEqual({
+      install: "bun install",
+    });
   });
 });

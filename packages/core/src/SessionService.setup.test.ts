@@ -38,11 +38,15 @@ import {
   readVerifyRecords,
 } from "@repo/harness";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
-import { Effect, Exit, Fiber, Layer, ManagedRuntime } from "effect";
+import { Clock, Effect, Exit, Fiber, Layer, ManagedRuntime } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import { SessionService, SessionServiceLive } from "./SessionService";
 import { TaskService, TaskServiceLive } from "./TaskService";
+import {
+  TriggerSessions,
+  TriggerSessionsFromSessionService,
+} from "./TriggerService";
 
 const PERSON = "person:lukas";
 
@@ -486,6 +490,171 @@ describe("a worktree's declared setup", () => {
     expect(failure?.code).toBe("setup_running");
     expect(failure?.message).toContain("still running");
     expect(readFileSync(attempts, "utf8")).toBe("start\ndone\n");
+  }, 180_000);
+
+  it("answers a trigger's send before a slow setup finishes, and sends its prompt once the setup succeeds", async () => {
+    const attempts = join(scratch, "installs-trigger.txt");
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const port = yield* TriggerSessions;
+        const { repo } = yield* registerFixture("trigger", {
+          ...PACKAGE,
+          ".factory/config": JSON.stringify({
+            install: `echo start >> ${attempts}; sleep 3; bun install; echo done >> ${attempts}`,
+            verify: "true",
+          }),
+        });
+        const created = yield* sessions.create({ repo, title: "triggered" });
+        const requestId = `trigger:setup-${RUN}`;
+        const startedAt = yield* Clock.currentTimeMillis;
+        // The webhook's own request: answered while the install still sleeps.
+        yield* port.send({
+          sessionId: created.id,
+          content: "from the webhook",
+          requestId,
+        });
+        const answeredInMs = (yield* Clock.currentTimeMillis) - startedAt;
+        const whileRunning = yield* readSetup(created.id);
+        const entriesWhileRunning = (yield* sessions.get(created.id)).entries;
+        // A redelivery of the same delivery while the setup runs waits beside nothing new.
+        yield* port.send({
+          sessionId: created.id,
+          content: "from the webhook",
+          requestId,
+        });
+        const snapshot = yield* settled(created.id);
+        // And one after the setup is a duplicate of a message already submitted under that key.
+        yield* port.send({
+          sessionId: created.id,
+          content: "from the webhook",
+          requestId,
+        });
+        return {
+          answeredInMs,
+          whileRunning,
+          entriesWhileRunning,
+          snapshot,
+          after: yield* sessions.get(created.id),
+          logged: yield* readSetup(created.id),
+        };
+      }).pipe(Effect.provide(TriggerSessionsFromSessionService)),
+    );
+    expect(outcome.answeredInMs).toBeLessThan(2_500);
+    expect(outcome.whileRunning.setup).toBeUndefined();
+    expect(
+      outcome.entriesWhileRunning.filter((entry) => entry.kind === "user"),
+    ).toEqual([]);
+    expect(outcome.logged.setup?.outcome).toBe("succeeded");
+    expect(readFileSync(attempts, "utf8")).toBe("start\ndone\n");
+    const users = (entries: typeof outcome.after.entries) =>
+      entries.filter((entry) => entry.kind === "user").map((e) => e.text);
+    expect(users(outcome.snapshot.entries)).toEqual(["from the webhook"]);
+    expect(users(outcome.after.entries)).toEqual(["from the webhook"]);
+    const probe = outcome.snapshot.entries.find(
+      (entry) => entry.kind === "toolResult" && entry.toolName === "bash",
+    );
+    expect(probe?.text).toContain("deps-present");
+  }, 180_000);
+
+  it("sends a trigger's prompt nowhere when the setup it waited for fails, and calls no model", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const port = yield* TriggerSessions;
+        const { repo } = yield* registerFixture("trigger-broken", {
+          ...PACKAGE,
+          ".factory/config": JSON.stringify({
+            install: 'sleep 1; echo "error: registry unreachable" >&2; exit 7',
+            verify: "true",
+          }),
+        });
+        const created = yield* sessions.create({ repo, title: "broken" });
+        const calls = faux.faux.state.callCount;
+        yield* port.send({
+          sessionId: created.id,
+          content: "from the webhook",
+          requestId: `trigger:broken-${RUN}`,
+        });
+        yield* waitUntil(
+          Effect.map(
+            readSetup(created.id),
+            (logged) => logged.setup !== undefined,
+          ),
+          "the setup to be recorded",
+        );
+        // Long enough for a message that was going to be sent after it to have been.
+        yield* Effect.sleep(500);
+        return {
+          calls,
+          snapshot: yield* sessions.get(created.id),
+          logged: yield* readSetup(created.id),
+        };
+      }).pipe(Effect.provide(TriggerSessionsFromSessionService)),
+    );
+    expect(outcome.logged.setup?.outcome).toBe("failed");
+    expect(
+      outcome.snapshot.entries.filter((entry) => entry.kind === "user"),
+    ).toEqual([]);
+    expect(faux.faux.state.callCount).toBe(outcome.calls);
+  }, 180_000);
+
+  it("stops a setup still running when its workspace is released, and records nothing for it", async () => {
+    const attempts = join(scratch, "installs-released.txt");
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const tasks = yield* TaskService;
+        const { repo } = yield* registerFixture("released", {
+          ...PACKAGE,
+          ".factory/config": JSON.stringify({
+            install: `echo start >> ${attempts}; sleep 3; echo done >> ${attempts}; exit 7`,
+            verify: "true",
+          }),
+        });
+        const board = yield* tasks.createBoard({
+          repo,
+          definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
+        });
+        const card = yield* tasks.create({
+          boardId: board.id,
+          title: "a card released mid-install",
+          actor: PERSON,
+        });
+        const run = yield* sessions.create({
+          taskId: card.id,
+          taskColumn: card.column,
+        });
+        const waiting = yield* Effect.forkChild(
+          Effect.exit(sessions.send({ sessionId: run.id, content: "go" })),
+        );
+        yield* waitUntil(
+          Effect.sync(() => existsSync(attempts)),
+          "the install to start",
+        );
+        yield* sessions.releaseWorkspace({
+          sessionId: run.id,
+          reason: "discarded",
+        });
+        const sent = yield* Fiber.join(waiting);
+        // Past the install's own end: a command left running would have written `done` and failed.
+        yield* Effect.sleep(4_000);
+        return {
+          sent,
+          card: yield* tasks.get(card.id),
+          logged: yield* readSetup(run.id),
+        };
+      }),
+    );
+    const failure = Exit.isFailure(outcome.sent)
+      ? outcome.sent.cause.reasons.find((reason) => reason._tag === "Fail")
+          ?.error
+      : undefined;
+    expect(failure?.code).toBe("harness");
+    expect(failure?.message).toContain("stopped before it finished");
+    expect(readFileSync(attempts, "utf8")).toBe("start\n");
+    expect(outcome.logged.setup).toBeUndefined();
+    expect(outcome.card.blocked).toBeUndefined();
   }, 180_000);
 
   it("runs and records nothing for a repo that declares no install or build", async () => {

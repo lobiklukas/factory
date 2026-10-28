@@ -135,6 +135,11 @@ export type TriggerSessionsShape = {
    * session was created under), and a port must admit one message per id: the seam gives a failed
    * delivery's claim back, so a write-back that fails *after* the send makes the sender's retry
    * send again, and only this key keeps that retry from appending the prompt twice (LOB-218).
+   *
+   * It answers before the session's worktree setup finishes (S-env-setup): a webhook sender gives
+   * up long before an install does, and its request's end must not take the prompt with it. The
+   * production ports send through `sendDeferringSetup`, which submits the prompt once the setup
+   * succeeds, under the same key.
    */
   readonly send: (input: {
     readonly sessionId: SessionId;
@@ -379,9 +384,11 @@ export const TriggerSessionsFromSessionService = Layer.effect(
             Effect.map((summary) => ({ id: summary.id })),
             Effect.mapError(failSession),
           ),
+      // A trigger never waits for a worktree's setup (S-env-setup): its sender would give
+      // up first, taking the prompt with it. The message is sent once the setup succeeds.
       send: (input) =>
         sessions
-          .send({
+          .sendDeferringSetup({
             sessionId: input.sessionId,
             content: input.content,
             requestId: input.requestId,
@@ -1021,7 +1028,9 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
 
               // A session whose worktree setup failed (S-env-setup) is the delivery's outcome, not a
               // failure to retry: the setup is recorded in its log, and a sender's retry would only
-              // run the same install again. The delivery is processed, and its reason says so.
+              // run the same install again. The delivery is processed, and its reason says so. The
+              // port does not wait for a setup still running (`sendDeferringSetup`), so this is the
+              // refusal it answers at once: a card's run whose setup already failed and ended it.
               const setupFailure = yield* sessions
                 .send({
                   sessionId: session.id,

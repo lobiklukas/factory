@@ -5,7 +5,9 @@
 # in its fresh worktree before the agent's first turn, so the run's `verify` passes without the agent
 # installing anything; a failing install refuses the first message `setup_failed`, parks the card
 # with that reason and the output's tail, keeps the tail in the log, and calls no model; and the
-# registry answers each checkout's readiness score. See `features/setup.md`.
+# registry answers each checkout's readiness score; a webhook delivery is answered before its
+# session's install finishes, and its prompt sent after; and a session on a clone of this repo runs
+# the repo's own `bun install`. See `features/setup.md`.
 #
 # Its own API (./up.sh, on API_PORT, with its own run directory), the faux model scripted to probe
 # for `node_modules` and then call `verify`, and fixture repos with no remote under
@@ -34,8 +36,14 @@ cd "$ROOT/.pi/skills/verify-api"
 
 # The faux run's first turn: did its worktree have the dependencies when the agent started? Then a
 # change for `verify` to measure, and `FAUX_VERIFY` makes the next turn call it.
-export FAUX_COMMAND='if [ -d node_modules/local-dep ]; then echo "deps-present"; else echo "deps-missing"; fi; mkdir -p src && echo 1 > src/feature.txt'
+export FAUX_COMMAND='if [ -d node_modules/local-dep ] || [ -d node_modules/effect ]; then echo "deps-present"; else echo "deps-missing"; fi; mkdir -p src && echo 1 > src/feature.txt'
 export FAUX_VERIFY=true
+# The `triggered` scenario's generic webhook route: one rule mapping the `factory` label to a repo
+# of this run's own, whose install sleeps, and the secret the drive signs with.
+export SETUP_TRIGGER_REPO="verify-setup-$(date +%s)/triggered"
+export TRIGGER_SECRET="verify-setup-trigger-secret"
+TRIGGER_RULES="$(printf '[{"label":"factory","repo":"%s","baseRef":"main","prompt":"Work on {{title}}: {{body}}"}]' "$SETUP_TRIGGER_REPO")"
+export TRIGGER_RULES
 # Long enough that the idle sweep never releases an owner between the drive's calls.
 export SESSION_IDLE_TIMEOUT_MS=600000
 

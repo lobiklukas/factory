@@ -42,6 +42,12 @@ test-results
 # ...except a verify skill's fixture, which is a repo's own config, not local state.
 !.pi/skills/verify-api/fixtures/repo/.factory/
 
+# ...and this repo's own `.factory/config` (S-env-setup): the setup a session on it runs. The rest
+# of the root `.factory/` is still local state (a session root an API started here makes).
+!/.factory/
+/.factory/*
+!/.factory/config
+
 # NOTE: .pi/ itself is shared agent tooling (skills, prompts) and IS committed.
 # See AGENTS.md. Only its generated output belongs here.
 

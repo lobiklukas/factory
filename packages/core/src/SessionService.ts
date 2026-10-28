@@ -376,6 +376,16 @@ export type SessionServiceShape = {
     input: SendMessageInput,
   ) => Effect.Effect<SendMessageResult, SessionError>;
   /**
+   * Send a message without waiting for the session's worktree setup (S-env-setup): a trigger's
+   * delivery, whose webhook sender gives up long before an install finishes. `sent` when no setup
+   * was owed (the message was submitted, as `send` would); `after_setup` when one is running, and
+   * the message is sent, with its request id, once that setup succeeds — not at all if it fails,
+   * whose record and card block say why.
+   */
+  readonly sendDeferringSetup: (
+    input: SendMessageInput,
+  ) => Effect.Effect<"sent" | "after_setup", SessionError>;
+  /**
    * Stop the session's run (C8). The answer says what happened: a session with no run to stop is
    * `not_running`, an outcome rather than a failure, and the call changed nothing.
    */
@@ -1296,6 +1306,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         SessionError | undefined,
         never
       >();
+      /**
+       * Messages a trigger sent while their session's worktree setup ran (S-env-setup,
+       * `sendDeferringSetup`), each waiting for that setup and then sent. In the layer's scope, so the
+       * webhook request that sent one can end — or be abandoned by its sender — without losing it.
+       * Keyed by session and request id, so a redelivery of the same message waits beside nothing.
+       */
+      const deferredSends = yield* FiberMap.make<string, void, never>();
+      let deferredSendCount = 0;
       /** One activity projection per owned session; releasing an owner interrupts its fiber. */
       const projectors = yield* FiberMap.make<SessionId, void, never>();
       /**
@@ -3200,9 +3218,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           );
         });
 
-      const send = (
-        input: SendMessageInput,
-      ): Effect.Effect<SendMessageResult, SessionError> =>
+      /** The checks a message passes before anything is opened for it. */
+      const refuseOversized = (input: SendMessageInput) =>
         Effect.gen(function* () {
           if (input.content.length > MAX_MESSAGE_CHARS) {
             yield* countRefusal("message_too_long");
@@ -3211,7 +3228,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               message: `message is ${input.content.length} characters; the limit is ${MAX_MESSAGE_CHARS}`,
             });
           }
+        });
 
+      const send = (
+        input: SendMessageInput,
+      ): Effect.Effect<SendMessageResult, SessionError> =>
+        Effect.gen(function* () {
+          yield* refuseOversized(input);
           const row = yield* requireSession(input.sessionId);
           // A released session is refused by the acquisition, from the release it reads under the
           // owners' gate (LOB-268): a check here, on `row`, would miss one that commits in between.
@@ -3223,7 +3246,69 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // fails refuses the send, so no message is submitted, nothing is titled from it, and no
           // model is called.
           yield* ensureSetup(input.sessionId, owner);
+          return yield* submitTo(input, row, owner);
+        });
 
+      /**
+       * A send that does not wait for the worktree's setup (S-env-setup): what a trigger's delivery
+       * sends, inside a request a webhook sender abandons after its own timeout (GitHub's is 10 s).
+       * With no setup owed it is `send`, and answers `sent`. With one owed — started here, or
+       * already running — it answers `after_setup` at once, and a fiber in `deferredSends`, in the
+       * layer's scope rather than the request's, waits for that setup and then sends the message
+       * with its request id; a setup that fails or is stopped sends nothing, and says so in the
+       * log (its failure is the session's `factory.setup` record, and a card's run parked the card).
+       * A refusal that needs no setup to answer — a card's run whose setup already failed, a message
+       * over the cap, a released session — is answered here, as `send` answers it.
+       */
+      const sendDeferringSetup = (
+        input: SendMessageInput,
+      ): Effect.Effect<"sent" | "after_setup", SessionError> =>
+        Effect.gen(function* () {
+          yield* refuseOversized(input);
+          const row = yield* requireSession(input.sessionId);
+          const owner = yield* acquireOwner(input.sessionId, row, {
+            starts: true,
+          });
+          const pending = yield* startSetup(input.sessionId, owner);
+          if (pending === undefined) {
+            yield* submitTo(input, row, owner);
+            return "sent" as const;
+          }
+          const key =
+            input.requestId === undefined
+              ? `${input.sessionId}#${(deferredSendCount += 1)}`
+              : `${input.sessionId} ${input.requestId}`;
+          yield* FiberMap.run(
+            deferredSends,
+            key,
+            Effect.gen(function* () {
+              const exit = yield* Fiber.await(pending);
+              const refusal = yield* setupRefusalOf(input.sessionId, exit);
+              if (refusal !== undefined) {
+                return yield* Effect.logWarning(
+                  `session ${input.sessionId}: a message waiting for its worktree's setup was not sent: ${refusal.message.split("\n")[0]}`,
+                );
+              }
+              yield* send(input).pipe(
+                Effect.catch((error) =>
+                  Effect.logWarning(
+                    `session ${input.sessionId}: a message that waited for its worktree's setup was not sent: ${error.message}`,
+                  ),
+                ),
+              );
+            }).pipe(Effect.withSpan("SessionService.deferredSend")),
+            { onlyIfMissing: true },
+          );
+          return "after_setup" as const;
+        });
+
+      /** Submit a message to an acquired owner whose setup is done: the part of `send` after it. */
+      const submitTo = (
+        input: SendMessageInput,
+        row: SessionRow,
+        owner: LiveOwner,
+      ): Effect.Effect<SendMessageResult, SessionError> =>
+        Effect.gen(function* () {
           // The first message names the session when nothing else has.
           const title =
             row.title.length > 0 ? row.title : titleFrom(input.content);
@@ -3290,10 +3375,65 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         owner: LiveOwner,
       ): Effect.Effect<void, SessionError> =>
         Effect.gen(function* () {
+          const running = yield* startSetup(sessionId, owner);
+          if (running === undefined) return;
+          const waitMs = options.setupWaitMs ?? SETUP_WAIT_MS;
+          const outcome = yield* Fiber.await(running).pipe(
+            Effect.timeoutOption(Duration.millis(waitMs)),
+          );
+          if (Option.isNone(outcome)) {
+            return yield* new SessionErrorClass({
+              code: "setup_running",
+              message: `session ${sessionId}: its worktree's setup (${setupSteps(
+                owner.workspace.commands,
+              )
+                .map((step) => step.step)
+                .join(
+                  ", ",
+                )}) is still running after ${Math.round(waitMs / 1000)}s, so the message was not sent: send it again to wait for that setup, which goes on without this request`,
+            });
+          }
+          const refusal = yield* setupRefusalOf(sessionId, outcome.value);
+          if (refusal !== undefined) return yield* refusal;
+        }).pipe(Effect.withSpan("SessionService.ensureSetup"));
+
+      /**
+       * What one finished setup fiber means to a message waiting on it: nothing (it succeeded), its
+       * refusal (it failed), or — when it was stopped before it finished, because its owner was
+       * released (a workspace release, a lost lease, shutdown) — a `harness` refusal that says so. A
+       * stopped setup recorded nothing, so the next send to an owner runs it again.
+       */
+      const setupRefusalOf = (
+        sessionId: SessionId,
+        exit: Exit.Exit<SessionError | undefined>,
+      ): Effect.Effect<SessionError | undefined> =>
+        Effect.succeed(
+          Exit.isSuccess(exit)
+            ? exit.value
+            : new SessionErrorClass({
+                code: "harness",
+                message: `session ${sessionId}: its worktree's setup was stopped before it finished, because this process released the session, so the message was not sent: send it again to run the setup`,
+              }),
+        );
+
+      /**
+       * Decide, under the session's setup gate, whether its worktree needs a setup before its first
+       * turn, and start it in `setups` when it does (or answer the one already running there). No
+       * fiber means nothing is owed: no step is declared, the setup succeeded, or the session set
+       * itself up before setups were run here. A card's run whose setup failed is refused at once.
+       */
+      const startSetup = (
+        sessionId: SessionId,
+        owner: LiveOwner,
+      ): Effect.Effect<
+        Fiber.Fiber<SessionError | undefined> | undefined,
+        SessionError
+      > =>
+        Effect.gen(function* () {
           const { workspace } = owner;
-          if (workspace.released !== undefined) return;
-          if (setupSteps(workspace.commands).length === 0) return;
-          const running = yield* withSetupGate(
+          if (workspace.released !== undefined) return undefined;
+          if (setupSteps(workspace.commands).length === 0) return undefined;
+          return yield* withSetupGate(
             sessionId,
             Effect.gen(function* () {
               const inFlight = yield* FiberMap.get(setups, sessionId);
@@ -3325,25 +3465,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               );
             }),
           );
-          if (running === undefined) return;
-          const waitMs = options.setupWaitMs ?? SETUP_WAIT_MS;
-          const outcome = yield* Fiber.join(running).pipe(
-            Effect.timeoutOption(Duration.millis(waitMs)),
-          );
-          if (Option.isNone(outcome)) {
-            return yield* new SessionErrorClass({
-              code: "setup_running",
-              message: `session ${sessionId}: its worktree's setup (${setupSteps(
-                workspace.commands,
-              )
-                .map((step) => step.step)
-                .join(
-                  ", ",
-                )}) is still running after ${Math.round(waitMs / 1000)}s, so the message was not sent: send it again to wait for that setup, which goes on without this request`,
-            });
-          }
-          if (outcome.value !== undefined) return yield* outcome.value;
-        }).pipe(Effect.withSpan("SessionService.ensureSetup"));
+        });
 
       /**
        * One setup of one session's worktree, as `setups` runs it: the steps, the record, and on a
@@ -5930,6 +6052,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         Effect.gen(function* () {
           // Interrupting the projection first: a released owner has no status to report.
           yield* FiberMap.remove(projectors, sessionId);
+          // And a setup still running (S-env-setup): its install runs in the worktree and sandbox
+          // being released — torn down on a workspace release, another process's after a lost lease,
+          // where that owner's first send runs its own. Interrupting it kills the command (the exec
+          // takes the interruption's signal) and records nothing, so the next owner runs it again.
+          yield* FiberMap.remove(setups, sessionId);
           // A run the release cuts short has no end to measure, so it is not recorded.
           runStarts.delete(sessionId);
           yield* shiftSessionsActive(-1);
@@ -6426,6 +6553,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         get,
         history,
         send,
+        sendDeferringSetup,
         interrupt,
         withdraw,
         fork,
