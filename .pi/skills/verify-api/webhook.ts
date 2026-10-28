@@ -443,7 +443,8 @@ const program = Effect.gen(function* () {
     "a generic create on the docs label still starts a docs session",
     docs.status === 200 &&
       docs.outcome?.status === "processed" &&
-      docs.outcome?.reason === `rule "docs" mapped it to ${REPO}` &&
+      docs.outcome?.reason ===
+        `rule "docs" (env:TRIGGER_RULES[1]) mapped it to ${REPO}` &&
       afterDocs === afterPush + 1 &&
       (docsPrompt ?? "").startsWith(`Document trigger ${requestId}-docs`),
     `status=${docs.status} body=${JSON.stringify(docs.body)} prompt=${JSON.stringify(docsPrompt ?? null)} sessions ${afterPush}→${afterDocs}`,
