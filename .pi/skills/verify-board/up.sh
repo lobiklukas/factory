@@ -49,6 +49,10 @@
 # Only a review run is offered the `review` tool, so no other run makes that call. All fixed, like
 # FAUX_COMMAND.
 #
+# FAUX_COST, when the caller sets it, prices every faux answer (a cent a request is the usual): the
+# one thing `budget.sh` needs from this instance, a spend a cap can be reached by. Unset, the
+# instance's model reports no cost, as it always did.
+#
 # The PR goes to a loopback GitHub fake (`.pi/skills/verify-api/github-fake.ts`, LOB-179) on
 # GITHUB_PORT (9403 by default), its ledger on disk in .verify/run/github-ledger.json — the oracle
 # the drive reads the PR's link and body back from. The API gets `GITHUB_API_URL` pointing at it and
@@ -184,6 +188,7 @@ echo "$BOARD_GITHUB" > "$RUN_DIR/github-mode"
     ALLOWED_ORIGINS="http://localhost:$API_PORT,http://localhost:$WEB_PORT" \
     MODEL_BACKEND=faux \
     FAUX_COMMAND="$FAUX_COMMAND" \
+    ${FAUX_COST:+FAUX_COST="$FAUX_COST"} \
     FAUX_ASK="$FAUX_ASK" \
     ROLE_MODELS="$ROLE_MODELS" \
     FAUX_MODEL_SCRIPTS="$FAUX_MODEL_SCRIPTS" \

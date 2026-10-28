@@ -31,7 +31,7 @@ import { SessionId as SessionIdSchema } from "@repo/domain/Session";
 import type { SessionEvent, SessionSnapshot } from "@repo/domain/Session";
 import { Effect, Fiber, Stream } from "effect";
 import { describe, expect, it } from "vitest";
-import { describeBudgetStop, writeBudget } from "./budget";
+import { commitBudget, describeBudgetStop, writeBudget } from "./budget";
 import { createFauxModelAccess } from "./models";
 import { MISSION_TASKS, MissionTask, type MissionResult } from "./mission";
 import {
@@ -182,6 +182,47 @@ describe("a budget cap", () => {
       "user",
       "budget",
     ]);
+    await Effect.runPromise(closeHarness(session.harness));
+  });
+
+  it("runs again once the stopped session's cap is raised (C23), and clears the stop", async () => {
+    const session = await open(COST);
+    await run(session, "go");
+    expect((await snapshot(session)).budget?.stopped).toBeDefined();
+
+    await Effect.runPromise(commitBudget(session.root, 5 * COST));
+    const raised = await snapshot(session);
+    // The cap is the new one, and the stop it replaced is not reported against it.
+    expect(raised.budget?.cap).toBeCloseTo(5 * COST, 10);
+    expect(raised.budget?.stopped).toBeUndefined();
+    expect(raised.budget?.spent).toBeCloseTo(COST, 10);
+
+    const settled = await run(session, "go on");
+    expect(settled.status).toBe("done");
+    // The first run sent one request; the next message's run sends its reply (the tool's output
+    // is already in the log), which the stopped session could not.
+    expect(session.calls()).toBe(2);
+    const after = await snapshot(session);
+    expect(spent(after)).toBeCloseTo(2 * COST, 10);
+    expect(after.budget?.stopped).toBeUndefined();
+    // The stop stays in the transcript as history; nothing after it is a second stop.
+    expect(kinds(after).filter((kind) => kind === "budget")).toHaveLength(1);
+    await Effect.runPromise(closeHarness(session.harness));
+  });
+
+  it("stops again at a raised cap the session reaches, with a stop of its own", async () => {
+    const session = await open(COST);
+    await run(session, "go");
+    await Effect.runPromise(commitBudget(session.root, 2 * COST));
+
+    // The reply the raise made room for reaches the new cap, so the run after it stops.
+    expect((await run(session, "go on")).status).toBe("done");
+    const settled = await run(session, "and again");
+    expect(settled.status).toBe("unanswered");
+    const after = await snapshot(session);
+    expect(session.calls()).toBe(2);
+    expect(after.budget?.stopped?.cap).toBeCloseTo(2 * COST, 10);
+    expect(after.budget?.stopped?.spent).toBeCloseTo(2 * COST, 10);
     await Effect.runPromise(closeHarness(session.harness));
   });
 
