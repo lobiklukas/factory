@@ -57,6 +57,7 @@ import type {
   RepoSlug,
   SessionError,
   SessionEvent,
+  SessionHistoryPage,
   SessionId,
   SessionListEntry,
   SessionSnapshot,
@@ -123,6 +124,8 @@ import {
   readSessionLog,
   readVerifyRecords,
   resolveRoleModels,
+  HISTORY_WINDOW,
+  writeTitle,
   tailOf,
   usageCostTotal,
   type VerifyRecord,
@@ -5087,6 +5090,74 @@ describe("every session's pending approvals", () => {
       outcome.snapshot.entries.filter((entry) => entry.kind === "user"),
     ).toEqual([]);
   });
+});
+
+/**
+ * A long session read after its owner is released (LOB-243): the snapshot carries the newest
+ * `HISTORY_WINDOW` entries and says where they start, and `history` pages back through the rest —
+ * the pages and the window together are the transcript the full fold projects.
+ */
+describe("a long session read after its owner is released", () => {
+  it("serves the newest window, and pages back to the first entry", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const sessions = yield* SessionService;
+        const created = yield* sessions.create({ title: "a long history" });
+        yield* sessions.close;
+        // Grow the log past the window through an owner of its own, the way a long run would.
+        const storage = yield* Effect.promise(() =>
+          PostgresStorage.owner(sql, created.id),
+        );
+        const opened = yield* openSession({
+          storage,
+          model: createModelAccess("faux"),
+          cwd: mkdtempSync(join(tmpdir(), "factory-history-")),
+        });
+        for (let at = 0; at < HISTORY_WINDOW + 40; at += 1)
+          yield* writeTitle(opened.root, `step ${at}`);
+        yield* closeSession(opened);
+        yield* Effect.promise(() => storage.dispose());
+
+        const snapshot = yield* sessions.get(created.id);
+        const pages: SessionHistoryPage[] = [];
+        let before = snapshot.earlier;
+        while (before !== undefined) {
+          const page = yield* sessions.history({
+            sessionId: created.id,
+            before,
+            limit: 25,
+          });
+          pages.push(page);
+          before = page.earlier;
+        }
+        const fold = yield* Effect.acquireUseRelease(
+          Effect.promise(() => PostgresStorage.reader(sql, created.id)),
+          readSessionLog,
+          (reader) => Effect.promise(() => reader.dispose()),
+        );
+        const missing = yield* sessions
+          .history({ sessionId: yield* mintSessionId, before: "1" })
+          .pipe(Effect.flip);
+        const refused = yield* sessions
+          .history({ sessionId: created.id, before: "first" })
+          .pipe(Effect.flip);
+        return { snapshot, pages, fold, missing, refused };
+      }),
+    );
+
+    expect(outcome.snapshot.session.mode).toBe("historical");
+    expect(outcome.snapshot.entries).toHaveLength(HISTORY_WINDOW);
+    expect(outcome.snapshot.earlier).toBe(outcome.snapshot.entries[0]?.id);
+    expect(outcome.pages.length).toBeGreaterThan(1);
+    expect(outcome.pages.every((page) => page.entries.length <= 25)).toBe(true);
+    expect([
+      ...outcome.pages.toReversed().flatMap((page) => page.entries),
+      ...outcome.snapshot.entries,
+    ]).toEqual(outcome.fold.entries);
+    expect(outcome.missing.code).toBe("not_found");
+    expect(outcome.refused.code).toBe("invalid_input");
+  }, 120_000);
 });
 
 /**

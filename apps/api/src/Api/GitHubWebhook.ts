@@ -30,9 +30,15 @@
  * a `pull_request` payload carries the PR's body and two repository objects, and smaller than
  * GitHub's own 25 MB ceiling by far.
  *
- * Only `pull_request` and `push` are read. GitHub's issue events (`@repo/core`'s `githubDelivery`,
- * LOB-190) are a different adapter and are not wired here; such a delivery is answered `202` and
- * ignored.
+ * - `issues` and `issue_comment` (LOB-190's adapter, served by LOB-259) are the issue intake: a
+ *   `factory` label on an issue, or a comment mentioning `@factory` (`GITHUB_MENTION`), is one
+ *   delivery to the same trigger seam the other routes share, keyed by the issue, so a redelivery —
+ *   or the label and then the mention — starts nothing more (`@repo/core`'s
+ *   `handleGitHubIssueWebhook`). The seam comments the session's link on the issue
+ *   (`GitHubWriteBack`). Which repo, and which prompt, is a `TRIGGER_RULES` rule on the label; the
+ *   repo is the payload's own, and has to be registered.
+ *
+ * Any other event is answered `202` and ignored.
  */
 import { Effect, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
@@ -42,9 +48,12 @@ import {
   gitReviewFetch,
   handleDocsPushWebhook,
   handleGitHubPullRequestWebhook,
+  handleGitHubIssueWebhook,
   handlePullRequestReviewWebhook,
   releaseMergedDelivery,
+  TriggerService,
 } from "@repo/core";
+import { TriggerSeamLive } from "./Webhook";
 
 /** The header naming one delivery attempt; the docs push logs it beside the id it derives. */
 const GITHUB_DELIVERY_HEADER = "x-github-delivery";
@@ -95,7 +104,13 @@ const readCapped = (
     return Buffer.concat(chunks).toString("utf8");
   }).pipe(Effect.orElseSucceed(() => ""));
 
-export const GitHubWebhookLive = HttpRouter.add(
+/** The comment that asks for work, when the deployment names none: `@factory`. */
+const mention = (): string | undefined => {
+  const configured = process.env["GITHUB_MENTION"]?.trim();
+  return configured === undefined || configured === "" ? undefined : configured;
+};
+
+const GitHubWebhookRoute = HttpRouter.add(
   "POST",
   "/webhooks/github",
   Effect.gen(function* () {
@@ -110,6 +125,39 @@ export const GitHubWebhookLive = HttpRouter.add(
     const secret = process.env["GITHUB_WEBHOOK_SECRET"];
     const signature = req.headers[GITHUB_SIGNATURE_HEADER];
     const event = req.headers[GITHUB_EVENT_HEADER];
+    if (event === "issues" || event === "issue_comment") {
+      // The rules the intake maps with are the seam's own (stored routes, then `TRIGGER_RULES`), so
+      // the intake and the seam cannot disagree about which deliveries a rule claims (LOB-266).
+      const triggers = yield* TriggerService;
+      const read = yield* triggers.rules.pipe(
+        Effect.map((rules) => ({ ok: true as const, rules })),
+        Effect.catchTag("TriggerError", (cause) =>
+          Effect.succeed({ ok: false as const, cause }),
+        ),
+      );
+      if (!read.ok) {
+        return HttpServerResponse.setStatus(
+          HttpServerResponse.jsonUnsafe({
+            ok: false,
+            error: read.cause.message,
+            code: read.cause.code,
+          }),
+          500,
+        );
+      }
+      const answered = yield* handleGitHubIssueWebhook({
+        secret,
+        raw,
+        signature,
+        event,
+        rules: read.rules,
+        mention: mention(),
+      });
+      return HttpServerResponse.setStatus(
+        HttpServerResponse.jsonUnsafe(answered.body),
+        answered.status,
+      );
+    }
     if (event === "push") {
       const pushed = yield* handleDocsPushWebhook({
         secret,
@@ -167,4 +215,12 @@ export const GitHubWebhookLive = HttpRouter.add(
         : reviewed.status,
     );
   }),
+);
+
+/**
+ * The route, with the shared trigger seam provided to every request: the issue events are
+ * delivered to it, and the other two events do not ask for it.
+ */
+export const GitHubWebhookLive = GitHubWebhookRoute.pipe(
+  HttpRouter.provideRequest(TriggerSeamLive),
 );

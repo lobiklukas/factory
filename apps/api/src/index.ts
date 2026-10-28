@@ -34,11 +34,11 @@ import { webhookLiveFor } from "./Api/Webhook";
 import { logTriggerBootFromProcess } from "./Api/WebhookBoot";
 import { TriggerCheckoutLog } from "./TriggerCheckouts";
 import { GitHubWebhookLive } from "./Api/GitHubWebhook";
+import { LinearIssueSyncLayer, LinearSyncLog } from "./Api/LinearSync";
 import {
-  LinearIssueSyncLayer,
-  LinearSyncLog,
-  SessionWriteBackLive,
-} from "./Api/LinearSync";
+  SessionWriteBacksLive,
+  TriggerAdaptersLog,
+} from "./Api/TriggerAdapters";
 import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
 import { describeLoadedEnvFiles, loadedEnvFiles } from "./EnvFiles";
@@ -552,7 +552,7 @@ const HttpLive = Effect.gen(function* () {
       onNone: () => ({}),
       onSome: (budget) => ({ defaultBudget: budget }),
     }),
-  }).pipe(Layer.provide(SessionWriteBackLive));
+  }).pipe(Layer.provide(SessionWriteBacksLive));
 
   // The database pool is lazy (`PgClient` opens a connection on first query), so this graph builds
   // — and the server binds — even when Postgres is unreachable. Migrations run in the background so
@@ -585,6 +585,7 @@ const HttpLive = Effect.gen(function* () {
     MigrationsDaemon,
     CredentialSelectionLog,
     LinearSyncLog,
+    TriggerAdaptersLog,
     TriggerCheckoutLog(triggerRules),
     PullRequestStepDeps,
   ).pipe(

@@ -9,6 +9,7 @@ import {
 import { boardCommand } from "./commands/board";
 import { discardCommand } from "./commands/discard";
 import { doctorCommand } from "./commands/doctor";
+import { historyCommand } from "./commands/history";
 import { lsCommand } from "./commands/ls";
 import { prCommand } from "./commands/pr";
 import { repoCommand } from "./commands/repo";
@@ -26,6 +27,7 @@ const root = Command.make("factory").pipe(
   Command.withSubcommands([
     runCommand,
     watchCommand,
+    historyCommand,
     lsCommand,
     sendCommand,
     withdrawCommand,

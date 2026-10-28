@@ -194,6 +194,24 @@ const verdictAt = (
   return verdict === "approved" || verdict === "denied" ? verdict : undefined;
 };
 
+/** The kinds `projectApprovals` folds: what a log's approval ledger (`factory.approvals`) keeps. */
+export const APPROVAL_ENTRY_KINDS: ReadonlySet<string> = new Set([
+  APPROVAL_REQUESTED_KIND,
+  APPROVAL_DECIDED_KIND,
+  APPROVAL_USED_KIND,
+]);
+
+/**
+ * What `projectApprovals` reads of an entry: its kind and its data. An `EntryRecord` is one, and so
+ * is an entry of the approval ledger, which keeps exactly these two fields of each approval entry
+ * so a historical read folds the ledger with this same function instead of the whole transcript
+ * (LOB-243).
+ */
+export type ApprovalEntry = {
+  readonly kind: string;
+  readonly data?: JsonValue | undefined;
+};
+
 /**
  * `factory.approval.requested`, `.decided` and `.used` → one record per request id.
  *
@@ -206,7 +224,7 @@ const verdictAt = (
  * millisecond — because both the snapshot fold and the index's list answer from it.
  */
 export const projectApprovals = (
-  entries: readonly EntryRecord[],
+  entries: readonly ApprovalEntry[],
 ): readonly ApprovalLogRecord[] => {
   const records = new Map<string, ApprovalLogRecord>();
   for (const entry of entries) {

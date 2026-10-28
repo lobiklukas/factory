@@ -109,6 +109,19 @@ one from `factory run`, one from the dashboard's **New session**, and one run ea
 repo × actor table to be `listSpend`'s answer and its pairs to be the list's costs added up
 (`features/spend.md`). Evidence goes to `.verify/evidence/latest/spend/`.
 
+### Earlier history of a long session
+
+```sh
+HISTORY_API_PORT=9437 HISTORY_WEB_PORT=3437 ./history.sh   # its own short-idle instance; leaves nothing running
+```
+
+The pane only pages back through a **historical** read, and this instance keeps its owners live. So
+`history.sh` starts its own API (`SESSION_IDLE_TIMEOUT_MS=4000`) and dashboard, grows and releases one
+session with `../verify-api/history.ts` (which checks the RPC half), then runs `history.mjs`: the pane
+shows the newest entries and **Show earlier entries**, each press reads one page, and once the control
+is gone every turn's message is on screen once, in order (`features/history.md`). Evidence goes to
+`.verify/evidence/latest/history/`.
+
 ### The repositories page
 
 ```sh
@@ -180,6 +193,7 @@ touch `.verify/evidence/`; after cleanup, confirm the evidence is still there.
 | `thread.sh`         | The card thread's own asking instance and its drive (`thread.mjs`)      |
 | `seed-spend.ts`     | The spend drive's board and the two cards its runs start from           |
 | `repos.sh`          | The repositories page's own instance, checkouts and drive (`repos.mjs`) |
+| `history.sh`        | A long history's own short-idle instance and its drive (`history.mjs`)  |
 | `features/`         | Feature map: what each user-facing feature is and how to prove it       |
 
 ## Feature map
