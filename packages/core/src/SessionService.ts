@@ -4279,7 +4279,15 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* acquireOwnerWith(
             id,
             row,
-            ({ storage, cwd, policy: sessionPolicy, run, pages, repo, verify }) =>
+            ({
+              storage,
+              cwd,
+              policy: sessionPolicy,
+              run,
+              pages,
+              repo,
+              verify,
+            }) =>
               Effect.acquireUseRelease(
                 openStorage(input.sessionId, "reader"),
                 (parentStorage) =>

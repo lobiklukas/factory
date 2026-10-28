@@ -182,7 +182,8 @@ const renderInstructions = (
   const cutAt = (kept: number): string =>
     `${preamble}\n\n${lines.slice(0, kept).join("\n")}\n\n[${path} continues: this section carries its first ${kept} of ${lines.length} lines. Read ${path} for the rest before relying on what is missing here.]`;
   const fits = (kept: number): boolean =>
-    estimateTextTokens(tagged(REPO_INSTRUCTIONS_SECTION_KEY, cutAt(kept))) <= cap;
+    estimateTextTokens(tagged(REPO_INSTRUCTIONS_SECTION_KEY, cutAt(kept))) <=
+    cap;
   let low = 0;
   let high = lines.length - 1;
   while (low < high) {
@@ -328,7 +329,10 @@ export type RepoPromptRecord = {
   readonly skills: {
     readonly tokens: number;
     readonly cap: number;
-    readonly listed: readonly { readonly name: string; readonly path: string }[];
+    readonly listed: readonly {
+      readonly name: string;
+      readonly path: string;
+    }[];
     readonly dropped: readonly string[];
     readonly shadowed: readonly string[];
   };

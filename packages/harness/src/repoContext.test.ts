@@ -26,7 +26,10 @@ const context = (overrides: Partial<RepoContext> = {}): RepoContext => ({
   ...overrides,
 });
 
-const skill = (name: string, description = `what ${name} is for`): RepoSkill => ({
+const skill = (
+  name: string,
+  description = `what ${name} is for`,
+): RepoSkill => ({
   name,
   description,
   path: `.pi/skills/${name}/SKILL.md`,
@@ -107,7 +110,9 @@ describe("the repo_instructions section", () => {
     expect(assembleRepoPrompt(context()).instructions).toBeUndefined();
     expect(
       assembleRepoPrompt(
-        context({ instructions: { path: "AGENTS.md", bytes: 3, text: " \n\n" } }),
+        context({
+          instructions: { path: "AGENTS.md", bytes: 3, text: " \n\n" },
+        }),
       ).instructions,
     ).toBeUndefined();
   });
@@ -119,7 +124,11 @@ describe("the repo_skills index", () => {
       context({
         skills: [
           skill("verify-api", "Drive the API.\n  Use after changing apps/api."),
-          { name: "bare", description: "", path: ".agents/skills/bare/SKILL.md" },
+          {
+            name: "bare",
+            description: "",
+            path: ".agents/skills/bare/SKILL.md",
+          },
         ],
       }),
     );

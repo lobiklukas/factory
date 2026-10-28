@@ -63,7 +63,10 @@ describe("reading a repository's instructions and skills", () => {
   it("reads AGENTS.md and lists .pi/skills before .agents/skills, by frontmatter", async () => {
     const root = fixture("both", {
       "AGENTS.md": "# Rules\n\nPostgres is on 5442.\n",
-      ".pi/skills/verify-web/SKILL.md": SKILL("verify-web", "Drive the dashboard."),
+      ".pi/skills/verify-web/SKILL.md": SKILL(
+        "verify-web",
+        "Drive the dashboard.",
+      ),
       ".pi/skills/effect/SKILL.md": SKILL("effect", "Effect v4 guide."),
       ".pi/skills/effect/references/SCHEMA.md": "not a skill",
       ".pi/skills/lib/helper.sh": "echo not a skill",
@@ -91,7 +94,11 @@ describe("reading a repository's instructions and skills", () => {
           path: ".pi/skills/verify-web/SKILL.md",
         },
         // No frontmatter: the directory names it.
-        { name: "plain", description: "", path: ".agents/skills/plain/SKILL.md" },
+        {
+          name: "plain",
+          description: "",
+          path: ".agents/skills/plain/SKILL.md",
+        },
       ],
     });
   });
@@ -180,7 +187,13 @@ describe("the tree and symlink parsers", () => {
         "100644 blob abc     12\tAGENTS.md\u0000120000 blob def      9\tlink\twith tab\u0000",
       ),
     ).toEqual([
-      { mode: "100644", type: "blob", object: "abc", bytes: 12, path: "AGENTS.md" },
+      {
+        mode: "100644",
+        type: "blob",
+        object: "abc",
+        bytes: 12,
+        path: "AGENTS.md",
+      },
       {
         mode: "120000",
         type: "blob",

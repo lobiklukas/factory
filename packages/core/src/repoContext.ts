@@ -99,10 +99,7 @@ export const parseTreeEntries = (output: string): readonly TreeEntry[] =>
   output.split("\0").flatMap((record) => {
     const tab = record.indexOf("\t");
     if (tab < 0) return [];
-    const [mode, type, object, size] = record
-      .slice(0, tab)
-      .trim()
-      .split(/\s+/);
+    const [mode, type, object, size] = record.slice(0, tab).trim().split(/\s+/);
     if (mode === undefined || type === undefined || object === undefined)
       return [];
     const bytes = Number(size);
