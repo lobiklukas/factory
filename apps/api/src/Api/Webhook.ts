@@ -128,9 +128,12 @@ const DEFAULT_SENTRY_RATE_LIMIT = 20;
 /** The default window the Sentry cap counts over, in seconds. */
 const DEFAULT_SENTRY_RATE_WINDOW_S = 60;
 
-/** A positive integer from the environment, or the default when it is unset or not one. */
-const positiveFromEnv = (name: string, fallback: number): number => {
-  const value = Number(process.env[name] ?? fallback);
+/**
+ * A positive integer from an environment value, or the default when it is unset or not one. The
+ * caller reads `process.env["NAME"]` itself, so the dev-task guard sees every name (LOB-257).
+ */
+const positiveInteger = (raw: string | undefined, fallback: number): number => {
+  const value = Number(raw ?? fallback);
   return Number.isInteger(value) && value > 0 ? value : fallback;
 };
 
@@ -603,9 +606,12 @@ const sentryRoute = (rules: ReadonlyArray<TriggerRule>) =>
       verify: (raw, signature, clientSecret) =>
         verifySentrySignature({ raw, signature, clientSecret }),
       rateCap: {
-        limit: positiveFromEnv("SENTRY_RATE_LIMIT", DEFAULT_SENTRY_RATE_LIMIT),
-        windowSeconds: positiveFromEnv(
-          "SENTRY_RATE_WINDOW_SECONDS",
+        limit: positiveInteger(
+          process.env["SENTRY_RATE_LIMIT"],
+          DEFAULT_SENTRY_RATE_LIMIT,
+        ),
+        windowSeconds: positiveInteger(
+          process.env["SENTRY_RATE_WINDOW_SECONDS"],
           DEFAULT_SENTRY_RATE_WINDOW_S,
         ),
         counts: (delivery) => sentryStartsWork(delivery.event, rules),
