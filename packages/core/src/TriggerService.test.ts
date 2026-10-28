@@ -25,11 +25,17 @@ import { randomBytes } from "node:crypto";
 import { BunServices } from "@effect/platform-bun";
 import type { RepoSlug, SessionId } from "@repo/domain/Session";
 import {
+  externalRefOf,
   TriggerError,
   type TriggerDelivery,
   type TriggerEvent,
   type TriggerRule,
 } from "@repo/domain/Trigger";
+import {
+  DEFAULT_DEFINITION_ID,
+  DefinitionId,
+  MAX_TASK_BODY_CHARS,
+} from "@repo/domain/Task";
 import { DatabaseLive } from "@repo/storage-postgres";
 import {
   Deferred,
@@ -48,8 +54,13 @@ import {
   TriggerRoutesLive,
   type TriggerRoutesShape,
 } from "./TriggerRoutes";
+import { TaskService, TaskServiceLive } from "./TaskService";
 import {
+  cardBodyOf,
+  NoCards,
+  NoWriteBack,
   sessionRequestIdOf,
+  TriggerCardsFromTaskService,
   TriggerService,
   TriggerServiceLive,
   TriggerSessions,
@@ -256,6 +267,7 @@ const withRuntime = async <A>(
           Layer.mergeAll(
             Layer.succeed(TriggerSessions, TriggerSessions.of(sessions)),
             Layer.succeed(TriggerWriteBack, TriggerWriteBack.of(writeBack)),
+            NoCards,
           ),
         ),
       ),
@@ -1380,5 +1392,425 @@ describe("stored trigger routes", () => {
         reason: { _tag: "TriggerRouteNotFound" },
       });
     });
+  }, 60_000);
+});
+
+/**
+ * Card mode (LOB-254): a mapped delivery puts one card on the repo's board and opens no session.
+ *
+ * The card port is the production one (`TriggerCardsFromTaskService` over the real `TaskService`),
+ * because the dedupe the issue asks for — one card per issue, whatever delivery carries it — is a
+ * fact of the `tasks` table and the service's lock on it, not of a fake. The sessions are the counting
+ * fake above, so "no session" is a count of zero rather than an absence nobody looked for.
+ */
+describe("a card rule", () => {
+  /** A repo per case, registered and (unless the case says not) given a board, as an operator would. */
+  const cardRepo = (name: string) => `acme/cards-${name}-${runId}` as RepoSlug;
+
+  const cardRules = (slug: RepoSlug): ReadonlyArray<TriggerRule> => [
+    {
+      label: "intake",
+      repo: slug,
+      baseRef: "main",
+      prompt: "unused: a card's runs are told its body",
+      mode: "card",
+    },
+  ];
+
+  /** Linear's `Issue` `create` webhook body, as the adapter reads it. */
+  const linearIssue = (id: string, over: Record<string, unknown> = {}) => ({
+    action: "create",
+    type: "Issue",
+    webhookTimestamp: 1_761_559_200_000,
+    url: `https://linear.app/acme/issue/${id}`,
+    data: {
+      id,
+      identifier: id,
+      title: "Make the widget stop wobbling",
+      description: "## Goal\n\nThe widget **wobbles** — make it stop.\n",
+      url: `https://linear.app/acme/issue/${id}/make-the-widget-stop-wobbling`,
+      labels: [{ id: "label-intake", name: "intake" }],
+      labelIds: ["label-intake"],
+      ...over,
+    },
+  });
+
+  type CardHarness = {
+    readonly trigger: TriggerServiceShape;
+    readonly routes: TriggerRoutesShape;
+    readonly created: ReadonlyArray<{ readonly id: SessionId }>;
+    readonly run: <A, E>(
+      effect: Effect.Effect<A, E, TaskService | SqlClient>,
+    ) => Promise<A>;
+  };
+
+  const withCards = async <A>(
+    slug: RepoSlug,
+    body: (harness: CardHarness) => Promise<A>,
+    options: {
+      readonly board?: boolean;
+      readonly cards?: boolean;
+      readonly storedRoutes?: boolean;
+      readonly rules?: ReadonlyArray<TriggerRule>;
+    } = {},
+  ): Promise<A> => {
+    const created: Array<{ readonly id: SessionId }> = [];
+    const sessions: TriggerSessionsShape = {
+      create: () =>
+        Effect.sync(() => {
+          const id =
+            `ses_${String(created.length + 1).padStart(26, "0")}` as SessionId;
+          created.push({ id });
+          return { id };
+        }),
+      send: () => Effect.void,
+    };
+    const seam = TriggerServiceLive({
+      rules: options.rules ?? cardRules(slug),
+      ...(options.storedRoutes === true ? { storedRoutes: true } : {}),
+    }).pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.succeed(TriggerSessions, TriggerSessions.of(sessions)),
+          NoWriteBack,
+          options.cards === false
+            ? NoCards
+            : TriggerCardsFromTaskService.pipe(Layer.provide(TaskServiceLive)),
+        ),
+      ),
+    );
+    const runtime = ManagedRuntime.make(
+      Layer.mergeAll(seam, TaskServiceLive, TriggerRoutesLive).pipe(
+        Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+      ),
+    );
+    try {
+      const run: CardHarness["run"] = (effect) => runtime.runPromise(effect);
+      await run(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          yield* sql`INSERT INTO repos (slug) VALUES (${slug}) ON CONFLICT (slug) DO NOTHING`;
+          if (options.board !== false) {
+            const tasks = yield* TaskService;
+            yield* tasks.createBoard({
+              repo: slug,
+              definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
+            });
+          }
+        }),
+      );
+      const trigger = await runtime.runPromise(TriggerService);
+      const routes = await runtime.runPromise(TriggerRoutes);
+      return await body({ trigger, routes, created, run });
+    } finally {
+      await runtime.dispose();
+    }
+  };
+
+  /** Every card on the repo's board, as `TaskService` reads them. */
+  const cardsOn = (slug: RepoSlug) =>
+    Effect.gen(function* () {
+      const tasks = yield* TaskService;
+      const board = (yield* tasks.listBoards).find(
+        (candidate) => candidate.repo === slug,
+      );
+      return board === undefined
+        ? []
+        : yield* tasks.list({ boardId: board.id });
+    });
+
+  it("files exactly one card in intake from a Linear issue create, with its description as the body, and opens no session", async () => {
+    const slug = cardRepo("create");
+    await withCards(slug, async ({ trigger, created, run }) => {
+      const issueId = `iss-${runId}-create`;
+      const delivery = linearDeliveryFor(cardRules(slug))(linearIssue(issueId));
+      expect(delivery).toBeDefined();
+      const outcome = await run(trigger.deliver(delivery!));
+
+      expect(outcome.status).toBe("processed");
+      expect(outcome.sessionId).toBeUndefined();
+      expect(outcome.taskId).toBeDefined();
+      expect(created).toHaveLength(0);
+
+      const cards = await run(cardsOn(slug));
+      expect(cards).toHaveLength(1);
+      const card = cards[0]!;
+      expect(card.id).toBe(outcome.taskId);
+      // The default pipeline's initial column, read from the definition the board pins.
+      expect(card.column).toBe("intake");
+      expect(card.title).toBe("Make the widget stop wobbling");
+      expect(card.body).toBe(
+        "## Goal\n\nThe widget **wobbles** — make it stop.\n",
+      );
+      expect(card.externalRef).toBe(`linear:${issueId}`);
+      expect(card.externalUrl).toBe(
+        `https://linear.app/acme/issue/${issueId}/make-the-widget-stop-wobbling`,
+      );
+      expect(card.baseRef).toBe("main");
+      expect(outcome.reason).toContain(`filed card ${card.id}`);
+    });
+  }, 60_000);
+
+  it("files no second card for a replayed delivery, nor for a second, distinct delivery about the same issue", async () => {
+    const slug = cardRepo("dedupe");
+    await withCards(slug, async ({ trigger, created, run }) => {
+      const issueId = `iss-${runId}-dedupe`;
+      const delivery = linearDeliveryFor(cardRules(slug))(linearIssue(issueId));
+      const first = await run(trigger.deliver(delivery!));
+      const replayed = await run(trigger.deliver(delivery!));
+      expect(replayed.replayed).toBe(true);
+      expect(replayed.status).toBe("processed");
+
+      // Distinct deliveries about the same issue id: a key the claim has never seen (a sender that
+      // keys every delivery afresh, say), and a re-label of the issue under another key.
+      const distinct = await run(
+        trigger.deliver({
+          requestId: `${runId}-dedupe-second`,
+          event: { ...delivery!.event, title: "Retitled in Linear" },
+        }),
+      );
+      expect(distinct.replayed).toBe(false);
+      expect(distinct.status).toBe("processed");
+      expect(distinct.taskId).toBe(first.taskId);
+      expect(distinct.reason).toContain(
+        `already on the board as card ${first.taskId}`,
+      );
+
+      const cards = await run(cardsOn(slug));
+      expect(cards.map((card) => card.id)).toEqual([first.taskId]);
+      expect(cards[0]?.title).toBe("Make the widget stop wobbling");
+      expect(created).toHaveLength(0);
+    });
+  }, 60_000);
+
+  it("files one card when a second delivery about the issue arrives while the first is still filing it", async () => {
+    // The interleaving a read-then-insert loses, made the only one this case runs: the first filing
+    // holds its transaction open (its card inserted, uncommitted) until the second delivery is
+    // queued behind it, then commits. `TaskService.file`'s lock is what queues the second; without
+    // it the second never waits — the holder's bounded wait fails the case — and, reading no
+    // committed card, it would file its own.
+    const slug = cardRepo("race");
+    await withCards(slug, async ({ trigger, run }) => {
+      const issueId = `iss-${runId}-race`;
+      const delivery = linearDeliveryFor(cardRules(slug))(linearIssue(issueId));
+      const board = (await run(
+        Effect.gen(function* () {
+          const tasks = yield* TaskService;
+          return (yield* tasks.listBoards).find((b) => b.repo === slug);
+        }),
+      ))!;
+      const held = Deferred.makeUnsafe<void>();
+      const holding = run(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          const tasks = yield* TaskService;
+          return yield* sql.withTransaction(
+            Effect.gen(function* () {
+              const first = yield* tasks.file({
+                boardId: board.id,
+                title: "filed first",
+                externalRef: externalRefOf(delivery!.event),
+                actor: "trigger:linear",
+              });
+              yield* Deferred.succeed(held, undefined);
+              yield* sql<{ waiting: number }>`
+                SELECT count(DISTINCT pid)::int AS waiting FROM pg_locks
+                WHERE NOT granted AND pg_backend_pid() = ANY(pg_blocking_pids(pid))
+              `.pipe(
+                Effect.map((rows) => rows[0]?.waiting ?? 0),
+                Effect.repeat({
+                  until: (waiting) => waiting >= 1,
+                  schedule: Schedule.spaced(Duration.millis(10)),
+                }),
+                Effect.timeoutOrElse({
+                  duration: Duration.seconds(10),
+                  orElse: () =>
+                    Effect.die(
+                      new Error(
+                        "the second delivery never waited on the first filing",
+                      ),
+                    ),
+                }),
+              );
+              return first;
+            }),
+          );
+        }),
+      );
+      await Effect.runPromise(Deferred.await(held));
+      const second = await run(
+        trigger.deliver({
+          requestId: `${runId}-race-second`,
+          event: delivery!.event,
+        }),
+      );
+      const first = await holding;
+      expect(first.created).toBe(true);
+      expect(second.status).toBe("processed");
+      expect(second.taskId).toBe(first.task.id);
+      expect(await run(cardsOn(slug))).toHaveLength(1);
+    });
+  }, 60_000);
+
+  it("records that the repo has no board, naming the command that makes one, and files the card once there is one", async () => {
+    const slug = cardRepo("noboard");
+    await withCards(
+      slug,
+      async ({ trigger, created, run }) => {
+        const delivery = linearDeliveryFor(cardRules(slug))(
+          linearIssue(`iss-${runId}-noboard`),
+        );
+        const skipped = await run(trigger.deliver(delivery!));
+        expect(skipped.status).toBe("skipped");
+        expect(skipped.reason).toContain(`repo ${slug} has no board`);
+        expect(skipped.reason).toContain(`factory board create --repo ${slug}`);
+        expect(await deliveryStatus(delivery!.requestId)).toBe("skipped");
+        expect(created).toHaveLength(0);
+
+        // The operator makes the board. The Linear key names the issue, so no fresh delivery id is
+        // coming: the next delivery under it is claimed again instead of replaying the skip.
+        await run(
+          Effect.gen(function* () {
+            const tasks = yield* TaskService;
+            yield* tasks.createBoard({
+              repo: slug,
+              definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
+            });
+          }),
+        );
+        const filed = await run(trigger.deliver(delivery!));
+        expect(filed.replayed).toBe(false);
+        expect(filed.status).toBe("processed");
+        expect(await run(cardsOn(slug))).toHaveLength(1);
+      },
+      { board: false },
+    );
+  }, 60_000);
+
+  it("fails a card rule on a seam with no card port, and gives the claim back", async () => {
+    const slug = cardRepo("noport");
+    await withCards(
+      slug,
+      async ({ trigger, created, run }) => {
+        const delivery = linearDeliveryFor(cardRules(slug))(
+          linearIssue(`iss-${runId}-noport`),
+        );
+        const failed = await run(Effect.flip(trigger.deliver(delivery!)));
+        expect(failed).toMatchObject({ code: "card-create" });
+        expect(failed.message).toContain("no card port");
+        expect(await deliveryStatus(delivery!.requestId)).toBeUndefined();
+        // Never a session instead: a card rule that cannot file its card starts nothing.
+        expect(created).toHaveLength(0);
+      },
+      { cards: false },
+    );
+  }, 60_000);
+
+  it("cuts a description over the card body's cap to the cap, with a marker, and says so", () => {
+    expect(cardBodyOf("short")).toEqual({ body: "short" });
+    const exact = "x".repeat(MAX_TASK_BODY_CHARS);
+    expect(cardBodyOf(exact)).toEqual({ body: exact });
+    const long = `${"y".repeat(MAX_TASK_BODY_CHARS)}TAIL`;
+    const cut = cardBodyOf(long);
+    expect(cut.cut).toBe(long.length);
+    expect(cut.body).toHaveLength(MAX_TASK_BODY_CHARS);
+    expect(cut.body.startsWith("yyyy")).toBe(true);
+    expect(cut.body).not.toContain("TAIL");
+    expect(cut.body).toContain(
+      `[cut at ${MAX_TASK_BODY_CHARS} characters by the factory; the source's description has ${long.length}]`,
+    );
+  });
+
+  it("files the card for an issue whose description is over the card body's cap, cut to the cap", async () => {
+    // Pasted logs: longer than a card body takes, shorter than the webhook body cap. A refusal here
+    // would answer 500 and give the claim back, so the sender would retry a delivery that can never
+    // file — the card is filed instead, with the head of the description and a marker.
+    const slug = cardRepo("long");
+    await withCards(slug, async ({ trigger, created, run }) => {
+      const description = `## Logs\n\n${"log line\n".repeat(4_500)}`;
+      expect(description.length).toBeGreaterThan(MAX_TASK_BODY_CHARS);
+      const delivery = linearDeliveryFor(cardRules(slug))(
+        linearIssue(`iss-${runId}-long`, { description }),
+      );
+      const outcome = await run(trigger.deliver(delivery!));
+      expect(outcome.status).toBe("processed");
+      expect(outcome.reason).toContain(
+        `its body was cut to ${MAX_TASK_BODY_CHARS} of ${description.length} characters`,
+      );
+      const cards = await run(cardsOn(slug));
+      expect(cards).toHaveLength(1);
+      expect(cards[0]?.body).toHaveLength(MAX_TASK_BODY_CHARS);
+      expect(cards[0]?.body?.startsWith("## Logs")).toBe(true);
+      expect(cards[0]?.body).toContain("[cut at ");
+      expect(await deliveryStatus(delivery!.requestId)).toBe("processed");
+      expect(created).toHaveLength(0);
+    });
+  }, 60_000);
+
+  it("records a card the board refuses for its input as a skip naming the field, not a failure to retry", async () => {
+    const slug = cardRepo("refused");
+    const rules = cardRules(slug).map((rule) => ({
+      ...rule,
+      baseRef: "main..evil",
+    }));
+    await withCards(
+      slug,
+      async ({ trigger, created, run }) => {
+        const delivery = linearDeliveryFor(rules)(
+          linearIssue(`iss-${runId}-refused`),
+        );
+        const outcome = await run(trigger.deliver(delivery!));
+        expect(outcome.status).toBe("skipped");
+        expect(outcome.reason).toContain(
+          "the board refused the card's baseRef",
+        );
+        expect(outcome.reason).toContain('"main..evil"');
+        // Recorded, so a retry is answered with the skip rather than refused again.
+        expect(await deliveryStatus(delivery!.requestId)).toBe("skipped");
+        const replayed = await run(trigger.deliver(delivery!));
+        expect(replayed).toMatchObject({ status: "skipped", replayed: true });
+        expect(await run(cardsOn(slug))).toHaveLength(0);
+        expect(created).toHaveLength(0);
+      },
+      { rules },
+    );
+  }, 60_000);
+
+  it("stores a route's card mode, reads it back, and files a card through it", async () => {
+    const slug = cardRepo("route");
+    await withCards(
+      slug,
+      async ({ trigger, routes, created, run }) => {
+        const label = `intake-route-${runId}`;
+        const route = await run(
+          routes.add({ label, repo: slug, prompt: "", mode: "card" }),
+        );
+        expect(route.mode).toBe("card");
+        expect(
+          (await run(routes.list)).find((stored) => stored.id === route.id)
+            ?.mode,
+        ).toBe("card");
+        try {
+          const outcome = await run(
+            trigger.deliver(
+              deliver(`${runId}-route-card`, {
+                labels: [label],
+                key: `${runId}-route-card-issue`,
+              }),
+            ),
+          );
+          expect(outcome.status).toBe("processed");
+          expect(outcome.reason).toContain(`route ${route.id}`);
+          expect(created).toHaveLength(0);
+          const cards = await run(cardsOn(slug));
+          expect(cards.map((card) => card.externalRef)).toEqual([
+            `generic:${runId}-route-card-issue`,
+          ]);
+        } finally {
+          await run(routes.remove(route.id));
+        }
+      },
+      { storedRoutes: true },
+    );
   }, 60_000);
 });

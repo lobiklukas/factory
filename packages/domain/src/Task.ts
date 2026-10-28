@@ -628,9 +628,16 @@ export const Task = Schema.Struct({
   baseRef: Schema.optional(Schema.String),
   /**
    * Where the card came from outside the factory (LOB-260): the tracker issue it was filed from — a
-   * URL or a key such as `LOB-42`. Opaque here: nothing reads it back out of the card yet.
+   * URL or a key such as `LOB-42`. A card a trigger filed (LOB-254) carries `<source>:<key>` —
+   * `linear:<issue id>` — which is what a second delivery about the same issue finds it by, and what
+   * the Linear write-back follows the card's runs to the issue with.
    */
   externalRef: Schema.optional(Schema.String),
+  /**
+   * Where a person opens that issue (LOB-254): the tracker's own link, which the card pane renders.
+   * Absent when whoever filed the card gave none.
+   */
+  externalUrl: Schema.optional(Schema.String),
   /** The definition version this task started under (B2). */
   definitionVersion: Schema.Int,
   revision: Schema.Int,
@@ -687,6 +694,7 @@ export const TaskEvent = Schema.TaggedUnion({
     body: Schema.optional(Schema.String),
     baseRef: Schema.optional(Schema.String),
     externalRef: Schema.optional(Schema.String),
+    externalUrl: Schema.optional(Schema.String),
     priority: Schema.optional(TaskPriority),
   },
   moved: {
@@ -924,6 +932,14 @@ export const MAX_TASK_BODY_CHARS = 32_000;
 export const MAX_TASK_REF_CHARS = 1_024;
 
 /**
+ * Whether `value` is a link a card may carry and a page may render as one (LOB-254): an absolute
+ * `http:` or `https:` URL. Anything else — `javascript:`, a relative path, a bare key — is refused at
+ * create, so the card pane never renders an `href` it would have to sanitize.
+ */
+export const isWebLink = (value: string): boolean =>
+  /^https?:\/\/[^\s/?#@]+(?:[/?#]\S*)?$/i.test(value);
+
+/**
  * A new card (B3). `repo` defaults to the board instance's repository, which is the only one a card
  * on that board may name: another is `BoardRepoMismatch` (LOB-255).
  *
@@ -943,6 +959,10 @@ export const CreateTaskInput = Schema.Struct({
     Schema.String.pipe(Schema.check(Schema.isMaxLength(MAX_TASK_REF_CHARS))),
   ),
   externalRef: Schema.optional(
+    Schema.String.pipe(Schema.check(Schema.isMaxLength(MAX_TASK_REF_CHARS))),
+  ),
+  /** The external ref's link, `http(s)` only (LOB-254). */
+  externalUrl: Schema.optional(
     Schema.String.pipe(Schema.check(Schema.isMaxLength(MAX_TASK_REF_CHARS))),
   ),
   actor: Schema.String,

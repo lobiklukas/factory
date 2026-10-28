@@ -45,6 +45,7 @@ import {
 import { type GitHubWebhookAnswer, refuseGitHubDelivery } from "./LinearSync";
 import { SessionService } from "./SessionService";
 import {
+  NoCards,
   NoWriteBack,
   TriggerService,
   TriggerServiceLive,
@@ -372,7 +373,7 @@ export const DocsSessionsFromSessionService = Layer.effect(
 export const DocsTriggerLive = (repo: RepoSlug) =>
   TriggerServiceLive({ rules: docsTriggerRules(repo) }).pipe(
     Layer.provide(DocsSessionsFromSessionService),
-    Layer.provide(NoWriteBack),
+    Layer.provide(Layer.mergeAll(NoWriteBack, NoCards)),
   );
 
 /**

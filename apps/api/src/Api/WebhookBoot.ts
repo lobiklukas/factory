@@ -64,14 +64,14 @@ export const readTriggerRules = (
   );
 };
 
-/** `trigger rules: 2 (factory→acme/widgets, team ENG→acme/api)` */
+/** `trigger rules: 2 (factory→acme/widgets, team ENG→acme/api card)`: a card rule says so (LOB-254). */
 export const describeTriggerRules = (
   rules: ReadonlyArray<TriggerRule>,
 ): string =>
   `trigger rules: ${rules.length}${
     rules.length === 0
       ? ""
-      : ` (${rules.map((rule) => `${ruleName(rule)}→${rule.repo}`).join(", ")})`
+      : ` (${rules.map((rule) => `${ruleName(rule)}→${rule.repo}${rule.mode === "card" ? " card" : ""}`).join(", ")})`
   } from ${ENV_RULES_ORIGIN}; stored routes are read per delivery and win over them`;
 
 /**

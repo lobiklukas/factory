@@ -101,6 +101,8 @@ describe("TRIGGER_RULES at boot", () => {
       TRIGGER_RULES: JSON.stringify([
         { label: "factory", repo: "acme/widgets", prompt: "{{title}}" },
         { team: "ENG", repo: "acme/api", prompt: "{{title}}" },
+        // A card rule (LOB-254) says so, so the operator can tell which labels file a card.
+        { label: "intake", repo: "acme/api", prompt: "", mode: "card" },
       ]),
     });
 
@@ -108,7 +110,7 @@ describe("TRIGGER_RULES at boot", () => {
     const rules = lines.find((line) => line.text.startsWith("trigger rules:"));
     expect(rules?.level).toBe("Info");
     expect(rules?.text).toContain(
-      "trigger rules: 2 (factory→acme/widgets, team ENG→acme/api)",
+      "trigger rules: 3 (factory→acme/widgets, team ENG→acme/api, intake→acme/api card)",
     );
     expect(lines.some((line) => line.level === "Error")).toBe(false);
   });
