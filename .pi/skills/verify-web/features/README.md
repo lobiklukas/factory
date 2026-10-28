@@ -36,6 +36,10 @@ from the `agent/C7` worktree, API `:9570` / web `:3570` / the GitHub fake `:9571
 the `agent/C9` worktree, API `:9562` / web `:3562`, on an empty throwaway database; `drive.mjs` passed
 (API `:9560` / web `:3560`) and `board-create.sh` passed beside it, as the checklist sits on `/boards`.
 
+`first-run.sh` also passed on 2026-10-28 from the `agent/G1-F11-F18` worktree, API `:9550` / web `:3550`,
+with its getting-started guide-link assertions (`[data-guide-link]` on `/boards`, `/repos` and the five
+empty routes, G1; see [first-run.md](first-run.md)).
+
 `board-create.sh` (the New board form, C5) passed **20/20** on 2026-10-28 from the `agent/C5` worktree,
 API `:9561` / web `:3561`, on an empty throwaway database; `drive.mjs` passed 120/120 there (API `:9560` /
 web `:3560`), its board now made through the form.
@@ -57,12 +61,13 @@ the pane re-reads on the 10 s `EXIT_POLL`.
 `card-edit.sh` (the card pane's block, unblock, urgent flag and title edit, C11) last passed **11/11** on
 2026-10-28 from the `agent/C11` worktree, API `:9582` / web `:3582`.
 
-`board-settings.sh` (the board settings page and each lane's disclosure, LOB-245) last passed **28/28** on
-2026-10-28 from the `agent/C22` worktree, API `:9520` / web `:3520`, with each column's effective autonomy
-shown and a run in a gated column parked on its approval (C22). Before it, 23/23 from `agent/D3`, where
+`board-settings.sh` (the board settings page and each lane's disclosure, LOB-245) last passed **33/33** on
+2026-10-28 from the `agent/F2-F3-F4-F9` worktree, API `:9562` / web `:3562`, with a re-pinned board's page
+following its pin without a reload (F9). Before it, 28/28 from `agent/C22` (each column's effective autonomy
+shown and a run in a gated column parked on its approval, C22), and before that 23/23 from `agent/D3`, where
 `drive.mjs` re-passed (API `:9541` / web `:3541`), its lane-control count leaving the settings disclosure out.
 
-`definition-edit.sh` (edit a board definition as a new version, D6) last passed **18/18** on 2026-10-28
+`definition-edit.sh` (edit a board definition as a new version, D6; autonomy, limits, caps and typed roles, F2-F4) last passed **31/31** and **7/7** (roles) on 2026-10-28 from `agent/F2-F3-F4-F9`, API `:9560` / web `:3560`; before that **18/18** on 2026-10-28
 from the `agent/D6` worktree, API `:9512` / web `:3512`; `board-settings.sh` re-passed there beside it.
 
 `skills.sh` (the skill pages, D8) last passed **21/21** on 2026-10-28 from the `agent/D8` worktree,
@@ -103,6 +108,7 @@ re-passed there beside it, as the strip and the form sit on their pages.
 | Model backend and model      | passing | [backend-badge.md](backend-badge.md) (`backend.sh`)                           |
 | New session form             | passing | [session-new.md](session-new.md) (`session-new.sh`)                           |
 | New session model picker     | passing | [model-picker.md](model-picker.md) (`model.sh`)                               |
+| Model no longer served       | passing | [model-unavailable.md](model-unavailable.md) (`model-unavailable.sh`)         |
 | Cost prediction              | passing | [cost.md](cost.md) (`cost.sh`)                                                |
 | Interrupt a busy run         | passing | [interrupt.md](interrupt.md) (`interrupt.sh`)                                 |
 | Card face (status, PR, cost) | passing | [card-face.md](card-face.md) (`card-face.sh`)                                 |

@@ -215,7 +215,9 @@ disclosure to show its column's same facts; and a malformed or missing board to 
 (`features/board-settings.md`). Booted with `APPROVAL_REQUIRED="npm publish"`, it also authors a
 definition whose `careful` column gates `sleep` (C22), requires every column's effective autonomy on
 the page to equal `getDefinition`, and starts a run in `careful` and one in `building` with the same
-faux call: the first parks on an approval, the second runs. Evidence goes to `.verify/evidence/latest/board-settings/`.
+faux call: the first parks on an approval, the second runs. It also re-pins a third board with Upgrade
+and requires the same page, unreloaded, to show the newest version's columns and no console error (F9).
+Evidence goes to `.verify/evidence/latest/board-settings/`.
 
 ### Definition editor
 
@@ -229,9 +231,12 @@ pins a board to it. `definition-edit.mjs` opens **Edit as new version** from the
 and checks that the skill and requires pickers offer exactly `listSkills`' and
 `getDefinitionVocabulary`'s names, with no text field for either. It adds a column and is refused,
 with the server's fault next to the column's moves, then completes it and saves. It requires "v2
-created", version 2 in `listDefinitions` with the draft's columns and the untouched WIP limit and
-caps, and the board still pinned to v1 (`features/definition-edit.md`). Evidence goes to
-`.verify/evidence/latest/definition-edit/`.
+created", version 2 in `listDefinitions` with the draft's columns, and the board still pinned to v1.
+It also edits a column's autonomy, WIP limit and the run caps (F2, F3: a blank gate and a non-positive
+limit refused beside their fields, the values stored, shown on a v2 board's settings page and
+printed by `factory board definition show`, emptied fields removing the limits), and a second
+instance with no role table lets a typed new role through (F4, `definition-edit-roles.mjs`; that
+pair of ports is the first's + 1). Evidence goes to `.verify/evidence/latest/definition-edit/`.
 
 ### Skill pages
 
@@ -307,6 +312,20 @@ a session started on `faux/faux-spec` to name it and to have sent every request 
 `usage.models`, read over the API), and one started on the server's default to run `faux/faux-cheap`
 (`features/model-picker.md`). Evidence goes to `.verify/evidence/latest/model/`.
 
+### A session pinned to a model the server no longer serves
+
+```sh
+MODELGONE_API_PORT=9453 MODELGONE_WEB_PORT=3453 ./model-unavailable.sh   # two boots of its own API; leaves nothing running
+```
+
+A session's model is pinned when it first opens, so a restart onto a catalog without it leaves the
+session unable to run (E9). `model-unavailable.sh` boots its API with `DEFAULT_MODEL=faux/faux-cheap` to
+seed a pinned session, then again serving `faux/faux-1` alone. `model-unavailable.mjs` requires
+`modelAvailable: false` on `getSession` and `listSessions`, `sendMessage` refused `model_unavailable`
+naming the model with the transcript unchanged, the pane's composer and Send disabled with the
+explanation and **Replay on faux/faux-1**, and that action creating a replay the page navigates to
+(`features/model-unavailable.md`). Evidence goes to `.verify/evidence/latest/model-unavailable/`.
+
 ### Interrupting a busy run
 
 ```sh
@@ -376,7 +395,10 @@ dashboard and `github-fake.ts`, plus three fixture checkouts whose marker file m
 one scripted command commit a small change, a change over the diff cap, or nothing. `pr.mjs` presses
 the control and requires the link in both panes without a reload, one create request in the fake's
 ledger for a double press and for a repeat over RPC, and each refusal in the server's words with the
-button disabled. It then runs again with no credential and requires the missing-token message
+button disabled. Since C7b it also requires a forge `422` naming an existing PR to be blocked (never
+`Retry pull request`) with that PR linked while a `502` is still a retry, a refusal to be dropped when
+`setSessionBudget` from outside the page moves the session on, and a run older than the newest 50
+sessions to keep its row control. It then runs again with no credential and requires the missing-token message
 (`features/pr-open.md`). Evidence goes to `.verify/evidence/latest/pr/{fake,off}/`.
 
 ## Evidence
@@ -425,30 +447,31 @@ touch `.verify/evidence/`; after cleanup, confirm the evidence is still there.
 
 ## Helpers
 
-| File                 | Purpose                                                                          |
-| -------------------- | -------------------------------------------------------------------------------- |
-| `up.sh`              | Launch isolated API + web, wait for readiness                                    |
-| `down.sh`            | Stop only what `up.sh` started                                                   |
-| `doctor.sh`          | Read-only health check of the instance                                           |
-| `drive.mjs`          | Browser drive + evidence capture                                                 |
-| `seed-attention.ts`  | The attention block's board, cards and the run's ask                             |
-| `spend.sh`           | The spend pane's own priced instance and its drive (`spend.mjs`)                 |
-| `thread.sh`          | The card thread's own asking instance and its drive (`thread.mjs`)               |
-| `seed-spend.ts`      | The spend drive's board and the two cards its runs start from                    |
-| `repos.sh`           | The repositories page's own instance, checkouts and drive (`repos.mjs`)          |
-| `board-create.sh`    | The New board form's own instance, empty database and drive (`board-create.mjs`) |
-| `first-run.sh`       | The first run's own instance, empty database and drive (`first-run.mjs`)         |
-| `board-settings.sh`  | The settings page's own instance (a role model) and drive (`board-settings.mjs`) |
-| `skills.sh`          | The skill pages' own instance, throwaway database and drive (`skills.mjs`)       |
-| `triggers.sh`        | The triggers page's own instance (secret, rules) and drive (`triggers.mjs`)      |
-| `definition-edit.sh` | The definition editor's own instance and drive (`definition-edit.mjs`)           |
-| `backend.sh`         | The anthropic-inferred instance, no banner, and the model (`backend.mjs`)        |
-| `history.sh`         | A long history's own short-idle instance and its drive (`history.mjs`)           |
-| `auth.sh`            | An API that requires a token, two dashboards and the drive (`auth.mjs`)          |
-| `model.sh`           | The model picker's own instance (`DEFAULT_MODEL`) and drive (`model.mjs`)        |
-| `session-new.sh`     | The New session form's own instance, checkouts and drive (`session-new.mjs`)     |
-| `pr.sh`              | Open pull request's own instance, fake GitHub and drive (`pr.mjs`)               |
-| `features/`          | Feature map: what each user-facing feature is and how to prove it                |
+| File                   | Purpose                                                                                                                       |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `up.sh`                | Launch isolated API + web, wait for readiness                                                                                 |
+| `down.sh`              | Stop only what `up.sh` started                                                                                                |
+| `doctor.sh`            | Read-only health check of the instance                                                                                        |
+| `drive.mjs`            | Browser drive + evidence capture                                                                                              |
+| `seed-attention.ts`    | The attention block's board, cards and the run's ask                                                                          |
+| `spend.sh`             | The spend pane's own priced instance and its drive (`spend.mjs`)                                                              |
+| `thread.sh`            | The card thread's own asking instance and its drive (`thread.mjs`)                                                            |
+| `seed-spend.ts`        | The spend drive's board and the two cards its runs start from                                                                 |
+| `repos.sh`             | The repositories page's own instance, checkouts and drive (`repos.mjs`)                                                       |
+| `board-create.sh`      | The New board form's own instance, empty database and drive (`board-create.mjs`)                                              |
+| `first-run.sh`         | The first run's own instance, empty database and drive (`first-run.mjs`)                                                      |
+| `board-settings.sh`    | The settings page's own instance (a role model) and drive (`board-settings.mjs`)                                              |
+| `skills.sh`            | The skill pages' own instance, throwaway database and drive (`skills.mjs`)                                                    |
+| `triggers.sh`          | The triggers page's own instance (secret, rules) and drive (`triggers.mjs`)                                                   |
+| `definition-edit.sh`   | The definition editor's two instances (one with no role table, `definition-edit-roles.mjs`) and drive (`definition-edit.mjs`) |
+| `backend.sh`           | The anthropic-inferred instance, no banner, and the model (`backend.mjs`)                                                     |
+| `history.sh`           | A long history's own short-idle instance and its drive (`history.mjs`)                                                        |
+| `auth.sh`              | An API that requires a token, two dashboards and the drive (`auth.mjs`)                                                       |
+| `model.sh`             | The model picker's own instance (`DEFAULT_MODEL`) and drive (`model.mjs`)                                                     |
+| `session-new.sh`       | The New session form's own instance, checkouts and drive (`session-new.mjs`)                                                  |
+| `pr.sh`                | Open pull request's own instance, fake GitHub and drive (`pr.mjs`)                                                            |
+| `model-unavailable.sh` | Two boots of one API (a pinned model, then not served) and the drive (`model-unavailable.mjs`)                                |
+| `features/`            | Feature map: what each user-facing feature is and how to prove it                                                             |
 
 ## Feature map
 

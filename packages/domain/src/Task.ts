@@ -846,12 +846,21 @@ export type RequirementOption = typeof RequirementOption.Type;
  * What an authored definition version may name besides skills (D6), from the rules `defineBoard`
  * holds a version to: every requirement key the factory knows, and the roles it accepts — the
  * deployment's role table, the roles the harness gives meaning to, and the roles a held definition
- * already declares. The dashboard's editor offers these and nothing typed, so a key or a role it
- * offers is one the server accepts. Skills are `listSkills`'.
+ * already declares. The dashboard's editor offers these and nothing typed — except a role name when
+ * the deployment has no role table (`rolesOpen`), which `defineBoard` then accepts whatever it is —
+ * so a key or a role it offers is one the server accepts. Skills are `listSkills`'.
  */
 export const DefinitionVocabulary = Schema.Struct({
   requirements: Schema.Array(RequirementOption),
   roles: Schema.Array(Schema.String),
+  /**
+   * Whether the deployment has no role table (`ROLE_MODELS` unset, B6): then `defineBoard` accepts
+   * any role name — every role runs on the deployment's model — and the editor lets a person type
+   * one the lists above do not hold. With a table, `roles` is closed: a role outside it is the typo
+   * the server refuses. Optional so a dashboard reading an older server still decodes its answer;
+   * an absent value reads as closed.
+   */
+  rolesOpen: Schema.optional(Schema.Boolean),
 });
 export type DefinitionVocabulary = typeof DefinitionVocabulary.Type;
 

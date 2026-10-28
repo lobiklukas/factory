@@ -17,6 +17,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import {
+  NO_CHANGE_ENTRY_KIND,
   diffView,
   projectEntry,
   projectInbox,
@@ -226,5 +227,22 @@ describe("projectEntry on a failed model request (S-notifications)", () => {
     expect(projected.isError).toBeUndefined();
     expect(projected.error).toBeUndefined();
     expect(projected.text).toBe("done");
+  });
+});
+
+describe("projectEntry on the no-change entry (F18)", () => {
+  const noChange = (text: string): EntryRecord => ({
+    id: 9 as EntryId,
+    conversationId: ROOT_CONVERSATION_ID,
+    kind: NO_CHANGE_ENTRY_KIND,
+    data: { text },
+  });
+
+  it("reads the stored text, so a log written with the first wording still renders it", () => {
+    const old =
+      "no documentation change: the branch has nothing to publish against main";
+    expect(projectEntry(noChange(old)).text).toBe(old);
+    const current = "no change: the branch has nothing to publish against main";
+    expect(projectEntry(noChange(current)).text).toBe(current);
   });
 });

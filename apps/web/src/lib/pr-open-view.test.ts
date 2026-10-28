@@ -10,9 +10,11 @@ import { Cause } from "effect";
 import { AsyncResult } from "effect/reactivity";
 import { describe, expect, it } from "vitest";
 import {
+  activityMoved,
   attemptOfCause,
   attemptOfResult,
   attemptOfStep,
+  forgeRefusalRepeats,
   openedUrl,
   prOffer,
   prTitleFor,
@@ -156,6 +158,81 @@ describe("attemptOfCause", () => {
     expect(attempt._tag === "failed" && attempt.reason).toContain(
       "connection dropped",
     );
+  });
+});
+
+describe("a forge refusal that will repeat (C7b)", () => {
+  const forge = (fields: {
+    status?: number;
+    existing?: string;
+    rateLimited?: boolean;
+  }) =>
+    attemptOfCause(
+      Cause.fail(
+        new PrError({
+          operation: "createPullRequest",
+          ref: "acme/web:factory/s->main",
+          message: "GitHub answered HTTP 422: A pull request already exists",
+          ...fields,
+        }),
+      ),
+    );
+
+  it("is determinate when the forge answered a 4xx verdict: no retry is offered", () => {
+    for (const status of [401, 403, 404, 410, 422]) {
+      expect(forge({ status })._tag, `HTTP ${status}`).toBe("refused");
+    }
+    expect(forge({ status: 422 })).toEqual({
+      _tag: "refused",
+      reason: "GitHub answered HTTP 422: A pull request already exists",
+    });
+  });
+
+  it("stays a retry for what passes: no status, a 5xx, a timeout, a rate limit", () => {
+    expect(forge({})._tag).toBe("failed");
+    for (const status of [500, 502, 503, 408, 425, 429]) {
+      expect(forge({ status })._tag, `HTTP ${status}`).toBe("failed");
+    }
+    expect(forge({ status: 403, rateLimited: true })._tag).toBe("failed");
+    expect(forgeRefusalRepeats(403, true)).toBe(false);
+    expect(forgeRefusalRepeats(403, false)).toBe(true);
+    expect(forgeRefusalRepeats(200, false)).toBe(false);
+  });
+
+  it("carries the existing PR the forge named, and the refusal blocks with the link", () => {
+    const named = forge({
+      status: 422,
+      existing: "https://github.com/acme/web/pull/41",
+    });
+    expect(named).toEqual({
+      _tag: "refused",
+      reason: "GitHub answered HTTP 422: A pull request already exists",
+      existing: "https://github.com/acme/web/pull/41",
+    });
+    expect(prOffer(idle, named)).toEqual({
+      _tag: "blocked",
+      reason: "GitHub answered HTTP 422: A pull request already exists",
+      existing: "https://github.com/acme/web/pull/41",
+    });
+  });
+});
+
+describe("activityMoved (C7b)", () => {
+  const at = "2026-10-28T10:00:00.000Z";
+  const later = "2026-10-28T10:00:07.250Z";
+
+  it("is a session the server says has moved on since the refusal, however nobody watched", () => {
+    expect(activityMoved(at, later)).toBe(true);
+  });
+
+  it("keeps the refusal while the server reports the same activity", () => {
+    expect(activityMoved(at, at)).toBe(false);
+  });
+
+  it("is no evidence when either side was not read: a mark that never landed, an unlisted session", () => {
+    expect(activityMoved(undefined, later)).toBe(false);
+    expect(activityMoved(at, undefined)).toBe(false);
+    expect(activityMoved(undefined, undefined)).toBe(false);
   });
 });
 

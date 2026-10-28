@@ -69,7 +69,7 @@ _inside_ a checkout and must measure nothing).
 
 **An unchanged branch opens nothing (LOB-196).** The same measurement answers the smaller question
 first: a branch with no file changed against its base answers `{outcome: "no-change"}`, appends one
-`factory.pr.no-change` entry to the transcript (`no documentation change: the branch has nothing to
+`factory.pr.no-change` entry to the transcript (`no change: the branch has nothing to
 publish against <base>`) and reaches GitHub not at all — no request, no `factory.pr`, no `pr_url`.
 That is the ordinary result of a docs run over docs that need no edit, which before this was a typed
 422 from GitHub, i.e. a failed run. Nothing is recorded about the answer, so a later run that does

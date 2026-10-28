@@ -92,7 +92,12 @@ publish`, which the script boots the API with) and its own, `building` with the 
    started on a card in `careful` (the faux run calls `sleep 0 && echo faux-ok`) to park idle on one
    approval for `sleep`, its command not run, while the same call in `building` runs unasked.
 
-Evidence goes to `.verify/evidence/latest/board-settings/`: `board-settings-newest.png`,
+10. (F9) a board pinned to v2 with its settings page open and marked: pressing **Upgrade** re-pins it,
+    and the same document (the marker survives, so no reload) names the newest version, lists that
+    version's columns equal to `getDefinition`, says it is the newest and drops the newer-version
+    notice. `boardConfigAtom` re-reads on `BOARD_PIN_KEY`, which the upgrade invalidates.
+
+Evidence goes to `.verify/evidence/latest/board-settings/`: `board-settings-repinned.png`, `board-settings-newest.png`,
 `board-settings-pinned.png`, `board-settings-lanes.png` (every disclosure open),
 `board-settings-missing.png`, `board-settings-autonomy.png` (the gated column),
 `board-settings-autonomy-page.png`, `observed.json` (every oracle, what the page showed, both
@@ -103,5 +108,6 @@ except a settings disclosure's, and its write check still fails on any write the
 
 ## Last run
 
-2026-10-28 from the `agent/C22` worktree, API `:9520` / web `:3520`: **28/28** passed (C22 added the
+2026-10-28 from `agent/F2-F3-F4-F9`, API `:9562` / web `:3562`: **33/33** passed (F9 added the re-pin
+checks and a console-error check after them). Before it: 2026-10-28 from the `agent/C22` worktree, API `:9520` / web `:3520`: **28/28** passed (C22 added the
 five autonomy checks). Before it: 2026-10-28 from `agent/D3`, API `:9540` / web `:3540`, 23/23.

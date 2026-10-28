@@ -47,4 +47,7 @@ Strategy preference, in order: (1) in-process fake behind an existing Effect ser
 interception at the client boundary; (3) a local emulator or mock server in a container; (4) record
 and replay. Prefer a small typed hand-written fake over a heavy tool when the surface is a few
 calls. Record license, last release date, and the pinned version. State what the fake cannot prove
-and whether a contract test or an opt-in live smoke backs it.
+and whether a contract test or an opt-in live smoke backs it. A live smoke is a hand run with a real
+webhook pointed at a tunnel; none is recorded. `docs/getting-started.md` has the runbook for one (a
+tunnel, a Linear webhook, a GitHub webhook, and what to read back), and its rehearsal half is walked
+against the fakes by `.pi/skills/verify-board/guide.sh`.

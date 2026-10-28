@@ -33,7 +33,7 @@ export const skillsAtom = runtime.atom(
 
 /**
  * What else an authored version may name (D6): the requirement keys the factory knows and the roles
- * `defineBoard` accepts, which the editor's pickers offer and nothing typed.
+ * `defineBoard` accepts, which the editor's pickers offer; with no role table a role may also be typed.
  */
 export const definitionVocabularyAtom = runtime.atom(
   Effect.gen(function* () {
