@@ -210,6 +210,46 @@ describe("a trigger route with no secret", () => {
   });
 });
 
+describe("a delivery refused before the seam", () => {
+  // T4: `listTriggerDeliveries` reads what the seam recorded, so what is refused earlier — a wrong
+  // signature (`401`), a body over the cap (`413`), a route with no secret (`503`, above) — is by
+  // design not in it: the table is the dedupe fact, and a stranger's unauthenticated request must not
+  // be able to write a row. The seam is the only writer, and these cases hold that the route hands it
+  // nothing, so removing either check turns them red with `expected 200 to be 401` / `to be 413`.
+  beforeEach(() => {
+    configure({ TRIGGER_SECRET: "generic-secret" });
+  });
+
+  it("is 401 for a wrong signature on both a generic and a Linear delivery, and hands the seam nothing", async () => {
+    configure({
+      TRIGGER_SECRET: "generic-secret",
+      LINEAR_WEBHOOK_SECRET: "linear-secret",
+    });
+    const viaGeneric = await post("/webhooks/generic", generic, "not-it");
+    const viaLinear = await post("/webhooks/linear", linear, "not-it");
+
+    expect(viaGeneric.status).toBe(401);
+    expect(viaLinear.status).toBe(401);
+    expect(delivered).toHaveLength(0);
+  });
+
+  it("is 413 for a body over TRIGGER_MAX_BODY_BYTES, even correctly signed, and hands the seam nothing", async () => {
+    process.env["TRIGGER_MAX_BODY_BYTES"] = "64";
+    try {
+      const refused = await post(
+        "/webhooks/generic",
+        { ...generic, body: "x".repeat(200) },
+        "generic-secret",
+      );
+      expect(refused.status).toBe(413);
+      expect(refused.body).toMatchObject({ code: "body-too-large" });
+      expect(delivered).toHaveLength(0);
+    } finally {
+      delete process.env["TRIGGER_MAX_BODY_BYTES"];
+    }
+  });
+});
+
 describe("a replay of a delivery still in flight", () => {
   // LOB-216: the seam answers `received` to a replay whose claim has no outcome yet — the first
   // process may be working, or may have been killed. A `200` would end Linear's retries (it stops on

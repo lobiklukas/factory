@@ -443,6 +443,10 @@ describe("a call without a credential the control plane knows (LOB-20)", () => {
     const routes = await asStranger((client) =>
       failureOf(client.listTriggerRoutes({})),
     );
+    // The recorded deliveries carry a source's reason text and the ids of the work it started.
+    const deliveries = await asNobody((client) =>
+      failureOf(client.listTriggerDeliveries({})),
+    );
     const approval = await asNobody((client) =>
       failureOf(
         client.decideApproval({
@@ -472,6 +476,10 @@ describe("a call without a credential the control plane knows (LOB-20)", () => {
     expect(routes).toMatchObject({
       _tag: "Unauthenticated",
       reason: "invalid",
+    });
+    expect(deliveries).toMatchObject({
+      _tag: "Unauthenticated",
+      reason: "missing",
     });
     expect(approval).toMatchObject({
       _tag: "Unauthenticated",
