@@ -93,9 +93,12 @@ import {
 } from "@repo/domain/Skill";
 import {
   AddTriggerRouteInput,
+  ListTriggerDeliveriesInput,
+  ListTriggerDeliveriesOutput,
   ListTriggerRoutesInput,
   ListTriggerRoutesOutput,
   RemoveTriggerRouteInput,
+  TriggerDeliveryError,
   TriggerRoute,
   TriggerRouteError,
   TriggerRouteNotFound,
@@ -567,6 +570,13 @@ export class TriggerRoutesRpc extends RpcGroup.make(
     payload: RemoveTriggerRouteInput,
     success: TriggerRoute,
     error: Schema.Union([TriggerRouteError, TriggerRouteNotFound]),
+  }),
+  // The deliveries the seam recorded (T4), newest first, each with its outcome and the reason
+  // verbatim, so "why did my labelled issue start nothing" is a read, not a log search.
+  Rpc.make("listTriggerDeliveries", {
+    payload: ListTriggerDeliveriesInput,
+    success: ListTriggerDeliveriesOutput,
+    error: TriggerDeliveryError,
   }),
 ).middleware(ControlPlaneAuth) {}
 
