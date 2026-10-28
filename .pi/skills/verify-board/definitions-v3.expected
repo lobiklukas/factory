@@ -1,0 +1,48 @@
+definition  default v3  Default pipeline
+intake  resting
+  role      —
+  model     faux/faux-1 (deployment)
+  skills    —
+  requires  —
+  exits     specifying, canceled
+specifying  working
+  role      specifier
+  model     faux/faux-1 (deployment)
+  skills    specify
+  requires  spec_doc (unchecked): a spec doc, gaps declared (explicitly [] when there are none)
+  exits     planning, canceled
+planning  working
+  role      planner
+  model     faux/faux-1 (deployment)
+  skills    —
+  requires  plan_doc (unchecked): a plan doc
+            human_move (unchecked): a human move (B5's plan approval gate)
+  exits     building [human gate: plan approval], canceled
+building  working
+  role      builder
+  model     faux/builder (role)
+  skills    implement
+  requires  run_completed (unchecked): a run that completed
+            non_empty_diff (checked): a non-empty diff
+            pr_link (checked): a PR link
+  exits     review, canceled
+review  working
+  role      reviewer
+  model     faux/faux-1 (deployment)
+  skills    review
+  requires  verified (checked): a passing verification of every surface the card's change touched
+            review_verdict (unchecked): a review verdict
+            human_merge (unchecked): a human merge (B5's merge gate)
+  exits     done [human gate: merge], canceled
+done  terminal
+  role      —
+  model     faux/faux-1 (deployment)
+  skills    —
+  requires  —
+  exits     —
+canceled  terminal
+  role      —
+  model     faux/faux-1 (deployment)
+  skills    —
+  requires  —
+  exits     —

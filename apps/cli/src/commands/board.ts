@@ -25,6 +25,7 @@ import { resolveApiUrl } from "../api";
 import { reportFailure, reportFailures } from "../errors";
 import { NO_PR } from "./ls";
 import { BoardClient } from "../rpc";
+import { boardConfigCommands } from "./boardConfig";
 
 /**
  * `factory board` — the board over the same RPC client the dashboard uses (D9).
@@ -927,7 +928,7 @@ const runsCommand = Command.make(
 
 export const boardCommand = Command.make("board").pipe(
   Command.withDescription(
-    "Create a board, then read and move its cards: lanes, one card, a move, a comment, a run, a block, what needs a person",
+    "Create a board, read its configuration, then read and move its cards: lanes, one card, a move, a comment, a run, a block, what needs a person",
   ),
   Command.withSubcommands([
     createCommand,
@@ -936,6 +937,8 @@ export const boardCommand = Command.make("board").pipe(
     moveCommand,
     commentCommand,
     startCommand,
+    // Read-only: which boards and definitions exist, and what each does (LOB-270).
+    ...boardConfigCommands,
     blockCommand,
     unblockCommand,
     attentionCommand,

@@ -210,6 +210,113 @@ export const LIST_BOARDS_LIMIT = 100;
 export const DEFAULT_DEFINITION_ID = "default";
 
 /**
+ * One version of a definition as the list names it (LOB-270): enough to pick one for `createBoard`
+ * without reading every version's columns.
+ */
+export const DefinitionVersionSummary = Schema.Struct({
+  version: Schema.Int,
+  name: Schema.String,
+  createdAt: Timestamp,
+});
+export type DefinitionVersionSummary = typeof DefinitionVersionSummary.Type;
+
+/** A definition and every version it holds, oldest first (LOB-270). */
+export const DefinitionSummary = Schema.Struct({
+  id: DefinitionId,
+  versions: Schema.Array(DefinitionVersionSummary),
+});
+export type DefinitionSummary = typeof DefinitionSummary.Type;
+
+/**
+ * Which definitions exist (LOB-270), ordered by id: what `factory board create --definition` and
+ * `--definition-version` can name. Definitions are written by migrations only, so the list is small
+ * and is answered whole.
+ */
+export const ListDefinitionsInput = Schema.Struct({});
+export type ListDefinitionsInput = typeof ListDefinitionsInput.Type;
+
+/**
+ * One definition version, with what each column does (LOB-270). `version` absent reads the newest,
+ * as `createBoard` pins it; an unknown id, or a version it does not hold, is `DefinitionNotFound`.
+ */
+export const GetDefinitionInput = Schema.Struct({
+  definitionId: DefinitionId,
+  version: Schema.optional(Schema.Int),
+});
+export type GetDefinitionInput = typeof GetDefinitionInput.Type;
+
+/** A board's configuration (LOB-270): its instance and the definition version it pins, described. */
+export const GetBoardConfigInput = Schema.Struct({ boardId: BoardInstanceId });
+export type GetBoardConfigInput = typeof GetBoardConfigInput.Type;
+
+/**
+ * One move a column declares (B5), and the human gate it crosses when it crosses one: the move only a
+ * person can make. Built from the same table `TaskService` refuses by, so what a reader is told is
+ * what a move meets.
+ */
+export const ColumnExit = Schema.Struct({
+  to: Schema.String,
+  humanGate: Schema.optional(Schema.String),
+});
+export type ColumnExit = typeof ColumnExit.Type;
+
+/**
+ * One exit requirement as a reader is told it (LOB-270): the declared key and description, and
+ * whether the board checks it on a move today. `checked: false` is a key the definition declares and
+ * nothing enforces as a requirement yet — a human gate's `human_*` key among them, which the move's
+ * actor check enforces instead and the column's exits mark.
+ */
+export const RequirementConfig = Schema.Struct({
+  key: Schema.String,
+  description: Schema.String,
+  checked: Schema.Boolean,
+});
+export type RequirementConfig = typeof RequirementConfig.Type;
+
+/**
+ * The model a run started in a column talks to (B6, LOB-207): `provider/modelId`, and where it came
+ * from — the role's row in the deployment's `ROLE_MODELS` (`role`), or the deployment's own model for
+ * a role with no row and a column with no role (`deployment`). Deployment configuration, read-only.
+ */
+export const ResolvedModel = Schema.Struct({
+  model: Schema.String,
+  source: Schema.Literals(["role", "deployment"]),
+});
+export type ResolvedModel = typeof ResolvedModel.Type;
+
+/** One column as a reader is told it (LOB-270): the declared column, plus what the factory does with it. */
+export const ColumnConfig = Schema.Struct({
+  name: Schema.String,
+  kind: ColumnKind,
+  role: Schema.optional(Schema.String),
+  model: ResolvedModel,
+  skills: Schema.Array(Schema.String),
+  requires: Schema.Array(RequirementConfig),
+  exits: Schema.Array(ColumnExit),
+});
+export type ColumnConfig = typeof ColumnConfig.Type;
+
+/**
+ * A definition version described (LOB-270): every column in declaration order with its exits, human
+ * gates, checked and unchecked requirements and its role's resolved model, so an operator can see what
+ * a board will do before trusting it.
+ */
+export const DefinitionConfig = Schema.Struct({
+  id: DefinitionId,
+  version: Schema.Int,
+  name: Schema.String,
+  columns: Schema.Array(ColumnConfig),
+});
+export type DefinitionConfig = typeof DefinitionConfig.Type;
+
+/** A board's full configuration (LOB-270): the instance and its pinned definition version, described. */
+export const BoardConfig = Schema.Struct({
+  instance: BoardInstance,
+  definition: DefinitionConfig,
+});
+export type BoardConfig = typeof BoardConfig.Type;
+
+/**
  * A new board (B2, LOB-208): one repository bound to a version of a named definition.
  *
  * `definitionVersion` is optional and defaults to the definition's **newest** version, read when the
@@ -485,8 +592,9 @@ export class BoardNotFound extends Schema.TaggedError<BoardNotFound>()(
 ) {}
 
 /**
- * A board was asked for over a definition the factory does not hold (LOB-208): no row with that id,
- * or — when the caller named one — no such version of it. `version` is absent for the first.
+ * A board was asked for over a definition the factory does not hold (LOB-208), or a definition was
+ * read that it does not hold (LOB-270): no row with that id, or — when the caller named one — no such
+ * version of it. `version` is absent for the first.
  */
 export class DefinitionNotFound extends Schema.TaggedError<DefinitionNotFound>()(
   "DefinitionNotFound",

@@ -1,6 +1,6 @@
 ---
 name: verify-board
-description: Drive and prove the factory board — create a board and a card, move it, assert the three refusals (undeclared transition, stale revision, a run crossing a human gate), and take the card through specify → ask → answer → the next run → build → PR with evidence → review → merge, through `factory board create|ls|show|move|comment|start|block|unblock|attention|runs` and `factory pr` in apps/cli against a real control plane in a real tmux terminal, then read the board back in the dashboard, and cross-check the CLI and the browser on one card both ways (`equivalence.sh` runs verify-cli and verify-web too); includes the ask on the task across a restart. Use when asked to verify, test, or show evidence that the board works from the command line, or after changing apps/cli, packages/domain, packages/core's TaskService, or apps/api.
+description: Drive and prove the factory board — create a board and a card, move it, assert the three refusals (undeclared transition, stale revision, a run crossing a human gate), and take the card through specify → ask → answer → the next run → build → PR with evidence → review → merge, through `factory board create|ls|show|move|comment|start|block|unblock|attention|runs` and `factory pr`, read definitions and a board's configuration through `factory board definitions|definition show|list|config`, in apps/cli against a real control plane in a real tmux terminal, then read the board back in the dashboard, and cross-check the CLI and the browser on one card both ways (`equivalence.sh` runs verify-cli and verify-web too); includes the ask on the task across a restart. Use when asked to verify, test, or show evidence that the board works from the command line, or after changing apps/cli, packages/domain, packages/core's TaskService, or apps/api.
 ---
 
 # Verify the board
@@ -43,9 +43,10 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 | the ask on the task (B7)         | `ask.sh`: busy, then parked; block + question; restart; answer; next prompt                 | a run that needs a person ends, and the answer reaches the next run  |
 | `requires[]` on exit (B8)        | `requires.sh`: building refused with no diff, then no PR; review refused, then through      | a refusal names the requirement; evidence is a condition of the move |
 | the surfaces' drives (LOB-87)    | `equivalence.sh`: verify-cli, verify-web, then this drive, one at a time                    | the equivalence holds with both surfaces' own drives green           |
+| definitions and config (LOB-270) | `definitions.sh`: `definitions`, `definition show`, `list`, `config`; v3 against a golden   | an operator sees what a board will do before trusting it             |
 
-Every check is required: `drive.sh`, `ask.sh`, `requires.sh`, `board-create.sh`, `triage.sh` and `equivalence.sh`
-each exit non-zero when one fails, and `drive.sh` folds `create.ts`'s, `ask.ts`'s and `spec.ts`'s (its
+Every check is required: `drive.sh`, `ask.sh`, `requires.sh`, `board-create.sh`, `definitions.sh`, `triage.sh` and
+`equivalence.sh` each exit non-zero when one fails, and `drive.sh` folds `create.ts`'s, `ask.ts`'s and `spec.ts`'s (its
 specify phase), `spec-pane.mjs`'s, `web.mjs`'s, `both-ways.mjs`'s and `build.ts`'s (its build phase)
 exit codes into its own.
 
@@ -123,6 +124,7 @@ runs the real script against a closed port and an answering one.
 ./ask.sh         # standalone: starts, kills and restarts its own API on ASK_PORT (default 9401)
 ./requires.sh    # standalone: its own API on REQUIRES_PORT (default 9402) and GitHub fake on REQUIRES_GITHUB_PORT (9404), four runs on one card
 ./board-create.sh  # requires the instance from ./up.sh, and DATABASE_URL naming its database
+./definitions.sh   # requires the instance from ./up.sh, and DATABASE_URL naming its database
 ./triage.sh      # requires the instance from ./up.sh: attention's question and gate rows, block/unblock refusals
 ./equivalence.sh   # standalone, no instance up: verify-cli, verify-web, then up/drive/down here
 ```
@@ -141,6 +143,14 @@ board, a card and a run on it whose prompt carries the `specifying` column's ski
 `board_exists` refusal of a second board over one repository, and the two `definition_not_found`
 refusals plus a malformed `--repo`. `board-create.ts` reads the newest version
 straight from the database (the oracle) and the run's prompt from its log. See `features/boards.md`.
+
+`definitions.sh` (LOB-270) reads the board's configuration from the terminal: `factory board
+definitions` (default v1 through the newest), `factory board definition show default --version 3`
+(each column's kind, role or `—`, resolved model, skills, requires marked checked or unchecked, and
+exits with the human gates marked), compared whole with the hand-written `definitions-v3.expected`
+and once more as a tmux pane, the newest by default, `factory board list` and `factory board config`,
+and the `definition_not_found`, `board_not_found` and `invalid_input` refusals. The expected models
+are `up.sh`'s `ROLE_MODELS`. See `features/definitions.md`.
 
 `triage.sh` (LOB-264) proves `factory board attention` and the by-hand `block`/`unblock` on two cards of
 its own: one blocked `needs_input` with a note (a `question` row) and one with an idle run in
@@ -229,6 +239,9 @@ Written to `.verify/evidence/latest/board/` (override with `EVIDENCE_DIR`), giti
   the CLI outputs
 - `create-board.json`, `create-board-*.txt`, `create-board-prompt.json` — `board-create.sh`'s checks,
   each command with its output, and the run's prompt sections
+- `definitions.json`, `definitions-*.txt`, `definitions-*.diff`, `definitions-pane.txt` —
+  `definitions.sh`'s checks, each command with its output, the comparisons with the expected
+  description, and the tmux pane
 - `../equivalence/observed.json`, `../equivalence/<step>.log` — `equivalence.sh`'s steps and their
   exit codes; the drives it runs write `../cli/`, `../web/` and this directory
 
