@@ -14,6 +14,7 @@ import {
 import { NEW_BOARD } from "@/lib/board-create-view";
 import { NEW_CARD } from "@/lib/card-create-view";
 import { buttonVariants } from "@/components/ui/button";
+import { GuideLink } from "@/components/guide-link";
 
 /** One step's press: a link to the form it is, or the name of what it waits for. */
 const StepAction = ({ step }: { readonly step: FirstRunStep }) => {
@@ -148,6 +149,7 @@ export const GettingStarted = ({
               <span className="text-[11px] text-muted-foreground">
                 {step.detail}
               </span>
+              <GuideLink step={step.id} />
             </span>
             <StepAction step={step} />
           </li>

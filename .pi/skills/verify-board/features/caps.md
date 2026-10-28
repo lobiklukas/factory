@@ -18,7 +18,8 @@ and the runs holding the slots; the error carries the cap typed (`cap.kind`: `ta
 board has room. A refused start writes no `task_runs` row and opens no session.
 
 A run is in flight from its start until its session first goes idle (`task_runs.finished_at`), unless
-its card is `done` or `canceled`, or its workspace was released, first. A run opened without a prompt
+its card is `done` or `canceled`, or its workspace was released, first. A run opened with no prompt (`--idle`; since C6 a start with no `--prompt` is sent the card's
+default prompt and settles when its turn ends)
 is in flight while it waits: send it its message, discard its session (`factory discard`), or finish
 its card, to free its slot. A start that fails after its rows are written (its owner does not open)
 ends its run there, so it holds no slot; so does a run a restart finds already settled, and a run
@@ -46,7 +47,9 @@ A column with a WIP limit prints `wip       at most N runs in flight` under its 
 MODE=define` writes a definition of the drive's own with two versions, as a migration writes one —
 v1 caps 2/1/2 and gives `review` a WIP limit of 1; v2 caps 3/1/3 — and the drive makes boards over it
 with `factory board create --definition … --definition-version …`, cards with `factory board add`, and
-runs with `factory board start` (no prompt, so every run stays in flight and every count is exact):
+runs with `factory board start --idle` (the run is sent nothing, so every run stays in flight and every
+count is exact; without `--idle` the faux run settles when its `sleep 8` ends and gives up its slot,
+which is what made eight of these checks fail on main until F11):
 
 1. **read** — `definition show` prints v1's caps line and `review`'s WIP limit, and v2's other caps.
 2. **task** — a second start on one card is refused naming `caps.task=1`; the card's runs, the
