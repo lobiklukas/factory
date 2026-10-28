@@ -18,6 +18,7 @@ import type { SessionId } from "@repo/domain/Session";
 import { createFauxModelAccess } from "@repo/harness";
 import { DatabaseLive } from "@repo/storage-postgres";
 import { Effect, Exit, Layer, ManagedRuntime, Metric, Option } from "effect";
+import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import {
   Refusals,
@@ -27,6 +28,7 @@ import {
   type SessionOrigin,
   SessionsActive,
 } from "./metrics";
+import { mintBoardId, mintTaskId } from "./ids";
 import {
   MAX_MESSAGE_CHARS,
   SessionService,
@@ -202,6 +204,65 @@ describe("factory.run.duration", () => {
     // The faux naps before each of a turn's two steps (a tool call, then the answer).
     expect(outcome.seconds).toBeGreaterThanOrEqual((2 * SLEEP_MS) / 1000);
     expect(outcome.seconds).toBeLessThan(60);
+  }, 60_000);
+});
+
+describe("task_runs.finished_at (LOB-44)", () => {
+  /**
+   * The outcome metrics' factory time is a card's runs from `started_at` to `finished_at`, which the
+   * same busy-to-idle observation that times a run writes.
+   *
+   * Mutation: drop the `finished_at` write — the column stays `NULL`.
+   * Mutation: write it when the run turns busy — it is not two faux naps after the row was written.
+   */
+  it("ends a card's run where its session goes idle", async () => {
+    const outcome = await sleeping.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const created = yield* sessions.create({ title: "a card's run" });
+        // Ids of the real shape: other suites list every board in this database and decode each.
+        const board = yield* mintBoardId;
+        const task = yield* mintTaskId;
+        yield* sql`
+          INSERT INTO board_instances (id, repo, definition_id, definition_version)
+          VALUES (${board}, ${`acme/metrics-${randomBytes(6).toString("hex")}`}, 'default', 1)
+        `;
+        yield* sql`
+          INSERT INTO tasks (id, board_id, "column", definition_version, revision)
+          VALUES (${task}, ${board}, 'building', 1, 1)
+        `;
+        yield* sql`
+          INSERT INTO task_runs (id, task_id, session_id, "column")
+          VALUES (${created.id}, ${task}, ${created.id}, 'building')
+        `;
+        const before = yield* runs;
+        yield* sessions.send({ sessionId: created.id, content: "finish me" });
+        yield* settledAfter(sessions, created.id, "finish me");
+        yield* waitUntil(
+          runs.pipe(Effect.map((state) => state.count > before.count)),
+          "the run's duration to be recorded",
+        );
+        const finished = () =>
+          sql<{ readonly ran: number | null }>`
+            SELECT
+              (extract(epoch FROM tr.finished_at - tr.started_at))::double precision AS ran
+            FROM task_runs tr WHERE tr.session_id = ${created.id}
+          `;
+        yield* waitUntil(
+          finished().pipe(Effect.map((rows) => rows[0]?.ran != null)),
+          "the run's finished_at to be written",
+        );
+        const ran = (yield* finished())[0];
+        // The card goes with its board (and its run with the card), so no other suite reads it.
+        yield* sql`DELETE FROM board_instances WHERE id = ${board}`;
+        return ran;
+      }),
+    );
+    // The faux naps before each of a turn's two steps, so the run ended at least that long after the
+    // row was written — which a write at the run's start would not.
+    expect(outcome?.ran).toBeGreaterThanOrEqual((2 * SLEEP_MS) / 1000);
+    expect(outcome?.ran).toBeLessThan(60);
   }, 60_000);
 });
 

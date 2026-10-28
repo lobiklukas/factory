@@ -14,6 +14,11 @@
  *   merge it is asked to mirror.
  * - **An unsigned merge tears nothing down**, because the signature is what the release is gated on.
  *
+ * The merge is also recorded on the PR's session (LOB-44): `factory.merge` in its log and
+ * `sessions.pr_merged_at` beside it, once however often GitHub redelivers it, and a later merged PR
+ * whose body says `Reverts owner/repo#N` records the revert on PR `N`'s session. `rebuildIndexes`
+ * refolds both columns from the log.
+ *
  * `issues` and `issue_comment` (LOB-259) are the same route's second job: a signed `factory` label
  * or `@factory` mention reaches the real trigger seam on this database and opens one session, and the
  * issue gets one comment from the real `GitHubWriteBack` — posted to a loopback GitHub this file
@@ -33,12 +38,17 @@ import {
   CredentialProvider,
   LinearIssueSync,
   LinearSyncError,
+  rebuildIndexes,
   SessionService,
   SessionServiceLive,
 } from "@repo/core";
 import { BranchName, RepoSlug, type SessionId } from "@repo/domain/Session";
-import { createFauxModelAccess } from "@repo/harness";
-import { DatabaseLive, PostgresLive } from "@repo/storage-postgres";
+import { createFauxModelAccess, readSessionLog } from "@repo/harness";
+import {
+  DatabaseLive,
+  PostgresLive,
+  PostgresStorage,
+} from "@repo/storage-postgres";
 import {
   ConfigProvider,
   Effect,
@@ -497,4 +507,141 @@ describe("POST /webhooks/github opens a session from an issue (LOB-259)", () => 
     expect(response.status).toBe(202);
     expect(posted).toHaveLength(before);
   });
+});
+
+/** A session's merge columns, as UTC instants to the second, and how many commits its log holds. */
+const mergeRow = (id: SessionId) =>
+  inService(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const rows = yield* sql<{
+        readonly mergedAt: string | null;
+        readonly revertedAt: string | null;
+        readonly commits: number;
+      }>`
+        SELECT
+          to_char(pr_merged_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS merged_at,
+          to_char(pr_reverted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS reverted_at,
+          (SELECT count(*)::int FROM commits WHERE log_id = ${id}) AS commits
+        FROM sessions WHERE id = ${id}
+      `;
+      return rows[0];
+    }),
+  );
+
+describe("POST /webhooks/github records the merge on the session's log (LOB-44)", () => {
+  /** A session that opened PR `number`: a real log, with the PR link on its row. */
+  const opened = (number: number) =>
+    inService(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        yield* sessions.registerRepo({ repo, localPath: checkout });
+        const session = yield* sessions.create({
+          title: `merge record ${number}`,
+          repo,
+          baseRef: "main",
+        });
+        const url = `https://github.com/${repo}/pull/${number}`;
+        yield* sql`UPDATE sessions SET pr_url = ${url} WHERE id = ${session.id}`;
+        return { id: session.id, url };
+      }),
+    );
+
+  const merged = (
+    number: number,
+    url: string,
+    mergedAt: string,
+    body: string | null = null,
+  ) => ({
+    action: "closed",
+    pull_request: {
+      number,
+      html_url: url,
+      merged: true,
+      merged_at: mergedAt,
+      merge_commit_sha: "0123456789abcdef0123456789abcdef01234567",
+      body,
+    },
+  });
+
+  it("records a merge once, a revert on the PR it names, and rebuildIndexes reproduces both from the log", async () => {
+    const work = await opened(51);
+    const bystander = await opened(52);
+    expect(await mergeRow(work.id)).toMatchObject({
+      mergedAt: null,
+      revertedAt: null,
+    });
+
+    expect(
+      (await deliver(merged(51, work.url, "2026-10-20T10:00:00Z"))).status,
+    ).toBe(200);
+    const recorded = await mergeRow(work.id);
+    expect(recorded).toMatchObject({
+      mergedAt: "2026-10-20T10:00:00Z",
+      revertedAt: null,
+    });
+
+    // A redelivery — even one naming another time — records nothing: no commit, the first merge stands.
+    await deliver(merged(51, work.url, "2026-10-21T10:00:00Z"));
+    expect(await mergeRow(work.id)).toEqual(recorded);
+
+    // An unsigned merge records nothing.
+    expect(
+      (
+        await deliver(
+          merged(52, bystander.url, "2026-10-20T11:00:00Z"),
+          () => "sha256=00",
+        )
+      ).status,
+    ).toBe(401);
+    expect(await mergeRow(bystander.id)).toMatchObject({ mergedAt: null });
+
+    // A person's revert PR, which no session opened, is recorded on the PR it reverts.
+    const revert = `https://github.com/${repo}/pull/53`;
+    await deliver(
+      merged(
+        53,
+        revert,
+        "2026-10-22T09:30:00Z",
+        `Reverts ${repo}#51\n\nThe widget broke.`,
+      ),
+    );
+    expect(await mergeRow(work.id)).toMatchObject({
+      mergedAt: "2026-10-20T10:00:00Z",
+      revertedAt: "2026-10-22T09:30:00Z",
+    });
+    expect(await mergeRow(bystander.id)).toMatchObject({
+      mergedAt: null,
+      revertedAt: null,
+    });
+
+    // The index is derived: emptied, a rebuild refolds both facts from `factory.merge`.
+    const rebuilt = await inService(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql`
+          UPDATE sessions SET pr_merged_at = NULL, pr_reverted_at = NULL WHERE id = ${work.id}
+        `;
+        yield* rebuildIndexes;
+        return yield* Effect.acquireUseRelease(
+          Effect.promise(() => PostgresStorage.reader(sql, work.id)),
+          readSessionLog,
+          (storage) => Effect.promise(() => storage.dispose()),
+        );
+      }),
+    );
+    expect(await mergeRow(work.id)).toMatchObject({
+      mergedAt: "2026-10-20T10:00:00Z",
+      revertedAt: "2026-10-22T09:30:00Z",
+    });
+    expect(rebuilt.merge).toEqual({
+      url: work.url,
+      number: 51,
+      mergedAt: "2026-10-20T10:00:00Z",
+      commit: "0123456789abcdef0123456789abcdef01234567",
+      revert: { by: revert, at: "2026-10-22T09:30:00Z" },
+    });
+    expect(await mergeRow(bystander.id)).toMatchObject({ mergedAt: null });
+  }, 120_000);
 });

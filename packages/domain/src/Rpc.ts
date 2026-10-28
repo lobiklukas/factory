@@ -61,6 +61,7 @@ import {
   ListPagesOutput,
 } from "@repo/domain/Page";
 import { StartMissionInput, StartMissionResult } from "@repo/domain/Mission";
+import { OutcomeReport, OutcomesInput } from "@repo/domain/Outcomes";
 import { GetServerInfoInput, ServerInfo } from "@repo/domain/Server";
 import {
   AddTriggerRouteInput,
@@ -201,6 +202,14 @@ export class SessionRpc extends RpcGroup.make(
   Rpc.make("listSpend", {
     payload: ListSpendInput,
     success: SpendReport,
+    error: SessionError,
+  }),
+  // The outcome metrics over a window (LOB-44): lead time, cycle time, defect pressure, recovery,
+  // adoption and cost, every value with its window, its denominator and its source. Read from the
+  // index tables and the card history, never a fold of a log, and never from GitHub or Linear.
+  Rpc.make("getOutcomes", {
+    payload: OutcomesInput,
+    success: OutcomeReport,
     error: SessionError,
   }),
   // The cited knowledge pages a session's log holds (LOB-204), read from the derived rows a rebuild

@@ -147,6 +147,7 @@ DATABASE_URL=… ./server-info.sh  # api on :9200 (API_PORT), via up.sh — getS
 DATABASE_URL=… ./identity.sh     # api on :9200 (API_PORT), via up.sh with a token table — unauthenticated calls refused, every write records the credential's actor (features/identity.md)
 ./approve-proposals.sh   # api on :9428, loopback Linear on :9429 — approved proposals become child issues, once (features/approve-proposals.md)
 DATABASE_URL=… ./metrics.sh  # api on :9200 (API_PORT), OTLP receiver on API_PORT+1 (OTLP_RECEIVER_PORT) — the documented metric set reaches a loopback collector, never motel (features/metrics.md)
+DATABASE_URL=… ./outcomes.sh # api on :9200 (API_PORT), GITHUB_API_URL at API_PORT+1 (nothing listens) — a signed merge and revert are recorded on the session's log, and `factory outcomes` reports them with window and denominator (features/outcomes.md)
 ```
 
 `pr-once.sh` is the third of those, and it starts no API process: the window it proves is a kill

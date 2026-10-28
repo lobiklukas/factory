@@ -22,6 +22,7 @@
     "./Decomposition": "./src/Decomposition.ts",
     "./Ids": "./src/Ids.ts",
     "./Mission": "./src/Mission.ts",
+    "./Outcomes": "./src/Outcomes.ts",
     "./Page": "./src/Page.ts",
     "./PullRequest": "./src/PullRequest.ts",
     "./Rpc": "./src/Rpc.ts",

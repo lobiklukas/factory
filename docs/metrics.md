@@ -52,3 +52,36 @@ accepts the body, what a backend does with the names — is the OTLP row of
 
 Admission control's refusal (LOB-70) and the board's queue depth (LOB-71) join this set when they
 land.
+
+## Outcome metrics (LOB-44)
+
+The metrics above are what the process is doing now. **Outcome metrics** ask whether the factory is
+accelerating delivery, over a window, and are not exported: they are one read of the index tables,
+`getOutcomes` over RPC and `factory outcomes` on the CLI (`--since`, `--until`, `--repo`, `--json`).
+The definitions are `packages/core/src/outcomes.ts`'s module comment; `outcomes.test.ts` proves each
+one against a hand-computed oracle over a seeded fixture.
+
+**Every value states its window `[since, until)`, its denominator (a count and what it counts) and
+its source.** A share or a median of an empty population is `null`, never `0`. The default window is
+the thirty days before now.
+
+| Metric            | Values                                                                                  | Denominator                                                  | Source                                                                     |
+| ----------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------- |
+| `lead_time`       | `card.median`, `card.mean`: card `created` → first move into `done`                     | cards that first reached `done` in the window                | `task_events`                                                              |
+|                   | `card.factory_share`: the union of the card's run intervals over its summed lead time   | the same cards, time-weighted                                | `task_runs.started_at` → `finished_at` (else the session's last activity)  |
+|                   | `delegation.median`, `delegation.mean`: Linear delegation → first merge (re-runs too)   | Linear issues whose delegation first merged in the window    | `sessions.request_id`, `forked_from`, `pr_merged_at`                       |
+| `cycle_time`      | `card.median`, `card.mean`: first move out of the filed column → first move into `done` | cards that reached `done` in the window after moving         | `task_events`                                                              |
+| `defect_pressure` | `merges.reverted`, `merges.followed_up`, `follow_up_sessions`, `rate`                   | PRs the factory opened that merged in the window             | `sessions.pr_merged_at`, `pr_reverted_at`, `forked_from`, `task_runs`      |
+| `recovery`        | `reruns.recovered`, `reruns.median_to_merge`; `approvals.approved_rate`, `denied_rate`  | re-runs created in the window; decisions taken in the window | `sessions.forked_from`, `pr_merged_at`; `session_approvals`                |
+| `adoption`        | `sessions.<trigger>` (linear … direct); `actors.repeat`                                 | sessions created in the window; people who started one in it | `sessions.request_id`, `task_runs`, `sessions.actor`                       |
+| `cost`            | `total`, `per_session`                                                                  | sessions created in the window                               | `session_activity.cost_total` (LOB-17), so it reconciles with `factory ls` |
+
+A merge is the factory's own record, not a read of GitHub: the `pull_request` webhook commits
+`factory.merge` to each session whose PR merged, and to the sessions of a PR a later merged PR says it
+reverts (`Reverts owner/repo#N`, GitHub's revert wording); `sessions.pr_merged_at` and
+`pr_reverted_at` are its index, refolded by `rebuildIndexes`. A merge before this was recorded is in
+no number. A run's end (`task_runs.finished_at`) is written where its session goes idle.
+
+Not here yet: the share of all merged PRs the factory authored and of issues it closed (their
+denominators are outside the factory's records), a policy `block`'s refusal rate (indexed nowhere),
+emission over OTLP, and a board view.

@@ -5,7 +5,8 @@
  * - `pull_request` (LOB-15) is mirrored on the Linear issue the PR's session was delegated from — a
  *   merge moves it to done, an unmerged close explains itself — a signed merge tears the PR's
  *   sessions' and reviewer runs' worktrees and branches down whatever the mirror answered (LOB-268),
- *   and (LOB-36) starts the reviewer run
+ *   the merge is recorded on those sessions' logs (LOB-44, `factory.merge`, with the revert a merged
+ *   `Reverts owner/repo#N` PR is recorded on the PR it names), and (LOB-36) starts the reviewer run
  *   its head asks for: `opened`, `reopened`, `ready_for_review` and `synchronize` on a PR the factory
  *   opened from a card (`@repo/core`'s `handlePullRequestReviewWebhook`). The answer carries both, the
  *   review under `review`; a failed mirror's status wins, then a failed review's.
@@ -50,6 +51,7 @@ import {
   handleGitHubPullRequestWebhook,
   handleGitHubIssueWebhook,
   handlePullRequestReviewWebhook,
+  recordMergedDelivery,
   releaseMergedDelivery,
   TriggerService,
 } from "@repo/core";
@@ -186,6 +188,16 @@ const GitHubWebhookRoute = HttpRouter.add(
       if (released > 0) {
         yield* Effect.logInfo(
           `github: a merged pull request released ${released} session workspace(s)`,
+        );
+      }
+      // The factory's own record of the merge (LOB-44): on the PR's sessions, and — when the merged
+      // PR reverts another — on that one's, so the outcome metrics read merges from the log rather
+      // than from GitHub. After the release, so the log is opened as a released session's is: in no
+      // directory, continuing no run. Gated on the signature like the release, not on the mirror.
+      const recorded = yield* recordMergedDelivery({ secret, raw, signature });
+      if (recorded.merged > 0 || recorded.reverted > 0) {
+        yield* Effect.logInfo(
+          `github: recorded a merge on ${recorded.merged} session(s) and a revert on ${recorded.reverted}`,
         );
       }
     }

@@ -305,7 +305,7 @@ LOB-12 → LOB-15/LOB-16) that nothing consumed.
 | [LOB-42](https://linear.app/lobiklukas/issue/LOB-42) Dependency-ready dispatch | T         | Start an issue only when its `blockedBy` edges are satisfied, and recompute the frontier on merge — the graph, consumed. |
 | [LOB-45](https://linear.app/lobiklukas/issue/LOB-45) Plan freshness            | V2        | After work completes, a read-only session proposes what the plan is missing, for a human to cut.                         |
 | [LOB-43](https://linear.app/lobiklukas/issue/LOB-43) Spec → tickets            | V2        | The hilltop move, bounded: a typed spec doc decomposes into proposed child issues with acceptance criteria and edges.    |
-| [LOB-44](https://linear.app/lobiklukas/issue/LOB-44) Outcome metrics           | M7        | Lead time, defect pressure, recovery rates, adoption — so "working" is evidence and not an opinion.                      |
+| [LOB-44](https://linear.app/lobiklukas/issue/LOB-44) Outcome metrics           | S         | Lead time, defect pressure, recovery rates, adoption — so "working" is evidence and not an opinion.                      |
 
 **Where this repo is ahead.** Authorization. The talk ends asking the audience for it; D14/D15
 already answer it — a per-sandbox, on-demand, repo-narrowed GitHub App token that is never
