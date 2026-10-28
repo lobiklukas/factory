@@ -687,7 +687,7 @@ describe("the actor every write records is the credential's, not the body's (LOB
           priority: "urgent",
           actor: MALLORY,
         });
-        const commented = yield* client.commentTask({
+        yield* client.commentTask({
           taskId: created.id,
           expectedRevision: updated.revision,
           body: "looks right",
