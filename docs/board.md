@@ -24,6 +24,13 @@ repository and references a definition version. Every task pins the definition v
 under, so editing a definition cannot mutate work in flight. Definitions live in the factory database
 (not in the repository, not in the tracker), and one default definition ships in a migration.
 
+Built (LOB-270): definitions and a board's configuration are readable over RPC (`listDefinitions`,
+`getDefinition`, `getBoardConfig`) and the CLI (`factory board definitions | definition show | list |
+config`). Each column is described with its declared exits and human gates (the code tables
+`TaskService` refuses by), each requirement marked checked or unchecked (`CHECKED_REQUIREMENTS`), and
+its role's model as the deployment's `ROLE_MODELS` resolves it (B6) — read-only, joined by
+`describeDefinition` in `packages/core`.
+
 ## B3 — Cards are rows, not a log
 
 `tasks` + append-only `task_events`, one transaction per mutation, `revision` on the task for

@@ -14,7 +14,8 @@
  * `human_merge` are B5's human gates, which `TaskService` already enforces by actor; `spec_doc`,
  * `plan_doc`, `run_completed` and `review_verdict` have no recorded artifact to check yet, and
  * refusing every move on a key nothing can satisfy would turn the pipeline off rather than gate it.
- * A key gains a checker when its evidence is recorded.
+ * A key gains a checker when its evidence is recorded. A reader is told which are which:
+ * `./boardConfig`'s `describeDefinition` marks each declared key `checked` from this set (LOB-270).
  *
  * **What `non_empty_diff` and `pr_link` mean.** Both read the card's *latest* run — the newest
  * `task_runs` row — for the reason `verified` reads the newest call: B12 gives each run its own

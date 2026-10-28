@@ -9,6 +9,9 @@
 //   MODE=prompt SESSION_ID=…       the prompt sections the run's own log leaves in effect, polled
 //                                  until the run has opened (at most 30 s). Prints one JSON line:
 //                                  {"sections":["…"],"skillSpecify":"…"}.
+//   MODE=boards                    how many board instances the database holds — the oracle
+//                                  `definitions.sh` (LOB-270) checks `factory board list` against.
+//                                  Prints the number.
 //
 // Env: MODE, SESSION_ID, DATABASE_URL. Exits non-zero when the read fails.
 import { Effect, Schedule, Schema } from "effect";
@@ -31,6 +34,14 @@ const newest = Effect.gen(function* () {
     SELECT max(version)::int AS version FROM board_definitions WHERE id = 'default'
   `;
   return String(rows[0]?.version ?? "");
+});
+
+const boards = Effect.gen(function* () {
+  const sql = yield* SqlClient;
+  const rows = yield* sql<{ n: number }>`
+    SELECT count(*)::int AS n FROM board_instances
+  `;
+  return String(rows[0]?.n ?? "");
 });
 
 const prompt = Effect.gen(function* () {
@@ -68,7 +79,9 @@ const program: Effect.Effect<string, ProbeError, SqlClient> =
     ? named(newest)
     : MODE === "prompt"
       ? named(prompt)
-      : Effect.fail(new ProbeError({ message: `unknown MODE "${MODE}"` }));
+      : MODE === "boards"
+        ? named(boards)
+        : Effect.fail(new ProbeError({ message: `unknown MODE "${MODE}"` }));
 
 Effect.runPromise(program.pipe(Effect.provide(DatabaseLive))).then(
   (line) => {
