@@ -42,6 +42,19 @@ export const TriggerSource = Schema.Literals([
 export type TriggerSource = typeof TriggerSource.Type;
 
 /**
+ * The person a delivery names (S-trigger-trust-gating). `id` is the source's stable id for them — a
+ * Linear user id, a GitHub user's numeric id — and `login` the handle a person types and a second id
+ * an allowlist may name: a GitHub login, a Linear user's e-mail. `name` is only for the recorded
+ * reason. None of it is a verified identity beyond what the signed delivery says.
+ */
+export const TriggerAuthor = Schema.Struct({
+  id: Schema.NonEmptyString,
+  login: Schema.optional(Schema.String),
+  name: Schema.optional(Schema.String),
+});
+export type TriggerAuthor = typeof TriggerAuthor.Type;
+
+/**
  * One inbound delivery, normalized by its adapter.
  *
  * `key` is the source's own identifier — a Linear issue id, a webhook caller's ticket key — and it
@@ -96,8 +109,70 @@ export const TriggerEvent = Schema.Struct({
    * vocabulary of its own. A rule that writes a prompt always gets its own.
    */
   defaultPrompt: Schema.optional(Schema.String),
+  /**
+   * Who did what this delivery reports, when the source says (S-trigger-trust-gating): the person
+   * who created or labelled a Linear issue (the webhook's `actor`), who opened, labelled or commented
+   * on a GitHub issue (`sender`, a comment's `user`). A rule's trust gate (`TriggerRule.trust`)
+   * checks it; absent means the source names nobody, which a rule that lists authors refuses.
+   */
+  author: Schema.optional(TriggerAuthor),
+  /**
+   * When the item this delivery is about was created, as the source says it (an ISO-8601 instant):
+   * a Linear issue's `createdAt`, a GitHub issue's `created_at`. A rule that takes only items
+   * created after it was enabled (`TriggerTrust.createdAfter`) reads it, so a label added to an old
+   * issue does not import a backlog.
+   */
+  createdAt: Schema.optional(Schema.String),
 });
 export type TriggerEvent = typeof TriggerEvent.Type;
+
+/**
+ * The least GitHub repository role a rule's trust gate admits (`TriggerTrust.githubPermission`), in
+ * GitHub's own order. `write` is what Copilot's and Devin's intake ask for: a person who could push
+ * the change themselves.
+ */
+export const GitHubPermission = Schema.Literals([
+  "triage",
+  "write",
+  "maintain",
+  "admin",
+]);
+export type GitHubPermission = typeof GitHubPermission.Type;
+
+/** An ISO-8601 instant `Date.parse` reads: what `TriggerTrust.createdAfter` names when it is not `enabled`. */
+const TrustInstant = Schema.String.check(
+  Schema.makeFilter((value: string) =>
+    Number.isFinite(Date.parse(value))
+      ? undefined
+      : "an ISO-8601 instant, like 2026-10-28T00:00:00Z",
+  ),
+);
+
+/**
+ * Who may start work through a rule, and which items (S-trigger-trust-gating). Every field is a
+ * further refusal, so a rule with no `trust` admits what it always did.
+ *
+ * - `authors`: the delivery's author must be one of these — a source's user id or login
+ *   (`TriggerAuthor`), compared exactly (a login without regard to case). An event that names no
+ *   author is refused.
+ * - `githubPermission`: or, for a GitHub event, the author's role on the event's repository must be
+ *   at least this, read from GitHub's collaborator-permission API per delivery. A rule that names
+ *   both admits an author either one admits; a non-GitHub event is admitted only by `authors`.
+ * - `createdAfter`: the item must have been created at or after this instant; `enabled` is the
+ *   instant the rule was enabled — a stored route's creation — so a route added today never imports
+ *   the backlog that already carried its label. An env rule has no such instant and names one.
+ *
+ * A refusal is a recorded skip whose reason names the author or the item's age, never a dropped
+ * delivery.
+ */
+export const TriggerTrust = Schema.Struct({
+  authors: Schema.optional(Schema.Array(Schema.NonEmptyString)),
+  githubPermission: Schema.optional(GitHubPermission),
+  createdAfter: Schema.optional(
+    Schema.Union([Schema.Literal("enabled"), TrustInstant]),
+  ),
+});
+export type TriggerTrust = typeof TriggerTrust.Type;
 
 /**
  * The key a fingerprinted event is bound under: `<source>:<fingerprint>` — `sentry:<issue id>` — so
@@ -174,6 +249,11 @@ const triggerRuleFields = {
   startsWorkFor: Schema.optional(Schema.Array(Schema.String)),
   /** What a delivery this rule maps starts (`TriggerMode`); absent is `session`. */
   mode: Schema.optional(TriggerMode),
+  /**
+   * Who may start work through this rule, and which items (`TriggerTrust`, S-trigger-trust-gating);
+   * absent admits every author and every item, as a rule always did.
+   */
+  trust: Schema.optional(TriggerTrust),
 };
 
 /** A rule claims something: it names a label, a team, or both. */
@@ -269,6 +349,9 @@ export type TriggerOutcome = typeof TriggerOutcome.Type;
  * `setup-failed` (S-env-setup) is the session layer's `setup_failed` from the seam's `send`: the
  * session's worktree setup failed, so its prompt was not sent. The seam records that as the
  * delivery's processed outcome rather than failing it, so a delivery never answers it.
+ * `author-check` (S-trigger-trust-gating) is a trust gate that could not ask the source whether the
+ * author is trusted (GitHub's permission API did not answer): a "not yet", retried like `storage`,
+ * never an admission.
  */
 export const TriggerErrorCode = Schema.Literals([
   "storage",
@@ -277,6 +360,7 @@ export const TriggerErrorCode = Schema.Literals([
   "write-back",
   "at-capacity",
   "setup-failed",
+  "author-check",
 ]);
 export type TriggerErrorCode = typeof TriggerErrorCode.Type;
 

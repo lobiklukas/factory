@@ -84,6 +84,7 @@ import {
   triggerFailureAnswer,
 } from "@repo/core";
 import type {
+  TriggerAuthor,
   TriggerDelivery,
   TriggerEvent,
   TriggerRule,
@@ -91,7 +92,11 @@ import type {
 import { LIFECYCLE_ACTIONS, TRIGGER_ACTION } from "@repo/domain/Trigger";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { readTriggerRules } from "./WebhookBoot";
-import { slackEnv, TriggerWriteBacksLive } from "./TriggerAdapters";
+import {
+  slackEnv,
+  TriggerAuthorPermissionsLive,
+  TriggerWriteBacksLive,
+} from "./TriggerAdapters";
 
 /** The default cap on a trigger delivery, in bytes. */
 const DEFAULT_MAX_BODY_BYTES = 65_536;
@@ -207,10 +212,30 @@ const labelNames = (value: unknown): ReadonlyArray<string> => {
 };
 
 /**
- * The generic payload: `{requestId?, action?, label?, labels?, title?, body?}`. `label` is the one
- * field a sender must supply — it is what a mapping rule matches — and the rest is carried into
- * the prompt. `action` defaults to `create`; a lifecycle action, or any action a rule admits through
- * `startsWorkFor`, is refused by `genericDelivery`.
+ * A generic sender's `author` (S-trigger-trust-gating): a bare id, or `{id, login?, name?}`. The
+ * sender holds the route's secret, so it is the one vouching for who it names; a rule's trust gate
+ * checks the name against its allowlist like any other source's.
+ */
+const genericAuthor = (value: unknown): TriggerAuthor | undefined => {
+  if (typeof value === "string") return value === "" ? undefined : { id: value };
+  const record = asRecord(value);
+  const id = stringField(record, "id");
+  if (id === undefined || id === "") return undefined;
+  const login = stringField(record, "login");
+  const name = stringField(record, "name");
+  return {
+    id,
+    ...(login === undefined ? {} : { login }),
+    ...(name === undefined ? {} : { name }),
+  };
+};
+
+/**
+ * The generic payload: `{requestId?, action?, label?, labels?, title?, body?, author?, createdAt?}`.
+ * `label` is the one field a sender must supply — it is what a mapping rule matches — and the rest is
+ * carried into the prompt, or, for `author` and `createdAt`, to a rule's trust gate. `action`
+ * defaults to `create`; a lifecycle action, or any action a rule admits through `startsWorkFor`, is
+ * refused by `genericDelivery`.
  */
 const genericEvent = (
   payload: Record<string, unknown>,
@@ -223,6 +248,8 @@ const genericEvent = (
   if (labels.length === 0) return undefined;
   const title = stringField(payload, "title") ?? "";
   const key = stringField(payload, "key") ?? stringField(payload, "requestId");
+  const author = genericAuthor(payload["author"]);
+  const createdAt = stringField(payload, "createdAt");
   return {
     source: "generic",
     key: key ?? title,
@@ -230,6 +257,8 @@ const genericEvent = (
     title,
     body: stringField(payload, "body") ?? "",
     labels,
+    ...(author === undefined ? {} : { author }),
+    ...(createdAt === undefined ? {} : { createdAt }),
   };
 };
 
@@ -840,6 +869,8 @@ const seamFor = (rules: ReadonlyArray<TriggerRule>) =>
         TriggerSessionsFromSessionService,
         TriggerCardsFromTaskService.pipe(Layer.provide(TaskServiceLive)),
         TriggerWriteBacksLive,
+        // The trust gate's GitHub role lookup (S-trigger-trust-gating), for a rule that asks.
+        TriggerAuthorPermissionsLive,
       ),
     ),
   );
