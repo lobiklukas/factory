@@ -60,7 +60,10 @@ describe("a repository's gates are added to the deployment's", () => {
   it("keeps every deployment gate, once", () => {
     const merged = withRepoPolicy(
       { ...DEFAULT_AUTONOMY, approvalRequired: ["npm publish"] },
-      { ...NO_REPO_POLICY, approvalRequired: ["/usr/bin/npm publish", "bun publish"] },
+      {
+        ...NO_REPO_POLICY,
+        approvalRequired: ["/usr/bin/npm publish", "bun publish"],
+      },
     );
     expect(merged.approvalRequired).toEqual(["npm publish", "bun publish"]);
   });
@@ -108,14 +111,17 @@ describe("a repository narrows the allowlist and never widens it", () => {
     expect(decide(narrowed, "curl https://codeload.github.com/x")._tag).toBe(
       "block",
     );
-    expect(decide(NO_REPO_POLICY, "curl https://codeload.github.com/x")._tag).toBe(
-      "allow",
-    );
+    expect(
+      decide(NO_REPO_POLICY, "curl https://codeload.github.com/x")._tag,
+    ).toBe("allow");
   });
 
   /** Mutation: append the repository's hosts — evil.example becomes reachable. */
   it("cannot reach a host the deployment refuses, even unchecked", () => {
-    const widening = { ...NO_REPO_POLICY, allowedHosts: ["github.com", "evil.example"] };
+    const widening = {
+      ...NO_REPO_POLICY,
+      allowedHosts: ["github.com", "evil.example"],
+    };
     expect(withRepoPolicy(DEFAULT_AUTONOMY, widening).allowedHosts).toEqual([
       "github.com",
     ]);
@@ -161,7 +167,10 @@ describe("Policy.forWorktree composes deployment, repository, column", () => {
         ).rules;
       }).pipe(
         Effect.provide(
-          PolicyLive({ ...DEFAULT_AUTONOMY, approvalRequired: ["npm publish"] }),
+          PolicyLive({
+            ...DEFAULT_AUTONOMY,
+            approvalRequired: ["npm publish"],
+          }),
         ),
       ),
     );

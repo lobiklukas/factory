@@ -145,7 +145,9 @@ describe("a policy that cannot be loaded is a typed RepoPolicyRejected", () => {
   /** Mutation: drop the `repoPolicyWidening` check — a host the deployment refuses loads. */
   it("refuses a host the deployment does not allow", async () => {
     const error = await rejection({
-      ".factory/config": config({ allowedHosts: ["github.com", "evil.example"] }),
+      ".factory/config": config({
+        allowedHosts: ["github.com", "evil.example"],
+      }),
     });
     expect(error._tag).toBe("RepoPolicyRejected");
     expect(error).toMatchObject({
@@ -181,10 +183,13 @@ describe("a policy that cannot be loaded is a typed RepoPolicyRejected", () => {
     ).toMatchObject({ kind: "invalid" });
     expect(
       await rejection({ ".factory/config": "{ policy: oops" }),
-    ).toMatchObject({ kind: "unreadable", reasons: [".factory/config is not JSON"] });
-    expect(
-      await rejection({ ".factory/config": "[]" }),
-    ).toMatchObject({ kind: "unreadable" });
+    ).toMatchObject({
+      kind: "unreadable",
+      reasons: [".factory/config is not JSON"],
+    });
+    expect(await rejection({ ".factory/config": "[]" })).toMatchObject({
+      kind: "unreadable",
+    });
   });
 });
 

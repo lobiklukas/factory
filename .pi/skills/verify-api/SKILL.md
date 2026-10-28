@@ -52,6 +52,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | The `verify` tool (LOB-78)              | `verify-tool.sh`: exit 0 with output, exit 3 with the tail, no evidence for a skill-less surface, the declared command first                                                                                                                                                                                                | a run's verification is a record, not prose                                        |
 | A worktree's setup (S-env-setup)        | `setup.sh`: install and build run before the first turn and `verify` passes untouched; a failed install refuses `setup_failed`, parks the card with the tail, keeps it in the log, calls no model; the readiness score                                                                                                      | a fresh worktree is set up before the agent starts                                 |
 | Repo AGENTS.md and skills               | `repo-context.sh`: AGENTS.md verbatim in the recorded prompt and its size in the log; repo skills as names and paths the run reads with `bash`, unknown to `listSkills`; a repo with neither gets no section; this repo's rules reach a run on it                                                                           | every run is told the repo's rules and skills                                      |
+| Repo policy (S-factory-config-as-code)  | `repo-policy.sh`: a base config gating `bun publish` asks and one without runs it; a denied command refused; a host the deployment denies rejected `policy_rejected`; a worktree edit and a relaxed base change nothing for the run, across a restart                                                                       | a repo tightens its runs in reviewed code                                          |
 | PR evidence (LOB-79)                    | `pr-evidence.sh`: the body names the skill, its exit code and a bounded excerpt; a truncation is marked; no evidence is said                                                                                                                                                                                                | the PR states what was verified, from the record                                   |
 | A Linear issue (LOB-164)                | `linear.sh`: a labeled issue opens one session on its rule's repo, the issue as its prompt; a retry, an edit open none; a stored route added over RPC routes the next delivery, a card route files one card in intake and no session (LOB-254), the boot log names rules and armed routes                                   | work arrives from Linear exactly once                                              |
 | Trigger deliveries (T4)                 | `linear.sh`: `listTriggerDeliveries` holds the drive's skips (unmapped label, unregistered repo) with their exact reasons, a processed delivery names its session and source, a card route's names its card, `status`/`source` filter, a forged (401) delivery leaves no row                                                | an operator sees why a labelled issue started nothing, without a log search        |
@@ -150,6 +151,7 @@ DATABASE_URL=… ./backend-boot.sh  # api on :9426 (BACKEND_BOOT_PORT), booted f
 ./verify-tool.sh # no port — the `verify` tool over five fixture repos (features/verify-tool.md)
 ./setup.sh       # api on API_PORT (default :9200) — a worktree's declared install/build before the first turn, setup_failed parks the card (features/setup.md)
 ./repo-context.sh # api on API_PORT (default :9440) — AGENTS.md and the skill index in the recorded prompt and the log (features/repo-context.md)
+./repo-policy.sh # api on API_PORT (default :9441), booted twice — .factory/config's policy at the base gates, denies, rejects widening, is pinned (features/repo-policy.md)
 ./pr-evidence.sh # fake GitHub on :9411 — the PR body's evidence block from the run's record (features/pr-evidence.md)
 ./spec.sh        # no port — the spec document: refused without gaps, committed with [], read by a second process
 ./budget.sh      # api on :9419 — a priced faux: a capped run stops at its limit and says so (features/budget.md)
@@ -275,6 +277,9 @@ order you want the evidence to end in.
 - `repo-context.json`, `repo-context.log`, `repo-context-api.log` — from `./repo-context.sh`: each
   session's prompt section keys, its `repo_instructions` and `repo_skills` text, the log's
   `factory.repo.prompt` record, the run's `bash` result and the factory's skill names
+- `repo-policy-arm.json`, `repo-policy-verify.json`, `repo-policy.log`, `repo-policy-api-arm.log`,
+  `repo-policy-api.log` — from `./repo-policy.sh`: each scenario's approvals, `bash` results and the
+  log's `factory.policy` record, the rejected create's error, and the branch's relaxed config
 - `decompose.json`, `decompose-process.json`, `decompose-api.log` — from `./decompose.sh`: the spec,
   the proposals, every table's fingerprint (row count and content `md5`) before and after the call,
   the log's new commits, and the script's own checks

@@ -183,11 +183,7 @@ export const decodePolicy = (
         reasons: [".factory/config is not JSON"],
       }),
     });
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      Array.isArray(parsed)
-    )
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
       return yield* Effect.fail<Undecodable>({
         kind: "unreadable",
         reasons: [".factory/config is not a JSON object"],
@@ -197,14 +193,12 @@ export const decodePolicy = (
       parsed.policy,
       { onExcessProperty: "error", errors: "all" },
     ).pipe(
-      Effect.mapError(
-        (error): Undecodable => ({
-          kind: "invalid",
-          reasons: [
-            `its policy block is not a policy (approvalRequired, deny and allowedHosts, each a list of non-empty strings): ${error.message.replace(/\n\s*/g, " ")}`,
-          ],
-        }),
-      ),
+      Effect.mapError((error): Undecodable => ({
+        kind: "invalid",
+        reasons: [
+          `its policy block is not a policy (approvalRequired, deny and allowedHosts, each a list of non-empty strings): ${error.message.replace(/\n\s*/g, " ")}`,
+        ],
+      })),
     );
     return {
       approvalRequired: (block.approvalRequired ?? []).map((entry) =>

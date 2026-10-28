@@ -2244,7 +2244,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         fetchedStart: string | undefined,
       ): Effect.Effect<PolicyRecordInput, SessionError> =>
         Effect.gen(function* () {
-          const none: PolicyRecordInput = { source: null, repo: NO_REPO_POLICY };
+          const none: PolicyRecordInput = {
+            source: null,
+            repo: NO_REPO_POLICY,
+          };
           if (row.repo === null) return none;
           const repo = yield* toRepoSlug(row.repo);
           const rejected = (error: RepoPolicyRejected) =>

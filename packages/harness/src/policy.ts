@@ -1162,7 +1162,10 @@ const decideRefusal = (
  * prefix is refused, read the way a gate is (`commandRunning`), so `sudo bun publish` and
  * `sh -c 'bun publish'` are the `bun publish` they run.
  */
-const decideDenied = (rules: AutonomyRules, command: string): PolicyDecision => {
+const decideDenied = (
+  rules: AutonomyRules,
+  command: string,
+): PolicyDecision => {
   if (rules.denied.length === 0) return ALLOW;
   const denied = commandRunning(rules.denied, command);
   return denied === undefined
@@ -2156,7 +2159,9 @@ export const repoPolicyWidening = (
   config: AutonomyConfig,
   policy: RepoPolicy,
 ): readonly string[] => {
-  const allowed = new Set(config.allowedHosts.map((host) => host.toLowerCase()));
+  const allowed = new Set(
+    config.allowedHosts.map((host) => host.toLowerCase()),
+  );
   return (policy.allowedHosts ?? [])
     .filter((host) => !allowed.has(host.toLowerCase()))
     .map(
@@ -2191,7 +2196,10 @@ export const withRepoPolicy = (
   const narrowed = policy.allowedHosts?.map((host) => host.toLowerCase());
   return {
     ...config,
-    approvalRequired: union(config.approvalRequired ?? [], policy.approvalRequired),
+    approvalRequired: union(
+      config.approvalRequired ?? [],
+      policy.approvalRequired,
+    ),
     denied: union(config.denied ?? [], policy.denied),
     allowedHosts:
       narrowed === undefined
