@@ -29,10 +29,12 @@ facts for its column (LOB-245, the board-configuration umbrella).
 - A lane's disclosure (`[data-lane-settings-toggle=<column>]`, panel `[data-lane-settings=<column>]`)
   is closed by default and mounts its read only when opened, so a board nobody inspects never reads
   its config. It renders the same `ColumnSettings` and links to the page.
-- Read-only. There is no edit control on the page; authoring a version is a later change. The drive
+- Read-only. Nothing on the page writes. **Edit as new version** (`[data-settings-edit]`, a link)
+  opens the editor on its own page ([definition-edit.md](definition-edit.md), D6). The drive
   proves it: the page (`[data-board-settings-page]`) holds no form, input or button, and every RPC
   the browser sends while on it is `getBoardConfig`, `listDefinitions` or one of the shell's own
-  reads. Skill names are plain text until a skills page exists to link them to.
+  reads (the board page's getting-started checklist, C9, among them, as its poll can land after
+  the click). Skill names are plain text until a skills page exists to link them to.
 - `/boards/not-a-board/settings` is refused by the route's decode; a well-formed id the server does
   not hold reads `No such board`.
 
