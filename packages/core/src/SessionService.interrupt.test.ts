@@ -63,6 +63,16 @@ const SLEPT = "slept-ok";
 const printed = (snapshot: SessionSnapshot): boolean =>
   snapshot.entries.some((entry) => entry.text.includes(FAUX_OUTPUT));
 
+/**
+ * Whether the run is in its model request — where the faux model naps — rather than still preparing
+ * it: Pi Durable's generation task commits the prompt in `prepare` and calls the model in `request`.
+ */
+const requesting = (snapshot: SessionSnapshot): boolean =>
+  snapshot.live.busy &&
+  snapshot.tasks.some(
+    (task) => task.kind === "pi.generation" && task.phase === "request",
+  );
+
 describe("interrupting a session", () => {
   it("stops a busy run before it prints, marks the turn, and runs the next message", async () => {
     const outcome = await runtime.runPromise(
@@ -70,11 +80,13 @@ describe("interrupting a session", () => {
         const sessions = yield* SessionService;
         const created = yield* sessions.create({ title: "a run to stop" });
         yield* sessions.send({ sessionId: created.id, content: "go slowly" });
+        // Mid-nap, not merely busy: a run is busy from its submission, before its model turn has
+        // committed the prompt it is about to send, and an interrupt that lands in that window is
+        // followed by the prompt's `pi.system` entry (`stopRun`: the marker is the turn's, not
+        // necessarily its last entry).
         yield* waitUntil(
-          sessions
-            .get(created.id)
-            .pipe(Effect.map((snapshot) => snapshot.live.busy)),
-          "the run to start",
+          sessions.get(created.id).pipe(Effect.map(requesting)),
+          "the run's model request",
         );
         const interrupted = yield* sessions.interrupt(created.id);
         const right = yield* sessions.get(created.id);

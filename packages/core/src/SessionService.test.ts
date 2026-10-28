@@ -14479,6 +14479,48 @@ describe("a session's workspace outlives its owner (LOB-268)", () => {
     }
   }, 120_000);
 
+  /**
+   * The sweep never closes an owner under a call still using it (`holding` in the service). A send
+   * acquires the owner, then checks its handoff and setup and writes its title before it submits:
+   * with an idle timeout shorter than that, a sweep that went by `lastUsedAt` alone released the
+   * owner in between, and the submit failed `Session is closed` — what this file's idle-sweep case
+   * above met under a loaded gate, at 200 ms.
+   *
+   * Mutation checked: dropping the sweep's `holds` check — the first send fails `submit message:
+   * Session is closed`, or a later one does.
+   */
+  it("never releases an owner while a call still uses it, however short the idle timeout", async () => {
+    const runtime = keptRuntime({ idleTimeoutMs: 1, sweepIntervalMs: 1 });
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const work = yield* sessionWithWork();
+          // Each a run of its own: the owner is released between them and opened again by the next.
+          const seen = [];
+          for (let round = 0; round < 3; round += 1)
+            seen.push(yield* nextRunSees(work.id));
+          // And the sweep still releases the owner once nothing is using it.
+          yield* waitUntil(
+            Effect.map(
+              sessions.get(work.id),
+              (snapshot) => snapshot.session.mode === "historical",
+            ),
+            "the idle owner's release",
+          );
+          yield* sessions.close;
+          return { seen };
+        }),
+      );
+      for (const seen of outcome.seen) {
+        expect(seen).toContain(SUBJECT);
+        expect(seen).toContain(NOTES);
+      }
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
   it("keeps every session's branch through a shutdown and a restart, and the next process's run sees the commit", async () => {
     const before = keptRuntime();
     const works = await before

@@ -1328,6 +1328,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        */
       const opening = yield* Ref.make(HashMap.empty<SessionId, number>());
       /**
+       * The calls using each session's owner right now (`holding`), by count: the idle sweep leaves
+       * an owner with any, however long ago it was last touched. A call touches its owner when it
+       * acquires it, but its work after that — a handoff, a setup check, the title, then the submit
+       * — can outlast the idle timeout on a loaded machine, and an owner released under it fails the
+       * submit `Session is closed`, or takes a run it had just placed out of the process.
+       */
+      const holds = yield* Ref.make(HashMap.empty<SessionId, number>());
+      /**
        * When each owned session's current run started, as its activity projection saw it turn busy
        * (`observeRun`); the run's duration is recorded when it turns idle (`factory.run.duration`).
        * Only the projection writes an entry, and `releaseOwner` drops it with the projection.
@@ -1783,6 +1791,35 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             }),
           );
         });
+
+      /**
+       * Run `effect` holding the session's owner against the idle sweep (`holds`), and touch the
+       * owner when it ends, so its idle window starts from the end of the call rather than from its
+       * acquisition. Only the sweep honours a hold: a release the call asks for, a lost lease and
+       * the shutdown close an owner whatever holds it.
+       */
+      const holding = <A, E, R>(
+        sessionId: SessionId,
+        effect: Effect.Effect<A, E, R>,
+      ): Effect.Effect<A, E, R> =>
+        Effect.acquireUseRelease(
+          Ref.update(holds, (counts) =>
+            HashMap.set(
+              counts,
+              sessionId,
+              Option.getOrElse(HashMap.get(counts, sessionId), () => 0) + 1,
+            ),
+          ),
+          () => effect,
+          () =>
+            Ref.update(holds, (counts) => {
+              const left =
+                Option.getOrElse(HashMap.get(counts, sessionId), () => 1) - 1;
+              return left > 0
+                ? HashMap.set(counts, sessionId, left)
+                : HashMap.remove(counts, sessionId);
+            }).pipe(Effect.andThen(touch(sessionId))),
+        );
 
       /**
        * The column the run started in, as the card's pinned definition declares it (B6).
@@ -3575,7 +3612,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               model,
               resumed: opened.resumed,
               secrets: granted,
-              lastUsedAt: now,
+              // Read again rather than `now`: an open can take longer than the idle timeout (a
+              // worktree cut, a long log's fold), and an owner stamped with its start would be idle
+              // the moment it is published.
+              lastUsedAt: yield* Clock.currentTimeMillis,
             };
             // The reservation becomes this owner in the same step, so the slot is counted once.
             yield* consumeSlot(acquisition.slot);
@@ -4484,7 +4524,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return later.sessionId;
         });
 
-      const send = (
+      const sendUnheld = (
         input: SendMessageInput,
       ): Effect.Effect<SendMessageResult, SessionError> =>
         Effect.gen(function* () {
@@ -4507,6 +4547,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* ensureSetup(input.sessionId, owner);
           return yield* submitTo(input, row, owner);
         });
+
+      /** Held from the acquisition to the submit: once the run is placed, the sweep sees it busy. */
+      const send = (
+        input: SendMessageInput,
+      ): Effect.Effect<SendMessageResult, SessionError> =>
+        holding(input.sessionId, sendUnheld(input));
 
       /**
        * A send that does not wait for the worktree's setup (S-env-setup): what a trigger's delivery
@@ -8528,6 +8574,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         const owners = yield* Ref.get(live);
         for (const [sessionId, owner] of HashMap.toEntries(owners)) {
           if (now - owner.lastUsedAt < (options.idleTimeoutMs ?? 0)) continue;
+          // A call still using the owner, however long since it acquired it (`holding`).
+          if (HashMap.has(yield* Ref.get(holds), sessionId)) continue;
           // A setup in progress is work, though no run is (S-env-setup): its install runs in the
           // sandbox a release would end.
           if (yield* FiberMap.has(setups, sessionId)) continue;
@@ -8632,20 +8680,28 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         }).pipe(Effect.forkScoped);
       }
 
+      /** A session's call, holding its owner against the idle sweep for as long as it runs. */
+      const held =
+        <I extends { readonly sessionId: SessionId }, A, E, R>(
+          call: (input: I) => Effect.Effect<A, E, R>,
+        ) =>
+        (input: I): Effect.Effect<A, E, R> =>
+          holding(input.sessionId, call(input));
+
       return SessionService.of({
         create,
-        get,
+        get: (sessionId) => holding(sessionId, get(sessionId)),
         history,
         send,
-        sendDeferringSetup,
-        interrupt,
-        setBudget,
-        withdraw,
+        sendDeferringSetup: held(sendDeferringSetup),
+        interrupt: (sessionId) => holding(sessionId, interrupt(sessionId)),
+        setBudget: held(setBudget),
+        withdraw: held(withdraw),
         fork,
         replay,
-        reset,
-        compact,
-        startMission,
+        reset: held(reset),
+        compact: held(compact),
+        startMission: held(startMission),
         list,
         spend,
         predictCost: predictSessionCost,
@@ -8655,21 +8711,21 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         getRepo,
         syncRepo,
         events,
-        requestApproval,
-        decideApproval,
+        requestApproval: held(requestApproval),
+        decideApproval: held(decideApproval),
         listApprovals,
         listPendingApprovals,
-        recordPage,
+        recordPage: held(recordPage),
         listPages,
-        curate,
-        proposeDecomposition,
-        approveProposals,
-        refreshPlan,
-        declinePlanRevision,
-        approvePlanRevision,
-        openPullRequest: openPr,
-        releaseWorkspace,
-        recordMerge,
+        curate: held(curate),
+        proposeDecomposition: held(proposeDecomposition),
+        approveProposals: held(approveProposals),
+        refreshPlan: held(refreshPlan),
+        declinePlanRevision: held(declinePlanRevision),
+        approvePlanRevision: held(approvePlanRevision),
+        openPullRequest: held(openPr),
+        releaseWorkspace: held(releaseWorkspace),
+        recordMerge: held(recordMerge),
         outcomes: (input) =>
           readOutcomes(input).pipe(Effect.provideService(SqlClient, sql)),
         roleModel,
