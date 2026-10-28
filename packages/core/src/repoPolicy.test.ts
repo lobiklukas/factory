@@ -3,7 +3,8 @@
  * checkout's objects at a ref, never from its files on disk, and refused with a typed
  * `RepoPolicyRejected` when it is not a policy or would allow something the deployment denies.
  *
- * The fixtures are local git repos with no remote.
+ * The fixtures are local git repos with no remote. Each case makes its own, which under the whole
+ * gate's load takes seconds rather than milliseconds, so the suites allow 30 s a case.
  */
 import { execSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -49,7 +50,7 @@ const read = (checkout: string, ref = "main", prefix = "") =>
 const config = (policy: unknown) =>
   JSON.stringify({ install: "bun install", policy });
 
-describe("readRepoPolicy at a base", () => {
+describe("readRepoPolicy at a base", { timeout: 30_000 }, () => {
   /** Mutation: read the policy block's keys under other names — the gate is lost. */
   it("reads the policy block's gates, deny list and hosts, and says where it read them", async () => {
     const checkout = fixtureRepo({
@@ -133,65 +134,69 @@ describe("readRepoPolicy at a base", () => {
   });
 });
 
-describe("a policy that cannot be loaded is a typed RepoPolicyRejected", () => {
-  const rejection = async (files: Record<string, string>) => {
-    const exit = await read(fixtureRepo(files));
-    if (Exit.isSuccess(exit)) throw new Error("expected a rejection");
-    const failure = exit.cause.reasons[0];
-    if (failure?._tag !== "Fail") throw new Error("expected a typed failure");
-    return failure.error;
-  };
+describe(
+  "a policy that cannot be loaded is a typed RepoPolicyRejected",
+  { timeout: 30_000 },
+  () => {
+    const rejection = async (files: Record<string, string>) => {
+      const exit = await read(fixtureRepo(files));
+      if (Exit.isSuccess(exit)) throw new Error("expected a rejection");
+      const failure = exit.cause.reasons[0];
+      if (failure?._tag !== "Fail") throw new Error("expected a typed failure");
+      return failure.error;
+    };
 
-  /** Mutation: drop the `repoPolicyWidening` check — a host the deployment refuses loads. */
-  it("refuses a host the deployment does not allow", async () => {
-    const error = await rejection({
-      ".factory/config": config({
-        allowedHosts: ["github.com", "evil.example"],
-      }),
+    /** Mutation: drop the `repoPolicyWidening` check — a host the deployment refuses loads. */
+    it("refuses a host the deployment does not allow", async () => {
+      const error = await rejection({
+        ".factory/config": config({
+          allowedHosts: ["github.com", "evil.example"],
+        }),
+      });
+      expect(error._tag).toBe("RepoPolicyRejected");
+      expect(error).toMatchObject({
+        repo: "acme/widgets",
+        ref: "main",
+        path: ".factory/config",
+        kind: "widens",
+        reasons: [expect.stringContaining("allowedHosts names evil.example")],
+      });
+      expect(error.message).toContain("cannot be loaded");
     });
-    expect(error._tag).toBe("RepoPolicyRejected");
-    expect(error).toMatchObject({
-      repo: "acme/widgets",
-      ref: "main",
-      path: ".factory/config",
-      kind: "widens",
-      reasons: [expect.stringContaining("allowedHosts names evil.example")],
-    });
-    expect(error.message).toContain("cannot be loaded");
-  });
 
-  /** Mutation: decode the block with excess keys ignored — `pushRefPrefixes` is silently dropped. */
-  it("refuses a key it does not know, rather than dropping it", async () => {
-    const error = await rejection({
-      ".factory/config": config({ pushRefPrefixes: ["refs/heads/"] }),
+    /** Mutation: decode the block with excess keys ignored — `pushRefPrefixes` is silently dropped. */
+    it("refuses a key it does not know, rather than dropping it", async () => {
+      const error = await rejection({
+        ".factory/config": config({ pushRefPrefixes: ["refs/heads/"] }),
+      });
+      expect(error).toMatchObject({ kind: "invalid" });
+      expect(error.reasons[0]).toContain("pushRefPrefixes");
     });
-    expect(error).toMatchObject({ kind: "invalid" });
-    expect(error.reasons[0]).toContain("pushRefPrefixes");
-  });
 
-  it("refuses a policy block of the wrong shape, and a config that is not JSON", async () => {
-    expect(
-      await rejection({
-        ".factory/config": config({ approvalRequired: "bun publish" }),
-      }),
-    ).toMatchObject({ kind: "invalid" });
-    expect(
-      await rejection({ ".factory/config": config({ deny: ["  "] }) }),
-    ).toMatchObject({ kind: "invalid" });
-    expect(
-      await rejection({ ".factory/config": config("deny everything") }),
-    ).toMatchObject({ kind: "invalid" });
-    expect(
-      await rejection({ ".factory/config": "{ policy: oops" }),
-    ).toMatchObject({
-      kind: "unreadable",
-      reasons: [".factory/config is not JSON"],
+    it("refuses a policy block of the wrong shape, and a config that is not JSON", async () => {
+      expect(
+        await rejection({
+          ".factory/config": config({ approvalRequired: "bun publish" }),
+        }),
+      ).toMatchObject({ kind: "invalid" });
+      expect(
+        await rejection({ ".factory/config": config({ deny: ["  "] }) }),
+      ).toMatchObject({ kind: "invalid" });
+      expect(
+        await rejection({ ".factory/config": config("deny everything") }),
+      ).toMatchObject({ kind: "invalid" });
+      expect(
+        await rejection({ ".factory/config": "{ policy: oops" }),
+      ).toMatchObject({
+        kind: "unreadable",
+        reasons: [".factory/config is not JSON"],
+      });
+      expect(await rejection({ ".factory/config": "[]" })).toMatchObject({
+        kind: "unreadable",
+      });
     });
-    expect(await rejection({ ".factory/config": "[]" })).toMatchObject({
-      kind: "unreadable",
-    });
-  });
-});
+  },
+);
 
 describe("decodePolicy", () => {
   it("reads an empty block as no policy, and keeps an empty allowlist as no egress", async () => {
