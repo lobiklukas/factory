@@ -46,6 +46,47 @@ export const formatDollars = (amount: number): string =>
 export const QUEUE_EMPTY = "[queued] (empty)";
 
 /**
+ * The line a historical snapshot of a long session opens with (LOB-243): it carries the newest
+ * entries only, so a terminal reader is told the transcript did not start here rather than left to
+ * think the first entry printed was the first one said. `before` is the oldest entry printed.
+ */
+export const formatEarlier = (before: string, sessionId?: string): string =>
+  sessionId === undefined
+    ? `[earlier] entries before ${before} are not shown`
+    : `[earlier] entries before ${before} are not shown; factory history ${sessionId} --before ${before} prints them`;
+
+/** One page of earlier transcript as `readSessionHistory` answers it. */
+export type HistoryPage = {
+  readonly entries: readonly TranscriptEntry[];
+  readonly earlier?: string | undefined;
+};
+
+/**
+ * The transcript before entry `before`, oldest first: one page, or with `all` every page back to the
+ * first entry (LOB-243). `earlier` is where the next page back would start, absent once the first
+ * entry is in `entries`. `readPage` is `readSessionHistory` bound to one session.
+ */
+export const readEarlier = <E>(
+  readPage: (before: string) => Effect.Effect<HistoryPage, E>,
+  before: string,
+  options: { readonly all: boolean },
+): Effect.Effect<HistoryPage, E> =>
+  Effect.gen(function* () {
+    const pages: (readonly TranscriptEntry[])[] = [];
+    let cursor: string | undefined = before;
+    while (cursor !== undefined) {
+      const page: HistoryPage = yield* readPage(cursor);
+      pages.unshift(page.entries);
+      cursor = page.earlier;
+      if (!options.all) break;
+    }
+    return {
+      entries: pages.flat(),
+      ...(cursor === undefined ? {} : { earlier: cursor }),
+    };
+  });
+
+/**
  * Whether the run is over. `live.busy` is the same signal as `status`, and either arriving means
  * the session settled — a live stream would otherwise never end, because a subscriber stays
  * attached after the work is done (release is the idle sweep's job, not the stream's).
@@ -123,6 +164,9 @@ export const followSession = (
               }));
               if (options.printMode) {
                 yield* Console.log(`mode: ${event.session.mode}`);
+              }
+              if (event.earlier !== undefined) {
+                yield* Console.log(formatEarlier(event.earlier, sessionId));
               }
               for (const entry of event.entries) {
                 yield* printEntry(state, entry);

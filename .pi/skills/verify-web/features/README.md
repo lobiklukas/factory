@@ -36,6 +36,7 @@ under Known gaps.
 | The session's PR link    | passing | [pr-link.md](pr-link.md)                   |
 | Spend by repo and actor  | passing | [spend.md](spend.md) (`spend.sh`)          |
 | Repositories             | passing | [repos.md](repos.md) (`repos.sh`)          |
+| Earlier history          | passing | [history.md](history.md) (`history.sh`)    |
 
 ## Known gaps
 
@@ -69,9 +70,10 @@ under Known gaps.
 - **Proposed child issues have no pane.** Nothing in the dashboard calls `proposeDecomposition` or
   renders a snapshot's `proposedIssues` yet (LOB-201); the surface is driven over RPC by verify-api's
   `./decompose.sh` ([decompose.md](../../verify-api/features/decompose.md)).
-- The dashboard has no case for a **historical** read. `SESSION_IDLE_TIMEOUT_MS` is deliberately long
-  in `up.sh` so the pane stays live; the fold path is proven by verify-api instead. The label renders
-  either way, so the day a fold is driven the check is the header string.
+- `drive.mjs` has no case for a **historical** read. `SESSION_IDLE_TIMEOUT_MS` is deliberately long
+  in `up.sh` so the pane stays live; the one historical read the dashboard is driven through is a long
+  session's earlier history, by `history.sh` on an instance of its own
+  ([history.md](history.md)).
 - **A compaction's spend is a delta between two readings of the session's usage**, not a number the
   server attributed to the action. It is bound to the first summary after the press and frozen once
   measured, so a compaction this pane did not press — the harness's own threshold policy, or a second

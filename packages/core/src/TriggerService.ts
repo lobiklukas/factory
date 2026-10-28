@@ -52,12 +52,12 @@ import {
   startsWork,
   TRIGGER_ACTION,
   TriggerError,
+  TriggerSource,
   type TriggerDelivery,
   type TriggerEvent,
   type TriggerMapping,
   type TriggerOutcome,
   type TriggerRule,
-  type TriggerSource,
 } from "@repo/domain/Trigger";
 import { SessionService } from "./SessionService";
 import { TaskService } from "./TaskService";
@@ -241,6 +241,37 @@ export const NoWriteBack = Layer.succeed(
   TriggerWriteBack,
   TriggerWriteBack.of({ write: () => Effect.void }),
 );
+
+/**
+ * One write-back per source: an event is answered by the client of the system it came from, and by
+ * nobody else's. A Jira comment for a GitHub issue would be a request to the wrong API, so the
+ * choice cannot be left to each client to refuse (LOB-259); a source with no layer — the generic
+ * webhook, Sentry, a deployment that configured no client for it — writes nothing, as `NoWriteBack`
+ * does.
+ *
+ * Each layer is built once, when this one is, and read back as the source's client.
+ */
+export const TriggerWriteBackBySource = <R>(
+  routes: Partial<
+    Record<TriggerSource, Layer.Layer<TriggerWriteBack, never, R>>
+  >,
+): Layer.Layer<TriggerWriteBack, never, R> =>
+  Layer.effect(
+    TriggerWriteBack,
+    Effect.gen(function* () {
+      const bySource = new Map<TriggerSource, TriggerWriteBackShape>();
+      for (const source of TriggerSource.literals) {
+        const layer = routes[source];
+        if (layer === undefined) continue;
+        const context = yield* Layer.build(layer);
+        bySource.set(source, Context.get(context, TriggerWriteBack));
+      }
+      return TriggerWriteBack.of({
+        write: (input) =>
+          bySource.get(input.event.source)?.write(input) ?? Effect.void,
+      });
+    }),
+  );
 
 /**
  * The production wiring: the seam's two calls are `SessionService.create` and

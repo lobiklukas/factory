@@ -9,7 +9,7 @@
     "dev": {
       // Every variable apps/api reads (ServerConfig, the model backend, the session root, the Motel
       // and DevTools exporters, DATABASE_MAX_CONNECTIONS via storage-postgres, and the trigger,
-      // Linear, Sentry and GitHub webhook receivers). Strict Mode strips anything not declared here,
+      // Linear, Sentry, Jira, Slack and GitHub webhook receivers and their write-backs). Strict Mode strips anything not declared here,
       // so a value set in the shell silently does nothing (LOB-101). A guard in
       // packages/storage-postgres/src/turbo-env.test.ts scans the sources for every
       // `process.env["X"]` and `Config.*("X")` and fails on a name missing from `env` or
@@ -62,6 +62,15 @@
         "SENTRY_RATE_LIMIT",
         "SENTRY_RATE_WINDOW_SECONDS",
         "GITHUB_WEBHOOK_MAX_BODY_BYTES",
+        "GITHUB_MENTION",
+        "GITHUB_SESSION_URL_BASE",
+        "JIRA_BASE_URL",
+        "JIRA_EMAIL",
+        "JIRA_SESSION_URL_BASE",
+        "SLACK_API_URL",
+        "SLACK_CHANNELS",
+        "SLACK_TEXT",
+        "SLACK_SESSION_URL_BASE",
         "NODE_ENV"
       ],
       // A secret: it must reach the process but must not enter the task hash or the cache key.
@@ -87,7 +96,11 @@
         "TRIGGER_SECRET",
         "LINEAR_WEBHOOK_SECRET",
         "LINEAR_API_KEY",
-        "SENTRY_CLIENT_SECRET"
+        "SENTRY_CLIENT_SECRET",
+        "JIRA_WEBHOOK_SECRET",
+        "JIRA_API_TOKEN",
+        "SLACK_SIGNING_SECRET",
+        "SLACK_BOT_TOKEN"
       ]
     }
   }

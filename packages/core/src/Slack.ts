@@ -34,6 +34,7 @@
  */
 import { Effect, Layer, Redacted, Schema } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { SqlClient } from "effect/sql/SqlClient";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { SessionId } from "@repo/domain/Session";
 import {
@@ -42,7 +43,8 @@ import {
   type TriggerDelivery,
   type TriggerEvent,
 } from "@repo/domain/Trigger";
-import { TriggerWriteBack } from "./TriggerService";
+import { pullRequestReport, SessionWriteBack } from "./SessionWriteBack";
+import { deliveryIdOfSession, TriggerWriteBack } from "./TriggerService";
 
 /**
  * How far a delivery's timestamp may be from now, in seconds. Slack's own documented window: a
@@ -139,6 +141,9 @@ export const SlackFilter = Schema.Struct({
 });
 export type SlackFilter = typeof SlackFilter.Type;
 
+/** Every Slack delivery's request id starts here; the rest is the message's address. */
+const SLACK_ID_PREFIX = "slack:";
+
 /** The action prefix a filtered message carries, so the seam's recorded reason says why. */
 const FILTERED = "filtered";
 
@@ -216,17 +221,37 @@ const slackAction = (
 };
 
 /**
+ * The answer to Slack's `url_verification` handshake, or `undefined` for any other payload.
+ *
+ * Slack sends `{type: "url_verification", challenge}` — signed like every delivery — when an operator
+ * enters the Request URL, and expects the challenge echoed back before it will deliver events at all.
+ * It is answered from the signing secret alone: the handshake happens before an app is installed, so
+ * before there is a bot token or a channel list to wait for.
+ */
+export const slackUrlVerification = (
+  payload: unknown,
+): { readonly challenge: string } | undefined => {
+  const body = asRecord(payload);
+  if (stringField(body, "type") !== "url_verification") return undefined;
+  const challenge = stringField(body, "challenge");
+  return challenge === undefined ? undefined : { challenge };
+};
+
+/**
  * A Slack Events API payload, normalized.
  *
  * `undefined` is "this payload carries no event to judge": Slack's `url_verification` handshake, a
  * payload that is not an `event_callback`, or one with no `event`. Everything else becomes a
  * `TriggerEvent` whose `action` says what will happen to it:
  *
- * - a `message` that passes the filter is `create` — the only action the seam starts work on;
- * - a `message` the filter rejects keeps a `filtered:<why>` action, so the skip the seam records
- *   names the reason (`filtered:channel`, `filtered:text`, `filtered:bot`, `filtered:subtype:…`);
- * - any other event type keeps Slack's own name (`reaction_added`, `app_mention`), so the recorded
- *   reason reads as the event that arrived rather than a word invented here.
+ * - a `message` or an `app_mention` that passes the filter is `create` — the only action the seam
+ *   starts work on. An `@factory` mention is the same ask as a message in a watched channel, and
+ *   Slack delivers a mention in a watched channel as both events with one `ts`, which is one message
+ *   address and so one delivery (`slackRequestId`);
+ * - one the filter rejects keeps a `filtered:<why>` action, so the skip the seam records names the
+ *   reason (`filtered:channel`, `filtered:text`, `filtered:bot`, `filtered:subtype:…`);
+ * - any other event type keeps Slack's own name (`reaction_added`, …), so the recorded reason reads
+ *   as the event that arrived rather than a word invented here.
  *
  * Bot messages and message edits are refused by the filter, not by the seam: a bot replying in a
  * watched channel would otherwise start a session per reply, and an edit is a second delivery of a
@@ -250,7 +275,11 @@ export const slackEvent = (
 
   // A non-message event has no message address; it is identified by Slack's event id so the skip it
   // records is one row per delivery.
-  if (type !== "message" || channel === undefined || ts === undefined) {
+  if (
+    (type !== "message" && type !== "app_mention") ||
+    channel === undefined ||
+    ts === undefined
+  ) {
     const key =
       eventId ?? `${type ?? "unknown"}:${stringField(event, "event_ts") ?? ""}`;
     return {
@@ -290,7 +319,7 @@ export const slackEvent = (
  * check (see `docs/testing-third-parties.md`); keying on the message makes it not matter.
  */
 export const slackRequestId = (event: TriggerEvent): string =>
-  `slack:${event.key}`;
+  `${SLACK_ID_PREFIX}${event.key}`;
 
 /** A payload as the seam takes it: the normalized event, named by its derived delivery id. */
 export const slackDelivery = (
@@ -338,6 +367,26 @@ export type SlackApp = {
 };
 
 /**
+ * The filter an environment names: the comma-separated channels and the optional phrase. Separate
+ * from `slackConfigFromEnv` because the route needs a filter whether or not the bot token that lets
+ * the app reply is configured: a deployment with no token still starts sessions, it just posts
+ * nothing back.
+ */
+export const slackFilterFromEnv = (
+  env: Pick<SlackEnv, "channels" | "text">,
+): SlackFilter => {
+  const channels = (env.channels ?? "")
+    .split(",")
+    .map((channel) => channel.trim())
+    .filter((channel) => channel !== "");
+  const text = env.text?.trim();
+  return {
+    channels,
+    ...(text === undefined || text === "" ? {} : { text }),
+  };
+};
+
+/**
  * A configured app from environment-shaped values, or `undefined` when the deployment has none.
  *
  * The bot token and the signing secret are required together: a half-configured app would accept
@@ -349,25 +398,18 @@ export const slackConfigFromEnv = (env: SlackEnv): SlackApp | undefined => {
   const botToken = env.botToken?.trim();
   const signingSecret = env.signingSecret?.trim();
   if (!botToken || !signingSecret) return undefined;
-  const channels = (env.channels ?? "")
-    .split(",")
-    .map((channel) => channel.trim())
-    .filter((channel) => channel !== "");
-  if (channels.length === 0) return undefined;
+  const filter = slackFilterFromEnv(env);
+  if (filter.channels.length === 0) return undefined;
   const apiUrl = env.apiUrl?.trim();
   const sessionUrlBase = env.sessionUrlBase?.trim();
-  const text = env.text?.trim();
   return {
     config: {
       ...(apiUrl ? { apiUrl: apiUrl.replace(/\/+$/, "") } : {}),
       botToken: Redacted.make(botToken),
-      ...(sessionUrlBase === undefined ? {} : { sessionUrlBase }),
+      ...(sessionUrlBase ? { sessionUrlBase } : {}),
     },
     signingSecret: Redacted.make(signingSecret),
-    filter: {
-      channels,
-      ...(text === undefined || text === "" ? {} : { text }),
-    },
+    filter,
   };
 };
 
@@ -398,21 +440,117 @@ const SlackReplies = Schema.Struct({
   ),
 });
 
+const writeBackError = (message: string): TriggerError =>
+  new TriggerError({ code: "write-back", message });
+
 /**
- * The seam's write-back port, filled by Slack's Web API.
+ * One reply in a message's thread, posted once.
  *
  * `chat.postMessage` with the channel and the thread root is the reply: `{channel, thread_ts, text}`
  * with the bot token as `Bearer`, and Slack answers `{ok: true, ts}`. Anything else — an
  * unreachable API, a refused token, a body that cannot be encoded, or Slack's own
- * `{ok: false, error}` on an HTTP `200` — is a `write-back` `TriggerError`, which the seam answers
- * by giving the delivery's claim back.
+ * `{ok: false, error}` on an HTTP `200` — is a `write-back` `TriggerError`.
  *
- * **It reads the thread before it replies.** The seam's retry contract is "any failed delivery gives
- * its claim back", so a write-back that posted again on the retry would answer a message twice
- * whenever the reply landed and its acknowledgement did not. A reply naming this session is the
- * record the retry looks for, exactly as on Jira (`Jira.ts`) and GitHub (`GitHub.ts`). The read is
- * Slack's default page of a thread (100 messages); a longer thread is the one shape this check
- * cannot see, which `docs/testing-third-parties.md` records.
+ * **It reads the thread before it replies.** A caller that retries (the seam gives a failed
+ * delivery's claim back; the PR step's report is repeated by the caller's retry of the step) would
+ * otherwise answer a message twice whenever the reply landed and its acknowledgement did not. A
+ * reply that already carries `marker` — the session id for the session's link, the PR's URL for the
+ * PR's — is the record the retry looks for, exactly as on Jira (`Jira.ts`) and GitHub
+ * (`GitHub.ts`). The read is Slack's default page of a thread (100 messages); a longer thread is the
+ * one shape this check cannot see, which `docs/testing-third-parties.md` records.
+ */
+const threadReplier = (config: SlackConfig) =>
+  Effect.gen(function* () {
+    const http = yield* HttpClient.HttpClient;
+    const apiUrl = (config.apiUrl ?? "https://slack.com").replace(/\/+$/, "");
+    const headers = {
+      authorization: `Bearer ${Redacted.value(config.botToken)}`,
+    };
+
+    /** Slack's own error name when it refused on an HTTP 200. */
+    const slackFailure = (
+      what: string,
+      body: { readonly error?: string | undefined },
+    ): TriggerError =>
+      writeBackError(
+        `${what}: Slack answered ok=false${body.error === undefined ? "" : ` (${body.error})`}`,
+      );
+
+    return (input: {
+      /** The message's address, for the errors: what the reply was for. */
+      readonly key: string;
+      readonly address: NonNullable<ReturnType<typeof parseSlackAddress>>;
+      readonly marker: string;
+      readonly text: string;
+    }): Effect.Effect<void, TriggerError> =>
+      Effect.gen(function* () {
+        const { address, key } = input;
+        const repliesUrl = `${apiUrl}/api/conversations.replies?channel=${encodeURIComponent(address.channel)}&ts=${encodeURIComponent(address.rootTs)}`;
+        const replies = yield* http
+          .execute(HttpClientRequest.get(repliesUrl, { headers }))
+          .pipe(
+            Effect.mapError(() =>
+              writeBackError(`Slack could not be read for ${key}`),
+            ),
+          );
+        if (replies.status < 200 || replies.status > 299) {
+          return yield* writeBackError(
+            `Slack answered HTTP ${replies.status} reading ${key}'s thread`,
+          );
+        }
+        const page = yield* HttpClientResponse.schemaBodyJson(SlackReplies)(
+          replies,
+        ).pipe(
+          Effect.mapError(() =>
+            writeBackError(`Slack's thread for ${key} could not be read`),
+          ),
+        );
+        if (!page.ok) return yield* slackFailure("reading the thread", page);
+        const already = (page.messages ?? []).some((message) =>
+          (message.text ?? "").includes(input.marker),
+        );
+        if (already) return;
+
+        const request = yield* HttpClientRequest.post(
+          `${apiUrl}/api/chat.postMessage`,
+          { headers },
+        ).pipe(
+          HttpClientRequest.bodyJson({
+            channel: address.channel,
+            thread_ts: address.rootTs,
+            text: input.text,
+          }),
+          Effect.mapError(() =>
+            writeBackError("the reply body could not be encoded"),
+          ),
+        );
+        const response = yield* http
+          .execute(request)
+          .pipe(
+            Effect.mapError(() =>
+              writeBackError(`Slack could not be reached for ${key}`),
+            ),
+          );
+        if (response.status < 200 || response.status > 299) {
+          return yield* writeBackError(
+            `Slack answered HTTP ${response.status} for ${key}`,
+          );
+        }
+        const answer = yield* HttpClientResponse.schemaBodyJson(SlackAnswer)(
+          response,
+        ).pipe(
+          Effect.mapError(() =>
+            writeBackError(`Slack's answer for ${key} could not be read`),
+          ),
+        );
+        if (!answer.ok) return yield* slackFailure("posting the reply", answer);
+      });
+  });
+
+/**
+ * The seam's write-back port, filled by Slack's Web API: the session's link, in the thread of the
+ * message that started it. A failed reply fails the delivery, which gives the claim back so the
+ * sender's retry runs the work (`threadReplier` makes that retry post nothing twice).
  */
 export const SlackWriteBack = (
   config: SlackConfig,
@@ -420,95 +558,95 @@ export const SlackWriteBack = (
   Layer.effect(
     TriggerWriteBack,
     Effect.gen(function* () {
-      const http = yield* HttpClient.HttpClient;
-      const apiUrl = (config.apiUrl ?? "https://slack.com").replace(/\/+$/, "");
-      const authorization = `Bearer ${Redacted.value(config.botToken)}`;
-      const headers = { authorization };
-      const fail = (message: string): TriggerError =>
-        new TriggerError({ code: "write-back", message });
-
-      /** Slack's own error name when it refused on an HTTP 200. */
-      const slackFailure = (
-        what: string,
-        body: { readonly error?: string | undefined },
-      ): TriggerError =>
-        fail(
-          `${what}: Slack answered ok=false${body.error === undefined ? "" : ` (${body.error})`}`,
-        );
-
+      const reply = yield* threadReplier(config);
       return TriggerWriteBack.of({
-        write: (input) =>
-          Effect.gen(function* () {
-            const address = parseSlackAddress(input.event.key);
-            if (address === undefined) {
-              return yield* fail(
+        write: (input) => {
+          const address = parseSlackAddress(input.event.key);
+          if (address === undefined) {
+            return Effect.fail(
+              writeBackError(
                 `the payload for ${input.event.key} names no channel and message to reply to`,
-              );
-            }
-
-            const repliesUrl = `${apiUrl}/api/conversations.replies?channel=${encodeURIComponent(address.channel)}&ts=${encodeURIComponent(address.rootTs)}`;
-            const replies = yield* http
-              .execute(HttpClientRequest.get(repliesUrl, { headers }))
-              .pipe(
-                Effect.mapError(() =>
-                  fail(`Slack could not be read for ${input.event.key}`),
-                ),
-              );
-            if (replies.status < 200 || replies.status > 299) {
-              return yield* fail(
-                `Slack answered HTTP ${replies.status} reading ${input.event.key}'s thread`,
-              );
-            }
-            const page = yield* HttpClientResponse.schemaBodyJson(SlackReplies)(
-              replies,
-            ).pipe(
-              Effect.mapError(() =>
-                fail(`Slack's thread for ${input.event.key} could not be read`),
               ),
             );
-            if (!page.ok)
-              return yield* slackFailure("reading the thread", page);
-            const already = (page.messages ?? []).some((message) =>
-              (message.text ?? "").includes(input.sessionId),
-            );
-            if (already) return;
-
-            const request = yield* HttpClientRequest.post(
-              `${apiUrl}/api/chat.postMessage`,
-              { headers },
-            ).pipe(
-              HttpClientRequest.bodyJson({
-                channel: address.channel,
-                thread_ts: address.rootTs,
-                text: slackReply(config, input.sessionId),
-              }),
-              Effect.mapError(() =>
-                fail("the reply body could not be encoded"),
-              ),
-            );
-            const response = yield* http
-              .execute(request)
-              .pipe(
-                Effect.mapError(() =>
-                  fail(`Slack could not be reached for ${input.event.key}`),
-                ),
-              );
-            if (response.status < 200 || response.status > 299) {
-              return yield* fail(
-                `Slack answered HTTP ${response.status} for ${input.event.key}`,
-              );
-            }
-            const answer = yield* HttpClientResponse.schemaBodyJson(
-              SlackAnswer,
-            )(response).pipe(
-              Effect.mapError(() =>
-                fail(`Slack's answer for ${input.event.key} could not be read`),
-              ),
-            );
-            if (!answer.ok) {
-              return yield* slackFailure("posting the reply", answer);
-            }
-          }),
+          }
+          return reply({
+            key: input.event.key,
+            address,
+            marker: input.sessionId,
+            text: slackReply(config, input.sessionId),
+          });
+        },
       });
+    }),
+  );
+
+/** The PR's reply: its number and link, in the thread of the message that asked for the work. */
+export const slackPullRequestReply = (pr: {
+  readonly number: number;
+  readonly url: string;
+}): string =>
+  `Factory opened pull request #${pr.number} for this message: ${pr.url}`;
+
+/**
+ * The session layer's write-back, filled by Slack: when the PR step opens a pull request for a
+ * session a Slack message started, the PR's link is posted in that message's thread (LOB-259).
+ *
+ * The message is found the way the Linear write-back finds its issue: the session's own request id
+ * is `trigger:slack:<channel>:<root>:<message>`, written by the seam when the delivery opened it, so
+ * the binding needs no table of its own. A session no Slack message opened is not reported, and
+ * neither is a step that opened no PR (a refusal says nothing a thread was promised).
+ *
+ * It cannot fail the step (`SessionWriteBack`): a Slack that is down is logged, and the caller's
+ * retry of the step — which answers `already-open` and reports again — finds the reply missing and
+ * posts it, because `threadReplier` posts a reply only once per PR link.
+ *
+ * Its output type reads `never`, as `LinearSessionWriteBack`'s does: a `Context.Reference` key
+ * carries no identifier type.
+ */
+export const SlackSessionWriteBack = (
+  config: SlackConfig,
+): Layer.Layer<never, never, HttpClient.HttpClient | SqlClient> =>
+  Layer.effect(
+    SessionWriteBack,
+    Effect.gen(function* () {
+      const reply = yield* threadReplier(config);
+      const sql = yield* SqlClient;
+      return {
+        pullRequest: (input) =>
+          Effect.gen(function* () {
+            const report = pullRequestReport(input.result);
+            if (report._tag !== "opened") return;
+            const rows = yield* sql<{ readonly requestId: string | null }>`
+              SELECT request_id FROM sessions WHERE id = ${input.sessionId}
+            `;
+            const delivery = deliveryIdOfSession(rows[0]?.requestId);
+            if (
+              delivery === undefined ||
+              !delivery.startsWith(SLACK_ID_PREFIX)
+            ) {
+              return;
+            }
+            const key = delivery.slice(SLACK_ID_PREFIX.length);
+            const address = parseSlackAddress(key);
+            if (address === undefined) return;
+            yield* reply({
+              key,
+              address,
+              marker: report.pr.url,
+              text: slackPullRequestReply(report.pr),
+            });
+          }).pipe(
+            Effect.catchTags({
+              TriggerError: (error) =>
+                Effect.logError(
+                  `slack: could not post ${input.sessionId}'s pull request in its thread: ${error.message}`,
+                ),
+              SqlError: (error) =>
+                Effect.logError(
+                  `slack: could not read ${input.sessionId}'s request id: ${error.message}`,
+                ),
+            }),
+          ),
+      };
     }),
   );
