@@ -1443,7 +1443,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * holds none of the lock's connection, so its own statements — the `pr_url` it records, the reads before it —
        * go to the pool and commit as they always did, and nothing it writes waits on the lock's
        * commit; its push and its GitHub call hold no row. The lock goes when the step ends (the
-       * transaction commits, or rolls back on a failure or an interruption) or with the connection,
+       * transaction commits, however the step ended, or rolls back on an interruption) or with the connection,
        * when the process holding it dies.
        */
       const withCardPrGate = <A, E, R>(
@@ -1455,23 +1455,25 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           Effect.gen(function* () {
             // The context the step was called in, which holds no transaction of the lock's.
             const outside = yield* Effect.context<R>();
-            return yield* sql
+            // The step's own exit is the transaction's value, so a failure of the lock alone is the
+            // `storage` error here, and the step's failures come out as they went in.
+            const stepped = yield* sql
               .withTransaction(
                 Effect.andThen(
                   sql`SELECT pg_advisory_xact_lock(hashtext(${`card_pr:${taskId}`}))`,
-                  Effect.provideContext(step, outside),
+                  Effect.exit(Effect.provideContext(step, outside)),
                 ),
               )
               .pipe(
-                Effect.catchTag("SqlError", (cause) =>
-                  Effect.fail(
+                Effect.mapError(
+                  (cause) =>
                     new SessionErrorClass({
                       code: "storage",
                       message: `take task ${taskId}'s PR lock: ${cause.message}`,
                     }),
-                  ),
                 ),
               );
+            return yield* stepped;
           }),
         );
       /**
