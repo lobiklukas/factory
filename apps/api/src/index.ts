@@ -306,6 +306,22 @@ const SessionBudgetConfig = Config.option(
 );
 
 /**
+ * Admission control (LOB-70): how many sessions this process runs at once — open owners, each a
+ * harness, a held log, a worktree and a projection. A request that would open one more is refused
+ * `at_capacity` (a webhook delivery: `503` with `Retry-After`), and served once the idle sweep
+ * (`SESSION_IDLE_TIMEOUT_MS`) releases one. Not `SESSION_BUDGET`, which is dollars per session, and
+ * not `SENTRY_RATE_LIMIT`, which is deliveries per window. Unset: no cap, so a deployment that never
+ * sets it runs exactly as before. A value that is not a positive integer fails the boot rather than
+ * silently leaving the process uncapped.
+ */
+const SessionMaxConcurrentConfig = Config.option(
+  Config.schema(
+    Schema.Finite.pipe(Schema.check(Schema.isInt(), Schema.isGreaterThan(0))),
+    "SESSION_MAX_CONCURRENT",
+  ),
+);
+
+/**
  * The docs trigger's interval schedule (LOB-197, started here by LOB-234).
  *
  * `DOCS_SCHEDULE_MS` is the interval and `DOCS_SCHEDULE_REPO` the repo each tick docs. Unset (or
@@ -544,6 +560,7 @@ const HttpLive = Effect.gen(function* () {
   const prCap = yield* PrCapConfig;
   const autonomy = yield* ApprovalGateConfig;
   const defaultBudget = yield* SessionBudgetConfig;
+  const maxConcurrent = yield* SessionMaxConcurrentConfig;
   const declaredRoles = yield* parseRoleModels(yield* RoleModelsConfig);
   const declaredDefault = (yield* DefaultModelConfig).trim();
   const docsSchedule = yield* DocsScheduleConfig;
@@ -590,6 +607,14 @@ const HttpLive = Effect.gen(function* () {
       onNone: () => "session budget: none by default (a create may name one)",
       onSome: (budget) =>
         `session budget: $${budget} by default (SESSION_BUDGET)`,
+    }),
+  );
+  yield* Effect.logInfo(
+    Option.match(maxConcurrent, {
+      onNone: () =>
+        "session admission: no cap on concurrent sessions (SESSION_MAX_CONCURRENT unset)",
+      onSome: (limit) =>
+        `session admission: at most ${limit} concurrent sessions (SESSION_MAX_CONCURRENT)`,
     }),
   );
   for (const warning of modelBackendWarnings(backendChoice)) {
@@ -738,6 +763,10 @@ const HttpLive = Effect.gen(function* () {
     sessionRoot: model.sessionRoot,
     sandbox,
     idleTimeoutMs: model.idleTimeoutMs,
+    ...Option.match(maxConcurrent, {
+      onNone: () => ({}),
+      onSome: (limit) => ({ maxConcurrentSessions: limit }),
+    }),
     prCap,
     autonomy,
     ...Option.match(defaultBudget, {

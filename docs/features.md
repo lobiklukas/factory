@@ -80,13 +80,15 @@ than the products rather than a worse copy of them — see §5.
 
 Production-readiness gaps that matter before any cluster (all verified in the audit): `GET /`
 returns the constant `"Hello Effect!"` (`apps/api/src/Api/Health.ts:5-6`) — the probes are the health
-surface now; no rate limiting or admission control; no HTTP status mapping for `SessionError` (the
+surface now; no rate limiting beyond the Sentry route's (`SENTRY_RATE_LIMIT`); no HTTP status mapping for `SessionError` (the
 RPC path carries typed errors, the plain routes answer 200 or 503); migrations are forward-only
 (`packages/storage-postgres/src/Migrations.ts`), and since LOB-21 they run in a background retry
 loop instead of the boot path, so a pod binds while its database is down; no Dockerfile, no CI.
 
 Closed since the audit: the probes, the body cap, and `SessionService.close` on SIGTERM (LOB-21 —
-`apps/api/src/Api/Probes.ts`, `apps/api/src/index.ts`).
+`apps/api/src/Api/Probes.ts`, `apps/api/src/index.ts`); admission control, a concurrency cap with a
+typed `at_capacity` refusal and a `503` on the trigger routes (LOB-70 — `SESSION_MAX_CONCURRENT`,
+`packages/core/src/admission.ts`).
 
 Drift and dead weight found: `packages/storage-postgres/docker-compose.yml` still points at port
 5432 with `stack_effect` credentials, contradicting `AGENTS.md` and `docs/handoff.md` (5442,

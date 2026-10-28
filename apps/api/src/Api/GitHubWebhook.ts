@@ -52,11 +52,22 @@ import {
   handlePullRequestReviewWebhook,
   releaseMergedDelivery,
   TriggerService,
+  type GitHubWebhookAnswer,
 } from "@repo/core";
 import { TriggerSeamLive } from "./Webhook";
 
 /** The header naming one delivery attempt; the docs push logs it beside the id it derives. */
 const GITHUB_DELIVERY_HEADER = "x-github-delivery";
+
+/**
+ * A handler's answer as a response: its status, its body and its headers — the `Retry-After` an
+ * `at-capacity` refusal carries (LOB-70), so a sender told `503` is also told when.
+ */
+const respond = (answer: GitHubWebhookAnswer) =>
+  HttpServerResponse.jsonUnsafe(answer.body, {
+    status: answer.status,
+    ...(answer.headers === undefined ? {} : { headers: answer.headers }),
+  });
 
 /** The default cap on a GitHub webhook body, in bytes. */
 const DEFAULT_MAX_BODY_BYTES = 1_048_576;
@@ -153,10 +164,7 @@ const GitHubWebhookRoute = HttpRouter.add(
         rules: read.rules,
         mention: mention(),
       });
-      return HttpServerResponse.setStatus(
-        HttpServerResponse.jsonUnsafe(answered.body),
-        answered.status,
-      );
+      return respond(answered);
     }
     if (event === "push") {
       const pushed = yield* handleDocsPushWebhook({
@@ -165,10 +173,7 @@ const GitHubWebhookRoute = HttpRouter.add(
         signature,
         delivery: req.headers[GITHUB_DELIVERY_HEADER],
       });
-      return HttpServerResponse.setStatus(
-        HttpServerResponse.jsonUnsafe(pushed.body),
-        pushed.status,
-      );
+      return respond(pushed);
     }
     const mirrored = yield* handleGitHubPullRequestWebhook({
       secret,
@@ -205,15 +210,14 @@ const GitHubWebhookRoute = HttpRouter.add(
       signature,
       fetch: yield* gitReviewFetch,
     });
-    return HttpServerResponse.setStatus(
-      HttpServerResponse.jsonUnsafe({
-        ...mirrored.body,
-        review: reviewed.body,
-      }),
-      reviewed.status === 200 || reviewed.status === 400
-        ? 200
-        : reviewed.status,
-    );
+    return respond({
+      body: { ...mirrored.body, review: reviewed.body },
+      status:
+        reviewed.status === 200 || reviewed.status === 400
+          ? 200
+          : reviewed.status,
+      ...(reviewed.headers === undefined ? {} : { headers: reviewed.headers }),
+    });
   }),
 );
 

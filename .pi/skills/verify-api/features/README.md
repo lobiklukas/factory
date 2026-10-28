@@ -264,6 +264,12 @@ reopen's resume lines. Re-run after review scoped the reopen's resume to the roo
 submissions. No drive mutation was run; the root scoping is mutation-checked in `packages/harness`'s
 `resume.test.ts`. See [lifecycle.md](lifecycle.md).
 
+The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree on 2026-10-28
+(`DATABASE_URL` the worktree's own `factory_agent_lob_70` on 5442, faux, the API on
+`ADMISSION_PORT=9500` with `SESSION_MAX_CONCURRENT=2` and `SESSION_IDLE_TIMEOUT_MS=3000`):
+`./admission.sh` **11/11** (8 driver checks, 3 shell checks), evidence
+`.verify/evidence/latest/api/admission*.json`. See [limits.md](limits.md).
+
 | Feature                  | Status  | File                                         |
 | ------------------------ | ------- | -------------------------------------------- |
 | Create a session         | passing | [create.md](create.md)                       |
