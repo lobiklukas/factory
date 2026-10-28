@@ -33,7 +33,7 @@ task, because the task exists and `factory watch` will show its summary.
   total line is those rows added. With no filter it is the server's own total. An absent repo or actor
   prints as `-`, as in `factory ls`.
 
-**How the skill drives it.** `./session.sh` owns its own API (`SESSION_PORT`, default `:9380`) with
+**How the skill drives it.** `./session.sh` owns its own API (`SESSION_PORT`, default `:9390`) with
 `FAUX_COST=0.01` and a registered checkout. In tmux it runs a repo-bound session, forks it (whole,
 `--at` its first entry, `--at` a nonexistent entry), resets it with and without a note, runs a scratch
 session with a 90k-character first message and compacts it, compacts the short fork, and reads

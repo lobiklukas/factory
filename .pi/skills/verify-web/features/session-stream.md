@@ -1,12 +1,12 @@
 # Session stream
 
-**Status: passing.** Clicking **New session** creates a session through the API, sends it a message,
-navigates to `/sessions/<id>`, streams the events back, and renders the transcript — ending with the
+**Status: passing.** Submitting the **New session** form ([session-new.md](session-new.md), E6)
+creates a session through the API, sends it the typed prompt, navigates to `/sessions/<id>`, streams the events back, and renders the transcript — ending with the
 answer the `bash` tool produced.
 
 ## Sub-features
 
-- The sidebar button creates a session and the route moves to that session's own URL
+- The sidebar's New session form creates a session and the route moves to that session's own URL
 - `SessionPane` attaches with `getSession` then `watchSession`, and folds events into one view
 - The header shows the session id, the run state, and the read path (`LIVE STREAM` or
   `HISTORICAL FOLD`)
@@ -21,13 +21,14 @@ replaced the demo `tick` stream, which proved the transport and nothing else.
 
 ## How to get to it (user POV)
 
-Click **New session**. The route becomes `/sessions/ses_…`, the sidebar gains a row, and the header
+Click **New session**, type the task, press **Start session**. The route becomes `/sessions/ses_…`, the sidebar gains a row, and the header
 reads `IDLE` (or `BUSY`) beside `LIVE STREAM`. The composer is pinned to the bottom edge; Enter sends,
 Shift+Enter newlines.
 
 ## Driving it with drive.mjs
 
-`drive.mjs` clicks the button, requires the path to match `/sessions/ses_…` within 20s, waits up to
+`drive.mjs` clicks the button, types a prompt of its own (stamped with the run's time, so its row is
+told from earlier runs), submits the form, requires the path to match `/sessions/ses_…` within 20s, waits up to
 40s for the answer, then requires `IDLE` within 20s. It also asserts the header labels the read path,
 the header carries the id, and the sidebar shows the session. All are required checks; the run exits
 non-zero without them.
@@ -70,8 +71,8 @@ there is no hand-rolled queue, and the client layer lives in the runtime.
 - A silent failure is the expected shape here, so absence of console errors proves nothing. To see
   what an atom actually did, drive it from bun with an `AtomRegistry` (`AtomRegistry.make()` +
   `subscribe` + `set`) and read the `AsyncResult`.
-- Each click creates a **new** session and sessions are append-only. Clicking ten times leaves ten
-  logs; that is expected, not a leak to clean up by hand.
+- Each submit creates a **new** session and sessions are append-only. Submitting ten times leaves ten
+  logs; that is expected, not a leak to clean up by hand. Opening the form creates nothing.
 - The sidebar is the server's list (LOB-75). `SessionPane` writes nothing to it; a `useEffect` on the
   streamed status calls `useAtomRefresh(sessionListAtom)`, so the open session's row follows its
   header without the pane holding a copy.

@@ -10,13 +10,13 @@
 # checkout to cut a worktree from and spend needs a model that reports a cost (`FAUX_COST`). It does
 # not touch the instance ./up.sh started, and it leaves nothing running.
 #
-#   ./session.sh                   # API on :9380 (SESSION_PORT overrides it)
+#   ./session.sh                   # API on :9390 (SESSION_PORT overrides it)
 #
 # Evidence: .verify/evidence/latest/cli/session-*.txt (the raw panes) and session.json.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PORT="${SESSION_PORT:-9380}"
+PORT="${SESSION_PORT:-9390}"
 API_URL="http://localhost:$PORT"
 RUN_DIR="$ROOT/.verify/run/cli-session"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/latest}/cli"

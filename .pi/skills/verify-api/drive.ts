@@ -890,11 +890,13 @@ const program = Effect.gen(function* () {
 
   // Feature: interrupt wakes and stops. After the fold it is not owned, so this also
   // proves steering wakes a session before acting on it (D8).
+  // The session is idle, so the answer is `not_running` (C8): an outcome, not a refusal.
   const interrupted = yield* client.interruptSession({ sessionId: created.id });
   assert(
-    "interruptSession leaves the session idle",
-    interrupted.status === "idle",
-    `mode=${interrupted.mode} status=${interrupted.status}`,
+    "interruptSession leaves the session idle, and says there was no run",
+    interrupted.session.status === "idle" &&
+      interrupted.outcome === "not_running",
+    `mode=${interrupted.session.mode} status=${interrupted.session.status} outcome=${interrupted.outcome}`,
   );
 
   // Feature: reset (LOB-181). A reset starts a new model context whose first message is the handoff

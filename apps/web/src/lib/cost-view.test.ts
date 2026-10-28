@@ -127,6 +127,16 @@ describe("predictionKey", () => {
     expect(fromPredictionKey(predictionKey("fix it\nnow", ""))).toEqual({
       prompt: "fix it\nnow",
       model: "",
+      repo: "",
     });
+  });
+
+  it("carries the repo the form picked, so a repo's sessions predict its own cost (E6)", () => {
+    expect(
+      fromPredictionKey(predictionKey("fix it", "faux/faux-1", "acme/api")),
+    ).toEqual({ prompt: "fix it", model: "faux/faux-1", repo: "acme/api" });
+    expect(predictionKey("fix it", "", "acme/api")).not.toBe(
+      predictionKey("fix it", ""),
+    );
   });
 });

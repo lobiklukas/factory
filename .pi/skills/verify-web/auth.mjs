@@ -109,7 +109,12 @@ try {
       .filter((row) => row.actor === actor)
       .reduce((total, row) => total + row.sessions, 0);
   const before = await rpc("listSpend", {});
+  // New session opens the form (E6); the session exists once it is submitted.
   await page.getByRole("button", { name: /new session/i }).click();
+  await page
+    .locator("#new-session-prompt")
+    .fill("Run the check and report it.");
+  await page.locator("[data-session-submit]").click();
   await page.waitForFunction(
     () => /^\/sessions\/ses_/.test(window.location.pathname),
     null,

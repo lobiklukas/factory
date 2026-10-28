@@ -1,5 +1,6 @@
 import type {
   CompactSessionInput,
+  CreateSessionInput,
   ReadSessionHistoryInput,
   SessionEvent,
   SessionId,
@@ -11,10 +12,10 @@ import type {
   TranscriptEntry,
   WithdrawMessageInput,
 } from "@repo/domain/Session";
-import { Effect, Stream } from "effect";
+import { Cause, Effect, Exit, Option, Stream } from "effect";
+import { Atom } from "effect/reactivity";
 import { runtime } from "../atom";
 import { RpcClient } from "../rpc-client";
-import { DASHBOARD_ACTOR } from "../approvals-view";
 import { SESSIONS_KEY } from "./session-list";
 
 /**
@@ -118,38 +119,65 @@ export const sessionAtom = runtime.fn((sessionId: SessionId) =>
 );
 
 /**
- * Creates a session and drives it with the first message, in one round trip. `SESSIONS_KEY` makes
- * the sidebar re-read the server's list once the session exists.
+ * Creates a session and drives it with the first message, in one round trip: what the New session
+ * form submits (E6). `create` is `createSession`'s payload exactly as the form built it
+ * (`newSessionInput`), and `content` the operator's prompt, sent verbatim. `SESSIONS_KEY` makes the
+ * sidebar re-read the server's list once the session exists.
+ *
+ * A refused create fails, with the server's typed refusal, and nothing exists. A create that lands
+ * and a first message that is refused is not that: the session exists, so the answer is the session
+ * and the refusal (`sendFailure`), and the form opens the session and says its prompt was not sent
+ * rather than claiming no session was made.
  */
 export const startSessionAtom = runtime.fn(
-  (input: {
-    readonly content: string;
-    readonly title?: string | undefined;
-    /** The model the picker chose (LOB-274); absent, the server's default. */
-    readonly model?: string | undefined;
-    /** The spend cap (LOB-163): the predicted high when the form asked for it (LOB-38). */
-    readonly budget?: number | undefined;
-  }) =>
+  (input: StartSessionInput) =>
     Effect.gen(function* () {
       const rpc = yield* RpcClient;
-      // `title` is optional on the wire (CreateSessionInput), and the control plane
-      // names a session from its first message, so omitting the key is the honest
-      // default rather than sending an empty string. The spend is the dashboard's (LOB-162).
-      // `model` likewise: absent is the server's choice, not the default's key echoed back.
-      const session = yield* rpc.client.createSession({
-        actor: DASHBOARD_ACTOR,
-        ...(input.title === undefined ? {} : { title: input.title }),
-        ...(input.model === undefined ? {} : { model: input.model }),
-        ...(input.budget === undefined ? {} : { budget: input.budget }),
-      });
-      yield* rpc.client.sendMessage({
-        sessionId: session.id,
-        content: input.content,
-      });
-      return session;
+      return yield* startSession(rpc.client, input);
     }),
   { reactivityKeys: [SESSIONS_KEY] },
 );
+
+/** What the New session form submits: `createSession`'s payload, then the first message. */
+export type StartSessionInput = {
+  readonly create: CreateSessionInput;
+  readonly content: string;
+};
+
+/** The two calls a start makes: the dashboard's RPC client, or a fake in a test. */
+export type StartSessionCalls<E extends { readonly message: string }> = {
+  readonly createSession: (
+    input: CreateSessionInput,
+  ) => Effect.Effect<SessionSummary, E>;
+  readonly sendMessage: (input: {
+    readonly sessionId: SessionId;
+    readonly content: string;
+  }) => Effect.Effect<unknown, E>;
+};
+
+/** `startSessionAtom`'s work, over the calls it is given. */
+export const startSession = <E extends { readonly message: string }>(
+  calls: StartSessionCalls<E>,
+  input: StartSessionInput,
+): Effect.Effect<
+  { readonly session: SessionSummary; readonly sendFailure?: string },
+  E
+> =>
+  Effect.gen(function* () {
+    const session = yield* calls.createSession(input.create);
+    const sent = yield* calls
+      .sendMessage({ sessionId: session.id, content: input.content })
+      .pipe(Effect.exit);
+    return Exit.isSuccess(sent)
+      ? { session }
+      : {
+          session,
+          sendFailure: Option.match(Cause.findErrorOption(sent.cause), {
+            onNone: () => Cause.pretty(sent.cause),
+            onSome: (error) => error.message,
+          }),
+        };
+  });
 
 /**
  * Forks a session at its last entry (LOB-180's RPC, LOB-182's action).
@@ -200,6 +228,21 @@ export const withdrawMessageAtom = runtime.fn((input: WithdrawMessageInput) =>
   }),
 );
 
+/**
+ * Stops the session's run (C8). The answer is what the interrupt came to: a stopped run reaches the
+ * pane over the stream it already follows (the status goes idle, the transcript gains its
+ * `interrupted` row), and `not_running` is an answer the pane reports, not a failure.
+ * `SESSIONS_KEY` re-reads the sidebar's list, whose row shows the status too.
+ */
+export const interruptSessionAtom = runtime.fn(
+  (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.interruptSession({ sessionId });
+    }),
+  { reactivityKeys: [SESSIONS_KEY] },
+);
+
 /** Sends a message into a session the pane is already attached to. */
 export const sendMessageAtom = runtime.fn(
   (input: { readonly sessionId: SessionId; readonly content: string }) =>
@@ -223,4 +266,30 @@ export const readSessionHistoryAtom = runtime.fn(
       const rpc = yield* RpcClient;
       return yield* rpc.client.readSessionHistory(input);
     }),
+);
+
+/**
+ * Opens a session's pull request (LOB-213's RPC, C7's control): one atom per session, so the session
+ * pane's header and the card pane's run row read and write the same answer.
+ *
+ * A family of `fn` atoms rather than a call each pane makes, because the answer is the state both
+ * panes render: the link after a press, the reason after a refusal, "opening" while the call is in
+ * flight — so a press in one is visible in the other without either re-reading anything. Kept alive
+ * so a refusal outlives the pane that showed it; the session list is re-read on success, which is
+ * where the row's `prUrl` comes from.
+ *
+ * The title is the caller's and the branches are the server's: the call names the session and what
+ * to call the PR, as `factory pr` does.
+ */
+export const openPullRequestAtom = Atom.family((sessionId: SessionId) =>
+  runtime
+    .fn(
+      (title: string) =>
+        Effect.gen(function* () {
+          const rpc = yield* RpcClient;
+          return yield* rpc.client.openPullRequest({ sessionId, title });
+        }),
+      { reactivityKeys: [SESSIONS_KEY] },
+    )
+    .pipe(Atom.keepAlive),
 );

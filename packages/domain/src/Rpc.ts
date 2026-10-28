@@ -112,6 +112,7 @@ import {
   CreateSessionInput,
   ForkSessionInput,
   GetRepoInput,
+  InterruptSessionResult,
   ListReposInput,
   ListReposOutput,
   ListSessionsInput,
@@ -181,9 +182,10 @@ export class SessionRpc extends RpcGroup.make(
     success: WithdrawMessageResult,
     error: SessionError,
   }),
+  // An interrupt of an idle session is an outcome in the answer (`not_running`), not an error (C8).
   Rpc.make("interruptSession", {
     payload: SessionIdInput,
-    success: SessionSummary,
+    success: InterruptSessionResult,
     error: SessionError,
   }),
   Rpc.make("forkSession", {

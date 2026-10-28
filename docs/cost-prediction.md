@@ -55,8 +55,8 @@ before it runs, so it could never be known at create time.
 create the session with `budget` set to the range's high, the p90. That is an ordinary LOB-163 cap
 (docs/design.md R4), so about one comparable run in ten would have been stopped by it. With no range
 the CLI refuses before anything is created. The dashboard disables the choice, and if it was ticked
-for a range that is gone (a model change resets it; a refresh could drop it), **New session** waits
-and says so rather than start the session uncapped.
+for a range that is gone (a model change resets it; a refresh or an edited prompt could drop it), the
+New session form's **Start session** refuses and says so rather than start the session uncapped.
 
 ## The backtest
 

@@ -182,3 +182,28 @@ describe("describeDefinition over a definition's own transitions (LOB-267)", () 
     ).toBe(false);
   });
 });
+
+describe("describeDefinition's caps and WIP limits (LOB-71)", () => {
+  /** Mutation: drop either spread in `describeDefinition` — the reader is told no cap. */
+  it("carries the version's caps and a column's WIP limit as declared, and none where none is", () => {
+    const capped = describeDefinition(
+      {
+        ...definition,
+        caps: { board: 2, task: 1, repo: 2 },
+        columns: definition.columns.map((column) =>
+          column.name === "review" ? { ...column, wipLimit: 1 } : column,
+        ),
+      },
+      modelOf,
+    );
+    expect(capped.caps).toEqual({ board: 2, task: 1, repo: 2 });
+    expect(capped.columns.map((column) => column.wipLimit)).toEqual([
+      undefined,
+      undefined,
+      1,
+    ]);
+    const plain = describeDefinition(definition, modelOf);
+    expect(plain).not.toHaveProperty("caps");
+    expect(plain.columns[2]).not.toHaveProperty("wipLimit");
+  });
+});

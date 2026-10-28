@@ -644,7 +644,7 @@ describe("the review a pull_request event starts", () => {
 
   it("a retried create repairs a review session whose first attempt died before its target was written", async () => {
     const number = 16;
-    const { card } = await cardWithPr(pageOf(number));
+    const { card, builder } = await cardWithPr(pageOf(number));
     const update = pullRequestUpdate(payload({ number }));
     if (update === undefined) throw new Error("the payload does not read");
     const requestId = `trigger:${reviewToken(update)}`;
@@ -652,6 +652,10 @@ describe("the review a pull_request event starts", () => {
       Effect.gen(function* () {
         const sessions = yield* SessionService;
         const sql = yield* SqlClient;
+        // The builder's run has ended its turn, as it has once its PR is open. The first attempt
+        // below is written without its review target, so it is a person's start as the board's caps
+        // read it (LOB-71), and the card's one slot must be free for it, as it is for the real one.
+        yield* sql`UPDATE task_runs SET finished_at = now() WHERE session_id = ${builder.id}`;
         // The first attempt: its row, its run and its owner, and no review target in its log.
         const first = yield* sessions.create({
           requestId,
