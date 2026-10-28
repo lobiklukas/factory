@@ -7,9 +7,13 @@
       "cache": false
     },
     "dev": {
-      // Every variable apps/api reads at boot (ServerConfig, the model backend, the session root,
-      // the Motel and DevTools exporters, DATABASE_MAX_CONNECTIONS via storage-postgres). Strict Mode
-      // strips anything not declared here, so a value set in the shell silently does nothing (LOB-101).
+      // Every variable apps/api reads (ServerConfig, the model backend, the session root, the Motel
+      // and DevTools exporters, DATABASE_MAX_CONNECTIONS via storage-postgres, and the trigger,
+      // Linear, Sentry and GitHub webhook receivers). Strict Mode strips anything not declared here,
+      // so a value set in the shell silently does nothing (LOB-101). A guard in
+      // packages/storage-postgres/src/turbo-env.test.ts scans the sources for every
+      // `process.env["X"]` and `Config.*("X")` and fails on a name missing from `env` or
+      // `passThroughEnv` below (LOB-257).
       "env": [
         "PORT",
         "HOST",
@@ -44,16 +48,34 @@
         "GITHUB_REVIEWER_APP_INSTALLATION_ID",
         "GITHUB_API_URL",
         "DOCS_SCHEDULE_MS",
-        "DOCS_SCHEDULE_REPO"
+        "DOCS_SCHEDULE_REPO",
+        "TRIGGER_RULES",
+        "TRIGGER_SECRET_HEADER",
+        "TRIGGER_DELIVERY_HEADER",
+        "TRIGGER_MAX_BODY_BYTES",
+        "LINEAR_API_URL",
+        "LINEAR_STATE_STARTED",
+        "LINEAR_STATE_IN_REVIEW",
+        "LINEAR_STATE_DONE",
+        "LINEAR_SESSION_URL_BASE",
+        "SENTRY_RATE_LIMIT",
+        "SENTRY_RATE_WINDOW_SECONDS",
+        "GITHUB_WEBHOOK_MAX_BODY_BYTES"
       ],
       // A secret: it must reach the process but must not enter the task hash or the cache key.
       "passThroughEnv": [
         "ANTHROPIC_API_KEY",
+        "ANTHROPIC_OAUTH_TOKEN",
+        "ANTHROPIC_AUTH_TOKEN",
         "GITHUB_TOKEN",
         "GITHUB_APP_PRIVATE_KEY",
         "GITHUB_REVIEWER_TOKEN",
         "GITHUB_REVIEWER_APP_PRIVATE_KEY",
-        "GITHUB_WEBHOOK_SECRET"
+        "GITHUB_WEBHOOK_SECRET",
+        "TRIGGER_SECRET",
+        "LINEAR_WEBHOOK_SECRET",
+        "LINEAR_API_KEY",
+        "SENTRY_CLIENT_SECRET"
       ]
     }
   }
