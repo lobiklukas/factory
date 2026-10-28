@@ -207,6 +207,42 @@ const laneCard = (task: Task): string =>
   ["", task.id, task.priority, task.title].join("  ");
 
 /**
+ * What `factory board ls` prints under the board's line: one line per column of the board's version
+ * with that lane's cards under it, then — for a board upgraded without migrating its cards (D5) —
+ * the cards in a column that version does not declare, each with the version it pins, so a card
+ * left on a renamed or dropped column is listed rather than missing from every lane (as the
+ * dashboard's strays are, `boardLanes`).
+ */
+export const laneLines = (
+  columns: ReadonlyArray<{ readonly name: string; readonly kind: string }>,
+  cards: ReadonlyArray<Task>,
+): ReadonlyArray<string> => {
+  const declared = new Set(columns.map((column) => column.name));
+  const strays = cards.filter((card) => !declared.has(card.column));
+  return [
+    ...columns.flatMap((column) => {
+      const lane = cards.filter((card) => card.column === column.name);
+      return [
+        [column.name, column.kind, String(lane.length)].join("  "),
+        ...lane.map(laneCard),
+      ];
+    }),
+    ...(strays.length === 0
+      ? []
+      : [
+          `elsewhere  ${strays.length} in a column the board's version does not declare`,
+          ...strays.map((card) =>
+            [
+              laneCard(card),
+              card.column,
+              `v${card.definitionVersion}`,
+            ].join("  "),
+          ),
+        ]),
+  ];
+};
+
+/**
  * `factory board ls` — one line per column, in the order the pinned definition declares them, with
  * that lane's cards under it.
  *
@@ -247,14 +283,8 @@ const lsCommand = Command.make(
       // cards still on an older one move by that one's moves.
       const mixed = pinnedVersionsNotice(view.definition.version, cards);
       if (mixed !== null) yield* Console.log(`pinned   ${mixed}`);
-      for (const column of view.definition.columns) {
-        const lane = cards.filter((card) => card.column === column.name);
-        yield* Console.log(
-          [column.name, column.kind, String(lane.length)].join("  "),
-        );
-        for (const card of lane) {
-          yield* Console.log(laneCard(card));
-        }
+      for (const line of laneLines(view.definition.columns, cards)) {
+        yield* Console.log(line);
       }
     });
 

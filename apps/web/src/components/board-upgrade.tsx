@@ -15,10 +15,14 @@ import {
 import { DASHBOARD_ACTOR } from "@/lib/approvals-view";
 import {
   defaultMapping,
+  mappingChoices,
+  mappingSources,
   type MappingRow,
+  type UpgradingCard,
   upgradedSummary,
   upgradeInputOf,
   upgradeRefusal,
+  upgradeTargets,
 } from "@/lib/board-upgrade-view";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -30,17 +34,19 @@ const SELECT_CLASS =
 const UNMAPPED = "";
 
 /**
- * Where each pinned column's cards go under the target version (D5): one row per column of the pin,
- * a select of the target's columns, preset to the column of the same name when there is one. Read
- * from `getDefinition` for the version the form names, so the choices are that version's columns.
+ * Where each column's cards go under the target version (D5): one row per column a card to migrate
+ * may sit in (`mappingSources`: the pin's, and any an older version's card is left in), preset to the
+ * target's column of the same name when there is one. A column the target still declares is offered
+ * only itself (`mappingChoices`); a renamed or dropped one, every column of the target. Read from
+ * `getDefinition` for the version the form names, so the choices are that version's columns.
  */
 const MappingRows = ({
-  pinned,
+  sources,
   targetKey,
   rows,
   onChange,
 }: {
-  readonly pinned: DefinitionConfig;
+  readonly sources: ReadonlyArray<string>;
   readonly targetKey: string;
   readonly rows: ReadonlyArray<MappingRow> | undefined;
   readonly onChange: (rows: ReadonlyArray<MappingRow>) => void;
@@ -63,12 +69,7 @@ const MappingRows = ({
       </p>
     );
   const target = result.value.columns.map((column) => column.name);
-  const shown =
-    rows ??
-    defaultMapping(
-      pinned.columns.map((column) => column.name),
-      target,
-    );
+  const shown = rows ?? defaultMapping(sources, target);
   return (
     <table className="self-start text-xs" data-upgrade-mapping>
       <tbody>
@@ -97,7 +98,7 @@ const MappingRows = ({
                 className={SELECT_CLASS}
               >
                 <option value={UNMAPPED}>— not mapped</option>
-                {target.map((name) => (
+                {mappingChoices(row.from, target).map((name) => (
                   <option key={name} value={name}>
                     {name}
                   </option>
@@ -113,19 +114,23 @@ const MappingRows = ({
 
 /**
  * The settings page's Upgrade action (D5): move the board to a newer version of its definition, and,
- * when the person asks, migrate its cards with the mapping on screen. Offered only when a newer
- * version exists. Without the migration, new cards pin the new version and existing cards keep
- * theirs; with it, every card is re-pinned or — when one has an unfinished run or a column the
- * mapping leaves out — none is, and the page lists the cards the server named.
+ * when the person asks, migrate its cards with the mapping on screen. Offered when a newer version
+ * exists, or while some card still pins an older version than the board — then the pin itself is
+ * offered too, as a migration only, which re-pins the cards an earlier upgrade left behind. Without
+ * the migration, new cards pin the new version and existing cards keep theirs; with it, every card is
+ * re-pinned or — when one has an unfinished run or a column the mapping leaves out — none is, and the
+ * page lists the cards the server named.
  */
 export const BoardUpgrade = ({
   boardId,
   definition,
   newer,
+  cards,
 }: {
   readonly boardId: BoardInstanceId;
   readonly definition: DefinitionConfig;
   readonly newer: ReadonlyArray<number>;
+  readonly cards: ReadonlyArray<UpgradingCard>;
 }) => {
   const upgrade = useAtomSet(upgradeBoardAtom, { mode: "promiseExit" });
   const [toVersion, setToVersion] = useState<number | undefined>(undefined);
@@ -139,11 +144,24 @@ export const BoardUpgrade = ({
     typeof upgradeRefusal
   > | null>(null);
 
-  const target = toVersion ?? newer.at(-1);
-  // No newer version: nothing to offer, but an upgrade this page just made still says what it did.
+  const targets = upgradeTargets(definition.version, newer, cards);
+  const target =
+    toVersion !== undefined && targets.includes(toVersion)
+      ? toVersion
+      : targets.at(-1);
+  // Nothing to offer, but an upgrade this page just made still says what it did.
   if (target === undefined)
     return done === null ? null : <UpgradeDone upgraded={done} />;
   const targetKey = `${definition.id}@${target}`;
+  // At the pin there is nothing to upgrade, only cards to re-pin: the migration is the action.
+  const atPin = target === definition.version;
+  const migrating = migrate || atPin;
+  const sources = mappingSources({
+    pin: definition.version,
+    pinnedColumns: definition.columns.map((column) => column.name),
+    target,
+    cards,
+  });
 
   const submit = (shown: ReadonlyArray<MappingRow>) => {
     if (pending) return;
@@ -155,7 +173,7 @@ export const BoardUpgrade = ({
         boardId,
         pinned: definition.version,
         toVersion: target,
-        migrate,
+        migrate: migrating,
         rows: shown,
         actor: DASHBOARD_ACTOR,
       }),
@@ -200,9 +218,11 @@ export const BoardUpgrade = ({
           }}
           className={SELECT_CLASS}
         >
-          {newer.map((version) => (
+          {targets.map((version) => (
             <option key={version} value={version}>
-              v{version}
+              {version === definition.version
+                ? `v${version} (the board's: re-pin the cards left behind)`
+                : `v${version}`}
             </option>
           ))}
         </select>
@@ -210,30 +230,34 @@ export const BoardUpgrade = ({
           <input
             type="checkbox"
             data-upgrade-migrate
-            checked={migrate}
+            checked={migrating}
+            disabled={atPin}
             onChange={(event) => setMigrate(event.currentTarget.checked)}
           />
           Also migrate the board&apos;s cards
         </label>
       </div>
       <p className="text-[11px] text-muted-foreground">
-        {migrate
-          ? `Every card is re-pinned to v${target} in the column picked for its own, or — if one has an unfinished run or sits in a column left unmapped — none is.`
-          : `New cards will pin v${target}; the cards already here keep v${definition.version} and move by it.`}
+        {atPin
+          ? `Every card still on an older version is re-pinned to v${target} in the column picked for its own, or — if one has an unfinished run or sits in a column left unmapped — none is.`
+          : migrating
+            ? `Every card is re-pinned to v${target} in the column picked for its own, or — if one has an unfinished run or sits in a column left unmapped — none is.`
+            : `New cards will pin v${target}; the cards already here keep the version they pin and move by it.`}
       </p>
-      {migrate ? (
+      {migrating ? (
         <MappingRows
-          pinned={definition}
+          sources={sources}
           targetKey={targetKey}
           rows={rows}
           onChange={setRows}
         />
       ) : null}
-      {migrate ? (
+      {migrating ? (
         <MigrateButton
           pending={pending}
           target={target}
-          definition={definition}
+          atPin={atPin}
+          sources={sources}
           targetKey={targetKey}
           rows={rows}
           onSubmit={submit}
@@ -287,14 +311,16 @@ const UpgradeDone = ({ upgraded }: { readonly upgraded: UpgradedBoard }) => (
 const MigrateButton = ({
   pending,
   target,
-  definition,
+  atPin,
+  sources,
   targetKey,
   rows,
   onSubmit,
 }: {
   readonly pending: boolean;
   readonly target: number;
-  readonly definition: DefinitionConfig;
+  readonly atPin: boolean;
+  readonly sources: ReadonlyArray<string>;
   readonly targetKey: string;
   readonly rows: ReadonlyArray<MappingRow> | undefined;
   readonly onSubmit: (rows: ReadonlyArray<MappingRow>) => void;
@@ -302,7 +328,7 @@ const MigrateButton = ({
   const result = useAtomValue(definitionVersionAtom(targetKey));
   const preset = AsyncResult.isSuccess(result)
     ? defaultMapping(
-        definition.columns.map((column) => column.name),
+        sources,
         result.value.columns.map((column) => column.name),
       )
     : undefined;
@@ -317,7 +343,11 @@ const MigrateButton = ({
       }}
       className="self-start"
     >
-      {pending ? "Upgrading…" : `Upgrade to v${target} and migrate cards`}
+      {pending
+        ? "Upgrading…"
+        : atPin
+          ? `Migrate the cards left behind to v${target}`
+          : `Upgrade to v${target} and migrate cards`}
     </Button>
   );
 };

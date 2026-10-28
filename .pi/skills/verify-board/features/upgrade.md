@@ -50,12 +50,15 @@ factory board upgrade --board brd_… --to 4 --expect-version 3 --same-columns -
 entry over it. The answer prints `upgraded <board> <definition> v<from> → v<to>`, one `repinned` line
 per card (its version and column before and after, its new revision) and how many cards still pin an
 older version. `board show` prints a card's `pinned    v<n>`, and `board ls` says when the board's cards
-pin more than one version.
+pin more than one version, and lists a card in a column the board's version does not declare (one
+left on a renamed or dropped column) under `elsewhere`, with its column and pinned version.
 
-In the dashboard, a board's settings page offers **Upgrade this board** when a newer version exists:
-a version picker, **Also migrate the board's cards** (unchecked by default), and — when checked — the
-mapping, one row per column of the pin, each preset to the target's column of the same name or
-"not mapped". The board page says when its cards pin more than one version, naming each and the
+In the dashboard, a board's settings page offers **Upgrade this board** when a newer version exists,
+or while a card still pins an older version than the board: a version picker (the pin itself is
+offered then, as a migration only, to re-pin the cards left behind), **Also migrate the board's
+cards** (unchecked by default), and — when checked — the mapping, one row per column of the pin and
+per column a card left on an older version sits or is blocked in, each preset to the target's column
+of the same name or "not mapped". A column the target still declares is offered only itself. The board page says when its cards pin more than one version, naming each and the
 board's own.
 
 ## How the skill drives it
@@ -99,8 +102,9 @@ printed lines; `apps/web/src/lib/board-upgrade-view.test.ts` the page's mapping 
 
 ## What it does not prove
 
-The drive's refused batch is an unmapped column; the unfinished-run refusal is proven against
-Postgres only (a run in flight on the drive's card would need a scripted turn held open). The
-dashboard's Upgrade offers versions newer than the pin only, so re-pinning cards an earlier upgrade
-left behind (`toVersion` equal to the pin) is the CLI's. A run's `task_runs.column` is not rewritten
+The drive's refused batch is an unmapped column; the unfinished-run refusal, the still-declared
+remap and run-actor refusals, and a run start re-pinned under it (`SessionService.test.ts`, board caps)
+are proven against Postgres only (a run in flight on the drive's card would need a scripted turn held
+open). The dashboard's re-pin at the pin (`toVersion` equal to it) is proven by
+`board-upgrade-view.test.ts`'s offered versions and rows, not by a drive. A run's `task_runs.column` is not rewritten
 by a mapping that renames a column, so an earlier run's column keeps its old name.

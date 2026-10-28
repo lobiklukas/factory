@@ -4,7 +4,11 @@ import { AsyncResult } from "effect/reactivity";
 import { Cause, Option, Schema } from "effect";
 import { PencilRulerIcon, SlidersHorizontalIcon } from "lucide-react";
 import { BoardInstanceId, type DefinitionConfig } from "@repo/domain/Task";
-import { boardConfigAtom, definitionsAtom } from "@/lib/atoms/board-atom";
+import {
+  boardAtom,
+  boardConfigAtom,
+  definitionsAtom,
+} from "@/lib/atoms/board-atom";
 import {
   capsLabel,
   NONE,
@@ -45,8 +49,10 @@ function BoardSettingsRoute() {
 
 /**
  * Whether a version newer than the board's pin exists (B2), from `listDefinitions`, and the Upgrade
- * action when one does (D5). A failed list says it could not tell rather than claiming the board is on
- * the newest version.
+ * action when one does, or when some card still pins an older version than the board (D5). The
+ * board's cards are the lanes' own read (`boardAtom`); until it lands, or when it fails, the action
+ * offers the newer versions only. A failed list says it could not tell rather than claiming the board
+ * is on the newest version.
  */
 const NewerVersions = ({
   boardId,
@@ -56,6 +62,8 @@ const NewerVersions = ({
   readonly definition: DefinitionConfig;
 }) => {
   const result = useAtomValue(definitionsAtom);
+  const board = useAtomValue(boardAtom(boardId));
+  const cards = AsyncResult.isSuccess(board) ? board.value.tasks : [];
   if (AsyncResult.isInitial(result)) return null;
   if (AsyncResult.isFailure(result)) {
     return (
@@ -87,7 +95,12 @@ const NewerVersions = ({
           {notice}
         </p>
       )}
-      <BoardUpgrade boardId={boardId} definition={definition} newer={newer} />
+      <BoardUpgrade
+        boardId={boardId}
+        definition={definition}
+        newer={newer}
+        cards={cards}
+      />
     </>
   );
 };

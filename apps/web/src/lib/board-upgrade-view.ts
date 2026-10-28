@@ -24,6 +24,61 @@ export type MappingRow = {
   readonly to: string | undefined;
 };
 
+/** What the page needs of a card to offer its column a row: where it sits, and the version it pins. */
+export type UpgradingCard = {
+  readonly column: string;
+  readonly definitionVersion: number;
+  readonly blocked?: { readonly column: string } | undefined;
+};
+
+/**
+ * The versions the Upgrade action offers: every version newer than the pin, and the pin itself while
+ * some card still pins an older one — the cards an earlier upgrade left behind, which only a
+ * migration at the pin re-pins. Empty when there is nothing to do.
+ */
+export const upgradeTargets = (
+  pin: number,
+  newer: ReadonlyArray<number>,
+  cards: ReadonlyArray<UpgradingCard>,
+): ReadonlyArray<number> => [
+  ...(cards.some((card) => card.definitionVersion !== pin) ? [pin] : []),
+  ...newer,
+];
+
+/**
+ * The columns a migration to `target` needs a row for, in order: the pin's (when the target is
+ * another version, every card on the pin moves), then each column a card not on `target` sits or is
+ * blocked in that is not among them — a card left on an older version in a column the pin no longer
+ * declares is one the server would refuse as unmapped, so it gets a row too.
+ */
+export const mappingSources = (form: {
+  readonly pin: number;
+  readonly pinnedColumns: ReadonlyArray<string>;
+  readonly target: number;
+  readonly cards: ReadonlyArray<UpgradingCard>;
+}): ReadonlyArray<string> => [
+  ...new Set([
+    ...(form.target === form.pin ? [] : form.pinnedColumns),
+    ...form.cards
+      .filter((card) => card.definitionVersion !== form.target)
+      .flatMap((card) =>
+        card.blocked === undefined
+          ? [card.column]
+          : [card.column, card.blocked.column],
+      ),
+  ]),
+];
+
+/**
+ * Where a row's cards may go: a column the target still declares keeps its cards (a migration
+ * re-pins, it does not move — the server refuses anything else), and only one it renamed or dropped
+ * is offered every column of the target.
+ */
+export const mappingChoices = (
+  from: string,
+  target: ReadonlyArray<string>,
+): ReadonlyArray<string> => (target.includes(from) ? [from] : target);
+
 /** The mapping the page offers first: each pinned column to the target's column of its name. */
 export const defaultMapping = (
   pinned: ReadonlyArray<string>,

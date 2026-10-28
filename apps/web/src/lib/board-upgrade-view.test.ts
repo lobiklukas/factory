@@ -10,7 +10,10 @@ import {
 } from "@repo/domain/Task";
 import {
   defaultMapping,
+  mappingChoices,
+  mappingSources,
   mappingOf,
+  upgradeTargets,
   upgradedSummary,
   upgradeInputOf,
   upgradeRefusal,
@@ -28,6 +31,79 @@ describe("defaultMapping", () => {
       { from: "todo", to: "todo" },
       { from: "doing", to: undefined },
       { from: "done", to: "done" },
+    ]);
+  });
+});
+
+describe("upgradeTargets", () => {
+  /**
+   * Mutation: offer newer versions only — after a pin-only upgrade to the newest version, the cards
+   * left behind can never be re-pinned from the dashboard.
+   */
+  it("offers the newer versions, and the pin itself while a card still pins an older one", () => {
+    expect(upgradeTargets(3, [4, 5], [{ column: "a", definitionVersion: 3 }])).toEqual(
+      [4, 5],
+    );
+    expect(upgradeTargets(3, [], [{ column: "a", definitionVersion: 3 }])).toEqual(
+      [],
+    );
+    expect(
+      upgradeTargets(3, [], [
+        { column: "a", definitionVersion: 3 },
+        { column: "b", definitionVersion: 2 },
+      ]),
+    ).toEqual([3]);
+  });
+});
+
+describe("mappingSources", () => {
+  const cards = [
+    { column: "todo", definitionVersion: 2 },
+    { column: "doing", definitionVersion: 1 },
+    {
+      column: "review",
+      definitionVersion: 1,
+      blocked: { column: "parked" },
+    },
+  ];
+
+  /**
+   * Mutation: build the rows from the pin's columns only — a v1 card in `doing`, which the v2 pin
+   * renamed, has no row, and the batch is always refused as unmapped.
+   */
+  it("gives a row to each column of the pin, then each column a card left on an older version sits or is blocked in", () => {
+    expect(
+      mappingSources({
+        pin: 2,
+        pinnedColumns: ["todo", "review", "done"],
+        target: 3,
+        cards,
+      }),
+    ).toEqual(["todo", "review", "done", "doing", "parked"]);
+  });
+
+  /** Mutation: keep the pin's columns at the pin — rows for cards that are not migrated at all. */
+  it("at the pin, gives rows only to the columns of the cards left behind", () => {
+    expect(
+      mappingSources({
+        pin: 2,
+        pinnedColumns: ["todo", "review", "done"],
+        target: 2,
+        cards,
+      }),
+    ).toEqual(["doing", "review", "parked"]);
+  });
+});
+
+describe("mappingChoices", () => {
+  /** Mutation: offer every column for every row — `building` could be sent past its exit to `review`. */
+  it("keeps a column the target still declares, and offers a renamed or dropped one every column", () => {
+    expect(mappingChoices("building", ["building", "review"])).toEqual([
+      "building",
+    ]);
+    expect(mappingChoices("doing", ["building", "review"])).toEqual([
+      "building",
+      "review",
     ]);
   });
 });
