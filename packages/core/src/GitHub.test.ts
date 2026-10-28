@@ -177,6 +177,21 @@ describe("githubEvent", () => {
     });
   });
 
+  it("names the sender as the author and the issue's own creation time (S-trigger-trust-gating)", () => {
+    const event = githubEvent({
+      ...payload({ action: "labeled" }),
+      sender: { login: "Octocat", id: 583231, type: "User" },
+      issue: {
+        ...(payload({})["issue"] as Record<string, unknown>),
+        created_at: "2026-09-01T12:00:00Z",
+      },
+    });
+    expect(event?.author).toEqual({ id: "583231", login: "Octocat" });
+    expect(event?.createdAt).toBe("2026-09-01T12:00:00Z");
+    // A payload with no sender names nobody, and a rule that lists authors refuses it.
+    expect(githubEvent(payload({}))).not.toHaveProperty("author");
+  });
+
   it("reads the repo from the payload rather than from anything global", () => {
     const elsewhere = githubEvent(payload({ fullName: "Other/Repository" }));
     expect(elsewhere?.repo).toBe("other/repository");
@@ -505,7 +520,24 @@ describe("githubIssueIntake", () => {
       body: "It wobbles when it spins.\n\nComment from alice:\n@factory please look at this",
       labels: ["factory"],
       repo,
+      // The commenter is the one asking (S-trigger-trust-gating); a user with no numeric id is
+      // named by login.
+      author: { id: "alice", login: "alice" },
     });
+  });
+
+  it("names the comment's author, not the delivery's sender, as the one asking", () => {
+    const body = commentPayload({ login: "alice" });
+    const intake = comment({
+      ...body,
+      comment: {
+        ...(body["comment"] as Record<string, unknown>),
+        user: { login: "alice", id: 101, type: "User" },
+      },
+      sender: { login: "mallory", id: 666, type: "User" },
+    });
+    if (intake._tag !== "delivery") throw new Error("should deliver");
+    expect(intake.delivery.event.author).toEqual({ id: "101", login: "alice" });
   });
 
   it("makes the label and the mention one delivery: the same key either way", () => {

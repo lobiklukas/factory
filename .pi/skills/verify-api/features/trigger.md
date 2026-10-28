@@ -180,3 +180,45 @@ after an error line naming the variable and every decode fault. `WEBHOOK_ROUTES`
 `/webhooks/…` path with no row. Proof: `WebhookBoot.test.ts` (the log lines, captured),
 `TriggerService.test.ts` ("stored trigger routes", on Postgres), `Rpc/TriggerRoutes.test.ts` (the
 RPC), and `./linear.sh`, which adds and removes a stored route mid-run and greps the boot log.
+
+## Trust gate and text hygiene (S-trigger-trust-gating)
+
+A signed delivery proves which _system_ sent it, not that the person behind it may start an agent on
+the operator's machine. A rule (an env rule or a stored route) may carry a **trust gate**,
+`trust: {authors?, githubPermission?, createdAfter?}` (`TriggerTrust` in `@repo/domain/Trigger`,
+stored as one `jsonb` column, migration `0042`); a rule with none admits what it always did.
+
+- `authors` — the delivery's author (`TriggerEvent.author`: Linear's `actor` id, or its e-mail as the
+  login; GitHub's `sender` or a comment's `user`, by numeric id or login; the generic body's `author`)
+  must be listed. An event that names no author is refused.
+- `githubPermission` — or, for a GitHub event, the author's role on the repo must be at least this
+  (`triage`, `write`, `maintain`, `admin`), read per delivery from
+  `GET /repos/{owner}/{repo}/collaborators/{username}/permission` (`GitHubAuthorPermissions`). Asked
+  only for an author the list does not name. A lookup that cannot answer fails the delivery
+  `author-check` (`500`, the claim given back); a seam with no permission port fails the same way.
+- `createdAfter` — the item (`TriggerEvent.createdAt`: a Linear issue's `data.createdAt`, a GitHub
+  issue's `created_at`) must be at least this old: an instant, or `enabled`, a stored route's own
+  creation. An env rule naming `enabled` refuses the boot. An undated item is refused.
+
+The gate runs after the mapping (it is the mapped rule's) and before the registry, the board and
+the session — a card rule included. A refusal is a recorded skip whose reason names the author
+(`untrusted author Mallory (user-mallory): rule "x" (route trr_…) admits only the authors [user-ada]`)
+or the item's age (`created before the rule was enabled: <key> was created at …, and rule "x" … takes
+only items created from …`). A delivery keyed by its work **reclaims** either skip, so a stranger who
+labels an issue first does not lock it against the trusted author who labels it next.
+
+**The words are cleaned** (`sanitizeTriggerText`, `packages/core/src/triggerText.ts`): the event's
+title and body, and the rendered prompt, are NFKC-normalized and stripped of zero-width, bidi and
+tag characters, variation selectors, invisible fillers, stray controls, and HTML comments, before
+the session's title, its first message, or a card's title and body read them. A processed delivery's
+reason ends `; removed N hidden characters and M HTML comments from the delivery's text` when
+anything was removed.
+
+**Proof.** `packages/core/src/triggerText.test.ts` pins the normaliser; `triggerTrust.test.ts` the
+gate's pure half and the GitHub port over a fake `HttpClient`; `TriggerService.trust.test.ts` the
+three acceptance cases through the real seam on Postgres (and the reclaim, the GitHub role, the
+lookup failure); `WebhookBoot.test.ts` the boot refusal. Over HTTP: `./linear.sh` checks 22–25 (an
+untrusted labeller's issue opens nothing and the recorded row names them; an issue created before
+the route skipped; a zero-width- and tag-hidden instruction and an HTML comment absent from the
+session's first message; the trusted relabel reclaimed) and `./github-issues.sh` check 13 (a
+reader's labelled issue refused naming the role, a writer's opened, both asked of the fake forge).

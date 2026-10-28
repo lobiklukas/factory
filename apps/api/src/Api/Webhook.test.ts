@@ -416,3 +416,45 @@ describe("a generic delivery that names a lifecycle action", () => {
     ]);
   });
 });
+
+describe("the generic webhook's author (S-trigger-trust-gating)", () => {
+  it("hands the seam the author and creation time the signed sender names, as an id or an object", async () => {
+    configure({ TRIGGER_SECRET: "generic-secret" });
+    await post(
+      "/webhooks/generic",
+      {
+        requestId: "trust-generic-1",
+        label: "factory",
+        author: "user-ada",
+        createdAt: "2026-10-28T00:00:00Z",
+      },
+      "generic-secret",
+    );
+    await post(
+      "/webhooks/generic",
+      {
+        requestId: "trust-generic-2",
+        label: "factory",
+        author: { id: "583231", login: "octocat", name: "The Octocat" },
+      },
+      "generic-secret",
+    );
+    await post(
+      "/webhooks/generic",
+      { requestId: "trust-generic-3", label: "factory", author: { name: "no id" } },
+      "generic-secret",
+    );
+    const events = delivered.map((delivery) => delivery.event);
+    expect(events[0]).toMatchObject({
+      author: { id: "user-ada" },
+      createdAt: "2026-10-28T00:00:00Z",
+    });
+    expect(events[1]?.author).toEqual({
+      id: "583231",
+      login: "octocat",
+      name: "The Octocat",
+    });
+    // An author with no id names nobody, which a rule that lists authors refuses.
+    expect(events[2]).not.toHaveProperty("author");
+  });
+});

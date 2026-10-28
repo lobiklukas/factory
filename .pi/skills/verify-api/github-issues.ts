@@ -29,6 +29,10 @@
 //  11. a missing and a wrong signature are 401, and record no delivery
 //  12. a comment that landed whose acknowledgement was lost fails the delivery (500 write-back); the
 //      retry is processed, reuses the session, and posts no second comment
+//  13. a stored route whose trust gate admits GitHub users with write (S-trigger-trust-gating): an
+//      issue labelled by a user whose role on the repo is read opens nothing, and the reason names
+//      them and their role; one labelled by a writer opens its session. Both roles were asked of
+//      the fake's collaborator-permission endpoint, with the token
 //
 // `unconfigured`: a delivery signed with the empty key — what an unset secret degrades to — is 503
 // naming `GITHUB_WEBHOOK_SECRET`, and opens nothing.
@@ -38,8 +42,10 @@
 import { createHmac } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { TriggerRoutesRpc } from "@repo/domain/Rpc";
 import { RepoSlug } from "@repo/domain/Session";
 import { Effect } from "effect";
+import { RpcClient } from "effect/rpc";
 import {
   deliveryRows,
   field,
@@ -136,8 +142,13 @@ const issuePayload = (over: {
   readonly number?: number;
   readonly labels?: ReadonlyArray<string>;
   readonly pullRequest?: boolean;
+  /** Who opened or labelled it (GitHub's `sender`); absent leaves it out, as the older checks do. */
+  readonly sender?: string;
 }): Record<string, unknown> => ({
   action: over.action ?? "opened",
+  ...(over.sender === undefined
+    ? {}
+    : { sender: { login: over.sender, id: 9_000 + (over.number ?? 7), type: "User" } }),
   issue: {
     number: over.number ?? 7,
     title: "The widget wobbles",
@@ -514,6 +525,51 @@ const program = Effect.gen(function* () {
       (yield* sessionCount) === 5,
     `status=${retried.status} gets=${forIssue("GET")} posts=${forIssue("POST")} comments=${commentsOn(9).length} sessions=${yield* sessionCount}`,
   );
+
+  // 13: the trust gate's GitHub role, asked of the forge (S-trigger-trust-gating).
+  const routes = yield* RpcClient.make(TriggerRoutesRpc);
+  const trustedLabel = `trusted-${RUN_STAMP}`;
+  const trustRoute = yield* routes.addTriggerRoute({
+    label: trustedLabel,
+    repo: REPO,
+    prompt: "Trusted {{title}}",
+    trust: { githubPermission: "write" },
+  });
+  const beforeTrust = yield* sessionCount;
+  const byReader = yield* Effect.promise(() =>
+    post(
+      "labelled by a reader",
+      "issues",
+      issuePayload({ number: 20, labels: [trustedLabel], sender: "verify-reader" }),
+    ),
+  );
+  const afterReader = yield* sessionCount;
+  const byWriter = yield* Effect.promise(() =>
+    post(
+      "labelled by a writer",
+      "issues",
+      issuePayload({ number: 21, labels: [trustedLabel], sender: "verify-writer" }),
+    ),
+  );
+  const asked = ledger().requests.filter((request) =>
+    request.path.endsWith("/permission"),
+  );
+  assert(
+    "a GitHub issue labelled by a user with read opens nothing and the reason names them and their role; a writer's opens its session",
+    byReader.status === 200 &&
+      field(byReader, "status") === "skipped" &&
+      field(byReader, "reason") ===
+        `untrusted author verify-reader (9020): rule "${trustedLabel}" (route ${trustRoute.id}) admits only GitHub users with write or higher on the repo; their role on ${REPO} is read` &&
+      afterReader === beforeTrust &&
+      byWriter.status === 200 &&
+      field(byWriter, "status") === "processed" &&
+      (yield* sessionCount) === beforeTrust + 1 &&
+      asked.map((request) => request.path).join(" ") ===
+        `/repos/${REPO}/collaborators/verify-reader/permission /repos/${REPO}/collaborators/verify-writer/permission` &&
+      asked.every((request) => request.authorization === "Bearer ghs-drive-token"),
+    `reader=${JSON.stringify(byReader.body)} writer=${JSON.stringify(byWriter.body)} asked=${JSON.stringify(asked)}`,
+  );
+  yield* routes.removeTriggerRoute({ id: trustRoute.id });
 
   observed.comments = ledger().comments;
 });
