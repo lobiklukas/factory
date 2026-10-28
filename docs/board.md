@@ -285,6 +285,14 @@ one transaction over one table, and B3's "cards are rows" holds for the thread t
 the harness's `ask` tool, which ends the run (`control: { terminate: true }`); every run opened on the
 card carries the thread as its `task_thread` prompt section.
 
+Built (C24): an answer offers the run that reads it. After an answer lifts a `needs_input` block the
+card pane offers **Start the next run** (the column the question was asked in, the card's default
+prompt), and `factory board comment --start` does the same from the CLI. The offer is spent by the
+first run that starts on the card afterwards, however it was started, and `--start` is refused before
+anything is written on a card that is not blocked `needs_input` or when `--actor` is a run (its
+comment would be a note); a comment that lands but leaves the card blocked fails with
+`start_not_started`.
+
 ## B8 — Evidence gates, not evidence prose
 
 `requires[]` is machine-checked on exit, which promotes verification-as-evidence (LOB-16) from a body

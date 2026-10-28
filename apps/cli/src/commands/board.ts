@@ -920,6 +920,16 @@ export class StartNeedsAnswer extends Schema.TaggedError<StartNeedsAnswer>()(
   { taskId: Schema.String, message: Schema.String },
 ) {}
 
+/**
+ * `--start` on a comment that landed but answered nothing: the card is still blocked, so no run is
+ * waiting on it and none was opened. Reported as `error: start_not_started` with a non-zero exit, so
+ * a script that asked for a run can tell that it got none; the comment itself is already written.
+ */
+export class StartNotStarted extends Schema.TaggedError<StartNotStarted>()(
+  "StartNotStarted",
+  { taskId: Schema.String, message: Schema.String },
+) {}
+
 /** What `factory board comment` needs of the client: the card, and the write of a comment to it. */
 export interface CommentClient<E> {
   readonly getTask: (input: {
@@ -942,7 +952,8 @@ export interface CommentClient<E> {
  * (B7, the `task_thread` prompt section) — so what is started is the run that reads it. `--start` on a
  * card that is not blocked `needs_input` is refused before the comment is written: a comment that is
  * only a note has no run waiting on it, and starting one anyway would be the surprise. If the
- * comment lands and the card is nevertheless still blocked, no run is started and the line says so.
+ * comment lands and the card is nevertheless still blocked, no run is started and the command fails
+ * (`StartNotStarted`, exit 1) after saying so. A run's actor is refused up front like a card that is not blocked.
  */
 export const commentCard = Effect.fnUntraced(function* <B, S>(
   client: CommentClient<B> & StartClient<B, S>,
@@ -967,6 +978,13 @@ export const commentCard = Effect.fnUntraced(function* <B, S>(
       }): nothing was commented`,
     });
   }
+  // Only a person answers: a run's comment on its own parked card is a note and leaves the block.
+  if (input.start !== undefined && Schema.is(SessionId)(input.actor)) {
+    return yield* new StartNeedsAnswer({
+      taskId: input.taskId,
+      message: `--start follows an answer, and --actor ${input.actor} is a run: a run's comment is a note and does not lift the block: nothing was commented`,
+    });
+  }
   const after = yield* client.commentTask({
     taskId: input.taskId,
     expectedRevision: input.expectedRevision,
@@ -982,10 +1000,9 @@ export const commentCard = Effect.fnUntraced(function* <B, S>(
   }
   if (input.start === undefined) return;
   if (lifted === undefined) {
-    yield* emit(
-      `not started: ${after.id} is still blocked, so no run is waiting on this comment`,
-    );
-    return;
+    const message = `${after.id} is still blocked, so no run is waiting on this comment`;
+    yield* emit(`not started: ${message}`);
+    return yield* new StartNotStarted({ taskId: input.taskId, message });
   }
   yield* startCard(
     client,

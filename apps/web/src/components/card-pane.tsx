@@ -55,6 +55,7 @@ import {
   draftAfterSend,
   liftedBlock,
   nextRunOffer,
+  runStartedSince,
   sendable,
   THREAD_ANCHOR,
   type CommentRefusal,
@@ -432,6 +433,9 @@ const useStartRun = (boardId: BoardInstanceId, task: Task) => {
   return { starting, begin };
 };
 
+/** The card pane's one run start, shared by the Thread's offer and the Runs section's field. */
+type RunStarter = ReturnType<typeof useStartRun>;
+
 /**
  * The card's thread (LOB-239, B7): the question a parked run asked, a person's answer, and every
  * note, oldest first, each with its kind, its actor and its time, and its body verbatim — whitespace
@@ -457,11 +461,13 @@ const Thread = ({
   task,
   definition,
   writes,
+  runStarter,
 }: {
   readonly boardId: BoardInstanceId;
   readonly task: Task;
   readonly definition: BoardDefinition;
   readonly writes: CardWrites;
+  readonly runStarter: RunStarter;
 }) => {
   const thread = useAtomValue(taskCommentsAtom(task.id));
   const refreshThread = useAtomRefresh(taskCommentsAtom(task.id));
@@ -473,8 +479,19 @@ const Thread = ({
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState(false);
   const [refusal, setRefusal] = useState<CommentRefusal | null>(null);
-  const [lifted, setLifted] = useState<TaskBlocked | undefined>(undefined);
-  const { starting, begin } = useStartRun(boardId, task);
+  // The block an answer lifted, with the ids of the card's runs the pane knew of when it landed: a
+  // run that appears after that, however it was started, spends the offer to start the next one.
+  const [answered, setAnswered] = useState<
+    | {
+        readonly block: TaskBlocked;
+        readonly seen: ReadonlySet<string> | undefined;
+      }
+    | undefined
+  >(undefined);
+  const lifted = answered?.block;
+  const { starting, begin } = runStarter;
+  const runs = useAtomValue(taskRunsAtom(task.id));
+  const knownRuns = Option.getOrUndefined(AsyncResult.value(runs));
   const intent = composerIntent(task);
   const ready = sendable(draft);
   const held = pending || writes.busy || writes.settling;
@@ -489,9 +506,24 @@ const Thread = ({
       ? lifted
       : undefined;
   // After an answer: the run the answer is for, offered from the column the card is back in (C24).
-  const nextRun = nextRunOffer(liftedShown, task, definition);
+  const nextRun = nextRunOffer(
+    liftedShown,
+    task,
+    definition,
+    runStartedSince(answered?.seen, knownRuns),
+  );
   // The last answer stays on screen through a failed refresh; only a first read that fails says so.
   const listed = Option.getOrUndefined(AsyncResult.value(thread));
+
+  // An answer sent before the card's runs were read takes the first read as the runs it knew of.
+  useEffect(() => {
+    if (answered === undefined || answered.seen !== undefined) return;
+    if (knownRuns === undefined) return;
+    setAnswered({
+      block: answered.block,
+      seen: new Set(knownRuns.map((run) => run.id)),
+    });
+  }, [answered, knownRuns]);
 
   useEffect(() => {
     if (hash !== THREAD_ANCHOR) return;
@@ -517,7 +549,18 @@ const Thread = ({
         if (Exit.isSuccess(exit)) {
           setDraft((current) => draftAfterSend(current, body));
           writes.landed(exit.value.revision);
-          setLifted(liftedBlock(before, exit.value));
+          const block = liftedBlock(before, exit.value);
+          setAnswered(
+            block === undefined
+              ? undefined
+              : {
+                  block,
+                  seen:
+                    knownRuns === undefined
+                      ? undefined
+                      : new Set(knownRuns.map((run) => run.id)),
+                },
+          );
           return;
         }
         setRefusal(
@@ -634,7 +677,7 @@ const Thread = ({
             aria-busy={starting}
             title={`Start a run from ${nextRun.column}, sent the card's default prompt`}
             onClick={() =>
-              begin(startPrompt(task, definition), () => setLifted(undefined))
+              begin(startPrompt(task, definition), () => setAnswered(undefined))
             }
           >
             {starting ? (
@@ -756,11 +799,13 @@ const Runs = ({
   task,
   definition,
   selected,
+  runStarter,
 }: {
   readonly boardId: BoardInstanceId;
   readonly task: Task;
   readonly definition: BoardDefinition;
   readonly selected: SessionId | undefined;
+  readonly runStarter: RunStarter;
 }) => {
   const runs = useAtomValue(taskRunsAtom(task.id));
   const runSessions = useAtomValue(runSessionsAtom);
@@ -769,7 +814,7 @@ const Runs = ({
       (entry) => [entry.id, entry] as const,
     ),
   );
-  const { starting, begin } = useStartRun(boardId, task);
+  const { starting, begin } = runStarter;
   // The prompt field: `null` while closed, the text as typed while open, with the column it was
   // built for. It opens with the card as it is now, so a card edited meanwhile is read again by
   // closing and reopening it; a card that moves while it is open is not sent (`moved`).
@@ -1087,6 +1132,7 @@ export const CardPane = ({
 }) => {
   const external = externalLink(task);
   const writes = useCardWrites(task);
+  const runStarter = useStartRun(boardId, task);
   const runs = useAtomValue(taskRunsAtom(task.id));
   const selection = runSelection(
     run,
@@ -1176,6 +1222,7 @@ export const CardPane = ({
           task={task}
           definition={definition}
           writes={writes}
+          runStarter={runStarter}
         />
         <Spec task={task} />
         <Runs
@@ -1183,6 +1230,7 @@ export const CardPane = ({
           task={task}
           definition={definition}
           selected={run}
+          runStarter={runStarter}
         />
       </div>
       {run === undefined || selection === "none" ? (

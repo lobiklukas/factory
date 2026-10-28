@@ -133,13 +133,32 @@ export const liftedBlock = (
  * the column it blocked from and nothing reads the answer until a run starts there, so the pane offers
  * that run — the start `runStart` allows for the card as it is now, or its reason when the column is
  * not one a run starts in. `undefined` when no answer landed (nothing lifted, or a block a comment
- * does not lift): there is nothing to offer then.
+ * does not lift), and once the offer is spent: a run has started on the card since the answer (from
+ * this pane's Runs section, the CLI, another tab or a trigger), or the card has left the column the
+ * answer was for — one answer starts one run, and it starts it where the question was asked.
  */
 export const nextRunOffer = (
   lifted: TaskBlocked | undefined,
   task: Task,
   definition: BoardDefinition,
+  runStartedSince: boolean,
 ): RunStart | undefined =>
-  lifted !== undefined && lifted.reason === "needs_input"
+  lifted !== undefined &&
+  lifted.reason === "needs_input" &&
+  lifted.column === task.column &&
+  !runStartedSince
     ? runStart(task, definition)
     : undefined;
+
+/**
+ * Whether a run has started on the card since the answer landed: a run the card lists that the pane
+ * did not know of when the answer was sent. `seen` is the run ids at that moment; `undefined` when
+ * the card's runs had not been read yet, in which case the first read is taken as what was there.
+ */
+export const runStartedSince = (
+  seen: ReadonlySet<string> | undefined,
+  runs: ReadonlyArray<{ readonly id: string }> | undefined,
+): boolean =>
+  seen !== undefined &&
+  runs !== undefined &&
+  runs.some((run) => !seen.has(run.id));

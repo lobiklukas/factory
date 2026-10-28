@@ -43,6 +43,7 @@ import {
   exitLines,
   commentCard,
   StartNeedsAnswer,
+  StartNotStarted,
   startCard,
   type StartClient,
   updateCard,
@@ -1264,9 +1265,34 @@ describe("commentCard --start (C24)", () => {
     const stillBlocked = card({ blocked, revision: 4 });
     const s = server(asked, stillBlocked);
     const { lines, effect } = run(s.client, "cli");
-    await Effect.runPromise(effect);
+    const error = await Effect.runPromise(Effect.flip(effect));
+    expect(error).toBeInstanceOf(StartNotStarted);
     expect(s.calls).not.toContain("sendMessage");
     expect(lines.at(-1)).toContain("not started");
+  });
+
+  /** A run's comment is a note on the server; --start must be refused before it is written. */
+  it("refuses --start with a run's actor, before writing anything", async () => {
+    const s = server(asked, asked);
+    const lines: Array<string> = [];
+    const error = await Effect.runPromise(
+      Effect.flip(
+        commentCard(
+          s.client,
+          {
+            taskId: TASK as never,
+            expectedRevision: 3,
+            body: ANSWER,
+            actor: SESSION_A,
+            start: "cli",
+          },
+          (line) => Effect.sync(() => void lines.push(line)),
+        ),
+      ),
+    );
+    expect(error).toBeInstanceOf(StartNeedsAnswer);
+    expect(error.message).toContain("nothing was commented");
+    expect(s.calls).toEqual([]);
   });
 });
 
