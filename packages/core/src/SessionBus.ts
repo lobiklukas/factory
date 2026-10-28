@@ -2,7 +2,7 @@
  * The bus (docs/design.md D12, LOB-18): how a process hears that a log it does not own has moved.
  *
  * Every insert into `commits` notifies `factory_commits` with a cursor — `{log_id, seq}`, never the
- * commit (migration 0034) — and this listens on that channel once per process and fans the cursors
+ * commit (migration 0035) — and this listens on that channel once per process and fans the cursors
  * out to whoever follows a log. A cursor is a hint: a follower reads the log from where it is, so a
  * hint that is dropped (a sliding buffer that overflowed, a connection that was lost and listened
  * again) costs the follower a delay until its next read, never an event.
@@ -25,7 +25,7 @@ import {
   Stream,
 } from "effect";
 
-/** The channel migration 0034's trigger notifies on. */
+/** The channel migration 0035's trigger notifies on. */
 export const COMMITS_CHANNEL = "factory_commits";
 
 /** Where one log has got to: the commit a notification announced. */

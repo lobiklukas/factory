@@ -1,5 +1,5 @@
 /**
- * The commit bus (LOB-18): migration 0034's trigger announces every commit as a cursor, and
+ * The commit bus (LOB-18): migration 0035's trigger announces every commit as a cursor, and
  * `SessionBusPostgres` hands each follower the cursors of its own log.
  *
  * Postgres only, not mocked: `docker compose up -d --wait postgres`. The commits are inserted as

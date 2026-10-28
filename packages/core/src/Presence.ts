@@ -4,7 +4,7 @@
  * A lease is a claim on one thing — a session's log today (`session`), a board card for the
  * dispatcher in wave 2 (`card`) — that lapses unless its holder renews it. That is the whole point:
  * a process that dies stops renewing, so after the TTL its claims are anybody's rather than hanging on
- * a process nobody can ask. The table is `leases` (migration 0033); this module is its only reader
+ * a process nobody can ask. The table is `leases` (migration 0034); this module is its only reader
  * and writer.
  *
  * Every claim names its holder (one process, minted at boot) and its home (`homeOf`: that process's

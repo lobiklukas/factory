@@ -249,8 +249,8 @@ _Done when:_ both are asserted in a suite or a drive run, or explicitly withdraw
 
 ### 7. ~~Presence and `SessionBus` — makes D12 true~~
 
-_Done (LOB-18)._ A `leases` table (migration 0033) holds each owner's presence lease, renewed every
-third of its TTL; migration 0034's `AFTER INSERT` trigger on `commits` notifies `factory_commits`
+_Done (LOB-18)._ A `leases` table (migration 0034) holds each owner's presence lease, renewed every
+third of its TTL; migration 0035's `AFTER INSERT` trigger on `commits` notifies `factory_commits`
 with a cursor; `packages/core/src/Presence.ts` and `SessionBus.ts` are the two pieces (in `core`, not
 a `packages/bus`: the bus has one consumer, `SessionService`), and `events` follows a session another
 process owns until that ownership ends. `follow.sh` drives two API processes over one database;

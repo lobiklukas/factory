@@ -71,7 +71,7 @@ A followed stream is the fold's snapshot with what the log says is happening now
 `status` and `live` from `pi.live`, `queued` from `pi.inbox`, the session's spend, and the live tasks
 from the log's task records — then one batch of events per read, in a live stream's order: entries
 (with `prOpened` beside its entry), `queued`, `live` and `status`, `usage`, `tasks`. It reads when the
-commit bus hints (migration 0034's `AFTER INSERT` trigger on `commits` notifies `factory_commits`
+commit bus hints (migration 0035's `AFTER INSERT` trigger on `commits` notifies `factory_commits`
 with a cursor, `{log_id, seq}`, never the commit) and on a poll
 (`SessionServiceOptions.presence.followPollMs`, 2 s by default) that also asks whether the session is
 still owned elsewhere. Once it is not, the stream reads one last time and **ends**, as a fold's does:

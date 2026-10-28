@@ -250,7 +250,7 @@ shares this process's home â€” host and session root, where the worktrees are â€
 rather than waited out: it is the process this one replaced after a crash. That needs a home that
 survives the restart (a stable hostname); a pod that comes back under a new one waits out the TTL,
 and its boot resumes are refused rather than retried (a follow-up on LOB-18).
-The **bus** is migration 0034's trigger notifying `factory_commits` with `{log_id, seq}`, one
+The **bus** is migration 0035's trigger notifying `factory_commits` with `{log_id, seq}`, one
 `LISTEN` per process started by the first follower (`SessionBus`, `packages/core`: one consumer does
 not earn `packages/bus`). A follower reads on every hint and on a poll (2 s) that also asks whether the
 session is still owned elsewhere, so a lost hint costs a delay, never an event. There is no

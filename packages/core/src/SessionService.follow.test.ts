@@ -230,7 +230,7 @@ describe("following a session another process owns", () => {
   }, 60_000);
 
   /**
-   * Mutation: drop migration 0034's trigger, or never subscribe to the bus — nothing reaches the
+   * Mutation: drop migration 0035's trigger, or never subscribe to the bus — nothing reaches the
    * follower before its minute-long poll, and the case times out.
    */
   it("hears a commit from the bus, not only from its poll", async () => {
