@@ -99,6 +99,7 @@ import {
   MISSION_BINDING_DOC_KIND,
   MISSION_DOC_KIND,
   MissionBindingDoc,
+  MergeDoc,
   MissionDoc,
   PageDoc,
   PagePromptDoc,
@@ -161,6 +162,7 @@ import {
   projectApprovals,
   projectBudgetDoc,
   projectEntry,
+  projectMergeDoc,
   projectPrDoc,
   projectPages,
   projectReplayComparisons,
@@ -178,6 +180,8 @@ import {
   SPEC_DOC_KIND,
   CRITERIA_DOC_KIND,
   PR_DOC_KIND,
+  MERGE_DOC_KIND,
+  type MergeDocView,
   PR_OPENED_ENTRY_KIND,
   PR_INHERITED_ENTRY_KIND,
   NO_CHANGE_ENTRY_KIND,
@@ -1155,6 +1159,108 @@ export const readPullRequestDoc = (
       ...(evidence === undefined ? {} : { evidence }),
     };
   });
+
+/**
+ * What a session's `factory.merge` records (LOB-44): the merge of the PR it opened, and the revert
+ * that undid it once one merged. `revert` is absent while nothing reverted it.
+ */
+export type MergeRecord = {
+  readonly url: string;
+  readonly number: number;
+  readonly mergedAt: string;
+  /** The merge commit GitHub reported, when it reported one. */
+  readonly commit?: string;
+  readonly revert?: { readonly by: string; readonly at: string };
+};
+
+/** One fact the GitHub webhook reports about a session's PR: its merge, or its revert. */
+export type MergeEvent =
+  | {
+      readonly _tag: "merged";
+      readonly url: string;
+      readonly number: number;
+      readonly mergedAt: string;
+      readonly commit?: string;
+    }
+  | {
+      readonly _tag: "reverted";
+      /** The PR that reverted this one, by its page. */
+      readonly by: string;
+      readonly revertedAt: string;
+    };
+
+/** A `factory.merge` view as the record readers take: `undefined` for a document with neither fact. */
+const mergeRecordOf = (doc: MergeDocView): MergeRecord | undefined => {
+  if (doc.mergedAt === "" && doc.revertedAt === "") return undefined;
+  return {
+    url: doc.url,
+    number: doc.number,
+    mergedAt: doc.mergedAt,
+    ...(doc.commit === "" ? {} : { commit: doc.commit }),
+    ...(doc.revertedAt === ""
+      ? {}
+      : { revert: { by: doc.revertedBy, at: doc.revertedAt } }),
+  };
+};
+
+/**
+ * Commit one merge fact to a session this process owns (LOB-44), unless the log already holds it:
+ * the first merge and the first revert stand, so a redelivered webhook commits nothing and answers
+ * `first: false` with what the log already says. The `sessions` columns are the caller's to update.
+ *
+ * Decided inside the commit, from the document as the mutation line holds it, and writing only the
+ * fields the event owns: a merge and a revert committed at once each keep the other's fact. A
+ * repeat touches no field, so it commits nothing.
+ */
+export const recordMergeEvent = (
+  conversation: Conversation,
+  event: MergeEvent,
+): Effect.Effect<
+  { readonly first: boolean; readonly merge: MergeRecord },
+  SessionError
+> =>
+  Effect.gen(function* () {
+    const { first, next } = yield* attempt("write merge", () =>
+      conversation.commit(
+        (tx) =>
+          tx.doc(MergeDoc, conversation.id).then((doc) => {
+            const current = projectMergeDoc(doc);
+            if (event._tag === "merged") {
+              if (current.mergedAt !== "")
+                return { first: false, next: current };
+              doc.url = event.url;
+              doc.number = event.number;
+              doc.mergedAt = event.mergedAt;
+              doc.commit = event.commit ?? "";
+            } else {
+              if (current.revertedAt !== "")
+                return { first: false, next: current };
+              doc.revertedBy = event.by;
+              doc.revertedAt = event.revertedAt;
+            }
+            return { first: true, next: projectMergeDoc(doc) };
+          }),
+        BACKGROUND_CONTEXT,
+      ),
+    );
+    const merge = mergeRecordOf(next);
+    // `next` holds the event's own fact whichever branch built it, so a record is always there.
+    if (merge === undefined) {
+      return yield* new SessionErrorClass({
+        code: "storage",
+        message: "a merge record was written with neither a merge nor a revert",
+      });
+    }
+    return { first, merge };
+  });
+
+/** The merge a log nobody owns records (LOB-44), from its `factory.merge` document alone. */
+export const readRecordedMerge = (
+  storage: Storage,
+): Effect.Effect<MergeRecord | undefined, SessionError> =>
+  Effect.map(readDocument(storage, MERGE_DOC_KIND), (value) =>
+    mergeRecordOf(projectMergeDoc(value)),
+  );
 
 /**
  * Every `verify` call in a session this process owns, oldest first, read through its conversation
@@ -2175,6 +2281,8 @@ export type SessionLog = {
   readonly binding: RepoBinding;
   /** The PR the log records, when the session opened one. */
   readonly pr?: PullRequestRecord;
+  /** The merge of that PR and its revert (LOB-44), when the webhook reported either. */
+  readonly merge?: MergeRecord;
   /** The task binding the log records, when the session runs against a task. */
   readonly task?: { readonly taskId: string; readonly column: string };
   /**
@@ -2326,6 +2434,7 @@ export const readSessionLog = (
     const specDoc = yield* readDocument(storage, SPEC_DOC_KIND);
     const criteriaDoc = yield* readDocument(storage, CRITERIA_DOC_KIND);
     const pr = yield* readRecordedPullRequest(storage);
+    const merge = yield* readRecordedMerge(storage);
     const forkDoc = yield* readDocument(storage, FORK_DOC_KIND);
     const actor = bindingString(
       yield* readDocument(storage, ACTOR_DOC_KIND),
@@ -2353,6 +2462,7 @@ export const readSessionLog = (
           : { branch: bindingString(binding, "branch") }),
       },
       ...(pr === undefined ? {} : { pr }),
+      ...(merge === undefined ? {} : { merge }),
       ...(spec === undefined ? {} : { spec }),
       ...(criteria === "" ? {} : { criteria }),
       ...(forkedFrom === "" ? {} : { forkedFrom }),

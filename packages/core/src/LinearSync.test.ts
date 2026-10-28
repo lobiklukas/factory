@@ -51,6 +51,7 @@ import {
   LinearTriggerWriteBack,
   type LinearWorkflowState,
   nextLinearState,
+  revertedPullRequest,
   syncPullRequestLifecycle,
   verifyGitHubSignature,
 } from "./LinearSync";
@@ -360,6 +361,62 @@ describe("githubPullRequestLifecycle", () => {
         pull_request: { number: 7, url: api, html_url: pr.url, merged: true },
       }),
     ).toEqual({ _tag: "merged", pr, apiUrl: api });
+  });
+
+  it("reads a merge's time and commit, and the PR its body says it reverts (LOB-44)", () => {
+    const merged = githubPullRequestLifecycle({
+      action: "closed",
+      pull_request: {
+        number: 7,
+        html_url: pr.url,
+        merged: true,
+        merged_at: "2026-10-28T09:00:00Z",
+        merge_commit_sha: "0123456789abcdef0123456789abcdef01234567",
+        body: "Reverts acme/widgets#3\n\nThis reverts the widget change.",
+      },
+    });
+    expect(merged).toEqual({
+      _tag: "merged",
+      pr,
+      mergedAt: "2026-10-28T09:00:00Z",
+      commit: "0123456789abcdef0123456789abcdef01234567",
+      reverts: { number: 3, url: "https://github.com/acme/widgets/pull/3" },
+    });
+    // An unmerged close carries none of the three: nothing merged, so nothing was reverted.
+    expect(
+      githubPullRequestLifecycle({
+        action: "closed",
+        pull_request: {
+          number: 7,
+          html_url: pr.url,
+          merged: false,
+          merged_at: null,
+          body: "Reverts acme/widgets#3",
+        },
+      }),
+    ).toEqual({ _tag: "closed", pr });
+  });
+
+  it("finds GitHub's revert line on the reverting PR's own host, and nothing in other prose", () => {
+    expect(
+      revertedPullRequest(
+        "https://ghe.example.com/acme/widgets/pull/9",
+        "Fixes a typo.\nReverts acme/widgets#12",
+      ),
+    ).toEqual({
+      number: 12,
+      url: "https://ghe.example.com/acme/widgets/pull/12",
+    });
+    // Mid-sentence, in a quote, or without a repo is not GitHub's revert wording.
+    for (const body of [
+      "This partly reverts acme/widgets#12",
+      "> Reverts acme/widgets#12 was a mistake",
+      "Reverts #12",
+      "",
+    ]) {
+      expect(revertedPullRequest(pr.url, body)).toBeUndefined();
+    }
+    expect(revertedPullRequest(pr.url, null)).toBeUndefined();
   });
 });
 

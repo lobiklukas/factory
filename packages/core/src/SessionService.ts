@@ -141,6 +141,8 @@ import {
   startMission as beginMission,
   type AutonomyConfig,
   type ApprovalAnswer,
+  type MergeEvent,
+  type MergeRecord,
   type ApprovalAsker,
   type SessionPolicy,
   type VerifyOptions,
@@ -157,6 +159,8 @@ import {
   forkSession,
   modelAccessFor,
   modelKey,
+  recordMergeEvent,
+  readRecordedMerge,
   interrupt as interruptConversation,
   isBusy,
   liveSessionEvents,
@@ -215,6 +219,8 @@ import {
 } from "@repo/harness";
 import type { BindableSandboxRuntimeShape } from "@repo/sandbox";
 import { PostgresStorage } from "@repo/storage-postgres";
+import type { OutcomeReport, OutcomesInput } from "@repo/domain/Outcomes";
+import { readOutcomes } from "./outcomes";
 import type { CredentialError, CredentialProvider } from "./credentials";
 import { NO_REVIEWER_IDENTITY, type ReviewPoster } from "./GitHubReview";
 import { BoardColumn, type ResolvedModel } from "@repo/domain/Task";
@@ -613,6 +619,29 @@ export type SessionServiceShape = {
     readonly sessionId: SessionId;
     readonly reason: WorkspaceReleaseReason;
   }) => Effect.Effect<ReleaseWorkspaceResult, SessionError>;
+  /**
+   * Record what the GitHub webhook reported about the session's PR (LOB-44): its merge, or a later
+   * PR's revert of it. The fact is committed to the log as `factory.merge` and indexed in
+   * `sessions.pr_merged_at` / `pr_reverted_at`, so `rebuildIndexes` reproduces it and the outcome
+   * metrics read it without asking GitHub. Idempotent: the first merge and the first revert stand,
+   * and a repeat answers `first: false` with what the log already holds. A released session is
+   * recorded on too — a merge releases its workspace first (LOB-268), and its log still takes writes.
+   */
+  readonly recordMerge: (input: {
+    readonly sessionId: SessionId;
+    readonly event: MergeEvent;
+  }) => Effect.Effect<
+    { readonly first: boolean; readonly merge: MergeRecord },
+    SessionError
+  >;
+  /**
+   * The outcome metrics over a window (LOB-44, `./outcomes`): lead time, cycle time, defect
+   * pressure, recovery, adoption and cost, each value with its window and its denominator. Read from
+   * the index tables in a fixed number of queries — never a fold of a log (R6).
+   */
+  readonly outcomes: (
+    input: OutcomesInput,
+  ) => Effect.Effect<OutcomeReport, SessionError>;
   /**
    * The model a run whose column declares `role` talks to (B6, LOB-207; read by LOB-270's
    * `getDefinition`): the role's row in this layer's `roleModels`, or the deployment's model for a
@@ -3885,6 +3914,17 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           if (started === undefined) return;
           runStarts.delete(sessionId);
           yield* recordRunDuration(now - started);
+          // A card's run (B1) ends where its session goes idle (LOB-44): the outcome metrics' factory
+          // time is a run's `started_at` to this. Rewritten by every run the session takes, so a run
+          // that was steered later ends at its last idle. Best-effort like the other activity writes:
+          // a row that lags reads as a run that ended at its last recorded activity.
+          yield* paper(
+            "write run finished",
+            sql`
+              UPDATE task_runs SET finished_at = to_timestamp(${now / 1000})
+              WHERE session_id = ${sessionId}
+            `,
+          ).pipe(Effect.ignore);
         });
 
       /**
@@ -5123,6 +5163,71 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return kept === undefined ? undefined : { ...kept, first: false };
         });
 
+      /** The instant an event says its fact happened at (`recordMerge` refuses one that is not one). */
+      const mergeEventAt = (event: MergeEvent): string =>
+        event._tag === "merged" ? event.mergedAt : event.revertedAt;
+
+      /** Whether a session's merge record already holds `event`'s fact: the first one stands. */
+      const holdsMergeFact = (
+        merge: MergeRecord | undefined,
+        event: MergeEvent,
+      ): merge is MergeRecord =>
+        merge !== undefined &&
+        (event._tag === "merged"
+          ? merge.mergedAt !== ""
+          : merge.revert !== undefined);
+
+      const recordMerge = (input: {
+        readonly sessionId: SessionId;
+        readonly event: MergeEvent;
+      }): Effect.Effect<
+        { readonly first: boolean; readonly merge: MergeRecord },
+        SessionError
+      > =>
+        Effect.gen(function* () {
+          // Checked before anything is committed: the log is the truth the index is refolded from,
+          // and `rebuildIndexes` casts this value to a timestamp, so a value that is not an instant
+          // would fail every rebuild after it.
+          const at = mergeEventAt(input.event);
+          if (Option.isNone(DateTime.make(at))) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message: `the ${input.event._tag} time is not an ISO-8601 instant: "${at}"`,
+            });
+          }
+          const row = yield* requireSession(input.sessionId);
+          // A redelivered event on a session nobody here owns is answered from the committed log,
+          // so recording nothing new opens no owner.
+          const owned = HashMap.has(yield* Ref.get(live), input.sessionId);
+          const kept = owned
+            ? undefined
+            : yield* withReader(input.sessionId, readRecordedMerge);
+          const recorded = holdsMergeFact(kept, input.event)
+            ? { first: false, merge: kept }
+            : yield* Effect.flatMap(
+                // Paused (LOB-25): a metrics fact is no reason to continue a run a dead process left
+                // in the log — the next acquisition for real work does, once the idle sweep has
+                // closed this owner. A released session (LOB-268, which a merge does first) opens
+                // in no directory; an unreleased one opens in its worktree as any write does.
+                acquireOwner(input.sessionId, row, { resume: false }),
+                (owner) => recordMergeEvent(owner.root, input.event),
+              );
+          // The log first, then its index, as the PR step writes `pr_url`: a failure between the two
+          // leaves the log ahead of the row until a rebuild, never a row the log does not back. Written
+          // on a repeat too, so a row a crash left behind the log is caught up by the redelivery.
+          const { merge } = recorded;
+          yield* paper(
+            "write session merge",
+            sql`
+              UPDATE sessions SET
+                pr_merged_at = ${merge.mergedAt === "" ? null : merge.mergedAt}::timestamptz,
+                pr_reverted_at = ${merge.revert?.at ?? null}::timestamptz
+              WHERE id = ${input.sessionId}
+            `,
+          );
+          return recorded;
+        });
+
       const releaseWorkspace = (input: {
         readonly sessionId: SessionId;
         readonly reason: WorkspaceReleaseReason;
@@ -5436,6 +5541,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         approvePlanRevision,
         openPullRequest: openPr,
         releaseWorkspace,
+        recordMerge,
+        outcomes: (input) =>
+          readOutcomes(input).pipe(Effect.provideService(SqlClient, sql)),
         roleModel,
         resumeMissions,
         resumeRuns,

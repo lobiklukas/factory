@@ -1542,6 +1542,15 @@ export type PullRequestLifecycle =
        * whose PR was opened before the step recorded the page (LOB-15) holds this one instead.
        */
       readonly apiUrl?: string;
+      /** When GitHub says the PR merged (`pull_request.merged_at`), on a merge that names it. */
+      readonly mergedAt?: string;
+      /** The merge commit (`pull_request.merge_commit_sha`), on a merge that names it. */
+      readonly commit?: string;
+      /**
+       * The PR this one reverts, when its body opens a line with GitHub's own revert wording
+       * (`Reverts owner/repo#N`, what the revert button writes), by its page on the same host.
+       */
+      readonly reverts?: PullRequestLink;
     }
   | { readonly _tag: "other"; readonly action: string };
 
@@ -1569,11 +1578,43 @@ export const githubPullRequestLifecycle = (
   const action = typeof body?.["action"] === "string" ? body["action"] : "";
   if (action !== "closed") return { _tag: "other", action };
   const apiUrl = pr?.["url"];
+  const merged = pr?.["merged"] === true;
+  const mergedAt = pr?.["merged_at"];
+  const commit = pr?.["merge_commit_sha"];
+  const reverts = merged ? revertedPullRequest(url, pr?.["body"]) : undefined;
   return {
-    _tag: pr?.["merged"] === true ? "merged" : "closed",
+    _tag: merged ? "merged" : "closed",
     pr: { number, url },
     ...(typeof apiUrl === "string" && apiUrl !== url ? { apiUrl } : {}),
+    ...(merged && typeof mergedAt === "string" && mergedAt !== ""
+      ? { mergedAt }
+      : {}),
+    ...(merged && typeof commit === "string" && commit !== ""
+      ? { commit }
+      : {}),
+    ...(reverts === undefined ? {} : { reverts }),
   };
+};
+
+/** GitHub's revert wording: a line `Reverts owner/repo#N`, as the revert button writes the body. */
+const REVERTS_LINE = /^Reverts ([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#(\d+)\s*$/m;
+
+/**
+ * The PR a merged PR's body says it reverts, by its page: the reverting PR's own host, so a GitHub
+ * Enterprise PR names a PR on the same server. `undefined` for a body with no revert line, or a page
+ * that is not a URL.
+ */
+export const revertedPullRequest = (
+  page: string,
+  body: unknown,
+): PullRequestLink | undefined => {
+  if (typeof body !== "string") return undefined;
+  const match = REVERTS_LINE.exec(body);
+  const repo = match?.[1];
+  const number = Number(match?.[2]);
+  if (repo === undefined || !Number.isSafeInteger(number)) return undefined;
+  if (!URL.canParse(page)) return undefined;
+  return { number, url: `${new URL(page).origin}/${repo}/pull/${number}` };
 };
 
 /**

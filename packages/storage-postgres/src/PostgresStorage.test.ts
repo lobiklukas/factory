@@ -2095,8 +2095,8 @@ describe("the skills table and its seeds", () => {
     },
   );
 
-  // The `plan-freshness` skill 0033 seeds (LOB-45): what a plan-freshness pass is told. Deleting
-  // 0033's INSERT fails both cases.
+  // The `plan-freshness` skill 0034 seeds (LOB-45): what a plan-freshness pass is told. Deleting
+  // 0034's INSERT fails both cases.
   it(
     "seeds the plan-freshness skill with the rules its validator holds a pass to",
     { timeout: 30_000 },
@@ -2135,7 +2135,7 @@ describe("the skills table and its seeds", () => {
         (await skills()).filter((skill) => !skill.name.startsWith("test-"));
       const before = await shipped();
       const migration = (
-        await import("./migrations/0033_seed_plan_freshness_skill")
+        await import("./migrations/0034_seed_plan_freshness_skill")
       ).default;
       await Effect.runPromise(
         migration.pipe(Effect.provideService(SqlClient, sql)),

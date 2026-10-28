@@ -29,7 +29,7 @@ revision on the spec's session. Nothing reaches the tracker until a person appro
   so a redelivery tries again. The revision is also filed under the merge's
   key (`merged:<pr url>`), and a held key is answered without a call.
 - **The pass** (`SessionService.refreshPlan`) is one model call, made with the seeded
-  `plan-freshness` skill (`0033_seed_plan_freshness_skill.ts`). It reads the spec plus the delegating
+  `plan-freshness` skill (`0034_seed_plan_freshness_skill.ts`). It reads the spec plus the delegating
   issue's children (title, state, and the checklist in the description), read through the tracker
   port (`ProposalTracker`'s `issues`). It opens no session, has no tools and writes no tracker. It is
   capped at 4 096 output tokens and asks for no prompt cache (`cacheRetention: "none"`). The prompt
