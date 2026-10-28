@@ -386,14 +386,19 @@ export const materializeDefinition = (
 };
 
 /**
- * The file `factory board define` accepts for a version (F8): its name, caps and materialized
- * columns and initial column — nothing the version does not declare, so no `version`, no `author`.
+ * The file `factory board define` accepts for a version (F8): its name, caps, columns and initial
+ * column — nothing the version does not declare, so no `version`, no `author`. A version that
+ * declares its own moves is emitted as stored, a column with none staying without the key, so the file
+ * is the version byte for byte and `define` answers it `unchanged`; only a legacy version (default
+ * 1–3, read through the default pipeline's table) is materialized, its moves spelled out.
  */
 export const definitionSourceOf = (
   definition: BoardDefinition,
 ): DefinitionSource => {
-  const { id, name, columns, initialColumn, caps } =
-    materializeDefinition(definition);
+  const { id, name, columns, caps } = declaresTransitions(definition)
+    ? definition
+    : materializeDefinition(definition);
+  const initialColumn = definition.initialColumn ?? initialColumnOf(definition);
   return {
     id,
     name,

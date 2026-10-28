@@ -829,7 +829,11 @@ describe("authoring a definition over RPC (D4)", () => {
     const payload = {
       id,
       name: "Source",
-      columns: columns(["implement"]),
+      // `done` carries no `transitions` key, as an author may write a terminal column: the file must
+      // not add one, or it is a different version to `defineBoard`'s comparison.
+      columns: columns(["implement"]).map(({ transitions, ...column }) =>
+        column.kind === "terminal" ? column : { ...column, transitions },
+      ),
       initialColumn: "todo",
       caps: { board: 3 },
     };

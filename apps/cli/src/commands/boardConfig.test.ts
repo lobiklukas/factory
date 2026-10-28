@@ -566,6 +566,18 @@ describe("definitionFileText (F8)", () => {
     });
     const source = definitionSourceOf(authored);
     expect(source.columns).toEqual(authored.columns);
+    // A column of a version that declares moves, left without the key, stays without it (not `[]`):
+    // `define` compares content, so the file must be the stored version byte for byte.
+    const bare = Schema.decodeSync(BoardDefinition)({
+      ...Schema.encodeSync(BoardDefinition)(authored),
+      columns: [
+        column("todo", "resting", { transitions: [{ to: "done" }] }),
+        column("done", "terminal"),
+      ],
+    });
+    expect(
+      definitionSourceOf(bare).columns.map((entry) => "transitions" in entry),
+    ).toEqual([true, false]);
     expect(source.caps).toEqual({ board: 2 });
     const decoded = decodeDefinitionFile(definitionFileText(source));
     expect(decoded).toEqual({ file: source });

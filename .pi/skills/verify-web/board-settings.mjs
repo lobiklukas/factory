@@ -19,6 +19,8 @@
 //             only on `careful`, write and push scopes — equal to `getDefinition`; and a run started
 //             on a card in `careful` parks on an approval for the same command a run in `building`
 //             runs unasked
+//   author    (F7) a version authored with `defineBoard` as an actor shows that author on its settings
+//             page, equal to `getDefinition`'s; the default pipeline's seeded version shows none
 //   lanes     each lane header's disclosure is closed until pressed, then shows its column's facts,
 //             equal to the same `getDefinition` column; its link opens the settings page
 //   read-only the page holds no form, input or button outside the Upgrade action (D5), which a board
@@ -47,6 +49,7 @@ const NEWEST_REPO = `verify-board-settings-${TAG}/newest`;
 const PINNED_REPO = `verify-board-settings-${TAG}/pinned`;
 const AUTONOMY_REPO = `verify-board-settings-${TAG}/autonomy`;
 const AUTONOMY_DEFINITION = `autonomy-${TAG}`;
+const VERSION_AUTHOR = `verify-author-${TAG}`;
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
 // A failure shot from an earlier run must not sit beside this run's passing evidence.
@@ -493,6 +496,8 @@ try {
   const authored = await rpc("defineBoard", {
     id: AUTONOMY_DEFINITION,
     name: "Autonomy per column",
+    // This instance runs with auth off, which keeps a body actor (LOB-20): the version's author (F7).
+    actor: VERSION_AUTHOR,
     initialColumn: "todo",
     columns: [
       {
@@ -584,6 +589,24 @@ try {
         )
       : `shown=${JSON.stringify(autonomyShown)} expected=${JSON.stringify(autonomyExpected)}`,
   );
+  // The version's author (F7): named on the page for a version someone wrote, absent for a seeded one.
+  const authorShown = await page
+    .locator("[data-settings-author]")
+    .allTextContents();
+  assert(
+    "the settings page names the version's author, equal to getDefinition's",
+    autonomyDefinition.author === VERSION_AUTHOR &&
+      same(authorShown, [VERSION_AUTHOR]),
+    `getDefinition=${autonomyDefinition.author} page=${JSON.stringify(authorShown)}`,
+  );
+  await openSettings(newestBoard.id);
+  assert(
+    "a seeded version's settings page names no author, and getDefinition has none",
+    (await page.locator("[data-settings-author]").count()) === 0 &&
+      !("author" in newestDefinition),
+    `page=${await page.locator("[data-settings-author]").count()} getDefinition=${JSON.stringify(newestDefinition.author)}`,
+  );
+  await openSettings(autonomyBoard.id);
   const carefulText = await page
     .locator("[data-settings-column='careful'] [data-column-settings]")
     .textContent();

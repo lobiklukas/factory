@@ -745,6 +745,24 @@ describe("TaskService.defineBoard author (F7)", () => {
     expect(await authorColumn(id)).toEqual([[1, "alice"]]);
   });
 
+  /** Mutation: leave `author` out of `getBoard`'s join — the settings page reads the board's version and names none. */
+  it("carries the author on the definition a board reads", async () => {
+    const id = newId();
+    await withService((s) =>
+      s.defineBoard({ ...input(id), actor: "alice" }, LIBRARY),
+    );
+    const view = await withService((s) =>
+      Effect.gen(function* () {
+        const board = yield* s.createBoard({
+          repo: RepoSlug.make(`factory-test/author-${hex(4)}`),
+          definitionId: id,
+        });
+        return yield* s.getBoard(board.id);
+      }),
+    );
+    expect(view.definition.author).toBe("alice");
+  });
+
   it("leaves a seeded version without an author", async () => {
     const seeded = await withService((s) =>
       s.getDefinition(DEFAULT_DEFINITION_ID, 1),

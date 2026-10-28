@@ -232,6 +232,28 @@ check "and the pane reads the expected description, line for line" \
   "$(diff -u "$EXPECTED" "$RUN_DIR/definitions-pane.out" > "$EVIDENCE_DIR/definitions-pane.diff" && echo 0 || echo 1)" \
   "see definitions-pane.txt, definitions-pane.diff"
 
+# --- board vocabulary: every key and role the RPC answers (F5) -------------------------------------
+run vocabulary board vocabulary --api "$API_URL"
+check "board vocabulary exits 0 and prints nothing on stderr" \
+  "$([ "$rc" = "0" ] && [ ! -s "$RUN_DIR/definitions-vocabulary.err" ] && echo 0 || echo 1)" "exit=$rc"
+API_URL="$API_URL" bun "$SKILL/vocabulary.ts" > "$RUN_DIR/definitions-vocabulary.expected" 2>"$RUN_DIR/definitions-vocabulary.log"
+check "the RPC answered a vocabulary with requirement keys and roles to compare" \
+  "$(grep -q '^requirement  ' "$RUN_DIR/definitions-vocabulary.expected" && grep -q '^role  ' "$RUN_DIR/definitions-vocabulary.expected" && echo 0 || echo 1)" \
+  "$(wc -l < "$RUN_DIR/definitions-vocabulary.expected" | tr -d ' ') lines"
+check "its output is the RPC's answer, line for line: every key and role, checked and human gates marked" \
+  "$(diff -u "$RUN_DIR/definitions-vocabulary.expected" "$RUN_DIR/definitions-vocabulary.out" > "$EVIDENCE_DIR/definitions-vocabulary.diff" && echo 0 || echo 1)" \
+  "see definitions-vocabulary.diff"
+check "it marks a checked key (pr_link) and a declared-only human gate key (human_move)" \
+  "$(grep -Eq '^requirement  pr_link  checked  ' "$RUN_DIR/definitions-vocabulary.out" && grep -Eq '^requirement  human_move  unchecked  \[human gate\]  ' "$RUN_DIR/definitions-vocabulary.out" && echo 0 || echo 1)" \
+  "pr_link checked; human_move unchecked [human gate]"
+run vocabulary-unreachable board vocabulary --api "http://127.0.0.1:1"
+check "an unreachable API fails with the shared typed error, non-zero" \
+  "$([ "$rc" != "0" ] && grep -q '^error: ' "$RUN_DIR/definitions-vocabulary-unreachable.err" && echo 0 || echo 1)" \
+  "exit=$rc; $(head -1 "$RUN_DIR/definitions-vocabulary-unreachable.err")"
+run define-help board define --help
+check "board define --help points at board vocabulary" \
+  "$([ "$rc" = "0" ] && has define-help 'factory board vocabulary' && echo 0 || echo 1)" "exit=$rc"
+
 # --- evidence --------------------------------------------------------------------------------------
 {
   printf '{\n'

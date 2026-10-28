@@ -43,6 +43,16 @@ of one id take consecutive versions. The API handler hands the rules the skill t
 call, and the session layer's role table; `TaskService.defineBoard` adds the roles the definitions it
 holds declare. The handler describes the answer as `getDefinition` does.
 
+## Round trip and author (F5, F7, F8)
+
+`definition show <id> --version N --json` prints the version as the file `define` takes
+(`getDefinitionSource`); `./define.sh` defines it back `--dry-run` and gets `unchanged`, edits the
+name and gets v3 differing in that line only, and reads a legacy version (`default` v1) with its
+moves and initial column spelled out. With auth off a version has no author (NULL, no `by` column in
+`board definitions`); the credential's actor on a version is proven by verify-api's `identity.sh`
+(`author:` checks) and shown on the settings page by verify-web's `board-settings.sh`.
+`./definitions.sh` compares `factory board vocabulary` with the RPC line for line (`vocabulary.ts`).
+
 ## How a user reaches it
 
 ```sh

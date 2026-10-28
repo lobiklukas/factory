@@ -1129,6 +1129,7 @@ export const TaskServiceLive = Layer.effect(
             columns: string;
             initialColumn: string | null;
             caps: unknown;
+            author: string | null;
           }>`
             SELECT bi.repo,
                    bi.definition_id AS "definitionId",
@@ -1137,7 +1138,8 @@ export const TaskServiceLive = Layer.effect(
                    bd.name,
                    bd.columns::text AS columns,
                    bd.initial_column,
-                   bd.caps
+                   bd.caps,
+                   bd.author
             FROM board_instances bi
             JOIN board_definitions bd
               ON bd.id = bi.definition_id AND bd.version = bi.definition_version
@@ -1168,6 +1170,7 @@ export const TaskServiceLive = Layer.effect(
               columns,
               ...initialColumnField(row.initialColumn),
               ...capsField(row.caps),
+              ...authorField(row.author),
             },
           }).pipe(
             Effect.mapError(
