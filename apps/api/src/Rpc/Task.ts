@@ -43,6 +43,7 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
         ),
       getTask: (input) => tasks.get(input.taskId),
       listTasks: (input) => tasks.list(input as any),
+      listBoardCards: (input) => tasks.listCards(input as any),
       // A move into `done` or `canceled` finishes the card, and its runs' worktrees and branches
       // go with it (LOB-268) — after the move committed, so a teardown never refuses the move.
       moveTask: (input) =>

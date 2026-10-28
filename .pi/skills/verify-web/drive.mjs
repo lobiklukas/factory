@@ -1994,6 +1994,8 @@ const BOARD_READS = new Set([
   // A lane's settings disclosure (LOB-245) reads the board's configuration when it is opened.
   "getBoardConfig",
   "listTasks",
+  // The board page reads its cards with `listBoardCards` (C10): the face's run status, PR and spend.
+  "listBoardCards",
   "listSessions",
   "listTaskRuns",
   // The card pane's thread (LOB-239): a read. Its write, `commentTask`, is not one of the clicks
@@ -2331,7 +2333,9 @@ const holdBoardReads = async (route) => {
   const body = route.request().postData() ?? "";
   if (
     freezeReads &&
-    (body.includes('"tag":"getBoard"') || body.includes('"tag":"listTasks"'))
+    (body.includes('"tag":"getBoard"') ||
+      body.includes('"tag":"listBoardCards"') ||
+      body.includes('"tag":"listTasks"'))
   ) {
     held.push(route);
     return;

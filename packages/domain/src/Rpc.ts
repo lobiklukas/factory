@@ -14,6 +14,7 @@ import {
   AlreadyBlocked,
   AttentionItem,
   BlockTaskInput,
+  BoardCard,
   BoardConfig,
   BoardInstance,
   BoardExists,
@@ -453,6 +454,13 @@ export class TasksRpc extends RpcGroup.make(
   Rpc.make("listTasks", {
     payload: ListTasksInput,
     success: Schema.Array(Task),
+    error: TaskErrorSchema,
+  }),
+  // A board's cards with what their runs say (C10): the newest run's status, the PR link and the
+  // summed spend, in `listTasks`' order, in one read — so a lane never asks per card.
+  Rpc.make("listBoardCards", {
+    payload: ListTasksInput,
+    success: Schema.Array(BoardCard),
     error: TaskErrorSchema,
   }),
   Rpc.make("moveTask", {
