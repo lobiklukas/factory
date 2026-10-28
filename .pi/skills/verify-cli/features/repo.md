@@ -55,5 +55,7 @@ disk. The refusal in step 3 is the server's (`invalid_input` naming the path), a
 a second request that would find the row if the refusal had written one.
 
 **What it does not prove.** Cloning: a repo with only a URL stays `no local checkout` (LOB-265). The
-web repo picker (LOB-262) and the refusal of a session or board on a repo with no checkout (LOB-263)
-are their own issues.
+dashboard's Repositories page (LOB-262) is proven by
+[verify-web's repos.md](../../verify-web/features/repos.md). The `warning …` lines LOB-263 added to `factory run`, `board create`, `board start`
+and `board ls` are unit-tested (`board.test.ts`) and read by `verify-api`'s `repo-binding.md`; this
+skill's drive does not assert them.

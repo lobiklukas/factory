@@ -29,9 +29,12 @@ under Known gaps.
 | The card's thread        | passing | [thread.md](thread.md) (`thread.sh`)       |
 | The session's PR link    | passing | [pr-link.md](pr-link.md)                   |
 | Spend by repo and actor  | passing | [spend.md](spend.md) (`spend.sh`)          |
+| Repositories             | passing | [repos.md](repos.md) (`repos.sh`)          |
 
 ## Known gaps
 
+- **The no-checkout banner (`[data-checkout-warning]`) is unit-tested, not driven (LOB-263).** It sits
+  under a board's header ([board.md](board.md)) and a session's ([session-stream.md](session-stream.md)).
 - **The board follows moves by polling, every 2 s.** LOB-76's card pane moves cards and starts runs;
   a move made elsewhere reaches an open board within one interval, not instantly; the attention view
   (LOB-77) and the card's thread (LOB-239) poll on the same interval.

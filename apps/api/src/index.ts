@@ -23,14 +23,15 @@ import {
   parseRoleModels,
   resolveRoleModels,
   REVIEW_ROLES,
-  type ModelBackend,
 } from "@repo/harness";
 import { MigrationsLive, PostgresLive } from "@repo/storage-postgres";
 import { Cause, Config, Effect, Exit, Layer, Option, Schema } from "effect";
 import { FetchHttpClient, HttpRouter, HttpServer } from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
-import { WebhookLive } from "./Api/Webhook";
+import { webhookLiveFor } from "./Api/Webhook";
+import { logTriggerBootFromProcess } from "./Api/WebhookBoot";
+import { TriggerCheckoutLog } from "./TriggerCheckouts";
 import { GitHubWebhookLive } from "./Api/GitHubWebhook";
 import {
   LinearIssueSyncLayer,
@@ -39,17 +40,18 @@ import {
 } from "./Api/LinearSync";
 import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
-import {
-  describeFauxBackend,
-  describeLoadedEnvFiles,
-  loadedEnvFiles,
-} from "./EnvFiles";
+import { describeLoadedEnvFiles, loadedEnvFiles } from "./EnvFiles";
 import {
   DEFAULT_SANDBOX_RUNTIME,
   describeSandboxRuntime,
   SandboxRuntimeConfig,
   selectSandboxRuntime,
 } from "./Sandbox";
+import {
+  describeModelBackend,
+  modelBackendWarnings,
+  selectModelBackend,
+} from "./ModelBackend";
 import { DevToolsLive } from "./observability/DevTools";
 import { MotelLive } from "./observability/Motel";
 
@@ -124,9 +126,11 @@ const ApprovalGateConfig = Config.String("APPROVAL_REQUIRED").pipe(
 /**
  * Which model a session runs against.
  *
- * `MODEL_BACKEND` wins when set. Otherwise a key decides: a real provider when one is configured,
- * pi-ai's deterministic faux provider when none is, so a checkout with no key still boots and a
- * session still runs end to end — it just reports that it is not talking to a model.
+ * `MODEL_BACKEND` wins when set. Otherwise a credential decides (`./ModelBackend`, LOB-258): the real
+ * provider when pi-ai resolves any credential it accepts, its deterministic faux provider when none
+ * does, so a checkout with no key still boots and a session still runs end to end — it just reports
+ * that it is not talking to a model. The credentials themselves are never read here: pi-ai reads
+ * them, and the boot line names the variable that authenticated, never its value.
  */
 const ModelConfig = Config.all({
   backend: Config.option(
@@ -203,7 +207,6 @@ const ModelConfig = Config.all({
   fauxModelScripts: Config.String("FAUX_MODEL_SCRIPTS").pipe(
     Config.withDefault(""),
   ),
-  apiKey: Config.option(Config.Redacted("ANTHROPIC_API_KEY")),
   sessionRoot: Config.String("SESSION_ROOT").pipe(
     Config.withDefault(".factory/sessions"),
   ),
@@ -386,7 +389,6 @@ const AllRouters = Layer.mergeAll(
   ApiRouter,
   SessionRpcLive,
   ProbesLive,
-  WebhookLive,
   GitHubWebhookLive,
 );
 
@@ -414,10 +416,10 @@ const HttpLive = Effect.gen(function* () {
     });
   }
   const allowedOrigins = config.allowedOrigins.split(",").map((o) => o.trim());
+  // `TRIGGER_RULES` and the webhook secrets, said once at boot (LOB-266); a malformed rule list
+  // refuses the boot here rather than answering every delivery `skipped`.
+  const triggerRules = yield* logTriggerBootFromProcess;
 
-  const backend: ModelBackend = Option.getOrElse(model.backend, () =>
-    Option.isSome(model.apiKey) ? "anthropic" : "faux",
-  );
   yield* Effect.logInfo(
     describeLoadedEnvFiles(
       yield* loadedEnvFiles({
@@ -430,9 +432,11 @@ const HttpLive = Effect.gen(function* () {
       }).pipe(Effect.provide(BunServices.layer)),
     ),
   );
-  yield* Effect.logInfo(
-    `model backend: ${backend}${Option.isSome(model.backend) ? " (MODEL_BACKEND)" : ""}`,
-  );
+  // After the env-file line, so a refused boot still says which files it read. Forced anthropic with
+  // no credential fails here, before anything is served (LOB-258).
+  const backendChoice = yield* selectModelBackend({ forced: model.backend });
+  const backend = backendChoice.backend;
+  yield* Effect.logInfo(describeModelBackend(backendChoice));
   yield* Effect.logInfo(
     Option.match(defaultBudget, {
       onNone: () => "session budget: none by default (a create may name one)",
@@ -440,8 +444,8 @@ const HttpLive = Effect.gen(function* () {
         `session budget: $${budget} by default (SESSION_BUDGET)`,
     }),
   );
-  if (backend === "faux") {
-    yield* Effect.logWarning(describeFauxBackend(Option.isSome(model.backend)));
+  for (const warning of modelBackendWarnings(backendChoice)) {
+    yield* Effect.logWarning(warning);
   }
   // Where sessions' commands run (LOB-244). Built in the boot's scope, so it outlives every owner:
   // the session layer below releases its owners — and their sandboxes — before this is released.
@@ -573,6 +577,7 @@ const HttpLive = Effect.gen(function* () {
     MigrationsDaemon,
     CredentialSelectionLog,
     LinearSyncLog,
+    TriggerCheckoutLog(triggerRules),
     PullRequestStepDeps,
   ).pipe(
     // The Linear sync sits beside Postgres so the session layer and the routes share one instance
@@ -600,7 +605,10 @@ const HttpLive = Effect.gen(function* () {
     `  - a session's PR step refuses a diff over ${prCap.maxFiles} files / ${prCap.maxLines} lines`,
   );
 
-  const CorsRouters = AllRouters.pipe(
+  const CorsRouters = Layer.mergeAll(
+    AllRouters,
+    webhookLiveFor(triggerRules),
+  ).pipe(
     Layer.provide(
       HttpRouter.cors({
         allowedOrigins,

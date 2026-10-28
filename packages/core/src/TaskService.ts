@@ -68,6 +68,7 @@ import {
   BoardInstanceId,
   BoardView,
   type CreateBoardInput,
+  type CreatedBoard,
   DefinitionSummary,
   GATED_COLUMNS,
   gatedExit,
@@ -97,6 +98,7 @@ import {
 import { PostgresStorage } from "@repo/storage-postgres";
 import { mintBoardId, mintTaskId } from "./ids";
 import { branchDiffSize } from "./prStep";
+import { noCheckoutWarning } from "./workspace";
 import {
   type BranchDiff,
   type CardEvidence,
@@ -331,11 +333,12 @@ export type TaskServiceShape = {
   /**
    * A new board over a named definition (B2, LOB-208), pinned to the version the caller names or, by
    * default, the definition's newest. An unknown definition or version is `DefinitionNotFound`; a
-   * repository that already has a board is `BoardExists`, naming it (one board per repository).
+   * repository that already has a board is `BoardExists`, naming it (one board per repository). A
+   * repository with no local checkout registered still gets its board, with a `warning` (LOB-263).
    */
   readonly createBoard: (
     input: CreateBoardInput,
-  ) => Effect.Effect<BoardInstance, TaskError>;
+  ) => Effect.Effect<CreatedBoard, TaskError>;
   /** Every definition, ordered by id, with its versions oldest first (LOB-270). */
   readonly listDefinitions: Effect.Effect<
     ReadonlyArray<DefinitionSummary>,
@@ -660,6 +663,24 @@ export const TaskServiceLive = Layer.effect(
      * foreign key holds, so it is reported as the storage fault it would be rather than as a truth
      * about the caller's argument.
      */
+    /**
+     * The warning a board over this repository carries (LOB-263): `undefined` when the registry
+     * holds a `local_path` for it, the sentence naming the fix when it does not — a repository no
+     * run has named yet has no row at all, which is the same thing: no checkout. Read from the table,
+     * never the disk, as the rest of this service is: whether the path is still a git work tree is
+     * `listRepos`'s read, and a run that meets a stale one fails loudly at its worktree.
+     */
+    const checkoutWarningFor = (
+      repo: string,
+    ): Effect.Effect<string | undefined, SqlError> =>
+      sql<{ localPath: string | null }>`
+        SELECT local_path AS "localPath" FROM repos WHERE slug = ${repo}
+      `.pipe(
+        Effect.map((rows) =>
+          rows[0]?.localPath == null ? noCheckoutWarning(repo) : undefined,
+        ),
+      );
+
     const getBoard = (boardId: string): Effect.Effect<BoardView, TaskError> =>
       withStorage(
         Effect.gen(function* () {
@@ -690,7 +711,9 @@ export const TaskServiceLive = Layer.effect(
             });
           }
           const columns = yield* readColumns(row.columns, `board ${boardId}`);
+          const warning = yield* checkoutWarningFor(row.repo);
           return yield* decodeBoard({
+            ...(warning === undefined ? {} : { warning }),
             instance: {
               id: boardId,
               repo: row.repo,
@@ -749,7 +772,7 @@ export const TaskServiceLive = Layer.effect(
      */
     const createBoard = (
       input: CreateBoardInput,
-    ): Effect.Effect<BoardInstance, TaskError> =>
+    ): Effect.Effect<CreatedBoard, TaskError> =>
       withStorage(
         sql.withTransaction(
           Effect.gen(function* () {
@@ -803,7 +826,11 @@ export const TaskServiceLive = Layer.effect(
                     message: `board definition ${input.definitionId} has no version ${input.definitionVersion}`,
                   });
             }
-            return yield* toInstance(row);
+            const warning = yield* checkoutWarningFor(row.repo);
+            return {
+              ...(yield* toInstance(row)),
+              ...(warning === undefined ? {} : { warning }),
+            };
           }),
         ),
       );
