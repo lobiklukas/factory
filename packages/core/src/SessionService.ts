@@ -80,12 +80,14 @@ import type {
   SessionWorkspace,
   SpendReport,
   SpendRow,
+  SyncRepoInput,
   WithdrawMessageInput,
   WithdrawMessageResult,
   WorkspaceRelease,
   WorkspaceReleaseReason,
 } from "@repo/domain/Session";
 import {
+  RepoCloneFailed,
   RepoNotFound,
   RepoSlug,
   SessionActor,
@@ -203,6 +205,7 @@ import type {
   ProposeDecompositionResult,
 } from "@repo/domain/Decomposition";
 import { isSafeBranchName } from "./git";
+import type { RepoMirror } from "./RepoMirror";
 import { mintSessionId } from "./ids";
 import type { DiffCap, PrError, PullRequestStep } from "./pr";
 import { DEFAULT_DIFF_CAP } from "./pr";
@@ -213,7 +216,11 @@ import {
 } from "./SessionWriteBack";
 import { SkillService, SkillServiceLive } from "./SkillService";
 import { inspectCheckout, workTreeRoot } from "./repos";
-import { removeWorkspace, resolveWorkspace } from "./workspace";
+import {
+  removeWorkspace,
+  resolveWorkspace,
+  type WorkspaceInput,
+} from "./workspace";
 
 /** Longest title we derive from a first message, in characters. */
 const TITLE_MAX = 80;
@@ -319,11 +326,28 @@ export type SessionServiceShape = {
   /**
    * Register or update a repo a session can bind to (docs/features.md §3 A1). A `localPath` that is
    * not absolute or not inside a git work tree is `invalid_input` naming it, and nothing is written
-   * (LOB-253).
+   * (LOB-253); so is a `url` with a credential in it, which the registry would otherwise store.
+   *
+   * A repo left with a `url` and no `localPath` is cloned into the factory's cache before the call
+   * answers (LOB-265), when the deployment has one (`SessionServiceOptions.repoMirror`). A clone that
+   * fails is `RepoCloneFailed`, naming the repo and the reason; the row stays registered, so
+   * `syncRepo` can try again.
    */
   readonly registerRepo: (
     input: RegisterRepoInput,
-  ) => Effect.Effect<RepoSummary, SessionError>;
+  ) => Effect.Effect<RepoSummary, SessionError | RepoCloneFailed>;
+  /**
+   * Clone or fetch a registered repo into the factory's cache now, instead of at its next session
+   * (LOB-265). `RepoNotFound` for a slug the registry has no row for, `RepoCloneFailed` for a clone
+   * that fails; a repo with a local checkout, or with no URL, has nothing to sync and is answered as
+   * it is.
+   */
+  readonly syncRepo: (
+    input: SyncRepoInput,
+  ) => Effect.Effect<
+    RepoSummary,
+    SessionError | RepoNotFound | RepoCloneFailed
+  >;
   /** Every registered repo, by slug, each with what its checkout says about itself (LOB-253). */
   readonly listRepos: Effect.Effect<ListReposOutput, SessionError>;
   /** One registered repo, or `RepoNotFound` for a slug the registry has no row for (LOB-253). */
@@ -487,6 +511,12 @@ export type SessionServiceOptions = {
   /** Where a session's working directory is created, one directory per session. */
   readonly sessionRoot: string;
   /**
+   * The factory's own clone of each repo registered with only a URL (LOB-265): fetched into when a
+   * session's worktree is cut and when the repo is registered, and what the worktree is cut from.
+   * Absent: such a repo opens its sessions in an empty directory with a warning, as before.
+   */
+  readonly repoMirror?: RepoMirror;
+  /**
    * The runtime every session's commands run through (LOB-244), in a sandbox bound to its working
    * directory: the deployment's, selected by its configuration. Absent: each session's own
    * in-process runtime, which runs them on the host (`@repo/harness`'s `openSessionEnvironment`).
@@ -526,6 +556,16 @@ export type SessionServiceOptions = {
    * worker's.
    */
   readonly reviewPoster?: ReviewPoster;
+};
+
+/** Whether a clone URL has userinfo: a password, or a token placed as the username. */
+const urlCarriesCredential = (url: string): boolean => {
+  try {
+    const parsed = new URL(url);
+    return parsed.username.length > 0 || parsed.password.length > 0;
+  } catch {
+    return false;
+  }
 };
 
 type SessionRow = {
@@ -1158,7 +1198,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         Effect.gen(function* () {
           const repo =
             row.repo === null ? undefined : yield* toRepoSlug(row.repo);
-          const localPath = yield* localPathFor(repo);
+          const registered =
+            repo === undefined
+              ? undefined
+              : (yield* paper("read repo", readRepo(repo)))[0];
+          const localPath = registered?.localPath ?? undefined;
           const release = resolution.cut
             ? resolution.released
             : (resolution.released ?? (yield* releaseOf(row)));
@@ -1170,6 +1214,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               baseRef: row.baseRef ?? undefined,
               ...(row.branch === null ? {} : { branch: row.branch }),
               localPath,
+              ...mirrorSource(repo, registered, row.baseRef ?? "main"),
               cut: resolution.cut && release === undefined,
             },
             { fs, path },
@@ -1211,13 +1256,64 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return yield* releasedError(row.id, release);
         });
 
+      /**
+       * Whether the repo is one the factory clones itself (LOB-265): it has a URL and no checkout of
+       * its own, and the deployment has somewhere to clone it to.
+       */
+      const mirrorOf = (
+        row: RepoRow | undefined,
+      ): { readonly mirror: RepoMirror; readonly url: string } | undefined =>
+        options.repoMirror === undefined ||
+        row === undefined ||
+        row.localPath !== null ||
+        row.url === ""
+          ? undefined
+          : { mirror: options.repoMirror, url: row.url };
+
+      /** What `resolveWorkspace` is given to cut a URL-only repo's worktree from its mirror. */
+      const mirrorSource = (
+        repo: RepoSlug | undefined,
+        row: RepoRow | undefined,
+        baseRef: string,
+      ): { readonly mirror?: WorkspaceInput["mirror"] } => {
+        const found = mirrorOf(row);
+        if (found === undefined || repo === undefined) return {};
+        return {
+          mirror: {
+            path: found.mirror.directory(repo),
+            sync: found.mirror
+              .sync({ repo, url: found.url, baseRef })
+              .pipe(Effect.map((tip) => tip.ref)),
+          },
+        };
+      };
+
+      /** Whether the factory's mirror of the repo has been cloned: read from the disk, never stored. */
+      const mirrorClonedAt = (
+        row: RepoRow,
+      ): Effect.Effect<string | undefined> =>
+        Effect.gen(function* () {
+          const found = mirrorOf(row);
+          if (found === undefined) return undefined;
+          const directory = found.mirror.directory(yield* toRepoSlug(row.slug));
+          const cloned = yield* fs
+            .exists(path.join(directory, "HEAD"))
+            .pipe(Effect.orElseSucceed(() => false));
+          return cloned ? directory : undefined;
+        }).pipe(Effect.orElseSucceed(() => undefined));
+
+      /**
+       * The checkout a session's worktree was cut from, for tearing it down: the registered path, or
+       * the mirror of a URL-only repo once it has been cloned (LOB-265).
+       */
       const localPathFor = (
         repo: RepoSlug | undefined,
       ): Effect.Effect<string | undefined, SessionError> =>
         Effect.gen(function* () {
           if (repo === undefined) return undefined;
-          const rows = yield* paper("read repo", readRepo(repo));
-          return rows[0]?.localPath ?? undefined;
+          const row = (yield* paper("read repo", readRepo(repo)))[0];
+          if (row === undefined) return undefined;
+          return row.localPath ?? (yield* mirrorClonedAt(row));
         });
 
       /**
@@ -1314,6 +1410,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         Effect.gen(function* () {
           const localPath = row.localPath ?? undefined;
           const facts = yield* inspectCheckout(localPath, { fs, path });
+          const mirrorPath = yield* mirrorClonedAt(row);
           return {
             repo: yield* toRepoSlug(row.slug),
             url: row.url,
@@ -1321,6 +1418,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             ...(localPath === undefined ? {} : { localPath }),
             registeredAt: row.registeredAt,
             ...facts,
+            ...(mirrorPath === undefined ? {} : { mirrorPath }),
           };
         });
 
@@ -1348,12 +1446,39 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           }
         });
 
+      /**
+       * Clone the repo into the factory's cache, or fetch its base ref when it is there (LOB-265).
+       * Nothing to do for a repo that has a checkout, has no URL, or a deployment with no cache.
+       */
+      const syncMirrorOf = (
+        row: RepoRow,
+      ): Effect.Effect<void, SessionError | RepoCloneFailed> =>
+        Effect.gen(function* () {
+          const found = mirrorOf(row);
+          if (found === undefined) return;
+          yield* found.mirror.sync({
+            repo: yield* toRepoSlug(row.slug),
+            url: row.url,
+            baseRef: row.defaultBaseRef,
+          });
+        });
+
       const registerRepo = (
         input: RegisterRepoInput,
-      ): Effect.Effect<RepoSummary, SessionError> =>
+      ): Effect.Effect<RepoSummary, SessionError | RepoCloneFailed> =>
         Effect.gen(function* () {
           if (input.localPath !== undefined) {
             yield* requireCheckout(input.repo, input.localPath);
+          }
+          // A URL with a credential in it is refused before it is stored: the registry would keep a
+          // token and `repo show` would print it, and the clone is given its own per call. Any other
+          // URL is registered as given; one a token may not be sent to (not GitHub, not https) is
+          // refused when it is cloned, as `RepoCloneFailed`, so the row stays to be corrected.
+          if (input.url !== undefined && urlCarriesCredential(input.url)) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message: `repo ${input.repo}: the URL carries a credential; remove it, the token is supplied per call`,
+            });
           }
           const existing = (yield* paper("read repo", readRepo(input.repo)))[0];
           const rows = yield* paper(
@@ -1376,6 +1501,25 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               message: `repo ${input.repo} did not register`,
             });
           }
+          yield* syncMirrorOf(row);
+          return yield* repoSummary(row);
+        });
+
+      const syncRepo = (
+        input: SyncRepoInput,
+      ): Effect.Effect<
+        RepoSummary,
+        SessionError | RepoNotFound | RepoCloneFailed
+      > =>
+        Effect.gen(function* () {
+          const row = (yield* paper("read repo", readRepo(input.repo)))[0];
+          if (row === undefined) {
+            return yield* new RepoNotFound({
+              repo: input.repo,
+              message: `repo ${input.repo} is not registered`,
+            });
+          }
+          yield* syncMirrorOf(row);
           return yield* repoSummary(row);
         });
 
@@ -3875,6 +4019,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         registerRepo,
         listRepos,
         getRepo,
+        syncRepo,
         events,
         requestApproval,
         decideApproval,

@@ -10,12 +10,13 @@ import { SessionClient } from "../rpc";
  * `factory repo` — the repo registry over the session RPC group (LOB-253): bind the factory to a
  * checkout (`add`), read every row (`ls`), read one (`show`).
  *
- * A repo is runnable when it has a local checkout inside a git work tree: that is what a session's
- * worktree is cut from (`@repo/core`'s `workspace.ts`), and without one a session opens in an empty
- * directory whose changes nothing can measure. A row that is not runnable — most often the one
- * `createSession` writes the first time a session names a slug, with no clone URL and no checkout —
- * says so in words and prints the command that fixes it, so the operator does not have to know the
- * schema to read the registry.
+ * A repo is runnable when it has a local checkout inside a git work tree, or a clone URL the factory
+ * has cloned into its own cache (LOB-265): that is what a session's worktree is cut from
+ * (`@repo/core`'s `workspace.ts`), and without one a session opens in an empty directory whose
+ * changes nothing can measure. A row that is not runnable — most often the one `createSession` writes
+ * the first time a session names a slug, with no clone URL and no checkout — says so in words and
+ * prints the command that fixes it, so the operator does not have to know the schema to read the
+ * registry.
  *
  * Every answer is the server's: the checkout facts (`localPathIsGit`, `workTree`, `hasFactoryConfig`)
  * are read by the API from its own disk, which is the disk the worktree is cut on. `work-tree` names
@@ -36,9 +37,9 @@ export const repoRemedy = (repo: string): string =>
  */
 export const repoState = (repo: RepoSummary): string => {
   if (repo.localPath === undefined) {
-    return repo.url === ""
-      ? "no clone URL / no local checkout"
-      : "no local checkout";
+    if (repo.url === "") return "no clone URL / no local checkout";
+    // A URL with no checkout is cloned by the factory: runnable once it has been.
+    return repo.mirrorPath === undefined ? "not cloned yet" : "ready";
   }
   return repo.localPathIsGit
     ? "ready"
@@ -46,6 +47,15 @@ export const repoState = (repo: RepoSummary): string => {
 };
 
 const isReady = (repo: RepoSummary): boolean => repoState(repo) === "ready";
+
+/**
+ * The command that makes this row runnable: clone it when it has a URL (LOB-265), register a
+ * checkout otherwise.
+ */
+export const remedyFor = (repo: RepoSummary): string =>
+  repo.localPath === undefined && repo.url !== ""
+    ? `factory repo sync ${repo.repo}`
+    : repoRemedy(repo.repo);
 
 /** What the `config` facts say, as `add` and `show` print it. */
 const configLine = (repo: RepoSummary): string =>
@@ -55,6 +65,8 @@ const configLine = (repo: RepoSummary): string =>
 export const repoLines = (repo: RepoSummary): readonly string[] => [
   `repo        ${repo.repo}`,
   `path        ${repo.localPath ?? NONE}`,
+  // The factory's own clone of `url`, when it has one: what a URL-only repo's sessions are cut from.
+  `cache       ${repo.mirrorPath ?? NONE}`,
   // The repository sessions are cut from: the path itself, or the work tree it sits inside.
   `work-tree   ${repo.workTree ?? NONE}`,
   `base-ref    ${repo.defaultBaseRef}`,
@@ -62,7 +74,7 @@ export const repoLines = (repo: RepoSummary): readonly string[] => [
   `config      ${configLine(repo)}`,
   `registered  ${repo.registeredAt}`,
   `state       ${repoState(repo)}`,
-  ...(isReady(repo) ? [] : [`remedy      ${repoRemedy(repo.repo)}`]),
+  ...(isReady(repo) ? [] : [`remedy      ${remedyFor(repo)}`]),
 ];
 
 /** What separates `factory repo ls`'s columns: a tab, so no path or URL with a space splits one. */
@@ -92,7 +104,7 @@ export const repoRow = (repo: RepoSummary): string =>
     repo.registeredAt,
     repo.hasFactoryConfig ? "yes" : "no",
     repo.url === "" ? NONE : repo.url,
-    isReady(repo) ? "ready" : `${repoState(repo)} (${repoRemedy(repo.repo)})`,
+    isReady(repo) ? "ready" : `${repoState(repo)} (${remedyFor(repo)})`,
   ].join(REPO_LS_SEPARATOR);
 
 /**
@@ -121,9 +133,10 @@ const apiFlag = Flag.String("api").pipe(
  * The path is resolved against the directory the command runs in, so `--path .` names this
  * checkout, and the server refuses one that is not a git work tree with `invalid_input` naming it.
  * A field left out keeps the row's value: a second `add` with only `--base-ref` keeps the path. So
- * `--path` may be left out only when the repo already has a checkout — until LOB-265 clones a
- * URL-only repo into a factory cache, a registration with no checkout is one no session can cut a
- * worktree from, and the command refuses it instead of writing it.
+ * `--path` may be left out when the repo already has a checkout, or when a `--url` is given (or was
+ * registered): the server then clones the URL into the factory's cache before it answers (LOB-265),
+ * and a clone that fails is `repo_clone_failed`, naming the repo and the reason. A registration with
+ * neither is one no session can cut a worktree from, and the command refuses it instead of writing it.
  */
 const addCommand = Command.make(
   "add",
@@ -131,7 +144,7 @@ const addCommand = Command.make(
     repo: repoArgument,
     path: Flag.String("path").pipe(
       Flag.withDescription(
-        "The repository's local checkout (required unless the repo already has one)",
+        "The repository's local checkout (required unless the repo already has one or a --url)",
       ),
       Flag.optional,
     ),
@@ -142,7 +155,9 @@ const addCommand = Command.make(
       Flag.optional,
     ),
     url: Flag.String("url").pipe(
-      Flag.withDescription("The URL the repository is cloned from"),
+      Flag.withDescription(
+        "The URL the repository is cloned from into the factory's cache (needs no --path)",
+      ),
       Flag.optional,
     ),
     api: apiFlag,
@@ -155,16 +170,18 @@ const addCommand = Command.make(
 
     const program = Effect.gen(function* () {
       const { client } = yield* SessionClient;
-      if (Option.isNone(path)) {
+      if (Option.isNone(path) && Option.isNone(url)) {
         // An unknown slug has no checkout either: the same refusal, not `repo_not_found`.
-        const existing = yield* client.getRepo({ repo: slug }).pipe(
-          Effect.asSome,
-          Effect.catchIf(Schema.is(RepoNotFound), () => Effect.succeedNone),
+        const existing = Option.getOrUndefined(
+          yield* client.getRepo({ repo: slug }).pipe(
+            Effect.asSome,
+            Effect.catchIf(Schema.is(RepoNotFound), () => Effect.succeedNone),
+          ),
         );
-        if (Option.getOrUndefined(existing)?.localPath === undefined) {
+        if (existing?.localPath === undefined && (existing?.url ?? "") === "") {
           return yield* reportFailure(
             "invalid_input",
-            `--path is required: ${slug} has no local checkout registered`,
+            `--path or --url is required: ${slug} has no local checkout or clone URL registered`,
           );
         }
       }
@@ -188,6 +205,11 @@ const addCommand = Command.make(
     {
       command: "factory repo add lobiklukas/factory --path . --base-ref main",
       description: "Bind the factory to this checkout",
+    },
+    {
+      command:
+        "factory repo add lobiklukas/factory --url https://github.com/lobiklukas/factory.git",
+      description: "Have the factory clone it into its own cache (no checkout)",
     },
     {
       command: "factory repo add lobiklukas/factory --base-ref trunk",
@@ -237,9 +259,36 @@ const showCommand = Command.make(
   }),
 ).pipe(Command.withDescription("Show one registered repository"));
 
+/**
+ * `factory repo sync owner/name` — clone the repo into the factory's cache now, or fetch its base ref
+ * when it is there (LOB-265). A repo with a checkout or with no URL has nothing to clone and is
+ * answered as it is; a clone that fails is `repo_clone_failed`, non-zero.
+ */
+const syncCommand = Command.make(
+  "sync",
+  { repo: repoArgument, api: apiFlag },
+  Effect.fnUntraced(function* ({ repo, api }) {
+    const slug = decodeSlug(repo);
+    if (slug === undefined) return yield* badSlug(repo);
+    const apiUrl = yield* resolveApiUrl(api);
+
+    const program = Effect.gen(function* () {
+      const { client } = yield* SessionClient;
+      const synced = yield* client.syncRepo({ repo: slug });
+      for (const line of repoLines(synced)) yield* Console.log(line);
+    });
+
+    yield* reportFailures(Effect.provide(program, SessionClient.layer(apiUrl)));
+  }),
+).pipe(
+  Command.withDescription(
+    "Clone a repository into the factory's cache, or fetch its base ref",
+  ),
+);
+
 export const repoCommand = Command.make("repo").pipe(
   Command.withDescription(
     "Register, list and inspect the repositories sessions run on",
   ),
-  Command.withSubcommands([addCommand, lsCommand, showCommand]),
+  Command.withSubcommands([addCommand, lsCommand, showCommand, syncCommand]),
 );

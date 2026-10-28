@@ -3,6 +3,10 @@
 One file per user-facing feature of `factory`. Each answers: what it is, how a user reaches it, how
 the skill drives it, and what observable end state proves it works.
 
+`factory repo add --url` / `repo sync` / `factory doctor` (a URL-only repo cloned into the factory's cache)
+were verified **2026-10-28** from the `agent/LOB-265` worktree with `./clone.sh` (API on `:9660`, the
+loopback git forge on `:9661`) — **21/21** checks.
+
 `factory discard` was verified **2026-10-28** from the `agent/LOB-268` worktree with
 `./discard.sh` (API on `:9541`) — **11/11** checks.
 
@@ -41,6 +45,7 @@ mutation run (the row always printing `-`) failed "ls shows the recorded PR URL"
 | `factory send --when-busy steer/reject`         | passing | [steer.md](steer.md)                                            |
 | `factory approve` / `deny`                      | passing | [approve.md](approve.md)                                        |
 | `factory discard`                               | passing | [discard.md](discard.md)                                        |
+| `factory repo add --url`, `repo sync`, `doctor` | passing | [clone.md](clone.md)                                            |
 | `factory pr`                                    | passing | [verify-board build.md](../../verify-board/features/build.md)   |
 | Feature                                         | Status  | File                                                            |
 | ----------------------------------------------- | ------- | --------------------------------------------------------------- |

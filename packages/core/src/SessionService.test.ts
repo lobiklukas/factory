@@ -42,7 +42,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -67,6 +67,7 @@ import type {
 } from "@repo/domain/Session";
 import {
   BranchName,
+  RepoCloneFailed,
   RepoNotFound,
   RepoSlug as RepoSlugSchema,
   SessionId as SessionIdSchema,
@@ -129,6 +130,7 @@ import {
 import { mintSessionId } from "./ids";
 import { rebuildIndexes } from "./rebuild";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
+import type { RepoMirror } from "./RepoMirror";
 import { noCheckoutWarning } from "./workspace";
 import { DEFAULT_DIFF_CAP, PullRequest } from "./pr";
 import type { OpenedPullRequest, PullRequestStep } from "./pr";
@@ -8691,6 +8693,305 @@ describe("the verify tool reads the session's workspace", () => {
       expect(comment).not.toContain("No verification was recorded");
     } finally {
       await verifyRuntime.dispose();
+    }
+  }, 120_000);
+});
+
+/**
+ * A repo registered with only a URL (LOB-265): the session layer's side of the factory's own clone.
+ *
+ * The real mirror (`gitRepoMirror`, token over a loopback git server) is proven in `git.test.ts`.
+ * Here the mirror is a fake that fetches from a local bare repository with plain git, so what is
+ * under test is the wiring: which calls sync, when, and what a session's worktree is cut from.
+ */
+describe("a repo registered with only a URL (LOB-265)", () => {
+  const cloneRoot = mkdtempSync(join(tmpdir(), "factory-core-clone-"));
+  const upstream = join(cloneRoot, "upstream");
+  const bareUpstream = join(cloneRoot, "upstream.git");
+  const mirrors = join(cloneRoot, "mirrors");
+  const url = "https://github.com/factory-test/url-only.git";
+  const git = (cwd: string, ...args: ReadonlyArray<string>): string =>
+    execFileSync("git", [...args], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@t.com",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@t.com",
+      },
+    }).trim();
+
+  /** What the fake was asked, and whether it should fail the next call. */
+  const calls: Array<{
+    readonly repo: string;
+    readonly url: string;
+    readonly baseRef: string;
+  }> = [];
+  const failing = { next: false };
+  const fakeMirror: RepoMirror = {
+    directory: (repo) => join(mirrors, `${repo.replace("/", "__")}.git`),
+    sync: (input) =>
+      Effect.gen(function* () {
+        calls.push(input);
+        if (failing.next)
+          return yield* new RepoCloneFailed({
+            repo: input.repo,
+            reason: "auth",
+            message: `repo ${input.repo}: fetch failed: the remote refused the credential`,
+          });
+        const mirror = join(mirrors, `${input.repo.replace("/", "__")}.git`);
+        if (!existsSync(join(mirror, "HEAD")))
+          git(cloneRoot, "init", "--bare", "--quiet", mirror);
+        git(
+          mirror,
+          "fetch",
+          "--quiet",
+          bareUpstream,
+          `+refs/heads/${input.baseRef}:refs/remotes/origin/${input.baseRef}`,
+        );
+        return {
+          path: mirror,
+          ref: `refs/remotes/origin/${input.baseRef}`,
+          sha: git(mirror, "rev-parse", `refs/remotes/origin/${input.baseRef}`),
+        };
+      }),
+  };
+
+  beforeAll(() => {
+    mkdirSync(upstream, { recursive: true });
+    git(upstream, "init", "-q", "-b", "main");
+    writeFileSync(join(upstream, "README.md"), "from the forge\n");
+    git(upstream, "add", "README.md");
+    git(upstream, "commit", "-q", "-m", "seed");
+    git(cloneRoot, "clone", "-q", "--bare", upstream, bareUpstream);
+  });
+
+  afterAll(() => {
+    rmSync(cloneRoot, { recursive: true, force: true });
+  });
+
+  const runtimeWith = (mirror: RepoMirror | undefined) =>
+    ManagedRuntime.make(
+      SessionServiceLive({
+        model: createFauxModelAccess({}).access,
+        sessionRoot: join(cloneRoot, "sessions"),
+        ...(mirror === undefined ? {} : { repoMirror: mirror }),
+      }).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+
+  it("clones on registration, cuts each session's worktree from the clone at the fetched base, and tears it down from there", async () => {
+    const slug = RepoSlugSchema.make(
+      `factory-test/url-only-${randomBytes(4).toString("hex")}`,
+    );
+    calls.length = 0;
+    const runtime = runtimeWith(fakeMirror);
+    try {
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const registered = yield* sessions.registerRepo({ repo: slug, url });
+          const afterRegister = calls.length;
+          const created = yield* sessions.create({ repo: slug });
+          const snapshot = yield* sessions.get(created.id);
+          const afterCreate = calls.length;
+          // Reading it again fetches nothing: only cutting a worktree reaches the remote.
+          yield* sessions.get(created.id);
+          const afterRead = calls.length;
+          // Read while the worktree exists: what it is cut from and at.
+          const cutFrom = {
+            commonDir: realpathSync(
+              git(snapshot.workspace.path, "rev-parse", "--git-common-dir"),
+            ),
+            head: git(snapshot.workspace.path, "rev-parse", "HEAD"),
+            readme: readFileSync(
+              join(snapshot.workspace.path, "README.md"),
+              "utf8",
+            ),
+          };
+          const released = yield* sessions.releaseWorkspace({
+            sessionId: created.id,
+            reason: "discarded",
+          });
+          return {
+            registered,
+            afterRegister,
+            created,
+            snapshot,
+            afterCreate,
+            afterRead,
+            cutFrom,
+            released,
+          };
+        }),
+      );
+      const mirror = fakeMirror.directory(slug);
+      const worktree = result.snapshot.workspace.path;
+
+      // Registration cloned the default base, once, and the row says where.
+      expect(result.afterRegister).toBe(1);
+      expect(calls[0]).toEqual({ repo: slug, url, baseRef: "main" });
+      expect(result.registered.mirrorPath).toBe(mirror);
+      expect(result.registered.localPath).toBeUndefined();
+
+      // The session fetched its base ref, then was cut a linked worktree of the clone at it.
+      expect(result.afterCreate).toBe(2);
+      expect(calls[1]).toEqual({ repo: slug, url, baseRef: "main" });
+      expect(result.afterRead).toBe(2);
+      expect(result.snapshot.workspace.warning).toBeUndefined();
+      expect(result.snapshot.workspace.branch).toBe(
+        `factory/${result.created.id}`,
+      );
+      expect(result.cutFrom.commonDir).toBe(realpathSync(mirror));
+      expect(result.cutFrom.head).toBe(git(upstream, "rev-parse", "HEAD"));
+      expect(result.cutFrom.readme).toBe("from the forge\n");
+
+      // A discard removes the worktree and its branch from the clone, which is not a registered path.
+      expect(result.released.first).toBe(true);
+      expect(existsSync(worktree)).toBe(false);
+      expect(
+        git(mirror, "branch", "--list", `factory/${result.created.id}`),
+      ).toBe("");
+      expect(git(mirror, "worktree", "list", "--porcelain")).not.toContain(
+        worktree,
+      );
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("registers a repo whose clone fails, names the repo and the reason, and clones it on syncRepo once the cause is fixed", async () => {
+    const slug = RepoSlugSchema.make(
+      `factory-test/url-fails-${randomBytes(4).toString("hex")}`,
+    );
+    const runtime = runtimeWith(fakeMirror);
+    try {
+      failing.next = true;
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const failed = yield* Effect.flip(
+            sessions.registerRepo({ repo: slug, url }),
+          );
+          // The row stays, un-cloned, so the clone can be retried.
+          const kept = yield* sessions.getRepo({ repo: slug });
+          const stillFailing = yield* Effect.flip(
+            sessions.syncRepo({ repo: slug }),
+          );
+          failing.next = false;
+          const synced = yield* sessions.syncRepo({ repo: slug });
+          const unknown = yield* Effect.flip(
+            sessions.syncRepo({
+              repo: RepoSlugSchema.make("factory-test/never"),
+            }),
+          );
+          return { failed, kept, stillFailing, synced, unknown };
+        }),
+      );
+      expect(result.failed).toBeInstanceOf(RepoCloneFailed);
+      expect(result.failed).toMatchObject({ repo: slug, reason: "auth" });
+      expect(result.failed.message).toContain(slug);
+      expect(result.kept.url).toBe(url);
+      expect(result.kept.mirrorPath).toBeUndefined();
+      expect(result.stillFailing).toBeInstanceOf(RepoCloneFailed);
+      expect(result.synced.mirrorPath).toBe(fakeMirror.directory(slug));
+      expect(result.unknown).toBeInstanceOf(RepoNotFound);
+    } finally {
+      failing.next = false;
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("clones nothing for a repo that has a checkout, has no URL, or a deployment with no cache", async () => {
+    const withPath = RepoSlugSchema.make(
+      `factory-test/has-path-${randomBytes(4).toString("hex")}`,
+    );
+    const noUrl = RepoSlugSchema.make(
+      `factory-test/no-url-${randomBytes(4).toString("hex")}`,
+    );
+    const noCache = RepoSlugSchema.make(
+      `factory-test/no-cache-${randomBytes(4).toString("hex")}`,
+    );
+    calls.length = 0;
+    const runtime = runtimeWith(fakeMirror);
+    const bare = runtimeWith(undefined);
+    try {
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          yield* sessions.registerRepo({
+            repo: withPath,
+            url,
+            localPath: upstream,
+          });
+          const cut = yield* sessions.create({ repo: withPath });
+          const cutView = yield* sessions.get(cut.id);
+          yield* sessions.registerRepo({ repo: noUrl });
+          const synced = yield* sessions.syncRepo({ repo: noUrl });
+          return { cutView, synced };
+        }),
+      );
+      expect(calls).toEqual([]);
+      // Cut from its own checkout: the worktree's common dir is the upstream clone's `.git`.
+      expect(
+        realpathSync(
+          git(result.cutView.workspace.path, "rev-parse", "--git-common-dir"),
+        ),
+      ).toBe(realpathSync(join(upstream, ".git")));
+      expect(result.synced.mirrorPath).toBeUndefined();
+
+      const view = await bare.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const registered = yield* sessions.registerRepo({
+            repo: noCache,
+            url,
+          });
+          const created = yield* sessions.create({ repo: noCache });
+          return { registered, snapshot: yield* sessions.get(created.id) };
+        }),
+      );
+      // As before LOB-265: a session with no checkout and nothing to clone it into warns.
+      expect(view.registered.mirrorPath).toBeUndefined();
+      expect(view.snapshot.workspace.warning).toBe(noCheckoutWarning(noCache));
+    } finally {
+      await runtime.dispose();
+      await bare.dispose();
+    }
+  }, 120_000);
+
+  it("refuses a URL that carries a credential, and stores nothing", async () => {
+    const slug = RepoSlugSchema.make(
+      `factory-test/url-secret-${randomBytes(4).toString("hex")}`,
+    );
+    calls.length = 0;
+    const runtime = runtimeWith(fakeMirror);
+    try {
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const refused = yield* Effect.flip(
+            sessions.registerRepo({
+              repo: slug,
+              url: "https://x-access-token:ghs_secret@github.com/factory-test/url-secret.git",
+            }),
+          );
+          const missing = yield* Effect.flip(sessions.getRepo({ repo: slug }));
+          return { refused, missing };
+        }),
+      );
+      expect(result.refused).toMatchObject({
+        _tag: "SessionError",
+        code: "invalid_input",
+      });
+      expect(result.refused.message).toContain("carries a credential");
+      expect(result.refused.message).not.toContain("ghs_secret");
+      expect(result.missing).toBeInstanceOf(RepoNotFound);
+      expect(calls).toEqual([]);
+    } finally {
+      await runtime.dispose();
     }
   }, 120_000);
 });

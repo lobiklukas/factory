@@ -33,6 +33,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -42,7 +43,11 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { RepoSlug, type SessionId } from "@repo/domain/Session";
+import {
+  RepoCloneFailed,
+  RepoSlug,
+  type SessionId,
+} from "@repo/domain/Session";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
 import {
   fetchBranch,
@@ -52,6 +57,7 @@ import {
   resolveForgeUrl,
 } from "./git";
 import { mintSessionId } from "./ids";
+import { gitRepoMirror } from "./RepoMirror";
 import { resolveWorkspace } from "./workspace";
 
 const repo = RepoSlug.make("lobiklukas/factory");
@@ -889,6 +895,242 @@ describe("a stalled remote", GIT_CASE, () => {
     }
   });
 });
+
+const mirrorRoot = join(root, "mirror-root");
+
+const isCloneFailed = Schema.is(RepoCloneFailed);
+
+const cloneErrorOf = <A>(
+  exit: Exit.Exit<A, unknown>,
+): RepoCloneFailed | undefined =>
+  Exit.isFailure(exit)
+    ? exit.cause.reasons.flatMap((r) =>
+        r._tag === "Fail" && isCloneFailed(r.error) ? [r.error] : [],
+      )[0]
+    : undefined;
+
+/** The deployment's mirror, built the way the API builds it: `<root>/.cache/<owner>/<name>.git`. */
+const openMirror = (token?: Option.Option<Redacted.Redacted<string>>) =>
+  runWith(gitRepoMirror({ root: mirrorRoot }), token);
+
+describe(
+  "the factory's clone of a repo registered with only a URL (LOB-265)",
+  GIT_CASE,
+  () => {
+    const cloned = async () => {
+      const made = await openMirror();
+      if (!Exit.isSuccess(made)) throw new Error("the mirror did not build");
+      const mirror = made.value;
+      const synced = await runWith(
+        mirror.sync({ repo, url: forgeUrl(), baseRef: "main" }),
+      );
+      return { mirror, synced };
+    };
+
+    it("clones a bare repository at the cache path with no credential in its config or on disk", async () => {
+      const { mirror, synced } = await cloned();
+      const mirrorPath = join(
+        mirrorRoot,
+        ".cache",
+        "lobiklukas",
+        "factory.git",
+      );
+      expect(mirror.directory(repo)).toBe(mirrorPath);
+      expect(Exit.isSuccess(synced)).toBe(true);
+      if (!Exit.isSuccess(synced)) return;
+      expect(synced.value).toEqual({
+        path: mirrorPath,
+        ref: "refs/remotes/origin/main",
+        sha: git(bare, "rev-parse", "main"),
+      });
+      expect(git(mirrorPath, "rev-parse", "--is-bare-repository")).toBe("true");
+      expect(git(mirrorPath, "rev-parse", "refs/remotes/origin/main")).toBe(
+        synced.value.sha,
+      );
+
+      // The remote did demand the token, and git did send it: the clone is not a path copy.
+      expect(remote.seen.some((s) => s.password === TOKEN)).toBe(true);
+      // And it is written nowhere: not the config, which names no remote and no URL, not a helper
+      // store, not a byte of any file in the mirror.
+      const config = readFileSync(join(mirrorPath, "config"), "utf8");
+      expect(config).not.toContain(TOKEN);
+      expect(config).not.toContain("[remote");
+      expect(config).not.toContain(remote.url);
+      expect(config).not.toContain("credential");
+      expect(existsSync(leakedStore)).toBe(false);
+      const files = filesUnder(mirrorPath);
+      expect(files.length).toBeGreaterThan(5);
+      const tokenBytes = Buffer.from(TOKEN);
+      expect(
+        files.filter((file) => readFileSync(file).includes(tokenBytes)),
+      ).toEqual([]);
+    });
+
+    it("cuts a session's worktree from the mirror at the fetched base ref, and fetches again for the next session", async () => {
+      const { mirror } = await cloned();
+      const mirrorPath = mirror.directory(repo);
+      const open = (id: SessionId) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          return yield* resolveWorkspace(
+            {
+              sessionRoot,
+              sessionId: id,
+              repo,
+              baseRef: "main",
+              mirror: {
+                path: mirror.directory(repo),
+                sync: mirror
+                  .sync({ repo, url: forgeUrl(), baseRef: "main" })
+                  .pipe(Effect.map((tip) => tip.ref)),
+              },
+            },
+            { fs, path },
+          );
+        });
+
+      const tip = commitFile(upstream, "MIRROR.md", "in the mirror\n");
+      git(upstream, "push", "origin", "main");
+      const firstId = await Effect.runPromise(mintSessionId);
+      const first = await runWith(open(firstId));
+      expect(Exit.isSuccess(first)).toBe(true);
+      if (!Exit.isSuccess(first)) return;
+      const worktree = first.value.path;
+
+      // A linked worktree of the mirror, on the session's branch, at the base the remote just had.
+      expect(first.value.warning).toBeUndefined();
+      expect(first.value.branch).toBe(`factory/${firstId}`);
+      expect(readFileSync(join(worktree, ".git"), "utf8")).toContain(
+        join(mirrorPath, "worktrees"),
+      );
+      expect(realpathSync(git(worktree, "rev-parse", "--git-common-dir"))).toBe(
+        realpathSync(mirrorPath),
+      );
+      expect(git(worktree, "rev-parse", "--abbrev-ref", "HEAD")).toBe(
+        `factory/${firstId}`,
+      );
+      expect(git(worktree, "rev-parse", "HEAD")).toBe(tip);
+      expect(readFileSync(join(worktree, "README.md"), "utf8")).toBe("seed\n");
+      expect(readFileSync(join(worktree, "MIRROR.md"), "utf8")).toBe(
+        "in the mirror\n",
+      );
+      expect(git(mirrorPath, "worktree", "list")).toContain(worktree);
+      // The base is also the mirror's own branch, so the range the PR step measures, `main...HEAD`,
+      // resolves in the session's worktree: its diff is what the session committed and nothing else.
+      expect(git(mirrorPath, "rev-parse", "refs/heads/main")).toBe(tip);
+      const committed = commitFile(
+        worktree,
+        "SESSION.md",
+        "the session's change\n",
+      );
+      expect(git(worktree, "diff", "--name-only", "main...HEAD")).toBe(
+        "SESSION.md",
+      );
+      // Cutting it wrote no upstream into the mirror's config.
+      expect(readFileSync(join(mirrorPath, "config"), "utf8")).not.toContain(
+        "[branch",
+      );
+
+      // Reopening the same session — the directory is a workspace — touches no network.
+      const requests = remote.requests.count;
+      const again = await runWith(open(firstId));
+      expect(Exit.isSuccess(again)).toBe(true);
+      expect(remote.requests.count).toBe(requests);
+
+      // The next session fetches again, so it starts from where the remote has moved to.
+      const moved = commitFile(upstream, "MOVED.md", "moved on\n");
+      git(upstream, "push", "origin", "main");
+      const secondId = await Effect.runPromise(mintSessionId);
+      const second = await runWith(open(secondId));
+      expect(Exit.isSuccess(second)).toBe(true);
+      if (!Exit.isSuccess(second)) return;
+      expect(git(second.value.path, "rev-parse", "HEAD")).toBe(moved);
+      // The first session's worktree is its own: still at what it committed.
+      expect(git(worktree, "rev-parse", "HEAD")).toBe(committed);
+    });
+
+    it("is a typed error naming the repo and the reason when the remote refuses the credential, and leaves no mirror behind", async () => {
+      const ghost = RepoSlug.make("lobiklukas/refused-clone");
+      const wrong = `ghs_${randomBytes(18).toString("hex")}`;
+      const made = await openMirror(Option.some(Redacted.make(wrong)));
+      if (!Exit.isSuccess(made)) throw new Error("the mirror did not build");
+      const exit = await runWith(
+        made.value.sync({
+          repo: ghost,
+          url: `${remote.url}/lobiklukas/refused-clone.git`,
+          baseRef: "main",
+        }),
+      );
+      const error = cloneErrorOf(exit);
+      expect(error).toMatchObject({ repo: ghost, reason: "auth" });
+      expect(error?.message).toContain("lobiklukas/refused-clone");
+      expect(error?.message).not.toContain(wrong);
+      expect(existsSync(made.value.directory(ghost))).toBe(false);
+    });
+
+    it("names the reason for a ref the remote lacks, a repo it does not serve and no token at all", async () => {
+      const { mirror } = await cloned();
+      const noRef = cloneErrorOf(
+        await runWith(
+          mirror.sync({ repo, url: forgeUrl(), baseRef: "no-such-branch" }),
+        ),
+      );
+      expect(noRef).toMatchObject({ repo, reason: "missing-ref" });
+
+      const ghost = RepoSlug.make("lobiklukas/not-served");
+      const notServed = cloneErrorOf(
+        await runWith(
+          mirror.sync({
+            repo: ghost,
+            url: `${remote.url}/lobiklukas/not-served.git`,
+            baseRef: "main",
+          }),
+        ),
+      );
+      expect(notServed).toMatchObject({ repo: ghost, reason: "failed" });
+      expect(existsSync(mirror.directory(ghost))).toBe(false);
+
+      // The credential is the one the mirror was built with, resolved at each call.
+      const tokenless = await openMirror(Option.none());
+      if (!Exit.isSuccess(tokenless))
+        throw new Error("the mirror did not build");
+      const noToken = cloneErrorOf(
+        await runWith(
+          tokenless.value.sync({ repo, url: forgeUrl(), baseRef: "main" }),
+        ),
+      );
+      expect(noToken).toMatchObject({ repo, reason: "credential" });
+    });
+
+    it("refuses a URL a token may not go to, and a slug that would name a dotfile, before reaching any remote", async () => {
+      const { mirror } = await cloned();
+      const before = remote.requests.count;
+      const elsewhere = cloneErrorOf(
+        await runWith(
+          mirror.sync({
+            repo,
+            url: "https://evil.example/lobiklukas/factory.git",
+            baseRef: "main",
+          }),
+        ),
+      );
+      expect(elsewhere).toMatchObject({ repo, reason: "refused" });
+      const dotted = RepoSlug.make(".cache/factory");
+      const dotfile = cloneErrorOf(
+        await runWith(
+          mirror.sync({
+            repo: dotted,
+            url: `${remote.url}/.cache/factory.git`,
+            baseRef: "main",
+          }),
+        ),
+      );
+      expect(dotfile).toMatchObject({ repo: dotted, reason: "refused" });
+      expect(remote.requests.count).toBe(before);
+    });
+  },
+);
 
 describe("isSafeBranchName", () => {
   it("accepts the branches the control plane names and nothing that reads as a refspec or option", () => {

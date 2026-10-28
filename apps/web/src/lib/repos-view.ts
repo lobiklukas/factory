@@ -24,18 +24,21 @@ export type Runnability =
 
 /**
  * Whether a session on `repo` gets a `factory/<session-id>` worktree. It does exactly when the repo
- * has a local checkout that is inside a git work tree: any other repo still opens sessions, but in
- * an empty directory, where nothing the run changes can be diffed or reviewed. A clone URL alone
- * does not make a repo runnable: nothing clones it into the factory's own cache yet (LOB-265).
+ * has a local checkout that is inside a git work tree, or no checkout and a clone URL the factory
+ * has already cloned into its own cache (`mirrorPath`, LOB-265): any other repo still opens
+ * sessions, but in an empty directory, where nothing the run changes can be diffed or reviewed.
  */
 export const runnability = (repo: RepoSummary): Runnability => {
+  if (repo.localPath === undefined && repo.mirrorPath !== undefined) {
+    return { runnable: true };
+  }
   if (repo.localPath === undefined) {
     return {
       runnable: false,
       cause: "no_checkout",
       reason:
         "No local checkout is registered, so a session opens in an empty directory and no worktree is cut.",
-      fix: "Register the absolute path of a clone on the API's machine (Add repository, with this slug and a local path).",
+      fix: "Register a clone URL for the factory to clone itself, or the absolute path of a clone on the API's machine (Add repository, with this slug and a URL or a local path).",
     };
   }
   if (!repo.localPathIsGit) {

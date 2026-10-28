@@ -557,6 +557,111 @@ export const fetchBranch = (
     return { ref: tracking, sha: fetched };
   }).pipe(Effect.scoped, Effect.withSpan("git.fetchBranch"));
 
+export type SyncMirrorInput = {
+  /** Where the bare repository lives. Created, with its parents, on the first call. */
+  readonly mirror: string;
+  /** The repo the token is resolved for, and the only repo it is sent to. */
+  readonly repo: RepoSlug;
+  /** The repo's URL. Defaults to `https://github.com/<repo>.git`; see `resolveForgeUrl`. */
+  readonly url?: string;
+  /** The branch a session starts from. Fetched into `refs/remotes/origin/<branch>`. */
+  readonly branch: string;
+  /** How long the network call may run. Defaults to `DEFAULT_GIT_TIMEOUT`. */
+  readonly timeout?: Duration.Input;
+};
+
+/**
+ * Bring one branch of the repo's forge into a factory-owned bare repository, creating it first
+ * when it is not there (LOB-265): the clone of a repo registered with only a URL, and the fetch
+ * every later session makes before its worktree is cut from it.
+ *
+ * It is `fetchBranch` with the bare repository as the checkout, so everything above holds: the
+ * token is resolved at the call, handed to one process, and written nowhere. Creating the mirror
+ * is `git init --bare` and nothing else — no `remote` is configured, no URL is stored in its
+ * config, so the mirror holds neither a credential nor anything to redirect one — and the objects
+ * arrive by the fetch. A mirror this call created is removed again when its first fetch fails, so
+ * a bad URL or a refused token leaves no half-made repository for the next call to mistake for a
+ * clone.
+ */
+export const syncMirror = (
+  input: SyncMirrorInput,
+): Effect.Effect<
+  FetchedBranch,
+  GitError | CredentialError,
+  | CredentialProvider
+  | ChildProcessSpawner.ChildProcessSpawner
+  | FileSystem.FileSystem
+> =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const call: RefCall = {
+      operation: "fetch",
+      repo: input.repo,
+      ref: `refs/heads/${input.branch}`,
+    };
+    const exists = yield* fs
+      .exists(`${input.mirror}/HEAD`)
+      .pipe(Effect.orElseSucceed(() => false));
+    if (!exists) {
+      yield* fs.makeDirectory(input.mirror, { recursive: true }).pipe(
+        Effect.catchTag("PlatformError", (error) =>
+          Effect.fail(
+            new GitError({
+              ...call,
+              reason: "failed",
+              message: `${subject(call)} failed: could not create the mirror (${error.reason._tag})`,
+            }),
+          ),
+        ),
+      );
+      const init = yield* runGit(
+        input.mirror,
+        [
+          "-c",
+          "init.defaultRefFormat=files",
+          "init",
+          "--bare",
+          "--quiet",
+          "--template=",
+          input.mirror,
+        ],
+        { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+      );
+      if (init.exitCode !== 0) return yield* failure(call, init);
+    }
+    const fetched = yield* fetchBranch({
+      worktree: input.mirror,
+      repo: input.repo,
+      ...(input.url === undefined ? {} : { url: input.url }),
+      branch: input.branch,
+      ...(input.timeout === undefined ? {} : { timeout: input.timeout }),
+    }).pipe(
+      Effect.tapError(() =>
+        exists
+          ? Effect.void
+          : fs
+              .remove(input.mirror, { recursive: true, force: true })
+              .pipe(Effect.ignore),
+      ),
+    );
+    // The base is also the mirror's own `refs/heads/<branch>`, so `<base>...factory/<id>` — the range
+    // the PR step measures in the session's worktree, which shares these refs — names a ref that
+    // exists. Nothing is ever committed on it: sessions work on `factory/*`, so the mirror's branch
+    // only ever follows the remote. A `factory/*` base is a session's branch, which a worktree may
+    // have checked out, so it is left alone.
+    if (!input.branch.startsWith(SESSION_BRANCH_PREFIX)) {
+      const head = yield* runGit(input.mirror, [
+        "update-ref",
+        "-m",
+        `factory: mirror ${call.ref}`,
+        call.ref,
+        fetched.sha,
+      ]);
+      if (head.exitCode !== 0) return yield* failure(call, head);
+    }
+    return fetched;
+  }).pipe(Effect.withSpan("git.syncMirror"));
+
 export type PushBranchInput = {
   /** The session's checkout, where the branch was committed. */
   readonly worktree: string;

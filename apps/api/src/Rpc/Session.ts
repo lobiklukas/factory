@@ -51,6 +51,7 @@ const SessionRpcHandlers = SessionRpc.toLayer(
       registerRepo: (input) => sessions.registerRepo(input),
       listRepos: () => sessions.listRepos,
       getRepo: (input) => sessions.getRepo(input),
+      syncRepo: (input) => sessions.syncRepo(input),
       // Only the session and the title: the branches are the session's own, read server-side.
       openPullRequest: (input) =>
         sessions

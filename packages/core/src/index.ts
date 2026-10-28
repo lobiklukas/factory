@@ -21,6 +21,7 @@ export * from "./ReviewTrigger";
 export * from "./Slack";
 export * from "./Sentry";
 export * from "./git";
+export * from "./RepoMirror";
 export * from "./Linear";
 export * from "./LinearSync";
 export * from "./SessionWriteBack";

@@ -5,6 +5,7 @@ import {
   CredentialProviderLive,
   DEFAULT_DIFF_CAP,
   githubReviewPoster,
+  gitRepoMirror,
   ReviewerCredentialConfig,
   selectReviewerCredentialProvider,
   runDocsSchedule,
@@ -528,11 +529,18 @@ const HttpLive = Effect.gen(function* () {
     `reviewer identity: ${Option.isSome(reviewerConfig.appId) ? "its own GitHub App (GITHUB_REVIEWER_APP_ID)" : Option.isSome(reviewerConfig.token) ? "its own token (GITHUB_REVIEWER_TOKEN)" : "none, so reviews are recorded and not posted"}`,
   );
 
+  // A repo registered with only a URL is cloned into `<SESSION_ROOT>/.cache` with the worker's read
+  // credential, and its sessions' worktrees are cut from that clone (LOB-265).
+  const repoMirror = yield* gitRepoMirror({ root: model.sessionRoot }).pipe(
+    Effect.provide(Layer.mergeAll(CredentialProviderLive, BunServices.layer)),
+  );
+
   // Sessions own one log, one working directory, and (locally) the harness that drives them. The PR
   // step's exit is mirrored on the Linear issue a session was delegated from, when a key is set
   // (LOB-15).
   const SessionDeps = SessionServiceLive({
     reviewPoster,
+    repoMirror,
     model: modelAccess,
     roleModels,
     sessionRoot: model.sessionRoot,

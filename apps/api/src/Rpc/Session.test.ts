@@ -31,10 +31,16 @@ import { BunServices } from "@effect/platform-bun";
 import {
   CredentialError,
   CredentialProvider,
+  type RepoMirror,
   SessionServiceLive,
 } from "@repo/core";
 import { RpcApi, SessionRpc } from "@repo/domain/Rpc";
-import { RepoSlug, type SessionId } from "@repo/domain/Session";
+import {
+  RepoCloneFailed,
+  RepoNotFound,
+  RepoSlug,
+  type SessionId,
+} from "@repo/domain/Session";
 import { DefinitionId } from "@repo/domain/Task";
 import { createFauxModelAccess } from "@repo/harness";
 import {
@@ -172,6 +178,30 @@ const credentials = CredentialProvider.of({
       : Effect.succeed(Redacted.make("rpc-test-token")),
 });
 
+/**
+ * The factory's clone (LOB-265), as a value the session layer is given: this file proves what crosses
+ * the wire, so the clone itself is a fake that refuses one repo. The real one, over a loopback git
+ * remote, is `packages/core/src/git.test.ts`'s.
+ */
+const cloneRefused = RepoSlug.make(`acme/rpc-clone-refused-${run}`);
+const fakeMirror: RepoMirror = {
+  directory: (asked) => join(sessionRoot, ".cache", `${asked}.git`),
+  sync: (input) =>
+    input.repo === cloneRefused
+      ? Effect.fail(
+          new RepoCloneFailed({
+            repo: input.repo,
+            reason: "auth",
+            message: `repo ${input.repo}: the remote refused the credential`,
+          }),
+        )
+      : Effect.succeed({
+          path: join(sessionRoot, ".cache", `${input.repo}.git`),
+          ref: `refs/remotes/origin/${input.baseRef}`,
+          sha: "0".repeat(40),
+        }),
+};
+
 const { handler, dispose } = HttpRouter.toWebHandler(
   SessionRpcLive.pipe(
     Layer.provide(
@@ -187,6 +217,7 @@ const { handler, dispose } = HttpRouter.toWebHandler(
           fauxDecomposition: DUPLICATE_TITLES,
         }).access,
         sessionRoot,
+        repoMirror: fakeMirror,
       }),
     ),
     Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
@@ -567,6 +598,47 @@ describe("a session's workspace is torn down over RPC only on a terminal event (
     } finally {
       rmSync(checkout, { recursive: true, force: true });
     }
+  }, 120_000);
+});
+
+describe("cloning a URL-only repo over RPC (LOB-265)", () => {
+  it("carries a clone failure as RepoCloneFailed with the repo and reason, and keeps the row so syncRepo can try again", async () => {
+    const outcome = await call((client) =>
+      Effect.gen(function* () {
+        const failed = yield* Effect.flip(
+          client.registerRepo({
+            repo: cloneRefused,
+            url: `https://github.com/${cloneRefused}.git`,
+          }),
+        );
+        const kept = yield* client.getRepo({ repo: cloneRefused });
+        const retried = yield* Effect.flip(
+          client.syncRepo({ repo: cloneRefused }),
+        );
+        const unknown = yield* Effect.flip(
+          client.syncRepo({
+            repo: RepoSlug.make(`acme/rpc-sync-unknown-${run}`),
+          }),
+        );
+        const secret = yield* Effect.flip(
+          client.registerRepo({
+            repo: RepoSlug.make(`acme/rpc-clone-secret-${run}`),
+            url: "https://x-access-token:ghs_wire@github.com/acme/x.git",
+          }),
+        );
+        return { failed, kept, retried, unknown, secret };
+      }),
+    );
+    for (const error of [outcome.failed, outcome.retried]) {
+      expect(error).toBeInstanceOf(RepoCloneFailed);
+      expect(error).toMatchObject({ repo: cloneRefused, reason: "auth" });
+      expect(error.message).toBe(
+        `repo ${cloneRefused}: the remote refused the credential`,
+      );
+    }
+    expect(outcome.kept.url).toBe(`https://github.com/${cloneRefused}.git`);
+    expect(outcome.unknown).toBeInstanceOf(RepoNotFound);
+    expect(outcome.secret).toMatchObject({ code: "invalid_input" });
   }, 120_000);
 });
 

@@ -8,6 +8,7 @@ import {
 } from "./commands/approve";
 import { boardCommand } from "./commands/board";
 import { discardCommand } from "./commands/discard";
+import { doctorCommand } from "./commands/doctor";
 import { lsCommand } from "./commands/ls";
 import { prCommand } from "./commands/pr";
 import { repoCommand } from "./commands/repo";
@@ -32,6 +33,7 @@ const root = Command.make("factory").pipe(
     prCommand,
     boardCommand,
     repoCommand,
+    doctorCommand,
     approvalsCommand,
     approveCommand,
     denyCommand,
