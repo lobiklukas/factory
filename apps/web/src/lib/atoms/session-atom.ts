@@ -1,5 +1,6 @@
 import type {
   CompactSessionInput,
+  ReadSessionHistoryInput,
   SessionEvent,
   SessionId,
   SessionLive,
@@ -27,6 +28,11 @@ import { SESSIONS_KEY } from "./session-list";
 export type SessionView = {
   readonly summary: SessionSummary;
   readonly entries: readonly TranscriptEntry[];
+  /**
+   * Where `entries` starts when the transcript holds more before it (LOB-243): a historical
+   * snapshot of a long session carries its newest entries only. Absent means `entries` is all of it.
+   */
+  readonly earlier?: string;
   readonly live: SessionLive;
   readonly usage: SessionUsage;
   readonly queued: readonly QueuedMessage[];
@@ -59,6 +65,7 @@ export const foldSessionEvent = (
       return {
         summary: event.session,
         entries: event.entries,
+        ...(event.earlier === undefined ? {} : { earlier: event.earlier }),
         live: event.live,
         usage: event.usage,
         queued: event.queued,
@@ -183,5 +190,18 @@ export const sendMessageAtom = runtime.fn(
         sessionId: input.sessionId,
         content: input.content,
       });
+    }),
+);
+
+/**
+ * Reads the page of a session's transcript before an entry (LOB-243's RPC): what "Show earlier
+ * entries" asks for when a historical snapshot carried only the newest of a long session. The page
+ * goes above what the pane shows; the stream is not involved, because earlier entries never change.
+ */
+export const readSessionHistoryAtom = runtime.fn(
+  (input: ReadSessionHistoryInput) =>
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.readSessionHistory(input);
     }),
 );

@@ -539,7 +539,18 @@ export type ReplayComparison = typeof ReplayComparison.Type;
 export const SessionSnapshotFields = {
   session: SessionSummary,
   workspace: SessionWorkspace,
+  /**
+   * The transcript, oldest first. A live snapshot carries all of it; a historical one carries the
+   * newest entries only (LOB-243), so a read of a long session costs what it shows — `earlier` says
+   * when there are more.
+   */
   entries: Schema.Array(TranscriptEntry),
+  /**
+   * Present when the transcript holds entries before `entries`: the id of the oldest entry carried,
+   * which `readSessionHistory` takes as `before` to return the page before it (LOB-243). Absent
+   * means `entries` starts the transcript.
+   */
+  earlier: Schema.optional(Schema.String),
   live: SessionLive,
   usage: SessionUsage,
   queued: Schema.Array(QueuedMessage),
@@ -803,6 +814,25 @@ export type SendMessageInput = typeof SendMessageInput.Type;
 
 export const SessionIdInput = Schema.Struct({ sessionId: SessionId });
 export type SessionIdInput = typeof SessionIdInput.Type;
+
+/**
+ * Page back through a session's transcript (LOB-243): the entries before entry `before`, newest
+ * `limit` of them (200 when absent, at most 500), oldest first. `before` is a snapshot's `earlier`
+ * or a previous page's.
+ */
+export const ReadSessionHistoryInput = Schema.Struct({
+  sessionId: SessionId,
+  before: Schema.String,
+  limit: Schema.optional(Schema.Int),
+});
+export type ReadSessionHistoryInput = typeof ReadSessionHistoryInput.Type;
+
+/** One page of earlier transcript, and where the page before it starts (`earlier`, as on a snapshot). */
+export const SessionHistoryPage = Schema.Struct({
+  entries: Schema.Array(TranscriptEntry),
+  earlier: Schema.optional(Schema.String),
+});
+export type SessionHistoryPage = typeof SessionHistoryPage.Type;
 
 /**
  * Replay a recorded session against another model (LOB-198).

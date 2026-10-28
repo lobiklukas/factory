@@ -46,6 +46,14 @@ export const formatDollars = (amount: number): string =>
 export const QUEUE_EMPTY = "[queued] (empty)";
 
 /**
+ * The line a historical snapshot of a long session opens with (LOB-243): it carries the newest
+ * entries only, so a terminal reader is told the transcript did not start here rather than left to
+ * think the first entry printed was the first one said. `before` is the oldest entry printed.
+ */
+export const formatEarlier = (before: string): string =>
+  `[earlier] entries before ${before} are not shown`;
+
+/**
  * Whether the run is over. `live.busy` is the same signal as `status`, and either arriving means
  * the session settled — a live stream would otherwise never end, because a subscriber stays
  * attached after the work is done (release is the idle sweep's job, not the stream's).
@@ -123,6 +131,9 @@ export const followSession = (
               }));
               if (options.printMode) {
                 yield* Console.log(`mode: ${event.session.mode}`);
+              }
+              if (event.earlier !== undefined) {
+                yield* Console.log(formatEarlier(event.earlier));
               }
               for (const entry of event.entries) {
                 yield* printEntry(state, entry);

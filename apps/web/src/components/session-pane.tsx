@@ -26,6 +26,7 @@ import {
 import {
   compactSessionAtom,
   forkSessionAtom,
+  readSessionHistoryAtom,
   sendMessageAtom,
   sessionAtom,
   withdrawMessageAtom,
@@ -38,6 +39,12 @@ import { CompactButton } from "@/components/compact-button";
 import { TaskPanel } from "@/components/task-panel";
 import { TranscriptRow } from "@/components/transcript-entry";
 import { visibleEntries } from "@/lib/transcript-view";
+import {
+  currentHistory,
+  nextBefore,
+  withEarlierPage,
+  type EarlierHistory,
+} from "@/lib/history-view";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -159,6 +166,10 @@ export const SessionPane = ({
   const fork = useAtomSet(forkSessionAtom, { mode: "promise" });
   const compact = useAtomSet(compactSessionAtom, { mode: "promise" });
   const withdraw = useAtomSet(withdrawMessageAtom, { mode: "promise" });
+  const readHistory = useAtomSet(readSessionHistoryAtom, { mode: "promise" });
+  /** Earlier transcript read on request (LOB-243), above what the view carries. */
+  const [history, setHistory] = useState<EarlierHistory | null>(null);
+  const [readingHistory, setReadingHistory] = useState(false);
   const refreshList = useAtomRefresh(sessionListAtom);
   const navigate = useNavigate();
   const [draft, setDraft] = useState("");
@@ -218,6 +229,15 @@ export const SessionPane = ({
    * bookkeeping; `index` keeps each row's place in the full log for the compaction lookup below.
    */
   const rows = view === null ? [] : visibleEntries(view.entries);
+
+  /**
+   * The earlier pages that sit above `rows` (LOB-243), and where the next press reads before. Kept
+   * apart from `rows` so the compaction lookup keeps indexing the view's own entries.
+   */
+  const loaded =
+    view === null ? null : currentHistory(history, sessionId, view.earlier);
+  const earlierRows = loaded === null ? [] : visibleEntries(loaded.entries);
+  const before = view === null ? undefined : nextBefore(loaded, view.earlier);
 
   const attaching = AsyncResult.isInitial(result);
   const failure = AsyncResult.isFailure(result) ? result.cause : null;
@@ -481,6 +501,59 @@ export const SessionPane = ({
                     </AlertDescription>
                   </Alert>
                 ) : null}
+
+                {/*
+                 * A historical read of a long session carries its newest entries (LOB-243); the
+                 * rest is read a page at a time, on request, and lands above them.
+                 */}
+                {view !== null && before !== undefined ? (
+                  <div className="flex justify-center">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      data-show-earlier={before}
+                      aria-busy={readingHistory}
+                      disabled={readingHistory}
+                      onClick={() => {
+                        const anchor = view.earlier;
+                        if (anchor === undefined) return;
+                        setReadingHistory(true);
+                        void readHistory({ sessionId, before })
+                          .then((page) =>
+                            setHistory((previous) =>
+                              withEarlierPage(
+                                currentHistory(previous, sessionId, anchor),
+                                sessionId,
+                                anchor,
+                                page,
+                              ),
+                            ),
+                          )
+                          .catch((cause: unknown) => {
+                            toast.error("Earlier entries did not load", {
+                              description:
+                                cause instanceof Error
+                                  ? cause.message
+                                  : String(cause),
+                            });
+                          })
+                          .finally(() => setReadingHistory(false));
+                      }}
+                    >
+                      {readingHistory ? (
+                        <Spinner className="size-3.5 text-muted-foreground" />
+                      ) : null}
+                      Show earlier entries
+                    </Button>
+                  </div>
+                ) : null}
+
+                {earlierRows.map(({ entry }) => (
+                  <MessageScrollerItem key={entry.id} messageId={entry.id}>
+                    <TranscriptRow entry={entry} />
+                  </MessageScrollerItem>
+                ))}
 
                 {rows.map(({ entry, index }, position) => (
                   <MessageScrollerItem

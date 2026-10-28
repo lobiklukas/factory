@@ -17,6 +17,7 @@ export const MISSION_DOC_KIND = "factory.mission";
 export const MISSION_BINDING_DOC_KIND = "factory.mission.binding";
 export const PROPOSED_ISSUES_DOC_KIND = "factory.proposedIssues";
 export const REVIEW_DOC_KIND = "factory.review";
+export const APPROVALS_DOC_KIND = "factory.approvals";
 
 /** What `SpecDoc` holds before anything was written, and what a version-1 value migrates to. */
 const unspecified = () => ({
@@ -318,4 +319,32 @@ export const ReviewDoc = defineDoc({
     outcome: "",
     outcomeDetail: "",
   }),
+});
+
+/** One approval entry as the ledger keeps it: the two fields `projectApprovals` reads. */
+type LedgerEntry = { kind: string; data: JsonValue };
+
+/**
+ * A conversation's approval ledger (LOB-243): a copy of every `factory.approval.*` entry it holds,
+ * oldest first, kind and data only, committed in the same commit as the entry it copies.
+ *
+ * It exists so a historical read can report pending approvals without walking the transcript: the
+ * approvals a snapshot reports are folded from the whole log (LOB-147), and before the ledger that
+ * meant every entry of it. `projectApprovals` folds the ledger's entries exactly as it folds the
+ * transcript's, so the two cannot disagree on what a request id came to; the ledger is bounded by
+ * the approvals the session asked for, not by the length of its log.
+ *
+ * `seeded` is the promise that the ledger is complete. The seed says `false`, and the one helper
+ * that opens the ledger for writing (`approvalLedger`) copies every approval entry the conversation
+ * already holds before it sets it — a log written before the ledger existed is seeded once, the
+ * first time it is opened or asked for an approval — so a reader trusts a ledger only when it says
+ * `true` and folds the transcript otherwise.
+ */
+export const ApprovalsDoc = defineDoc({
+  kind: APPROVALS_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({ seeded: false as boolean, entries: [] as LedgerEntry[] }),
 });

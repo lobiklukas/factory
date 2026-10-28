@@ -1124,9 +1124,12 @@ export const TaskServiceLive = Layer.effect(
         `;
         const logs = yield* Effect.tryPromise({
           try: () =>
+            // Each run's log from its checkpoint (LOB-243): a card's evidence costs its runs'
+            // tails, not their whole logs.
             PostgresStorage.readers(
               sql,
               runs.map((run) => run.sessionId),
+              { checkpoints: true },
             ),
           catch: (cause) =>
             new TaskStorageError({

@@ -3,7 +3,12 @@
  * submission id `factory withdraw` takes, so the id is part of the line's contract.
  */
 import { describe, expect, it } from "vitest";
-import { formatDollars, formatEntry, formatQueued } from "./transcript";
+import {
+  formatDollars,
+  formatEarlier,
+  formatEntry,
+  formatQueued,
+} from "./transcript";
 
 describe("formatQueued", () => {
   it("names the queue and the submission id, then the text", () => {
@@ -46,5 +51,13 @@ describe("an inherited PR line in a terminal (LOB-211)", () => {
     expect(
       formatEntry({ id: "7", kind: "inherited", text, toolCalls: [] }),
     ).toBe(`[inherited] ${text}`);
+  });
+});
+
+describe("a long historical transcript in a terminal (LOB-243)", () => {
+  it("says the entries printed are not the first, and from where", () => {
+    expect(formatEarlier("301")).toBe(
+      "[earlier] entries before 301 are not shown",
+    );
   });
 });
