@@ -1,5 +1,6 @@
 export * from "./Api";
 export * from "./Approval";
+export * from "./Cost";
 export * from "./Page";
 export * from "./Rpc";
 export * from "./Server";

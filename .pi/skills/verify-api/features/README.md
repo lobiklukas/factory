@@ -198,6 +198,12 @@ the hook installed and a fork writes its parent's cap, and nothing the drive ass
 [budget.md](budget.md), which names what the drive does not reach (forks and replays, the dashboard
 row).
 
+The cost-prediction checks (LOB-38) were run from the `agent/LOB-38` worktree on 2026-10-28
+(`DATABASE_URL` naming the worktree's own server on 5442, and the script minting and dropping its own
+`factory_verify_cost_<random>` database there; faux priced at `FAUX_COST=0.01`; API on
+`COST_PORT=9551`): `./cost.sh` **28/28** (11 driver checks, 2 capped-session checks, 15 shell checks),
+evidence `.verify/evidence/latest/api/cost*`. See [cost.md](cost.md).
+
 The PR-step RPC checks (LOB-213) were run from the `agent/LOB-213` worktree on 2026-10-27
 (`DATABASE_URL` the worktree's own `factory_agent_lob_213` on 5442, faux, API on `PR_RPC_PORT=9520`,
 the loopback GitHub fake on `PR_RPC_GITHUB_PORT=9521`): `./pr-rpc.sh` **12/12** (7 driver checks, 5
@@ -312,6 +318,7 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | What the server runs     | passing | [server-info.md](server-info.md)             |
 | Metrics to a collector   | passing | [metrics.md](metrics.md)                     |
 | Control-plane identity   | passing | [identity.md](identity.md)                   |
+| Cost prediction          | passing | [cost.md](cost.md)                           |
 
 The model-backend checks (LOB-258) were run from the `agent/LOB-258` worktree on 2026-10-28
 (`BACKEND_BOOT_PORT=9542`, the worktree's own database on 5442, no repo-root `.env`):
