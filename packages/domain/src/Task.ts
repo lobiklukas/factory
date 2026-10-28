@@ -1545,10 +1545,11 @@ export const gatedColumns = (
  * - `gate` — the card is not blocked, it sits in a column whose exit crosses a human gate (B5), it has
  *   a run started in that column, and none of its runs is busy or holds an undecided approval: the
  *   run is idle, and the next move is the one only a person can make. `sessionId` is the newest
- *   run in the column. `unmet` names the exit's checked requirements the card does not meet yet, in
- *   declaration order (D10: a planning run that settled without a plan leaves `plan_doc`): the gate's
- *   move would be refused naming them, so what the person must do first is get them met. Absent when
- *   every checked requirement is met.
+ *   run in the column. `unmet` names the documents the exit requires that the card does not hold yet
+ *   (`spec_doc`, `plan_doc`), in declaration order (D10: a planning run that settled without a plan
+ *   leaves `plan_doc`): the gate's move would be refused naming them, so what the person must do
+ *   first is get them written. Absent when the card holds them. The log-judged keys are not judged
+ *   here; the card's exit checklist (`getTaskExit`) shows those.
  *
  * A card blocked for any other reason — a dependency, a capability, a transient failure — is waiting
  * on that, not on a person, so it is never a `gate`; it is listed only for an approval its run holds.

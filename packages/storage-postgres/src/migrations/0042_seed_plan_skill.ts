@@ -84,7 +84,8 @@ export const bindPlanSkill = (definitionId: string) =>
             ),
           );
         }
-        const encodedColumns = yield* Schema.encodeEffect(ColumnsJson)(withPlan);
+        const encodedColumns =
+          yield* Schema.encodeEffect(ColumnsJson)(withPlan);
         // The caps are the newest version's, read back through their own schema so a malformed row
         // fails here.
         const caps =

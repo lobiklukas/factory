@@ -1789,9 +1789,8 @@ describe("the board's tables and seed", () => {
     "binds the plan skill at the newest version + 1 over an authored version",
     { timeout: 30_000 },
     async () => {
-      const { bindPlanSkill } = await import(
-        "./migrations/0042_seed_plan_skill"
-      );
+      const { bindPlanSkill } =
+        await import("./migrations/0042_seed_plan_skill");
       const ColumnsJson = Schema.fromJsonString(Schema.Array(BoardColumn));
       const suffix = randomBytes(6).toString("hex");
       const id = `d10_plan_${suffix}`;
@@ -1805,7 +1804,7 @@ describe("the board's tables and seed", () => {
       expect(seed).toBeDefined();
       if (seed === undefined) return;
       const withoutPlanning = JSON.stringify(
-        Schema.decodeUnknownSync(ColumnsJson)(seed.columns).filter(
+        Schema.decodeSync(ColumnsJson)(seed.columns).filter(
           (column) => column.name !== "planning",
         ),
       );
@@ -1828,11 +1827,11 @@ describe("the board's tables and seed", () => {
           ),
         );
       const planningSkills = (columns: string | undefined) =>
-        Schema.decodeUnknownSync(ColumnsJson)(columns ?? "[]").find(
+        Schema.decodeSync(ColumnsJson)(columns ?? "[]").find(
           (column) => column.name === "planning",
         )?.skills;
       const others = (columns: string | undefined) =>
-        Schema.decodeUnknownSync(ColumnsJson)(columns ?? "[]").filter(
+        Schema.decodeSync(ColumnsJson)(columns ?? "[]").filter(
           (column) => column.name !== "planning",
         );
 

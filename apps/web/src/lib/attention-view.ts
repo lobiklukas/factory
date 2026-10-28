@@ -69,7 +69,8 @@ export const attentionReasonText = (item: AttentionItem): string => {
           ? `Blocked: needs input from ${task.blocked?.column ?? task.column}, with no question recorded`
           : `Asked: ${reason.question}`;
     case "gate":
-      if (task === undefined) return `Idle at the ${reason.gate}, a person's move`;
+      if (task === undefined)
+        return `Idle at the ${reason.gate}, a person's move`;
       // The exit still misses a checked requirement (D10: no plan yet), so the gate's move would be
       // refused: say what must be met first, not invite the approval.
       return reason.unmet === undefined || reason.unmet.length === 0

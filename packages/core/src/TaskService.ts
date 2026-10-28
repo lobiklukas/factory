@@ -3057,55 +3057,66 @@ export const TaskServiceLive = Layer.effect(
                 : { question: row.question }),
             }),
           );
-          // A gate whose exit still misses a checked requirement (a planning run that posted no
-          // plan: `plan_doc`, D10) is still a person's — someone must start or prompt a run — but
-          // not yet the gate's move, which would be refused naming the key. The item names what is
-          // unmet, judged exactly as `move` judges it, so the view says "needs a plan" rather than
-          // inviting an approval the service refuses.
-          const gateItems = yield* Effect.forEach(gates, (row) =>
-            Effect.gen(function* () {
-              const definition = definitions.get(
-                `${row.definitionId}@${row.definitionVersion}`,
-              );
-              const exit =
-                definition === undefined
-                  ? undefined
-                  : gatedExit(definition, row.column);
-              const requirements =
-                exit === undefined
-                  ? []
-                  : exitRequirements(
-                      definition?.columns.find(
-                        (column) => column.name === row.column,
-                      ),
-                      exit.to,
-                    );
-              const unmet =
-                requirements.length === 0
-                  ? []
-                  : yield* cardEvidence(
-                      row.id,
-                      new Set(requirements.map((requirement) => requirement.key)),
-                      row.column,
-                    ).pipe(
-                      Effect.map((evidence) =>
-                        requirements
-                          .filter(
-                            (requirement) =>
-                              !requirementVerdict(requirement, evidence).met,
-                          )
-                          .map((requirement) => requirement.key),
-                      ),
-                    );
-              return yield* toAttention(row, {
-                _tag: "gate",
-                gate: exit?.gate,
-                to: exit?.to,
-                sessionId: row.runSession,
-                ...(unmet.length === 0 ? {} : { unmet }),
-              });
-            }),
+          // A gate whose exit still misses a document the card must hold (a planning run that
+          // settled without a plan: `plan_doc`, D10) is still a person's — someone must start or
+          // prompt a run — but not yet the gate's move, which `move` would refuse naming the key.
+          // The item names it, judged by the same `requirementVerdict`, so the view says "needs a
+          // plan" rather than inviting an approval the service refuses. Only the keys a card's own
+          // events settle (`spec_doc`, `plan_doc`) are judged here, in one read for every gate row:
+          // the log-judged keys (`verified`, `review_verdict`, …) would read every run's log on
+          // every attention poll, and are the exit checklist's (`exit`) to show.
+          const documentKeys: ReadonlySet<string> = new Set([
+            SPEC_DOC_REQUIREMENT,
+            PLAN_DOC_REQUIREMENT,
+          ]);
+          const documents =
+            gates.length === 0
+              ? []
+              : yield* sql<{ taskId: string; kind: string }>`
+                  SELECT DISTINCT task_id, kind FROM task_events
+                  WHERE task_id = ANY(${gates.map((row) => row.id)}::text[])
+                    AND kind IN ('specified', 'planned')
+                `;
+          const held = new Set(
+            documents.map((row) => `${row.taskId}:${row.kind}`),
           );
+          const gateItems = yield* Effect.forEach(gates, (row) => {
+            const definition = definitions.get(
+              `${row.definitionId}@${row.definitionVersion}`,
+            );
+            const exit =
+              definition === undefined
+                ? undefined
+                : gatedExit(definition, row.column);
+            const evidence: CardEvidence = {
+              column: row.column,
+              runs: [],
+              ...(held.has(`${row.id}:specified`) ? { specified: true } : {}),
+              ...(held.has(`${row.id}:planned`) ? { planned: true } : {}),
+            };
+            const unmet =
+              exit === undefined
+                ? []
+                : exitRequirements(
+                    definition?.columns.find(
+                      (column) => column.name === row.column,
+                    ),
+                    exit.to,
+                  )
+                    .filter(
+                      (requirement) =>
+                        documentKeys.has(requirement.key) &&
+                        !requirementVerdict(requirement, evidence).met,
+                    )
+                    .map((requirement) => requirement.key);
+            return toAttention(row, {
+              _tag: "gate",
+              gate: exit?.gate,
+              to: exit?.to,
+              sessionId: row.runSession,
+              ...(unmet.length === 0 ? {} : { unmet }),
+            });
+          });
           return [
             ...mergeByRequest(approvalItems, sessionApprovalItems),
             ...questionItems,

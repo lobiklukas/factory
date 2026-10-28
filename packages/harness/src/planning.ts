@@ -26,7 +26,11 @@
 import type { JsonValue } from "@earendil-works/chord";
 import { Type } from "@earendil-works/pi-ai";
 import type { ConversationId, Extension, Tx } from "@earendil-works/pi-durable";
-import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
+import {
+  defineExtension,
+  defineTool,
+  section,
+} from "@earendil-works/pi-durable";
 import { PlanDoc } from "./docs";
 import { decodePlan, type Plan } from "./plan";
 import { items, listed, validated } from "./stageTool";
