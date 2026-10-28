@@ -1683,10 +1683,15 @@ export const TaskServiceLive = Layer.effect(
       input: CreateTaskInput,
     ): Effect.Effect<Task, TaskError | SqlError> =>
       Effect.gen(function* () {
+        // The instance is locked `FOR SHARE` first, so an upgrade (D5) that holds it waits for this
+        // card to commit before it reads the cards it re-pins, and a create that waits on an upgrade
+        // goes on at the new pin. A statement of its own, not a lock on the join below: a row lock
+        // that waited re-checks the join against the instance's new version but the definition row
+        // of the old one, which no longer matches, and the board would read as missing.
+        yield* sql`SELECT id FROM board_instances WHERE id = ${input.boardId} FOR SHARE`;
         // The board and the definition version it binds, which is the version the card pins (B2)
-        // and so the one whose initial column it starts in (LOB-267). Read `FOR SHARE` of the
-        // instance, so an upgrade (D5) that holds it waits for this card to commit before it reads
-        // the cards it re-pins, and a create that waits on an upgrade reads the new pin.
+        // and so the one whose initial column it starts in (LOB-267): read after the lock, so it is
+        // the pin as it stands once any upgrade holding it has committed.
         const boards = yield* sql<{
           id: string;
           repo: string;
@@ -1700,7 +1705,6 @@ export const TaskServiceLive = Layer.effect(
               JOIN board_definitions bd
                 ON bd.id = bi.definition_id AND bd.version = bi.definition_version
               WHERE bi.id = ${input.boardId}
-              FOR SHARE OF bi
             `;
         const board = boards[0];
         if (board === undefined) {

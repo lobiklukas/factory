@@ -84,7 +84,7 @@ Evidence: `upgrade.json` (every check), `upgrade-*.txt` (each command and its ou
 `upgrade-web-notice.json`, `upgrade-web-upgrade.json`, `upgrade-notice.png`, `upgrade-form.png`,
 `upgrade-done.png`.
 
-Below the terminal: `packages/core/src/TaskService.upgrade.test.ts`, against Postgres, proves the pin
+Below the terminal: `packages/core/src/TaskService.define.test.ts` (its `upgradeBoard` cases, beside the define cases so no other file writes `board_definitions` under them), against Postgres, proves the pin
 moving while an old card keeps v1's moves and a new card gets v2's, the stale-version refusal, the
 version refusals, a migration through a renaming mapping (event, revision, the block's column, the
 replayed history), a refused batch writing nothing for an unfinished run and an unmapped column (a
