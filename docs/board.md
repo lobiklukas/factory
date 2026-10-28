@@ -162,7 +162,7 @@ at the **head that PR was last reported at** recorded `pass`. The head is not "t
 run": the review trigger opens one run per head, so a push back to a head the PR had before (a
 force-push undoing one) replays that head's old run, and another head's run stays the newest. Every
 review delivery on a card's PR, a replay included, records its head in `review_heads` before its run
-is opened (`ReviewTrigger.recordReviewHead`), and that row picks the run (migration 0028). No review
+is opened (`ReviewTrigger.recordReviewHead`), and that row picks the run (migration 0029). No review
 run ("no review ran"), only another PR's review, a reported head with no review run yet (still being
 opened, or skipped as unfetchable), a run with no verdict yet (naming the head under review), a
 `fail` (naming the failing dimensions) and a pass its post found `stale` are each refused naming the
