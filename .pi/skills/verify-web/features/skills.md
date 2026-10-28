@@ -28,16 +28,25 @@ open, which the page says beside the result.
   `?version=N`; the one shown carries `aria-current="page"`.
 - An older version carries a notice (`[data-skill-older]`): "You are reading v1. The newest is v3: …",
   with **Show v3** (`[data-skill-show-newest]`) back to the newest.
-- **Edit** (`[data-skill-edit]`) opens `form[data-skill-form]` on the newest version's description and
-  body, whichever version is shown. **Publish v<n+1>** (`[data-skill-publish]`) sends `putSkill` with the
+- **Edit** (`[data-skill-edit]`) reads the newest fresh (`readNewestSkillAtom`, a `getSkill`) and opens
+  `form[data-skill-form]` on that version's description and body, whichever version is shown;
+  `data-skill-form-base` is the version it opened on. Edit is disabled while the page's own newest
+  is being re-read. **Publish v<n+1>** (`[data-skill-publish]`) sends `putSkill` with the
   form's text, the newest's attachments and the dashboard's actor. Unchanged text is stopped in the
   form (`[data-skill-problem=unchanged]`) and sends nothing. A refusal — a blank body is the server's
   `InvalidSkill` — is `[data-skill-refusal=<tag>]` (`role="alert"`) in the server's words, and the form
   keeps what was typed. A publish that lands says `[data-skill-created=N]` "vN created", closes the
   form, shows the newest, and every skill read re-runs (`SKILLS_KEY`), so the history lists vN
   without a reload.
+- Publish reads the newest again before it sends. If a version landed since the form opened (a
+  `factory skill put`, another browser), nothing is sent: `[data-skill-refusal=NewestMoved]` names both
+  versions, the typed text stays, the form now starts from the landed version, and a second Publish
+  writes over it on purpose. The page's reads re-run so the page shows the landed version too.
+- A draft in the form survives pressing a history entry or **Show vN**: while the next version is read,
+  the page keeps the version it showed (`[data-skill-loading]`, `aria-busy`) rather than a skeleton.
 - `/skills/<unknown>` reads **No such skill**; `?version=99` past the newest reads **No such version**.
-- Not polled: a skill changes only by a put, so a put from a terminal is a reload away.
+- Not polled: a skill changes only by a put, so a put from a terminal is a reload away for the body
+  and history shown; Edit and Publish read the newest themselves.
 
 ## How to get to it (user POV)
 
@@ -68,13 +77,17 @@ drive process, and `factory skill show`. It requires:
 7. `getSkill` to answer the edit at v<n+1> by `dashboard` with the attachments kept, v<n> unchanged,
    and `factory skill show specify` to print `version      <n+1> (newest)` and the new line;
 8. a history entry to open its version's body with the notice naming the newest, and the notice's link
-   to open the newest again;
-9. an unknown skill to read **No such skill**, an unknown version **No such version**, and no console
-   error over the whole drive.
+   to open the newest again, with a draft typed in the form beforehand still in it after both;
+9. a version put from the drive process after the page loaded to be the one Edit opens on (and the page
+   to catch up to it), a second put while the form is open to stop Publish with
+   `NewestMoved` — no `putSkill`, both versions named, the text kept — and Publish again to write the
+   typed text as the next version with the landed one intact;
+10. an unknown skill to read **No such skill**, an unknown version **No such version**, and no console
+    error over the whole drive.
 
 Evidence goes to `.verify/evidence/latest/skills/`: `skills-list.png`, `skills-page.png`,
 `skills-refused.png`, `skills-form.png`, `skills-created.png`, `skills-older.png`,
-`skills-missing.png`, `observed.json` (the oracle answers, what the page showed, every RPC tag the
+`skills-moved.png`, `skills-missing.png`, `observed.json` (the oracle answers, what the page showed, every RPC tag the
 browser sent, every check).
 
 ## Known gaps
@@ -84,8 +97,12 @@ browser sent, every check).
   links those skills here, but this page does not list them.
 - **No new skill from the browser.** `putSkill` makes version 1 of a new name, and the CLI's
   `factory skill put` can; the pages only edit a skill that exists.
+- **Publish's check is not atomic.** `putSkill` has no expected-version field: it writes `newest + 1`
+  whatever the form read. Publish re-reads the newest first, so a put from elsewhere is caught unless
+  it lands in the moment between that read and the send. Closing the gap needs an optional
+  `expectedNewest` on `putSkill`, refused when stale (follow-up on LOB-245).
 - **The body is shown as text, not rendered markdown**: what a run is told is the text itself.
 
 ## Last run
 
-2026-10-28 from the `agent/D8` worktree, API `:9540` / web `:3540`: **17/17** passed.
+2026-10-28 from the `agent/D8` worktree, API `:9541` / web `:3541`: **21/21** passed.

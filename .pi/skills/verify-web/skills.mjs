@@ -339,6 +339,10 @@ try {
   await page.locator("#skill-body").fill(edited);
   await shot("form");
   const reloadsBefore = sentTags.length;
+  // A full page load would drop this: the proof the publish re-read in place rather than reloaded.
+  await page.evaluate((tag) => {
+    window.__skillsNoReload = tag;
+  }, TAG);
   await page.locator("[data-skill-publish]").click();
   const created = await page
     .waitForSelector("[data-skill-created]", { timeout: 20_000 })
@@ -370,9 +374,7 @@ try {
       after.history[0]?.version === before.newest + 1 &&
       after.history[0]?.current === true &&
       after.history.length === historyBefore.length + 1 &&
-      (await page.evaluate(
-        () => performance.getEntriesByType("navigation").length,
-      )) === 1,
+      (await page.evaluate(() => window.__skillsNoReload)) === TAG,
     JSON.stringify(after.history.slice(0, 3)),
   );
   assert(
@@ -404,12 +406,20 @@ try {
       : `exit ${cli.status}: ${cli.stderr.slice(0, 200)}`,
   );
 
-  // --- older: a history entry opens that version ------------------------------------------------
+  // --- older: a history entry opens that version, and a draft open meanwhile survives -----------
+  const DRAFT = `A draft typed before reading an older version (${TAG}).`;
+  await page.locator("[data-skill-edit]").click();
+  await page.waitForSelector("[data-skill-form]", { timeout: 10_000 });
+  await page.locator("#skill-body").fill(DRAFT);
   await page
     .locator(`[data-skill-history-version='${before.version}'] a`)
     .click();
   await waitShown(before.version, before.newest + 1);
   const older = await readPage();
+  const draftAfterHistory = await page
+    .locator("#skill-body")
+    .inputValue()
+    .catch(() => null);
   observed.older = older;
   await shot("older");
   assert(
@@ -423,10 +433,108 @@ try {
   );
   await page.locator("[data-skill-show-newest]").click();
   await waitShown(before.newest + 1);
+  const draftAfterNewest = await page
+    .locator("#skill-body")
+    .inputValue()
+    .catch(() => null);
   assert(
     "the notice's link opens the newest again",
     (await readPage()).body === edited,
     page.url(),
+  );
+  assert(
+    "a draft open in the Edit form survives opening a history entry and the notice's link",
+    draftAfterHistory === DRAFT && draftAfterNewest === DRAFT,
+    `after history: ${String(draftAfterHistory).slice(0, 60)}; after newest: ${String(draftAfterNewest).slice(0, 60)}`,
+  );
+  await page.locator("[data-skill-cancel]").click();
+  await page.waitForSelector("[data-skill-edit]", { timeout: 10_000 });
+
+  // --- fresh: Edit opens on the newest the server holds, not the one the page read ---------------
+  // The page's reads are not polled, so a put from elsewhere (here the drive, as the CLI would) is
+  // invisible until Edit reads the newest again.
+  const elsewhere = `${edited}\nPut from elsewhere while the page was open (${TAG}).\n`;
+  const fromElsewhere = await rpc("putSkill", {
+    name: SKILL,
+    description: before.description,
+    body: elsewhere,
+    attachments: before.attachments,
+  });
+  await page.locator("[data-skill-edit]").click();
+  await page.waitForSelector("[data-skill-form]", { timeout: 10_000 });
+  const freshForm = {
+    body: await page.locator("#skill-body").inputValue(),
+    base: await page
+      .locator("[data-skill-form]")
+      .getAttribute("data-skill-form-base"),
+    publish: await page.locator("[data-skill-publish]").textContent(),
+  };
+  await waitShown(fromElsewhere.version);
+  observed.fresh = { put: fromElsewhere.version, form: freshForm };
+  assert(
+    "Edit opens on a version put from elsewhere after the page loaded, and the page catches up to it",
+    freshForm.body === elsewhere &&
+      freshForm.base === String(fromElsewhere.version) &&
+      freshForm.publish?.includes(`v${fromElsewhere.version + 1}`),
+    JSON.stringify({ ...freshForm, body: freshForm.body.slice(-60) }),
+  );
+
+  // --- moved: a put that lands while the form is open is not silently superseded ----------------
+  const meanwhile = `${elsewhere}\nPut while the form was open (${TAG}).\n`;
+  const landed = await rpc("putSkill", {
+    name: SKILL,
+    description: before.description,
+    body: meanwhile,
+    attachments: before.attachments,
+  });
+  const mine = `${elsewhere}\nThe browser's edit, typed over v${fromElsewhere.version} (${TAG}).\n`;
+  await page.locator("#skill-body").fill(mine);
+  const putsBeforeMoved = puts();
+  await page.locator("[data-skill-publish]").click();
+  await page.waitForSelector("[data-skill-refusal='NewestMoved']", {
+    timeout: 20_000,
+  });
+  const movedText =
+    (await page.locator("[data-skill-refusal]").textContent()) ?? "";
+  const movedHistory = await rpc("listSkillVersions", { name: SKILL });
+  const movedState = {
+    text: movedText,
+    kept: await page.locator("#skill-body").inputValue(),
+    publish: await page.locator("[data-skill-publish]").textContent(),
+    puts: puts() - putsBeforeMoved,
+    newestNow: movedHistory[0]?.version,
+  };
+  await waitShown(landed.version);
+  observed.moved = { landed: landed.version, ...movedState };
+  await shot("moved");
+  assert(
+    "Publish after a version landed sends no putSkill, names both versions, and keeps the typed text",
+    movedState.puts === 0 &&
+      movedState.newestNow === landed.version &&
+      movedText.includes(
+        `v${landed.version} was published after this form opened on v${fromElsewhere.version}`,
+      ) &&
+      movedState.kept === mine &&
+      movedState.publish?.includes(`v${landed.version + 1}`),
+    JSON.stringify({ ...movedState, kept: movedState.kept.slice(-60) }),
+  );
+  await page.locator("[data-skill-publish]").click();
+  await waitShown(landed.version + 1);
+  const overNewest = await rpc("getSkill", { name: SKILL });
+  const keptLanded = await rpc("getSkill", {
+    name: SKILL,
+    version: landed.version,
+  });
+  assert(
+    "Publish again writes the typed text over it as the next version, and the landed one is kept",
+    puts() - putsBeforeMoved === 1 &&
+      overNewest.version === landed.version + 1 &&
+      overNewest.body === mine &&
+      keptLanded.body === meanwhile &&
+      (await page
+        .locator(`[data-skill-created='${landed.version + 1}']`)
+        .count()) === 1,
+    `v${overNewest.version}; v${landed.version} kept=${keptLanded.body === meanwhile}`,
   );
 
   // --- missing ----------------------------------------------------------------------------------

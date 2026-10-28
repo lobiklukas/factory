@@ -12,6 +12,7 @@ import { useState, type FormEvent } from "react";
 import type { SkillRecord } from "@repo/domain/Skill";
 import {
   putSkillAtom,
+  readNewestSkillAtom,
   skillAtom,
   skillsAtom,
   skillVersionsAtom,
@@ -21,6 +22,7 @@ import {
   createdMessage,
   formChanged,
   historyRows,
+  movedRefusal,
   nextVersion,
   NONE,
   olderVersionNotice,
@@ -69,8 +71,19 @@ function SkillRoute() {
   const { name } = Route.useParams();
   const { version } = Route.useSearch();
   const shown = useAtomValue(skillAtom({ name, version }));
+  // The last version this page showed. Another version's read starts out Initial (each version is
+  // its own atom), and replacing the page with a skeleton then would unmount the Edit form and lose
+  // what was typed — so a history entry pressed mid-edit keeps the page, form included, on screen
+  // until the version it names is read.
+  const [kept, setKept] = useState<SkillRecord | undefined>(undefined);
+  if (AsyncResult.isSuccess(shown) && shown.value !== kept) {
+    setKept(shown.value);
+  }
 
   if (AsyncResult.isInitial(shown)) {
+    if (kept !== undefined && kept.name === name) {
+      return <SkillPage key={name} skill={kept} loading />;
+    }
     return (
       <div role="status" className="flex flex-1 flex-col gap-3 p-6">
         <span className="sr-only">Loading the skill</span>
@@ -110,15 +123,26 @@ function SkillRoute() {
     );
   }
 
-  return <SkillPage skill={shown.value} />;
+  return <SkillPage key={name} skill={shown.value} loading={false} />;
 }
 
-/** The page for one version, once it is read. */
-const SkillPage = ({ skill }: { readonly skill: SkillRecord }) => {
+/**
+ * The page for one version, once it is read. Keyed by the skill's name, so another skill's page never
+ * inherits this one's form; `loading` is another version of the same skill being read meanwhile.
+ */
+const SkillPage = ({
+  skill,
+  loading,
+}: {
+  readonly skill: SkillRecord;
+  readonly loading: boolean;
+}) => {
   const notice = olderVersionNotice(skill);
   return (
     <div
       data-skill-page={skill.name}
+      data-skill-loading={loading ? "" : undefined}
+      aria-busy={loading || undefined}
       data-skill-shown-version={skill.version}
       data-skill-newest={skill.newest}
       className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto"
@@ -310,24 +334,54 @@ const History = ({
  * `InvalidSkill`) is shown inline in the server's words and the form keeps what was typed.
  *
  * The form always edits the newest version, whichever version the page shows: an edit supersedes
- * the newest, so its text is what the person starts from.
+ * the newest, so its text is what the person starts from. The page's reads are not polled, so the
+ * form never trusts them for "the newest": Edit reads it fresh and opens on that (`base`), and
+ * Publish reads it again first — if a version landed since (`factory skill put`, another browser),
+ * nothing is sent, the form says so and keeps the text, and a second Publish writes over it on
+ * purpose. `putSkill` has no expected-version guard, so a put that lands between that read and the
+ * send still wins the race; see the feature's Known gaps.
  */
 const SkillEditor = ({ name }: { readonly name: string }) => {
   const newest = useAtomValue(skillAtom({ name, version: undefined }));
+  const readNewest = useAtomSet(readNewestSkillAtom, { mode: "promiseExit" });
   const put = useAtomSet(putSkillAtom, { mode: "promiseExit" });
   const navigate = useNavigate();
   const [form, setForm] = useState<SkillForm | null>(null);
+  // The newest version the open form was read from: what Publish compares the server's newest to.
+  const [base, setBase] = useState<SkillRecord | null>(null);
+  const [opening, setOpening] = useState(false);
+  const [openFailure, setOpenFailure] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [refusal, setRefusal] = useState<SkillRefusal | null>(null);
   const [unchanged, setUnchanged] = useState(false);
   const [created, setCreated] = useState<SkillRecord | null>(null);
 
   const record = AsyncResult.isSuccess(newest) ? newest.value : undefined;
+  // A re-read in flight (right after a publish lands) may still hold the version before it.
+  const settled = record !== undefined && !newest.waiting;
 
   const open = () => {
-    if (record === undefined) return;
-    setForm(skillForm(record));
+    if (!settled || opening) return;
+    setOpening(true);
+    setOpenFailure(null);
     setCreated(null);
+    setRefusal(null);
+    setUnchanged(false);
+    void readNewest({ name, known: record.newest })
+      .then((exit) => {
+        if (Exit.isSuccess(exit)) {
+          setBase(exit.value);
+          setForm(skillForm(exit.value));
+          return;
+        }
+        setOpenFailure(Cause.pretty(exit.cause));
+      })
+      .finally(() => setOpening(false));
+  };
+
+  const close = () => {
+    setForm(null);
+    setBase(null);
     setRefusal(null);
     setUnchanged(false);
   };
@@ -341,19 +395,40 @@ const SkillEditor = ({ name }: { readonly name: string }) => {
       setUnchanged(false);
     };
 
+  const refuse = (cause: Cause.Cause<{ _tag: string; message: string }>) =>
+    setRefusal(
+      skillRefusal(
+        Option.getOrUndefined(Cause.findErrorOption(cause)),
+        Cause.pretty(cause),
+      ),
+    );
+
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (form === null || record === undefined || pending) return;
-    if (!formChanged(form, record)) {
+    if (form === null || base === null || pending) return;
+    if (!formChanged(form, base)) {
       setUnchanged(true);
       return;
     }
     setRefusal(null);
     setPending(true);
-    void put(publishInput(record, form))
-      .then((exit) => {
+    void readNewest({ name, known: base.newest })
+      .then(async (read) => {
+        if (Exit.isFailure(read)) {
+          refuse(read.cause);
+          return;
+        }
+        const moved = movedRefusal(base, read.value);
+        if (moved !== null) {
+          // Start from the version that landed, so the next Publish is a choice to write over it.
+          setBase(read.value);
+          setRefusal(moved);
+          return;
+        }
+        const exit = await put(publishInput(base, form));
         if (Exit.isSuccess(exit)) {
           setForm(null);
+          setBase(null);
           setCreated(exit.value);
           // Show the version just written, which is the newest: the page's `?version=` names an
           // older one if it was open on one.
@@ -364,12 +439,7 @@ const SkillEditor = ({ name }: { readonly name: string }) => {
           });
           return;
         }
-        setRefusal(
-          skillRefusal(
-            Option.getOrUndefined(Cause.findErrorOption(exit.cause)),
-            Cause.pretty(exit.cause),
-          ),
-        );
+        refuse(exit.cause);
       })
       .finally(() => setPending(false));
   };
@@ -390,23 +460,41 @@ const SkillEditor = ({ name }: { readonly name: string }) => {
           </span>
         </p>
       )}
-      {form === null ? (
-        <div>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            data-skill-edit
-            disabled={record === undefined}
-            onClick={open}
-          >
-            <PencilIcon className="size-3.5" strokeWidth={1.75} />
-            Edit
-          </Button>
+      {form === null || base === null ? (
+        <div className="flex flex-col gap-1.5">
+          <div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              data-skill-edit
+              disabled={!settled || opening}
+              aria-busy={opening || undefined}
+              onClick={open}
+            >
+              {opening ? (
+                <Spinner className="size-3.5" />
+              ) : (
+                <PencilIcon className="size-3.5" strokeWidth={1.75} />
+              )}
+              Edit
+            </Button>
+          </div>
+          {openFailure === null ? null : (
+            <p
+              role="alert"
+              data-skill-open-failed
+              title={openFailure}
+              className="text-xs text-destructive"
+            >
+              The newest version could not be read, so the form did not open.
+            </p>
+          )}
         </div>
       ) : (
         <form
           data-skill-form
+          data-skill-form-base={base.newest}
           onSubmit={submit}
           noValidate
           className="flex flex-col gap-3 border border-border bg-card p-3"
@@ -435,13 +523,9 @@ const SkillEditor = ({ name }: { readonly name: string }) => {
             />
           </div>
           <p className="text-[11px] text-muted-foreground">
-            Publishing writes{" "}
-            {record === undefined
-              ? "the next version"
-              : versionLabel(nextVersion(record))}
-            . No version is rewritten: a run already open keeps the one it
-            opened with, and the next run in a column that binds {name} is told
-            this one.
+            Publishing writes {versionLabel(nextVersion(base))}. No version is
+            rewritten: a run already open keeps the one it opened with, and the
+            next run in a column that binds {name} is told this one.
           </p>
           {unchanged ? (
             <p
@@ -479,8 +563,7 @@ const SkillEditor = ({ name }: { readonly name: string }) => {
               aria-busy={pending}
             >
               {pending ? <Spinner className="size-3.5" /> : null}
-              Publish{" "}
-              {record === undefined ? "" : versionLabel(nextVersion(record))}
+              Publish {versionLabel(nextVersion(base))}
             </Button>
             <Button
               type="button"
@@ -488,11 +571,7 @@ const SkillEditor = ({ name }: { readonly name: string }) => {
               size="sm"
               data-skill-cancel
               disabled={pending}
-              onClick={() => {
-                setForm(null);
-                setRefusal(null);
-                setUnchanged(false);
-              }}
+              onClick={close}
             >
               Cancel
             </Button>

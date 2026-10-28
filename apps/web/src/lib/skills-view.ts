@@ -132,3 +132,21 @@ export const skillRefusal = (
   error === undefined || error.message.length === 0
     ? { tag: error?._tag ?? "Unknown", message: fallback }
     : { tag: error._tag, message: error.message };
+
+/**
+ * What a Publish says when the newest moved after the form opened: someone (`factory skill put`,
+ * another browser) wrote a version the typed text never saw. `putSkill` writes `newest + 1` whatever
+ * the form was read from, so sending it unasked would quietly supersede that version's text. The
+ * form keeps what was typed and starts from the fresh newest, so a second Publish writes over it on
+ * purpose. `null` when the newest is still the one the form opened on.
+ */
+export const movedRefusal = (
+  base: Pick<SkillRecord, "newest">,
+  fresh: Pick<SkillRecord, "newest">,
+): SkillRefusal | null =>
+  fresh.newest === base.newest
+    ? null
+    : {
+        tag: "NewestMoved",
+        message: `${versionLabel(fresh.newest)} was published after this form opened on ${versionLabel(base.newest)}, so nothing was sent. Your text is kept: Publish again to write ${versionLabel(fresh.newest + 1)} over it, or Cancel and Edit to start from ${versionLabel(fresh.newest)}.`,
+      };

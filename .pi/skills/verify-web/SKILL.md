@@ -214,7 +214,8 @@ throwaway database it mints on `DATABASE_URL`'s server and drops on exit. `skill
 an unchanged Publish to send no `putSkill`, a blank body to be `InvalidSkill` inline in the server's
 words with nothing written, an edit to say "v<n+1> created" and list v<n+1> first in the history
 without a reload, `factory skill show specify` to print the new body, a history entry to open its own
-version, and an unknown skill or version to say so (`features/skills.md`). Evidence goes to
+version with a draft in the form kept, Edit to open on a version put from elsewhere, a Publish after
+another put to be stopped as `NewestMoved` with the text kept, and an unknown skill or version to say so (`features/skills.md`). Evidence goes to
 `.verify/evidence/latest/skills/`.
 
 ### The dashboard's credential

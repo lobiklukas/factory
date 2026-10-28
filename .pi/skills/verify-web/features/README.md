@@ -54,8 +54,8 @@ from the `agent/C10` worktree, API `:9581` / web `:3581`, `FAUX_SLEEP_MS=5000`. 
 2026-10-28 from the `agent/D3` worktree, API `:9540` / web `:3540`; `drive.mjs` re-passed there
 (API `:9541` / web `:3541`), its lane-control count now leaving the settings disclosure out.
 
-`skills.sh` (the skill pages, D8) last passed **17/17** on 2026-10-28 from the `agent/D8` worktree,
-API `:9540` / web `:3540`, on a throwaway database; `board-settings.sh` re-passed there (23/23, API `:9541` /
+`skills.sh` (the skill pages, D8) last passed **21/21** on 2026-10-28 from the `agent/D8` worktree,
+API `:9541` / web `:3541`, on a throwaway database; `board-settings.sh` re-passed there (23/23, API `:9541` /
 web `:3541`) with each column's skills now links.
 
 `cost.sh` (cost prediction on the New session form and `/spend`, LOB-38) last passed **12/12** on

@@ -7,6 +7,7 @@ import {
   createdMessage,
   formChanged,
   historyRows,
+  movedRefusal,
   nextVersion,
   olderVersionNotice,
   oneLine,
@@ -85,6 +86,22 @@ describe("the Edit form", () => {
       tag: "Unknown",
       message: "a dropped connection",
     });
+  });
+});
+
+describe("a publish after the newest moved", () => {
+  /** Mutation: always answer null, so a stale form silently supersedes a newer version. */
+  it("refuses when a version landed after the form opened, naming both and the one a retry writes", () => {
+    const refusal = movedRefusal({ newest: 3 }, { newest: 4 });
+    expect(refusal?.tag).toBe("NewestMoved");
+    expect(refusal?.message).toContain(
+      "v4 was published after this form opened on v3",
+    );
+    expect(refusal?.message).toContain("Publish again to write v5");
+  });
+
+  it("says nothing when the newest is still the one the form opened on", () => {
+    expect(movedRefusal({ newest: 3 }, { newest: 3 })).toBeNull();
   });
 });
 

@@ -1,5 +1,5 @@
 import { Effect } from "effect";
-import { Atom } from "effect/reactivity";
+import { Atom, Reactivity } from "effect/reactivity";
 import type { PutSkillInput } from "@repo/domain/Skill";
 import { runtime } from "../atom";
 import { RpcClient } from "../rpc-client";
@@ -54,6 +54,24 @@ export const skillVersionsAtom = Atom.family((name: string) =>
       }),
     )
     .pipe(Atom.withReactivity([SKILLS_KEY])),
+);
+
+/**
+ * The newest version as the server holds it now (D8), read when Edit is pressed and again just
+ * before a Publish sends: the page's reads are not polled, so a version put from the CLI or another
+ * browser since the page opened is otherwise invisible to the form. `known` is the newest the caller
+ * last saw; when the server's differs, every skill read re-runs so the page catches up too.
+ */
+export const readNewestSkillAtom = runtime.fn(
+  (input: { readonly name: string; readonly known: number | undefined }) =>
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      const fresh = yield* rpc.client.getSkill({ name: input.name });
+      if (fresh.newest !== input.known) {
+        yield* Reactivity.invalidate([SKILLS_KEY]);
+      }
+      return fresh;
+    }),
 );
 
 /**
