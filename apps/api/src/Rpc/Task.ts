@@ -1,6 +1,8 @@
 import {
   definitionVocabulary,
   describeDefinition,
+  PullRequestStates,
+  refreshCardPullRequest,
   releaseFinishedCard,
   SessionService,
   SkillService,
@@ -9,6 +11,7 @@ import {
 } from "@repo/core";
 import { TasksRpc } from "@repo/domain/Rpc";
 import { Effect } from "effect";
+import { SqlClient } from "effect/sql/SqlClient";
 import { attributed } from "./Auth";
 
 export const TaskRpcHandlers = TasksRpc.toLayer(
@@ -26,6 +29,17 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
     // An authored version's skills are held to the library a run resolves them from (D7), read
     // afresh for every define, so a skill put a moment ago is one a column may bind.
     const skills = yield* SkillService;
+    // The card's PR read from the forge when the card is opened (C20): how a box GitHub delivers no
+    // webhooks to learns its card's PR merged or closed.
+    const states = yield* PullRequestStates;
+    const sql = yield* SqlClient;
+    const refresh = (taskId: string, settle: boolean) =>
+      refreshCardPullRequest(taskId, { settle }).pipe(
+        Effect.provideService(TaskService, tasks),
+        Effect.provideService(SessionService, sessions),
+        Effect.provideService(PullRequestStates, states),
+        Effect.provideService(SqlClient, sql),
+      );
     const skillNames = skills.list.pipe(
       Effect.map((records) => new Set(records.map((record) => record.name))),
       Effect.mapError(
@@ -87,8 +101,11 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
       listBoardCards: (input) => tasks.listCards(input as any),
       // A move into `done` or `canceled` finishes the card, and its runs' worktrees and branches
       // go with it (LOB-268) — after the move committed, so a teardown never refuses the move.
+      // A move into `done` reads the card's PR first (C20), so a merge GitHub could not deliver is on
+      // record for `human_merge`; the read records it and leaves the card for this move to make.
       moveTask: (input) =>
-        attributed(input).pipe(
+        (input.to === "done" ? refresh(input.taskId, false) : Effect.void).pipe(
+          Effect.andThen(attributed(input)),
           Effect.flatMap((owned) => tasks.move(owned as any)),
           Effect.tap((task) =>
             releaseFinishedCard(task).pipe(
@@ -114,7 +131,12 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
       listTaskComments: (input) => tasks.comments(input.taskId),
       getTaskSpec: (input) =>
         tasks.spec(input.taskId).pipe(Effect.map((spec) => spec ?? null)),
-      getTaskExit: (input) => tasks.exit(input.taskId),
+      // Opening the card reads its PR (C20): a merge moves it to done and a close blocks it, as the
+      // webhook would, and the checklist is judged on the card that read leaves.
+      getTaskExit: (input) =>
+        refresh(input.taskId, true).pipe(
+          Effect.andThen(tasks.exit(input.taskId)),
+        ),
       listTaskRuns: (input) => tasks.listRuns(input.taskId),
       listAttention: (input) => tasks.attention(input.boardId),
     });

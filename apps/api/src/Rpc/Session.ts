@@ -1,5 +1,6 @@
 import {
   CredentialProvider,
+  PullRequestStatesLive,
   SessionService,
   SkillServiceLive,
   TaskServiceLive,
@@ -115,6 +116,9 @@ export const SessionRpcLive = RpcServer.layerHttp({
   ),
   Layer.provide(RpcSerialization.layerNdjson),
   Layer.provide(TaskServiceLive),
+  // The forge read a card's PR is followed with when no webhook told it (C20), over the credential
+  // provider and the client the PR step's member already requires.
+  Layer.provide(PullRequestStatesLive),
   Layer.provide(TriggerRoutesLive),
   Layer.provide(TriggerDeliveriesLive),
   Layer.provide(SkillServiceLive),

@@ -35,6 +35,7 @@ export * from "./PlanFreshness";
 export * from "./SessionWriteBack";
 export * from "./WorkspaceRelease";
 export * from "./PullRequestMerge";
+export * from "./cardPullRequest";
 export * from "./metrics";
 export * from "./outcomes";
 export * from "./admission";

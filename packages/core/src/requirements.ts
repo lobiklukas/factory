@@ -12,10 +12,11 @@
  * and `pr_link` (LOB-240), whose evidence the PR step already records, and `review`'s
  * `review_verdict` (LOB-241), whose evidence is the reviewer run's `factory.review` (LOB-36),
  * `spec_doc` (D9), whose evidence is a `specified` event on the card (LOB-238), and `run_completed`
- * (D9), whose evidence is how the card's latest run's log ends. The other keys the default pipeline
- * declares are not checked here, and each for a stated reason: `human_move` and `human_merge` label
- * B5's human gates, which `TaskService` enforces by actor on a move whose transition names a `gate`
- * (the key itself is read by nothing); `plan_doc` has no recorded artifact to check yet, and
+ * (D9), whose evidence is how the card's latest run's log ends, and `human_merge` (C20), whose
+ * evidence is GitHub's merge of the card's PR recorded on a run's log (`factory.merge`, LOB-44). The
+ * other keys the default pipeline declares are not checked here, and each for a stated reason:
+ * `human_move` labels B5's plan approval gate, which `TaskService` enforces by actor on a move whose
+ * transition names a `gate` (the key itself is read by nothing); `plan_doc` has no recorded artifact to check yet, and
  * refusing every move on a key nothing can satisfy would turn the pipeline off rather than gate it.
  * A key gains a checker when its evidence is recorded. A reader is told which are which:
  * `./boardConfig`'s `describeDefinition` marks each declared key `checked` from this set (LOB-270).
@@ -29,6 +30,16 @@
  * mid-tool-call, ended on a failed or aborted model answer or one cut off at the output limit
  * (`stopReason: "length"`), was interrupted (C8) or was stopped by its budget (LOB-163) has not
  * completed. A card with no run started in the column has completed nothing. A review run is not the card's run (`pr_link`'s rule), so its end says nothing here.
+ *
+ * **What `human_merge` means (C20).** It is checked on a move into `done` only — the merge completes
+ * the card, and sending a card back from `review` is no merge. The card's PR is the newest one a run
+ * of its change recorded (`factory.pr`; `review_verdict`'s rule), or — for a card none of whose runs
+ * recorded one — the PR a merge recorded on one of its runs names. It is met when a run of the card
+ * recorded GitHub's merge of that PR (`factory.merge`, which a signed `pull_request` delivery or the
+ * PR-state read when the card is opened writes), so a person's move into `done` is refused while the
+ * PR is open or was closed without being merged. The actor check is the gate's (B5) and still stands:
+ * a run is refused the move as `HumanGateRequired` before this is read. A merge moves the card to
+ * `done` by itself (`TaskService.settlePullRequest`), so this holds the hand-made move only.
  *
  * **What `non_empty_diff` and `pr_link` mean.** Both read the card's branch and PR: the branch of
  * the card's *latest* run — the newest `task_runs` row — for the reason `verified` reads the newest
@@ -129,6 +140,7 @@ import type {
 } from "@repo/domain/Task";
 import {
   ABANDON_COLUMN,
+  HUMAN_MERGE_REQUIREMENT,
   NON_EMPTY_DIFF_REQUIREMENT,
   PR_LINK_REQUIREMENT,
   REVIEW_VERDICT_REQUIREMENT,
@@ -155,13 +167,15 @@ export const CHECKED_REQUIREMENTS: ReadonlySet<string> = new Set([
   REVIEW_VERDICT_REQUIREMENT,
   SPEC_DOC_REQUIREMENT,
   RUN_COMPLETED_REQUIREMENT,
+  HUMAN_MERGE_REQUIREMENT,
 ]);
 
 /**
- * The default pipeline's human-gate keys (B5). Nothing reads them: what makes a move a person's is
- * the transition's `gate` (`TaskService.move` refuses a run actor crossing one), and these keys only
- * label the column that has one. An authored version may declare one only on a column whose moves
- * out name a gate (`./boardDefine`), so the label never promises a gate nothing enforces.
+ * The default pipeline's human-gate keys (B5). What makes a move a person's is the transition's `gate`
+ * (`TaskService.move` refuses a run actor crossing one), and these keys label the column that has one;
+ * `human_merge` is also checked, against the card's PR's recorded merge (C20, module doc). An
+ * authored version may declare one only on a column whose moves out name a gate (`./boardDefine`), so
+ * the label never promises a gate nothing enforces.
  */
 export const HUMAN_GATE_REQUIREMENTS: ReadonlySet<string> = new Set([
   "human_move",
@@ -170,14 +184,14 @@ export const HUMAN_GATE_REQUIREMENTS: ReadonlySet<string> = new Set([
 
 /**
  * The keys a definition may declare that nothing checks yet (module doc): the default pipeline's
- * `plan_doc`, whose artifact is not recorded, and the human-gate labels (`HUMAN_GATE_REQUIREMENTS`),
- * whose gate is the transition's `gate`, not the key. A reader is told they are unchecked
- * (`describeDefinition`).
+ * `plan_doc`, whose artifact is not recorded, and `human_move`, whose gate is the transition's `gate`,
+ * not the key. A reader is told they are unchecked (`describeDefinition`).
  */
-export const UNCHECKED_REQUIREMENTS: ReadonlySet<string> = new Set([
-  "plan_doc",
-  ...HUMAN_GATE_REQUIREMENTS,
-]);
+export const UNCHECKED_REQUIREMENTS: ReadonlySet<string> = new Set(
+  ["plan_doc", ...HUMAN_GATE_REQUIREMENTS].filter(
+    (key) => !CHECKED_REQUIREMENTS.has(key),
+  ),
+);
 
 /**
  * Every key the factory knows (D4): the checked ones and the declared-but-unchecked ones. An authored
@@ -208,6 +222,11 @@ export type RunEvidence = {
   readonly prHead?: string;
   /** The commit its recorded PR was published at (`factory.pr`'s `commit`, C19). */
   readonly prCommit?: string;
+  /**
+   * The PR whose merge its log records (`factory.merge`, LOB-44), by its page; read only when the
+   * move checks `human_merge` (C20).
+   */
+  readonly mergedPr?: string;
 };
 
 /**
@@ -279,10 +298,14 @@ export type RequirementVerdict =
   | { readonly met: true }
   | { readonly met: false; readonly reason: string };
 
+/** The column a merge completes a card into (C20): `human_merge` is checked on a move into it only. */
+const MERGED_COLUMN = "done";
+
 /**
  * The requirements leaving `column` for `to` has to check: the column's checked keys, in the order
  * it declares them. A move into `canceled` checks none — abandoning a card is always allowed, and a
- * card nobody will finish cannot be asked to prove the work it is abandoning.
+ * card nobody will finish cannot be asked to prove the work it is abandoning. `human_merge` is
+ * checked on a move into `done` only (module doc).
  */
 export const exitRequirements = (
   column: BoardColumn | undefined,
@@ -290,8 +313,10 @@ export const exitRequirements = (
 ): ReadonlyArray<ColumnRequirement> =>
   column === undefined || to === ABANDON_COLUMN
     ? []
-    : column.requires.filter((requirement) =>
-        CHECKED_REQUIREMENTS.has(requirement.key),
+    : column.requires.filter(
+        (requirement) =>
+          CHECKED_REQUIREMENTS.has(requirement.key) &&
+          (requirement.key !== HUMAN_MERGE_REQUIREMENT || to === MERGED_COLUMN),
       );
 
 /** Whether a result is a verification that ran to exit 0. */
@@ -603,6 +628,26 @@ export const reviewVerdictVerdict = (
   return { met: true };
 };
 
+/** The `human_merge` requirement over the card's PR and the merges its runs recorded (module doc). */
+export const humanMergeVerdict = (
+  evidence: CardEvidence,
+): RequirementVerdict => {
+  const cardPr =
+    evidence.runs.findLast((run) => run.prUrl !== undefined)?.prUrl ??
+    evidence.runs.findLast((run) => run.mergedPr !== undefined)?.mergedPr;
+  if (cardPr === undefined)
+    return {
+      met: false,
+      reason:
+        "the card has no PR on record, so nothing merged: a run of the card opens its PR (factory pr <session>), and its merge in GitHub moves the card to done",
+    };
+  if (evidence.runs.some((run) => run.mergedPr === cardPr)) return { met: true };
+  return {
+    met: false,
+    reason: `no merge of the card's PR ${cardPr} is on record: it is open, or was closed without being merged. Merge it in GitHub — its signed pull_request delivery to POST /webhooks/github, or the PR-state read when the card is opened, records the merge and moves the card to done`,
+  };
+};
+
 /** One checked requirement's verdict over the card's evidence. */
 export const requirementVerdict = (
   requirement: ColumnRequirement,
@@ -621,6 +666,8 @@ export const requirementVerdict = (
       return specDocVerdict(evidence);
     case RUN_COMPLETED_REQUIREMENT:
       return runCompletedVerdict(evidence);
+    case HUMAN_MERGE_REQUIREMENT:
+      return humanMergeVerdict(evidence);
     default:
       return { met: false, reason: `"${requirement.key}" has no checker` };
   }
@@ -629,7 +676,7 @@ export const requirementVerdict = (
 /**
  * A column's whole `requires[]` as the card's pane lists it (D9), in declaration order: each checked
  * key judged by `requirementVerdict` — the verdict a refusal of the move carries — and each key
- * nothing checks (`plan_doc`, the human-gate labels) marked `unchecked`, never `met`.
+ * nothing checks (`plan_doc`, `human_move`) marked `unchecked`, never `met`.
  */
 export const exitView = (
   column: BoardColumn,
