@@ -762,3 +762,83 @@ describe("authoring a definition over RPC (D4)", () => {
     expect(await versionsOf(id)).toEqual([1]);
   });
 });
+
+/**
+ * The editor's pickers over the wire (D6): `getDefinitionVocabulary` answers the keys and roles the
+ * `defineBoard` handler's rules accept — this file's role table (`builder`), the harness's roles,
+ * and every role a held definition declares, read when asked rather than when the handler is built.
+ */
+describe("the definition vocabulary over RPC (D6)", () => {
+  /**
+   * Mutation: answer the role table alone — `specifier` and `planner` go missing. Mutation: read the
+   * declared roles once — the row written here is not offered. Mutation: offer an unknown key.
+   */
+  it("offers every known key and the roles defineBoard accepts, a newly declared role included", async () => {
+    const before = await call((client) => client.getDefinitionVocabulary({}));
+    expect(before.requirements.map((option) => option.key)).toEqual([
+      "human_merge",
+      "human_move",
+      "non_empty_diff",
+      "plan_doc",
+      "pr_link",
+      "review_verdict",
+      "run_completed",
+      "spec_doc",
+      "verified",
+    ]);
+    expect(
+      before.requirements.find((option) => option.key === "human_move"),
+    ).toMatchObject({ checked: false, humanGate: true });
+    expect(
+      before.requirements.find((option) => option.key === "pr_link"),
+    ).toMatchObject({ checked: true, humanGate: false });
+    expect(before.roles).toEqual(
+      expect.arrayContaining(["builder", "planner", "reviewer", "specifier"]),
+    );
+    const role = `triager${run}`;
+    expect(before.roles).not.toContain(role);
+
+    await scratch.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const columns = JSON.stringify([
+          { name: "triage", kind: "working", role, skills: [], requires: [] },
+        ]);
+        yield* sql`
+          INSERT INTO board_definitions (id, version, name, columns)
+          VALUES (${`vocab${run}`}, 1, 'Declares a role', ${columns}::jsonb)
+        `;
+      }),
+    );
+    const after = await call((client) => client.getDefinitionVocabulary({}));
+    expect(after.roles).toContain(role);
+    expect(after.roles).toEqual([...after.roles].toSorted());
+
+    // A role the vocabulary offers is one defineBoard takes under this role table.
+    const defined = await call((client) =>
+      client.defineBoard({
+        id: DefinitionId.make(`vocabuse${run}`),
+        name: "Uses an offered role",
+        initialColumn: "todo",
+        columns: [
+          {
+            name: "todo",
+            kind: "working",
+            role,
+            skills: [],
+            requires: [],
+            transitions: [{ to: "done" }],
+          },
+          {
+            name: "done",
+            kind: "terminal",
+            skills: [],
+            requires: [],
+            transitions: [],
+          },
+        ],
+      }),
+    );
+    expect(defined.outcome).toBe("created");
+  });
+});

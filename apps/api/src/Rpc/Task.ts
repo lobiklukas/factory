@@ -1,4 +1,5 @@
 import {
+  definitionVocabulary,
   describeDefinition,
   releaseFinishedCard,
   SessionService,
@@ -58,6 +59,14 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
             outcome,
             definition: describeDefinition(definition, deployment),
           })),
+        ),
+      // The editor's pickers (D6): the keys and roles the rules `defineBoard` runs accept, against the
+      // same role table and the same held definitions, read afresh for every call.
+      getDefinitionVocabulary: () =>
+        tasks.declaredRoles.pipe(
+          Effect.map((declared) =>
+            definitionVocabulary({ table: sessions.roles, declared }),
+          ),
         ),
       // One read: `getBoard`'s join of the instance and its pinned version, so the two cannot disagree.
       getBoardConfig: (input) =>

@@ -707,6 +707,37 @@ export const DefinedBoard = Schema.Struct({
 });
 export type DefinedBoard = typeof DefinedBoard.Type;
 
+/**
+ * One requirement key an authored version may declare (D6): the key, the description a column that
+ * picks it starts with, whether a move out of the column is refused over it today (`checked`, as
+ * `getDefinition` marks it), and whether it is a human gate's label, which an authored column may
+ * declare only beside a move that names a gate.
+ */
+export const RequirementOption = Schema.Struct({
+  key: Schema.String,
+  description: Schema.String,
+  checked: Schema.Boolean,
+  humanGate: Schema.Boolean,
+});
+export type RequirementOption = typeof RequirementOption.Type;
+
+/**
+ * What an authored definition version may name besides skills (D6), from the rules `defineBoard`
+ * holds a version to: every requirement key the factory knows, and the roles it accepts — the
+ * deployment's role table, the roles the harness gives meaning to, and the roles a held definition
+ * already declares. The dashboard's editor offers these and nothing typed, so a key or a role it
+ * offers is one the server accepts. Skills are `listSkills`'.
+ */
+export const DefinitionVocabulary = Schema.Struct({
+  requirements: Schema.Array(RequirementOption),
+  roles: Schema.Array(Schema.String),
+});
+export type DefinitionVocabulary = typeof DefinitionVocabulary.Type;
+
+export const GetDefinitionVocabularyInput = Schema.Struct({});
+export type GetDefinitionVocabularyInput =
+  typeof GetDefinitionVocabularyInput.Type;
+
 /** B9: within a column, dependency readiness, then this flag, then FIFO. */
 export const TaskPriority = Schema.Literals(["urgent", "normal"]);
 export type TaskPriority = typeof TaskPriority.Type;

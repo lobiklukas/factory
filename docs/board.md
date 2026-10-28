@@ -55,6 +55,15 @@ harness gives meaning to nor one a held definition declares (`ROLE_MODELS` is a 
 table, so a typo is what this catches) (`authoredDefinitionFaults` in `packages/core`). An authored
 version therefore always declares its own moves and its initial column.
 
+Built (D6): the dashboard authors one too. **Edit as new version** on a board's settings page opens
+`/boards/<id>/settings/edit` on the board's pinned version. There an admin adds, removes, reorders and
+renames columns, sets kinds and roles, binds skills from `listSkills`, and requires keys and roles from
+`getDefinitionVocabulary` (the keys and roles `defineBoard` accepts; pickers only, no free text). They
+also edit moves and gates. A diff against the pinned version shows before Save, which calls
+`defineBoard`: the page says "v<n> created", shows each `InvalidDefinition` fault next to its field,
+and leaves the board on its pin (`.pi/skills/verify-web/features/definition-edit.md`). The draft
+carries each column as stored, so a field the editor has no control for is kept.
+
 **Seed migrations and authored versions share one id space.** The default pipeline's seeds write
 `default` at a fixed version with `ON CONFLICT (id, version) DO NOTHING` (0026 v4, 0038 v5). Since D4
 an operator may author `default` v6, and a later seed that writes `default` v6 would then do nothing,
@@ -441,7 +450,9 @@ customization, decomposition, and board metrics.
    as someone else (docs/design.md, R4's _As built (LOB-20)_). Still not built: per-column move
    permissions and audit views.
 8. **Board customization** — edit columns in the UI, more than one board per repository. Trigger: after
-   the default has been used for real work.
+   the default has been used for real work. Built: editing a definition as a new version in the
+   dashboard (D6). Still not built: moving a board to a newer version, and more than one board per
+   repository.
 9. **Decomposition** (LOB-43) into child cards. Trigger: after dependency links and once the specifier
    has proven itself. Built: the proposing half (LOB-201) — `proposeDecomposition` reads a
    session's spec and commits proposed child issues (`factory.proposedIssues`, read back through

@@ -30,10 +30,12 @@ import {
   DefinitionConfig,
   DefinitionNotFound,
   DefinitionSummary,
+  DefinitionVocabulary,
   EmptyComment,
   GetBoardConfigInput,
   GetBoardInput,
   GetDefinitionInput,
+  GetDefinitionVocabularyInput,
   GetTaskInput,
   GetTaskSpecInput,
   HumanGateRequired,
@@ -458,6 +460,13 @@ export class TasksRpc extends RpcGroup.make(
   Rpc.make("defineBoard", {
     payload: DefineBoardInput,
     success: DefinedBoard,
+    error: TaskErrorSchema,
+  }),
+  // What an authored version may name besides skills (D6): every requirement key the factory knows
+  // and the roles `defineBoard` accepts, so an editor offers only what the server would take.
+  Rpc.make("getDefinitionVocabulary", {
+    payload: GetDefinitionVocabularyInput,
+    success: DefinitionVocabulary,
     error: TaskErrorSchema,
   }),
   // A board's full configuration (LOB-270): `getBoard`'s instance with its pinned version described
