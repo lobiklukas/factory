@@ -2,7 +2,8 @@
 
 **What it is.** The server's list of sessions, newest activity first (LOB-6). One row per session
 with what the derived `session_activity` index carries — id, status, repo, last activity, spend,
-the PR link (LOB-65), title — and a `cursor:` line when the server has another page. The `pr` column
+the PR link (LOB-65), the model the session is pinned to (LOB-272, `model`, after `pr`, `-` when the
+row names none), title — and a `cursor:` line when the server has another page. The `pr` column
 is the session's recorded `prUrl`, or `-` when no PR was opened: never an empty cell, so the title
 stays the last field and the link is always the sixth.
 
@@ -10,7 +11,7 @@ stays the last field and the link is always the sixth.
 
 **How the skill drives it.** `drive.sh` runs `factory ls --api …` after `factory run`, and asserts
 exit 0, a row whose first field is the session id the run minted, the run's title in that row, a
-header naming the `pr` column, and `-` as that row's sixth field (the run opened no PR).
+header naming the `pr` and `model` columns, `faux/faux-1` as that row's seventh field, and `-` as that row's sixth field (the run opened no PR).
 
 Then, after both watches, it seeds a session whose log records a PR (`.pi/skills/lib/seed-pr.ts`:
 the real `SessionService` and PR step on the API's database and session root, against the loopback

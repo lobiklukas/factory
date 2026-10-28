@@ -27,6 +27,7 @@ import {
   isMissionPhase,
   missionSnapshot,
   readMissionDoc,
+  readMissionWorkers,
 } from "./Mission";
 
 /** Whether `schema` refuses `value`, as a value rather than a throw, so a case reads as data. */
@@ -249,5 +250,69 @@ describe("the startMission boundary", () => {
     // `encodeSync` then `decodeSync` is what the HTTP protocol does at each end of a call.
     const encoded = Schema.encodeSync(StartMissionResult)(result);
     expect(Schema.decodeSync(StartMissionResult)(encoded)).toEqual(result);
+  });
+});
+
+/**
+ * LOB-194: a mission's workers, each with what it spent. The roster is document state a previous
+ * build may not have written, so it is read defensively; the snapshot carries it only when there is
+ * one, and what it carries is a schema.
+ */
+describe("a mission's workers", () => {
+  const spend = (costTotal: number) => ({
+    input: 1,
+    output: 2,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 3,
+    costTotal,
+  });
+
+  it("reads the roster a document names, and no roster from one that has none", () => {
+    expect(
+      readMissionWorkers({
+        workers: [{ id: "a", taskId: "8", conversationId: "3" }],
+      }),
+    ).toEqual([{ id: "a", taskId: "8", conversationId: "3" }]);
+    // A document an older build wrote has no field; a stray value is not a roster.
+    expect(readMissionWorkers({})).toEqual([]);
+    expect(readMissionWorkers({ workers: "a" })).toEqual([]);
+    // An entry that is not three strings is dropped, and the others are kept.
+    expect(
+      readMissionWorkers({
+        workers: [
+          { id: "a", taskId: 8, conversationId: "3" },
+          null,
+          { id: "b", taskId: "9", conversationId: "" },
+        ],
+      }),
+    ).toEqual([{ id: "b", taskId: "9", conversationId: "" }]);
+  });
+
+  it("carries each worker's spend on the snapshot, and no field for a mission with none", () => {
+    const workers = [
+      { id: "a", taskId: "8", conversationId: "3", usage: spend(0.02) },
+      { id: "b", taskId: "9", usage: spend(0) },
+    ];
+    const snapshot = missionSnapshot(
+      "7",
+      { phase: "verify", entered: ["plan", "implement", "verify"] },
+      undefined,
+      workers,
+    );
+    expect(snapshot?.workers).toEqual(workers);
+    // What crosses the wire decodes: a worker without a conversation yet is the optional field.
+    expect(
+      Schema.decodeSync(MissionSnapshot)({ ...aMission, workers }),
+    ).toEqual({ ...aMission, workers });
+    expect(
+      refuses(MissionSnapshot, {
+        ...aMission,
+        workers: [{ id: "a", taskId: "8", usage: { costTotal: 1 } }],
+      }),
+    ).toBe(true);
+    expect(
+      missionSnapshot("7", { phase: "plan", entered: ["plan"] })?.workers,
+    ).toBeUndefined();
   });
 });
