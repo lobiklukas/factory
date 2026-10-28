@@ -217,7 +217,7 @@ const bindingOf = (issue: string) =>
 
 /** The skip reason a repeat alert for `issue` records while its first session is open. */
 const boundReason = (issue: string, sessionId: string, eventId: string) =>
-  `sentry:${issue} is bound to open session ${sessionId} (delivery sentry:event:${eventId}), so this delivery opens no second session`;
+  `sentry:${issue} is bound to open session ${sessionId} (delivery sentry:event:${eventId}), so this delivery opens no second session; it frees when that session's workspace is released or after 3 days without activity, and \`factory discard ${sessionId}\` frees it now`;
 
 /** The API's log, once it holds `needle` (or after a short wait, as it stands). */
 const readLog = (needle: string) =>

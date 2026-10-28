@@ -82,6 +82,13 @@ export const TriggerEvent = Schema.Struct({
    * records it as the delivery's skip reason and starts nothing — a recorded decision, not a drop.
    */
   filtered: Schema.optional(Schema.String),
+  /**
+   * The source's own prompt template (LOB-82: Sentry's investigate-before-edit one), for a rule whose
+   * `prompt` is blank: a rule that only says *where* an alert goes still tells the session *how* to
+   * start. The adapter sets it, as it sets `fingerprint` and `filtered`, so the seam reads no source's
+   * vocabulary of its own. A rule that writes a prompt always gets its own.
+   */
+  defaultPrompt: Schema.optional(Schema.String),
 });
 export type TriggerEvent = typeof TriggerEvent.Type;
 
@@ -323,20 +330,19 @@ export const ruleName = (rule: TriggerRule): string =>
  * The event's own repo wins over the rule's when it names one: a rule says *which events start
  * work*, and for GitHub the answer to *which repo* is in the payload.
  *
- * `defaultPrompt` is the source's own template (LOB-82: Sentry's investigate-before-edit one), used
- * when the rule's `prompt` is blank: a rule that only says *where* an alert goes still tells the
- * session *how* to start. A rule that writes a prompt always gets its own.
+ * A rule whose `prompt` is blank renders the event's `defaultPrompt` when the adapter set one
+ * (LOB-82: Sentry's investigate-before-edit template). A rule that writes a prompt always gets its
+ * own.
  */
 export const resolveMapping = (
   rules: ReadonlyArray<TriggerRule>,
   event: TriggerEvent,
-  defaultPrompt?: string,
 ): TriggerMapping | undefined => {
   const rule = findRule(rules, event);
   if (rule === undefined) return undefined;
   const template =
-    rule.prompt.trim() === "" && defaultPrompt !== undefined
-      ? defaultPrompt
+    rule.prompt.trim() === "" && event.defaultPrompt !== undefined
+      ? event.defaultPrompt
       : rule.prompt;
   return {
     repo: event.repo ?? rule.repo,

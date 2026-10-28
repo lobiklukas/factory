@@ -41,7 +41,9 @@
  * its issue as the fingerprint (`data.event.issue_id`, `TriggerEvent.fingerprint`), and the seam
  * binds that to the session the first event opened, in Postgres (`trigger_fingerprints`), so a repeat
  * alert is a recorded skip naming the open session — before and after a restart — and only an issue
- * whose session was closed (its workspace released: done, canceled, merged, discarded) opens another.
+ * whose session was closed (its workspace released: done, canceled, merged, discarded) or has been
+ * idle past `TRIGGER_FINGERPRINT_IDLE_AFTER` (a run that judged the alert noise and opened no PR is
+ * never released) opens another. A card rule files the issue's card under the issue, not the event.
  *
  * **The filter is the deployment's, and a refusal names the field (LOB-82).** `SENTRY_MIN_LEVEL`,
  * `SENTRY_ENVIRONMENTS` and `SENTRY_RELEASES` (`sentryFilterFromEnv`) narrow which alerts are work:
@@ -52,7 +54,8 @@
  * **The title says where it broke.** A session's title is the event's title with its environment and
  * release (`ReferenceError: x (production, release web@1.2.3)`), so a list of sessions tells a
  * production alert from a staging one without opening either. The rule's prompt, when it writes
- * none, is `SENTRY_PROMPT_TEMPLATE`: investigate before editing.
+ * none, is `SENTRY_PROMPT_TEMPLATE`: investigate before editing. The event carries it
+ * (`TriggerEvent.defaultPrompt`), so the generic seam names no Sentry vocabulary.
  *
  * **The labels are the mapping.** Sentry names no repository, so a rule says which repo an alert
  * means: every delivery carries `sentry`, and one that names its project also carries
@@ -417,6 +420,8 @@ export const sentryEvent = (
       // session its first alert opened.
       ...(issueId === undefined ? {} : { fingerprint: issueId }),
       ...(filtered === undefined ? {} : { filtered }),
+      // What a rule with a blank prompt tells the session: the adapter's, not the seam's.
+      defaultPrompt: SENTRY_PROMPT_TEMPLATE,
     };
   }
 
@@ -436,6 +441,7 @@ export const sentryEvent = (
     ...(resource === "issue" && subjectId !== undefined
       ? { fingerprint: subjectId }
       : {}),
+    defaultPrompt: SENTRY_PROMPT_TEMPLATE,
   };
 };
 

@@ -50,7 +50,6 @@ import {
   type SentryFilter,
 } from "./Sentry";
 import {
-  DEFAULT_PROMPTS,
   NoCards,
   NoWriteBack,
   readFingerprintBinding,
@@ -174,6 +173,7 @@ describe("a Sentry payload, normalized (the filter)", () => {
       ].join("\n"),
       labels: [SENTRY_LABEL, sentryProjectLabel("1")],
       fingerprint: "1117540176",
+      defaultPrompt: SENTRY_PROMPT_TEMPLATE,
     });
   });
 
@@ -534,7 +534,11 @@ describe("the default Sentry prompt (LOB-82)", () => {
         "If the cause is outside this repository, or the alert is noise, say so and stop without editing. Otherwise fix the root cause rather than the symptom, keep the change as small as the fix needs, and open a pull request whose description names the Sentry issue and the root cause.",
       ].join("\n"),
     );
-    expect(DEFAULT_PROMPTS.sentry).toBe(SENTRY_PROMPT_TEMPLATE);
+    // The adapter carries it on the event, so the generic seam names no Sentry vocabulary.
+    expect(
+      sentryEvent(alert("templated"), { resource: "event_alert" })
+        ?.defaultPrompt,
+    ).toBe(SENTRY_PROMPT_TEMPLATE);
   });
 
   it("is what a rule with a blank prompt renders, over the alert's own title and facts", () => {
@@ -547,11 +551,7 @@ describe("the default Sentry prompt (LOB-82)", () => {
       repo: "acme/web" as RepoSlug,
       prompt: "  ",
     };
-    const prompt = resolveMapping(
-      [blank],
-      event,
-      DEFAULT_PROMPTS.sentry,
-    )?.prompt;
+    const prompt = resolveMapping([blank], event)?.prompt;
     expect(prompt).toBe(renderPrompt(SENTRY_PROMPT_TEMPLATE, event));
     expect(prompt).toContain(
       "A Sentry alert fired: ReferenceError: heck is not defined (production, release web@1.2.3)",
@@ -560,11 +560,7 @@ describe("the default Sentry prompt (LOB-82)", () => {
     expect(prompt).toContain("Investigate before you edit anything.");
     // A rule that writes its own prompt keeps it.
     expect(
-      resolveMapping(
-        [{ ...blank, prompt: "Fix {{title}}" }],
-        event,
-        DEFAULT_PROMPTS.sentry,
-      )?.prompt,
+      resolveMapping([{ ...blank, prompt: "Fix {{title}}" }], event)?.prompt,
     ).toBe(`Fix ${event.title}`);
   });
 });
@@ -930,7 +926,7 @@ describe("a Sentry issue bound to its session (LOB-82)", () => {
     const expected = {
       status: "skipped",
       replayed: false,
-      reason: `sentry:${issue} is bound to open session ${sessionId} (delivery ${sentryEventRequestId(firstEvent)}), so this delivery opens no second session`,
+      reason: `sentry:${issue} is bound to open session ${sessionId} (delivery ${sentryEventRequestId(firstEvent)}), so this delivery opens no second session; it frees when that session's workspace is released or after 3 days without activity, and \`factory discard ${sessionId}\` frees it now`,
     };
 
     await withProcess(opened, async (post) => {
@@ -1026,6 +1022,88 @@ describe("a Sentry issue bound to its session (LOB-82)", () => {
       },
       { failCreate: true },
     );
+    expect(opened).toHaveLength(1);
+  });
+  it("opens new work for a session that ended without a PR once it has been idle past the window — the noise verdict does not mute the issue forever", async () => {
+    const opened: Array<Opened> = [];
+    const issue = issueOf("idle");
+    await withProcess(opened, async (post, run) => {
+      const first = await post(recorded(`${runId}-idle-1`, issue), "r-1");
+      expect(first.status).toBe("processed");
+      // The run judged the alert noise and stopped: no PR, no card, no release. Its last activity
+      // is inside the window, so a repeat alert is still its.
+      await run(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          yield* sql`
+            INSERT INTO session_activity (session_id, status, last_activity_at)
+            VALUES (${first.sessionId ?? ""}, 'idle', now() - interval '1 hour')
+          `;
+        }),
+      );
+      expect(
+        await post(recorded(`${runId}-idle-2`, issue), "r-2"),
+      ).toMatchObject({ status: "skipped" });
+
+      // Weeks later the issue regresses: the session has been idle past the window.
+      await run(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          yield* sql`
+            UPDATE session_activity SET last_activity_at = now() - interval '30 days'
+            WHERE session_id = ${first.sessionId ?? ""}
+          `;
+        }),
+      );
+      expect(
+        await run(readFingerprintBinding(`sentry:${issue}`)),
+      ).toMatchObject({ sessionId: first.sessionId, open: false });
+      const regressed = await post(recorded(`${runId}-idle-3`, issue), "r-3");
+      expect(regressed).toMatchObject({ status: "processed", replayed: false });
+      expect(regressed.sessionId).not.toBe(first.sessionId);
+      expect(
+        await run(readFingerprintBinding(`sentry:${issue}`)),
+      ).toMatchObject({ sessionId: regressed.sessionId, open: true });
+    });
+    expect(opened).toHaveLength(2);
+  });
+
+  it("claims afresh an event that lost to a holder which then gave the binding back, when that event is delivered again", async () => {
+    const opened: Array<Opened> = [];
+    const issue = issueOf("pending");
+    const eventId = `${runId}-pending-loser`;
+    const holder = `sentry:event:${runId}-pending-holder`;
+    await withProcess(opened, async (post, run) => {
+      // Another delivery holds the binding and has not opened its session yet.
+      await run(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          yield* sql`
+            INSERT INTO trigger_fingerprints (fingerprint, request_id)
+            VALUES (${`sentry:${issue}`}, ${holder})
+          `;
+        }),
+      );
+      expect(await post(recorded(eventId, issue), "r-1")).toEqual({
+        status: "skipped",
+        replayed: false,
+        reason: `sentry:${issue} is being bound by delivery ${holder}, which has not opened its session yet, so this delivery opens no second session`,
+      });
+
+      // The holder's delivery fails and gives the binding back (`releaseClaim`).
+      await run(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          yield* sql`DELETE FROM trigger_fingerprints WHERE fingerprint = ${`sentry:${issue}`}`;
+        }),
+      );
+      // The same event, delivered again (another alert rule, a new Request-ID): its transient skip
+      // does not answer for it; it is claimed afresh and opens the issue's session.
+      expect(await post(recorded(eventId, issue), "r-2")).toMatchObject({
+        status: "processed",
+        replayed: false,
+      });
+    });
     expect(opened).toHaveLength(1);
   });
 });

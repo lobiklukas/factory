@@ -46,10 +46,12 @@
  * Before a session is opened for it, the seam claims `trigger_fingerprints` for `<source>:<fingerprint>`
  * — one `INSERT … ON CONFLICT … RETURNING`, so two occurrences racing cannot both win — and records
  * the session it opens there. A later occurrence whose bound session is still open (its workspace
- * not released) is a recorded skip naming that session; one whose session was closed takes the
- * binding over and opens the next. The row is Postgres, so a restart keeps it, as it keeps the
- * delivery's own dedupe row. An adapter's own filter (`TriggerEvent.filtered`) is a recorded skip
- * too, with the adapter's reason, before any rule is consulted.
+ * not released, and active inside `fingerprintIdleAfter`) is a recorded skip naming that session
+ * and how to free it; one whose session was closed or went idle takes the binding over and opens the
+ * next. The row is Postgres, so a restart keeps it, as it keeps the delivery's own dedupe row. A card
+ * rule files a fingerprinted event's card under the fingerprint, so its occurrences share one card.
+ * An adapter's own filter (`TriggerEvent.filtered`) is a recorded skip too, with the adapter's
+ * reason, before any rule is consulted.
  *
  * **The write-back is optional and injected.** No adapter in part 1 needs one (the generic webhook
  * has no place to write, and the Linear route only delegates), so the default is a no-op: a
@@ -80,7 +82,6 @@ import {
   type TriggerOutcome,
   type TriggerRule,
 } from "@repo/domain/Trigger";
-import { SENTRY_PROMPT_TEMPLATE } from "./Sentry";
 import { SessionService } from "./SessionService";
 import { TaskService } from "./TaskService";
 import { envRoutedRules, readRoutedRules } from "./TriggerRoutes";
@@ -412,6 +413,12 @@ export type TriggerServiceOptions = {
    * because the first process may still be working; past it, that process is presumed dead.
    */
   readonly reclaimAfter?: Duration.Input;
+  /**
+   * How long a session bound to a fingerprint (LOB-82) may go without activity before a later
+   * occurrence overtakes the binding and opens the next session (default
+   * `TRIGGER_FINGERPRINT_IDLE_AFTER`).
+   */
+  readonly fingerprintIdleAfter?: Duration.Input;
 };
 
 /**
@@ -455,11 +462,38 @@ const noBoard = (repo: RepoSlug): string =>
 const NO_BOARD_PATTERN = "repo % has no board (%";
 
 /**
- * A source's own prompt template, used when the rule that routes its event writes a blank `prompt`
- * (`resolveMapping`'s `defaultPrompt`): Sentry's investigate-before-edit template (LOB-82).
+ * The skip a fingerprinted occurrence gets while another delivery holds its binding but has not
+ * opened its session yet. Transient: if that holder fails, it gives the binding back, so a keyed-by-
+ * work redelivery of this occurrence is claimed afresh (`deliver`'s claim) rather than answered with
+ * this skip.
  */
-export const DEFAULT_PROMPTS: Partial<Record<TriggerSource, string>> = {
-  sentry: SENTRY_PROMPT_TEMPLATE,
+const pendingBinding = (fingerprint: string, holder: string): string =>
+  `${fingerprint} is being bound by delivery ${holder}, which has not opened its session yet, so this delivery opens no second session`;
+const PENDING_BINDING_PATTERN =
+  "% is being bound by delivery %, which has not opened its session yet, %";
+
+/**
+ * How long a bound session may go without activity before the next occurrence of its item stops
+ * counting it as open (LOB-82). A workspace release (card done or canceled, PR merged, `factory
+ * discard`) frees a binding at once; this frees the ones nothing will release: a run that judged the
+ * alert noise and stopped without a PR, a run that crashed, a PR closed unmerged, a session-mode run
+ * with no card. Long enough that an alert storm and a PR under review stay on one session; short
+ * enough that a regression weeks later opens new work.
+ */
+export const TRIGGER_FINGERPRINT_IDLE_AFTER: Duration.Input = "72 hours";
+
+const secondsOf = (input: Duration.Input): number =>
+  Duration.toSeconds(Duration.fromInputUnsafe(input));
+
+/** A window as a reason says it: `3 days`, `6 hours`, `90 seconds`. */
+const spanText = (seconds: number): string => {
+  const unit = (count: number, name: string) =>
+    `${count} ${name}${count === 1 ? "" : "s"}`;
+  if (seconds >= 86_400 && seconds % 86_400 === 0)
+    return unit(seconds / 86_400, "day");
+  if (seconds >= 3_600 && seconds % 3_600 === 0)
+    return unit(seconds / 3_600, "hour");
+  return unit(seconds, "second");
 };
 
 /** What `trigger_fingerprints` says about one fingerprint: the delivery that holds it and its session. */
@@ -469,7 +503,10 @@ export type FingerprintBinding = {
   readonly requestId: string;
   /** The bound session; absent while its delivery has not opened it yet. */
   readonly sessionId?: SessionId;
-  /** Whether that session is still open: it exists and its workspace was not released. */
+  /**
+   * Whether that session is still open: it exists, its workspace was not released, and it was
+   * active inside the idle window (`TRIGGER_FINGERPRINT_IDLE_AFTER`).
+   */
   readonly open: boolean;
 };
 
@@ -477,26 +514,35 @@ export type FingerprintBinding = {
  * The binding a fingerprint (`fingerprintOf`: `sentry:<issue id>`) has, or `undefined` for one no
  * session was ever opened for. The session is the one recorded on the row, or — when the delivery
  * holding it died between opening the session and recording it — the one opened under that
- * delivery's request id.
+ * delivery's request id. Its last activity is `session_activity`'s, or its creation when it has none.
  */
 export const readFingerprintBinding = (
   fingerprint: string,
+  idleAfter: Duration.Input = TRIGGER_FINGERPRINT_IDLE_AFTER,
 ): Effect.Effect<FingerprintBinding | undefined, SqlError, SqlClient> =>
   Effect.gen(function* () {
     const sql = yield* SqlClient;
+    const idleSeconds = secondsOf(idleAfter);
     const rows = yield* sql<{
       readonly requestId: string;
       readonly sessionId: string | null;
       readonly open: boolean;
     }>`
       SELECT b.request_id, s.id AS session_id,
-        (s.id IS NOT NULL AND s.workspace_released_at IS NULL) AS open
+        COALESCE(
+          s.id IS NOT NULL
+            AND s.workspace_released_at IS NULL
+            AND COALESCE(a.last_activity_at, s.created_at)
+              > now() - make_interval(secs => ${idleSeconds}),
+          false
+        ) AS open
       FROM trigger_fingerprints b
       LEFT JOIN sessions s
         ON s.id = COALESCE(
           b.session_id,
           (SELECT id FROM sessions WHERE request_id = ${SESSION_REQUEST_PREFIX} || b.request_id LIMIT 1)
         )
+      LEFT JOIN session_activity a ON a.session_id = s.id
       WHERE b.fingerprint = ${fingerprint}
     `;
     const row = rows[0];
@@ -524,6 +570,10 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
       const reclaimSeconds = Duration.toSeconds(
         Duration.fromInputUnsafe(options.reclaimAfter ?? TRIGGER_RECLAIM_AFTER),
       );
+      const fingerprintIdleAfter =
+        options.fingerprintIdleAfter ?? TRIGGER_FINGERPRINT_IDLE_AFTER;
+      const fingerprintIdleSeconds = secondsOf(fingerprintIdleAfter);
+      const fingerprintIdleText = spanText(fingerprintIdleSeconds);
       const sessions = yield* TriggerSessions;
       const cards = yield* TriggerCards;
       const writeBack = yield* TriggerWriteBack;
@@ -626,7 +676,9 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           if (board === undefined) {
             return yield* skip(requestId, noBoard(mapping.repo));
           }
-          const externalRef = externalRefOf(event);
+          // A fingerprinted event is one occurrence of an item (a Sentry issue's event, LOB-82): its
+          // card is the item's, so every occurrence lands on one card rather than one per event.
+          const externalRef = fingerprintOf(event) ?? externalRefOf(event);
           const body = cardBodyOf(event.body);
           const filed = yield* cards
             .file({
@@ -682,8 +734,10 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
        * only one gets a row back. The holder's session is the one recorded on the row, or the one
        * opened under the holder's request id (a process that died between opening the session and
        * recording it). "Closed" is a released workspace — the card done or canceled, the PR merged,
-       * the session discarded — or a session that no longer exists; a holder with no session yet is
-       * only overtaken once its claim is older than the reclaim window, as a dead delivery is.
+       * the session discarded — a session idle longer than `fingerprintIdleAfter` (a run that ended
+       * with no PR, or whose PR was closed unmerged, is never released), or a session that no longer
+       * exists; a holder with no session yet is only overtaken once its claim is older than the
+       * reclaim window, as a dead delivery is.
        */
       const bindFingerprint = (
         fingerprint: string,
@@ -705,9 +759,12 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                   OR (
                     NOT EXISTS (
                       SELECT 1 FROM sessions s
+                      LEFT JOIN session_activity a ON a.session_id = s.id
                       WHERE (s.id = b.session_id
                           OR s.request_id = ${SESSION_REQUEST_PREFIX} || b.request_id)
                         AND s.workspace_released_at IS NULL
+                        AND COALESCE(a.last_activity_at, s.created_at)
+                          > now() - make_interval(secs => ${fingerprintIdleSeconds})
                     )
                     AND (
                       b.session_id IS NOT NULL
@@ -724,14 +781,19 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           if (claimed.length > 0) return undefined;
           const holder = yield* storage(
             "read the fingerprint's binding",
-            readFingerprintBinding(fingerprint).pipe(
+            readFingerprintBinding(fingerprint, fingerprintIdleAfter).pipe(
               Effect.provideService(SqlClient, sql),
             ),
           );
           if (holder?.sessionId !== undefined) {
-            return `${fingerprint} is bound to open session ${holder.sessionId} (delivery ${holder.requestId}), so this delivery opens no second session`;
+            // The reason names the way out: the binding frees itself once the session is released
+            // or idle, and an operator who wants the next occurrence to start work now discards it.
+            return `${fingerprint} is bound to open session ${holder.sessionId} (delivery ${holder.requestId}), so this delivery opens no second session; it frees when that session's workspace is released or after ${fingerprintIdleText} without activity, and \`factory discard ${holder.sessionId}\` frees it now`;
           }
-          return `${fingerprint} is being bound by delivery ${holder?.requestId ?? "another delivery"}, which has not opened its session yet, so this delivery opens no second session`;
+          return pendingBinding(
+            fingerprint,
+            holder?.requestId ?? "another delivery",
+          );
         });
 
       const deliver = (
@@ -747,6 +809,9 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           // unregistered-repo skip: the conditional `DO UPDATE` flips that row back to `received`
           // in the same statement, so the delivery after the operator registers the repo starts the
           // session, and two such deliveries still cannot both win (the second sees `received`).
+          // The no-board skip and a fingerprint's pending-binding skip (LOB-82: it lost to a holder
+          // that had not opened its session yet, and that holder may since have failed and given
+          // the binding back) are transient the same way.
           //
           // Any delivery also wins over a *stale* claim: a row still `received` whose claim is older
           // than `reclaimAfter` belongs to a process that died between its claim and its outcome
@@ -764,7 +829,8 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                     SET status = 'received', skip_reason = NULL, claimed_at = now()
                     WHERE (webhook_deliveries.status = 'skipped'
                         AND (webhook_deliveries.skip_reason LIKE ${UNREGISTERED_REPO_PATTERN}
-                          OR webhook_deliveries.skip_reason LIKE ${NO_BOARD_PATTERN}))
+                          OR webhook_deliveries.skip_reason LIKE ${NO_BOARD_PATTERN}
+                          OR webhook_deliveries.skip_reason LIKE ${PENDING_BINDING_PATTERN}))
                       OR (webhook_deliveries.status = 'received'
                         AND webhook_deliveries.claimed_at < now() - make_interval(secs => ${reclaimSeconds}))
                   RETURNING request_id, claimed_at::text AS claim
@@ -836,11 +902,7 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
               const mapping =
                 matched === undefined
                   ? undefined
-                  : resolveMapping(
-                      [matched.rule],
-                      event,
-                      DEFAULT_PROMPTS[event.source],
-                    );
+                  : resolveMapping([matched.rule], event);
               if (matched === undefined || mapping === undefined) {
                 return yield* skip(
                   requestId,

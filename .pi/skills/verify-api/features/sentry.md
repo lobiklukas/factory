@@ -24,19 +24,34 @@ SENTRY_ENVIRONMENTS [production]`, `release "web@1.9.0" is not in SENTRY_RELEASE
   missing field fails a filter that names it: `environment is missing; …`). It is keyed by its
   `Request-ID`, like any delivery that cannot start work, and spends no rate-cap token. A
   `SENTRY_MIN_LEVEL` that is not a level is `503 not-configured` naming the variable, for every
-  delivery, until it is fixed.
+  delivery, until it is fixed; the boot already says so, at error level (`sentry filter:
+SENTRY_MIN_LEVEL is "eror"; …`), beside the armed-routes lines, and a valid filter is logged too
+  (`sentry filter: level >= error, environments [production], releases any`).
 - **The title.** A session's title is the event's title with its environment and release when the
   payload has them: `ReferenceError: x (production, release web@1.2.3)`.
 - **The fingerprint.** An alert carries its Sentry issue (`data.event.issue_id`) as the event's
   fingerprint, and the seam binds `sentry:<issue_id>` to the session the issue's first alert opened,
   in Postgres (`trigger_fingerprints`), so the binding outlives a restart. Another event in the same
   issue — the alert firing again, under a new `event_id` — opens no second session while that
-  session is open: it is a recorded skip naming it, `sentry:<issue_id> is bound to open session
-ses_… (delivery sentry:event:<first event>), so this delivery opens no second session`. Two events
-  racing for an unbound issue cannot both open one (the binding is a single `INSERT … ON CONFLICT`).
-  Once the session is closed — its workspace released: the card done or canceled, the PR merged, the
-  session discarded — the issue's next alert opens a new session and the binding moves to it. A
-  delivery that fails before opening its session gives the binding back.
+  session is open: it is a recorded skip naming it and the way out, `sentry:<issue_id> is bound to
+open session ses_… (delivery sentry:event:<first event>), so this delivery opens no second
+session; it frees when that session's workspace is released or after 3 days without activity, and
+\`factory discard ses_…\` frees it now`. Two events racing for an unbound issue cannot both open
+one (the binding is a single `INSERT … ON CONFLICT`). A session counts as closed when its
+workspace is released — the card done or canceled, the PR merged, the session discarded
+(`factory discard <session>`, the operator's way to unmute an issue at once) — **or** when it has
+had no activity for `TRIGGER_FINGERPRINT_IDLE_AFTER`(72 hours;`session_activity`, else the
+session's creation). The idle bound is what frees a binding nothing releases: a run that judged
+the alert noise and stopped without a PR (the default prompt asks for exactly that), a run that
+crashed, a PR closed unmerged, a session-mode run that has no card. The issue's next alert after
+that opens a new session and the binding moves to it. A delivery that fails before opening its
+session gives the binding back; an event that lost the race to it meanwhile was recorded as
+`… is being bound by delivery …, which has not opened its session yet …`, a transient skip that a
+redelivery of the same event (another alert rule, a new `Request-ID`) claims afresh rather than
+  replays. An event Sentry never sends again stays skipped: the issue's next event opens the session.
+- **A card rule.** A rule with `"mode": "card"` (LOB-254) files the alert's card under the issue,
+  `externalRef` `sentry:<issue_id>`, not the event, so every event in one issue lands on one card
+  (`already on the board as card …`) and the card's runs are the issue's sessions.
 
 **The default prompt (LOB-82).** A rule whose `prompt` is blank (`""`) gets Sentry's own template,
 `SENTRY_PROMPT_TEMPLATE` in `packages/core/src/Sentry.ts`, rendered by `renderPrompt` over the
