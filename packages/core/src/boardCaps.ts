@@ -11,7 +11,11 @@
  * (`task_runs.finished_at`, the end LOB-44 measures), unless its card reaches `done` or `canceled`
  * or its workspace is released first — a finished card's run holds no slot even if it never ran.
  * A run opened without a prompt is in flight while it waits: it is open on the card, and a person
- * frees it by sending it its message or by finishing the card; the refusal names it so they can.
+ * frees it by sending it its message, discarding its session, or finishing the card; the refusal
+ * names it and all three so they can. The end is written where a process sees the session go idle,
+ * so `SessionService` also ends the runs that never will: a start whose owner fails to open after
+ * its rows were committed, and a run a dead process left settled but unended (`resumeRuns`); a
+ * `task_runs` row `rebuildIndexes` re-creates ends at its session's last activity.
  *
  * Checked where a run starts, `SessionService.create` with a card named, inside the transaction that
  * writes the run's session and `task_runs` rows: an advisory lock on the card's repository first, so

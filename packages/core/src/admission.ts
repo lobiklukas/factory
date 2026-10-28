@@ -67,12 +67,15 @@ export const atCapacity = (cap: AdmissionCap): SessionError =>
 /**
  * The refusal past a board definition's run cap (LOB-71): the same `at_capacity` as the server's,
  * built the same way from a limit and its source, and naming what it counted and the runs holding
- * it. Nothing was written: a retry succeeds once one of them ends its turn or its card is finished.
+ * it. Nothing was written: a retry succeeds once one of them ends its turn, is discarded, or its
+ * card is finished — the three ways a person frees a slot, so the refusal names all three. Discarding
+ * (`factory discard`) is the one that frees a run that will never take a turn without changing its
+ * card: on a card capped at one run, finishing the card is canceling it.
  */
 export const runCapReached = (hit: RunCapHit): SessionError =>
   new SessionErrorClass({
     code: "at_capacity",
-    message: `at capacity: at most ${hit.limit} run${hit.limit === 1 ? "" : "s"} may be in flight ${scopePhrase(hit)} at once (${hit.source}=${hit.limit}), and ${hit.holders.length} ${hit.holders.length === 1 ? "is" : "are"}: ${hit.holders.join(", ")}; retry once one ends its turn or its card is done or canceled`,
+    message: `at capacity: at most ${hit.limit} run${hit.limit === 1 ? "" : "s"} may be in flight ${scopePhrase(hit)} at once (${hit.source}=${hit.limit}), and ${hit.holders.length} ${hit.holders.length === 1 ? "is" : "are"}: ${hit.holders.join(", ")}; retry once one ends its turn (send it a message if it is waiting for one), is discarded (factory discard <session>), or its card is done or canceled`,
     cap: {
       kind: hit.kind,
       limit: hit.limit,

@@ -248,7 +248,14 @@ runs holding it named — narrowest first (task, column, board, repository). A r
 row and opens no session. A run is in flight from its start until its session first goes idle
 (`task_runs.finished_at`), unless its card reaches `done`/`canceled` or its workspace is released
 first; a run opened with no prompt is in flight while it waits, and a person frees it by sending it its
-message or finishing its card. The repo cap counts every board over the repository (`createBoard`
+message, discarding its session (`factory discard`), or finishing its card — the refusal names all
+three. `finished_at` is written where this process sees the session go idle, so the paths that see no
+such turn end the run themselves: a start whose owner or first log writes fail after its rows were
+committed (a URL-only repo's fetch, LOB-265), a run a dead process left marked but already settled
+(`resumeRuns`), and a `task_runs` row `rebuildIndexes` re-creates, which ends at its session's last
+activity — a rebuild frees slots rather than holding them, except for a run whose `run_session_root`
+it kept, which the boot resumes. A run left by a process that never boots again holds its slot until
+someone sends to its session or discards it. The repo cap counts every board over the repository (`createBoard`
 still makes one per repository, so today it binds only once board customization makes more). A
 review run (LOB-36) is the PR's, not a person's: it counts, but no cap refuses it, because a refused
 delivery would lose the review the merge gate needs. No dispatcher, lease or auto-start comes with it —

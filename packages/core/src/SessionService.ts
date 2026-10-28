@@ -2543,15 +2543,25 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * run may still hold the card's one slot, and a refused delivery is a review lost — the card's
        * `review_verdict` gate would then refuse its merge until someone redelivered the event. The
        * server's own cap (LOB-70) still bounds it.
+       *
+       * A create carrying a request id reads it again under the lock, before the count: a concurrent
+       * retry of the same create read nothing before the first attempt committed, and would
+       * otherwise count that attempt's run against itself and be refused naming its own session.
+       * It is answered with that session instead (`existing`), as the read outside the lock would.
        */
       const withRunAdmitted = <A>(
         taskId: string | undefined,
         column: string | undefined,
         reviewing: boolean,
+        requestId: string | undefined,
         write: Effect.Effect<A, SessionError>,
-      ): Effect.Effect<A, SessionError> =>
+      ): Effect.Effect<
+        | { readonly existing: SessionRow }
+        | { readonly existing?: undefined; readonly written: A },
+        SessionError
+      > =>
         taskId === undefined || column === undefined
-          ? write
+          ? Effect.map(write, (written) => ({ written }))
           : sql
               .withTransaction(
                 Effect.gen(function* () {
@@ -2565,11 +2575,19 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                         }),
                     ),
                   );
+                  if (requestId !== undefined) {
+                    const raced = yield* paper(
+                      "read session by request",
+                      readSessionByRequest(requestId),
+                    );
+                    const existing = raced[0];
+                    if (existing !== undefined) return { existing };
+                  }
                   if (hit !== undefined && !reviewing) {
                     yield* countRefusal("at_capacity");
                     return yield* runCapReached(hit);
                   }
-                  return yield* write;
+                  return { written: yield* write };
                 }),
               )
               .pipe(
@@ -2583,6 +2601,53 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 ),
               );
 
+      /**
+       * A retried create answered with the session its first attempt made (found by request id):
+       * repaired where that attempt died before its owner opened, then described.
+       */
+      const answerRetry = (
+        input: CreateSessionInput,
+        already: SessionRow,
+      ): Effect.Effect<SessionSummary, SessionError> =>
+        Effect.gen(function* () {
+          const sessionId = yield* toSessionId(already.id);
+          const model = yield* sessionModelFor(input.model);
+          if (model !== undefined)
+            yield* ensureSessionModel(sessionId, already, model, {
+              reviewing: input.review !== undefined && already.repo !== null,
+            });
+          if (input.review !== undefined)
+            yield* ensureReviewTarget(sessionId, already, input.review);
+          return yield* describe(sessionId, already);
+        });
+
+      /**
+       * End a card's run that is still open (B9, LOB-71) where no turn ever will: `observeRun` ends a
+       * run only when this process sees its session go from busy to idle, and two paths never do.
+       * A start that failed after its rows were committed — the owner did not open (a URL-only
+       * repo's fetch failed, LOB-265; the harness did not open) or a log write after it failed —
+       * never turns busy. A run a dead process left marked but already settled (`resumeRuns`) is
+       * reopened with nothing to continue. Either would otherwise hold a cap slot on its card and
+       * board until someone sent its session a message or finished its card. It ends at its
+       * session's last recorded activity, or now if none was. Its rows stay, so a retry by request
+       * id or a send still finds the session and the column it was started in.
+       */
+      const endOpenRun = (sessionId: SessionId): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          const now = yield* Clock.currentTimeMillis;
+          yield* paper(
+            "end an open run",
+            sql`
+              UPDATE task_runs
+              SET finished_at = COALESCE(
+                (SELECT last_activity_at FROM session_activity WHERE session_id = ${sessionId}),
+                to_timestamp(${now / 1000})
+              )
+              WHERE session_id = ${sessionId} AND finished_at IS NULL
+            `,
+          ).pipe(Effect.ignore);
+        });
+
       const create = (
         input: CreateSessionInput = {},
       ): Effect.Effect<SessionSummary, SessionError> =>
@@ -2595,17 +2660,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   readSessionByRequest(input.requestId),
                 );
           const already = requested?.[0];
-          if (already !== undefined) {
-            const sessionId = yield* toSessionId(already.id);
-            const model = yield* sessionModelFor(input.model);
-            if (model !== undefined)
-              yield* ensureSessionModel(sessionId, already, model, {
-                reviewing: input.review !== undefined && already.repo !== null,
-              });
-            if (input.review !== undefined)
-              yield* ensureReviewTarget(sessionId, already, input.review);
-            return yield* describe(sessionId, already);
-          }
+          if (already !== undefined) return yield* answerRetry(input, already);
 
           if (input.review !== undefined && input.repo === undefined) {
             return yield* new SessionErrorClass({
@@ -2631,10 +2686,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             input.taskId === undefined
               ? undefined
               : (input.taskColumn ?? "building");
-          const { binding, inserted } = yield* withRunAdmitted(
+          const admittedRun = yield* withRunAdmitted(
             input.taskId,
             column,
             input.review !== undefined,
+            input.requestId,
             Effect.gen(function* () {
               const binding = yield* resolveBinding(input);
               const inserted = yield* paper(
@@ -2663,6 +2719,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               return { binding, inserted };
             }),
           );
+          if (admittedRun.existing !== undefined) {
+            // The session is the first attempt's, which held its own slot: this one's goes back
+            // before the answer, which may open that session's owner (`ensureSessionModel`).
+            yield* gate.withPermits(1)(consumeSlot(slot));
+            return yield* answerRetry(input, admittedRun.existing);
+          }
+          const { binding, inserted } = admittedRun.written;
           const row = inserted[0] ?? {
             id,
             title,
@@ -2677,53 +2740,60 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             workspaceReleaseReason: null,
             model: null,
           };
-          const owner = yield* acquireOwner(id, row, {
-            reviewing: input.review !== undefined,
-            ...(model === undefined ? {} : { model }),
-            slot,
+          const opened = Effect.gen(function* () {
+            const owner = yield* acquireOwner(id, row, {
+              reviewing: input.review !== undefined,
+              ...(model === undefined ? {} : { model }),
+              slot,
+            });
+            if (input.review !== undefined && binding.repo !== undefined) {
+              // What the reviewer reviews is a fact in its log before it is told anything (LOB-36), and
+              // it is the first: a reopen reads the read-only stage from it alone, so no other write
+              // may sit between the owner's open and it. A create that died before it is repaired by
+              // its retry (`ensureReviewTarget`).
+              yield* writeReviewTarget(owner.root, {
+                repo: binding.repo,
+                ...input.review,
+              });
+            }
+            if (title.length > 0) {
+              // The log keeps the title too, so rebuilding the index does not lose it.
+              yield* writeTitle(owner.root, title);
+            }
+            if (binding.repo !== undefined && binding.baseRef !== undefined) {
+              // The log keeps the binding too, so the index and the workspace are derivable from it.
+              yield* writeRepoBinding(owner.root, {
+                repo: binding.repo,
+                baseRef: binding.baseRef,
+                ...(binding.branch === undefined
+                  ? {}
+                  : { branch: binding.branch }),
+              });
+            }
+            if (input.actor !== undefined) {
+              // The log keeps the actor too (LOB-162), so a rebuilt index still knows whose spend
+              // this session is.
+              yield* writeActor(owner.root, input.actor);
+            }
+            if (input.taskId !== undefined && column !== undefined) {
+              yield* writeTaskBinding(owner.root, {
+                taskId: input.taskId,
+                column,
+              });
+            }
+            // The cap is the log's (LOB-163): the harness's hook reads it before every request, and a
+            // fold reports it. Written before create answers, so no message can start a run under it
+            // before it is there.
+            const budget = input.budget ?? options.defaultBudget;
+            if (budget !== undefined) {
+              yield* writeBudget(owner.root, budget);
+            }
           });
-          if (input.review !== undefined && binding.repo !== undefined) {
-            // What the reviewer reviews is a fact in its log before it is told anything (LOB-36), and
-            // it is the first: a reopen reads the read-only stage from it alone, so no other write
-            // may sit between the owner's open and it. A create that died before it is repaired by
-            // its retry (`ensureReviewTarget`).
-            yield* writeReviewTarget(owner.root, {
-              repo: binding.repo,
-              ...input.review,
-            });
-          }
-          if (title.length > 0) {
-            // The log keeps the title too, so rebuilding the index does not lose it.
-            yield* writeTitle(owner.root, title);
-          }
-          if (binding.repo !== undefined && binding.baseRef !== undefined) {
-            // The log keeps the binding too, so the index and the workspace are derivable from it.
-            yield* writeRepoBinding(owner.root, {
-              repo: binding.repo,
-              baseRef: binding.baseRef,
-              ...(binding.branch === undefined
-                ? {}
-                : { branch: binding.branch }),
-            });
-          }
-          if (input.actor !== undefined) {
-            // The log keeps the actor too (LOB-162), so a rebuilt index still knows whose spend
-            // this session is.
-            yield* writeActor(owner.root, input.actor);
-          }
-          if (input.taskId !== undefined && column !== undefined) {
-            yield* writeTaskBinding(owner.root, {
-              taskId: input.taskId,
-              column,
-            });
-          }
-          // The cap is the log's (LOB-163): the harness's hook reads it before every request, and a
-          // fold reports it. Written before create answers, so no message can start a run under it
-          // before it is there.
-          const budget = input.budget ?? options.defaultBudget;
-          if (budget !== undefined) {
-            yield* writeBudget(owner.root, budget);
-          }
+          // A card's run whose owner or first log writes fail here was committed above: it is
+          // ended rather than left holding a cap slot no turn will free (`endOpenRun`).
+          yield* input.taskId === undefined
+            ? opened
+            : opened.pipe(Effect.onError(() => endOpenRun(id)));
           // The session exists and its directory is open: the list can show it without a fold.
           yield* touchActivity(id);
           yield* countSessionCreate("create");
@@ -5662,8 +5732,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 // The row outlived its run (a death between the run settling and the projection
                 // writing it): nothing was continued, the mark goes, and the sweep releases the
                 // owner like any idle one. A run a client started here since keeps the mark.
+                // Its card's run, if it is one, ends too: the death was before `observeRun` wrote
+                // it, and nothing else would (B9, LOB-71).
                 const busy = yield* isBusy(owner.harness, owner.root);
-                if (!busy) yield* setRunInFlight(sessionId, false);
+                if (!busy) {
+                  yield* setRunInFlight(sessionId, false);
+                  yield* endOpenRun(sessionId);
+                }
                 return undefined;
               }),
             );

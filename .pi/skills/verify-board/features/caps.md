@@ -19,7 +19,10 @@ board has room. A refused start writes no `task_runs` row and opens no session.
 
 A run is in flight from its start until its session first goes idle (`task_runs.finished_at`), unless
 its card is `done` or `canceled`, or its workspace was released, first. A run opened without a prompt
-is in flight while it waits: send it its message, or finish its card, to free its slot. A review run
+is in flight while it waits: send it its message, discard its session (`factory discard`), or finish
+its card, to free its slot. A start that fails after its rows are written (its owner does not open)
+ends its run there, so it holds no slot; so does a run a restart finds already settled, and a run
+`rebuildIndexes` re-creates. A review run
 (LOB-36) counts but is never refused — the PR starts it, and refusing it would lose the review the
 merge gate needs. Nothing starts a run on its own: no dispatcher, lease or auto-start comes with this.
 
@@ -30,8 +33,9 @@ factory board definition show default --version 5
 # caps        board 2 · task 1 · repo 2 runs in flight
 factory board start --task tsk_…
 # error: at_capacity: at capacity: at most 1 run may be in flight on task tsk_… at once
-#   (definition default v5 caps.task=1), and 1 is: ses_…; retry once one ends its turn or its card
-#   is done or canceled
+#   (definition default v5 caps.task=1), and 1 is: ses_…; retry once one ends its turn (send it a
+#   message if it is waiting for one), is discarded (factory discard <session>), or its card is done
+#   or canceled
 ```
 
 A column with a WIP limit prints `wip       at most N runs in flight` under its exits.

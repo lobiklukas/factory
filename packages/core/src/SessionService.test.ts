@@ -11771,6 +11771,62 @@ describe("a repo registered with only a URL (LOB-265)", () => {
     }
   }, 120_000);
 
+  /**
+   * A card's start whose clone fails has committed its session and `task_runs` rows already (the
+   * caps are checked with them, LOB-71): its run never turns busy, so nothing would end it, and on
+   * default v5 (one run per card) every later start on the card would be refused naming it.
+   *
+   * Mutation: drop the `Effect.onError(endOpenRun)` around the owner's open in `create` — the
+   * second start is refused `at_capacity` naming the failed one.
+   */
+  it("ends a card's run whose start failed to clone, so the card's next start is admitted (LOB-71)", async () => {
+    const slug = RepoSlugSchema.make(
+      `factory-test/caps-clone-fails-${randomBytes(4).toString("hex")}`,
+    );
+    const runtime = runtimeWith(fakeMirror);
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          const sessions = yield* SessionService;
+          yield* sessions.registerRepo({ repo: slug, url });
+          const card = yield* Effect.gen(function* () {
+            const tasks = yield* TaskService;
+            const board = yield* tasks.createBoard({
+              repo: slug,
+              definitionId: DefinitionIdSchema.make(DEFAULT_DEFINITION_ID),
+            });
+            return yield* tasks.create({
+              boardId: board.id,
+              title: "a card whose first start fails",
+              actor: "person:lukas",
+            });
+          }).pipe(Effect.provide(TaskServiceLive));
+          failing.next = true;
+          const failed = yield* Effect.flip(
+            sessions.create({ taskId: card.id }),
+          );
+          failing.next = false;
+          const runs = yield* sql<{ finished: boolean }>`
+            SELECT finished_at IS NOT NULL AS finished
+            FROM task_runs WHERE task_id = ${card.id}
+          `;
+          const next = yield* Effect.exit(sessions.create({ taskId: card.id }));
+          yield* sessions.close;
+          return { failed, runs, next };
+        }),
+      );
+      expect(outcome.failed.code).toBe("repo_clone_failed");
+      // The failed start's rows stay — a retry by request id still finds its session — but its run
+      // has ended, so it holds no slot.
+      expect(outcome.runs).toEqual([{ finished: true }]);
+      expect(Exit.isSuccess(outcome.next)).toBe(true);
+    } finally {
+      failing.next = false;
+      await runtime.dispose();
+    }
+  }, 120_000);
+
   it("fetches the clone outside the owners' gate: a slow forge on one repo does not hold up a session on another", async () => {
     const slow = RepoSlugSchema.make(
       `factory-test/slow-forge-${randomBytes(4).toString("hex")}`,
@@ -13837,10 +13893,12 @@ describe("board caps and WIP limits (LOB-71)", () => {
   };
 
   /**
-   * What a refused start must not have written: its card's runs, sessions in total, its request id,
-   * and session logs — an opened session is a log with a commit, so none means none was opened.
+   * What a refused start must not have written: its card's runs, sessions on its board's repository
+   * (a card's session inherits it, C1), its request id, and those sessions' logs — an opened session
+   * is a log with a commit, so none means none was opened. Scoped to rows the start could write, so
+   * nothing else the database is doing meanwhile moves the counts.
    */
-  const writes = (taskId: string, requestId: string) =>
+  const writes = (taskId: string, repo: string, requestId: string) =>
     Effect.gen(function* () {
       const sql = yield* SqlClient;
       const rows = yield* sql<{
@@ -13851,9 +13909,10 @@ describe("board caps and WIP limits (LOB-71)", () => {
       }>`
         SELECT
           (SELECT count(*)::int FROM task_runs WHERE task_id = ${taskId}) AS runs,
-          (SELECT count(*)::int FROM sessions) AS sessions,
+          (SELECT count(*)::int FROM sessions WHERE repo = ${repo}) AS sessions,
           (SELECT count(*)::int FROM sessions WHERE request_id = ${requestId}) AS asked,
-          (SELECT count(DISTINCT log_id)::int FROM commits) AS logs
+          (SELECT count(DISTINCT log_id)::int FROM commits
+           WHERE log_id IN (SELECT id FROM sessions WHERE repo = ${repo})) AS logs
       `;
       return rows[0];
     });
@@ -13877,9 +13936,9 @@ describe("board caps and WIP limits (LOB-71)", () => {
         const first = yield* start(one.id);
         const again = yield* start(one.id, "building", "lob-71-again");
         const second = yield* start(two.id);
-        const before = yield* writes(three.id, "lob-71-third");
+        const before = yield* writes(three.id, board.repo, "lob-71-third");
         const third = yield* start(three.id, "building", "lob-71-third");
-        const after = yield* writes(three.id, "lob-71-third");
+        const after = yield* writes(three.id, board.repo, "lob-71-third");
         return {
           board,
           first,
@@ -13916,7 +13975,9 @@ describe("board caps and WIP limits (LOB-71)", () => {
       expect(board?.message).toContain(outcome.first.value.id);
       expect(board?.message).toContain(outcome.second.value.id);
     }
-    // Nothing written and nothing opened for the refused start.
+    // Nothing written and nothing opened for the refused start: the two admitted starts are there.
+    expect(outcome.before?.sessions).toBe(2);
+    expect(outcome.before?.logs).toBe(2);
     expect(outcome.after).toEqual(outcome.before);
     expect(outcome.after?.runs).toBe(0);
     expect(outcome.after?.asked).toBe(0);
@@ -14161,4 +14222,126 @@ describe("board caps and WIP limits (LOB-71)", () => {
     expect(refusalOf(outcome.whileHeld)?.cap?.kind).toBe("board");
     expect(Exit.isSuccess(outcome.afterCancel)).toBe(true);
   }, 90_000);
+
+  /**
+   * Two retries of one start race past the request-id read outside the lock: the second must be
+   * answered with the session the first made, not refused against that session's run.
+   *
+   * Mutation: drop the request-id read under the lock in `withRunAdmitted` — a retry is refused
+   * `at_capacity` naming the session its own request created.
+   */
+  it("answers concurrent retries of one start with the one session it made, not a refusal against its own run", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const definitionId = yield* newDefinition([{ caps: { task: 1 } }]);
+        const board = yield* newBoard(definitionId, 1);
+        const card = yield* newCard(board.id, "retried");
+        const requestId = `lob-71-retry-${randomBytes(4).toString("hex")}`;
+        const exits = yield* Effect.all(
+          [1, 2, 3, 4].map(() => start(card.id, "building", requestId)),
+          { concurrency: "unbounded" },
+        );
+        const runs = yield* sql<{ count: number }>`
+          SELECT count(*)::int AS count FROM task_runs WHERE task_id = ${card.id}
+        `;
+        return { exits, runs: runs[0]?.count };
+      }),
+    );
+    expect(outcome.exits.map((exit) => refusalOf(exit)?.code)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    const ids = outcome.exits.map((exit) =>
+      Exit.isSuccess(exit) ? exit.value.id : undefined,
+    );
+    expect(new Set(ids).size).toBe(1);
+    expect(outcome.runs).toBe(1);
+  }, 60_000);
+
+  /**
+   * A dead process can leave a run marked in flight (LOB-25) whose turn had already settled, so its
+   * end was never written. The boot that finds nothing to continue ends it, or it would hold its
+   * card's slot until someone sent to it.
+   *
+   * Mutation: drop `endOpenRun` from `resumeRuns`' settled branch — the run stays open and the
+   * card's next start is refused naming it.
+   */
+  it("ends a run a restart finds marked but already settled, freeing its card's slot", async () => {
+    const root = mkdtempSync(join(tmpdir(), "factory-core-caps-resume-"));
+    const boot = ManagedRuntime.make(
+      SessionServiceLive({
+        model: createModelAccess("faux", { fauxModels: ["faux-1"] }),
+        sessionRoot: root,
+      }).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+    try {
+      const outcome = await boot.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          const sessions = yield* SessionService;
+          const definitionId = yield* newDefinition([{ caps: { task: 1 } }]);
+          const board = yield* newBoard(definitionId, 1);
+          const card = yield* newCard(board.id, "settled before the death");
+          const first = yield* start(card.id);
+          if (Exit.isFailure(first)) throw new Error("the first start failed");
+          // What the death leaves: the run's mark under this root, and no end written.
+          yield* sessions.close;
+          yield* sql`
+            UPDATE sessions SET run_session_root = ${root} WHERE id = ${first.value.id}
+          `;
+          yield* sql`
+            UPDATE task_runs SET finished_at = NULL WHERE session_id = ${first.value.id}
+          `;
+          const held = yield* start(card.id);
+          yield* sessions.resumeRuns;
+          const ended = yield* sql<{ finished: boolean }>`
+            SELECT finished_at IS NOT NULL AS finished
+            FROM task_runs WHERE session_id = ${first.value.id}
+          `;
+          const after = yield* start(card.id);
+          yield* sessions.close;
+          return { held, ended: ended[0]?.finished, after };
+        }),
+      );
+      expect(refusalOf(outcome.held)?.cap?.kind).toBe("task");
+      expect(outcome.ended).toBe(true);
+      expect(Exit.isSuccess(outcome.after)).toBe(true);
+    } finally {
+      await boot.dispose();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  /**
+   * `task_runs.finished_at` is no fact a log holds, so the rows a rebuild re-creates take their
+   * session's last activity as their end: a dropped-and-rebuilt `task_runs` must not hold every
+   * past run's slot forever.
+   *
+   * Mutation: re-create the row with `finished_at` NULL — the card's next start is refused.
+   */
+  it("ends the runs a rebuild re-creates, so a rebuilt task_runs holds no slot", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const definitionId = yield* newDefinition([{ caps: { task: 1 } }]);
+        const board = yield* newBoard(definitionId, 1);
+        const card = yield* newCard(board.id, "rebuilt");
+        const first = yield* start(card.id);
+        if (Exit.isFailure(first)) throw new Error("the first start failed");
+        yield* sql`DELETE FROM task_runs WHERE session_id = ${first.value.id}`;
+        yield* rebuildIndexes;
+        const rebuilt = yield* sql<{ column: string; finished: boolean }>`
+          SELECT "column", finished_at IS NOT NULL AS finished
+          FROM task_runs WHERE session_id = ${first.value.id}
+        `;
+        const after = yield* start(card.id);
+        return { rebuilt: rebuilt[0], after };
+      }),
+    );
+    expect(outcome.rebuilt).toEqual({ column: "building", finished: true });
+    expect(Exit.isSuccess(outcome.after)).toBe(true);
+  }, 120_000);
 });
