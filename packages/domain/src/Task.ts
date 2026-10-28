@@ -333,8 +333,8 @@ export const Task = Schema.Struct({
   title: Schema.String,
   column: Schema.String,
   /**
-   * The board's repository, which `createTask` gives every card (LOB-255). Absent only on a card
-   * made before then; a run started for one is still bound to the board's repository.
+   * The board's repository, which `createTask` gives every card (LOB-255). A card made before then
+   * holds none in its row and reads back with its board's, the one its runs are bound to.
    */
   repo: Schema.optional(RepoSlug),
   /** The definition version this task started under (B2). */

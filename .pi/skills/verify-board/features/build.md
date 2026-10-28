@@ -55,7 +55,10 @@ After the dashboard phase, in the same tmux pane, each command followed by the e
 2. **The build run.** `board start` in `building`; `build.ts MODE=built` checks it is bound to the
    board's repository on `factory/<run>`, in a worktree whose `HEAD` is that branch, though the card
    named no repo (LOB-255), then waits for it to answer and reads its log: exactly one `verify` record, over `apps/web/src/card.ts`, a `VerifyRan` of the
-   `.pi/skills/verify-web` skill on the `web` surface, exit 0.
+   `.pi/skills/verify-web` skill on the `web` surface, exit 0. The card pane's run start
+   (`startRunAtom`) is not driven here: it sends the same `createSession` with the card named, and
+   the binding is the server's (`SessionService`'s `cardRepoFor`, covered in
+   `packages/core/src/TaskService.test.ts`), so which client started the run does not change it.
 3. **A non-empty diff.** `git diff --numstat main...factory/<run>` in the fixture checkout lists the
    changed path — git's own answer, not the factory's.
 4. **The building gate, before the PR** (LOB-240). The run's `building → review` is refused with

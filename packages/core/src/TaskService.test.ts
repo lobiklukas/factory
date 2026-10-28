@@ -837,7 +837,13 @@ describe("TaskService — a card's repository (LOB-255)", () => {
         yield* sql`UPDATE tasks SET repo = NULL WHERE id = ${legacy.id}`;
       }),
     );
-    expect((await withService((s) => s.get(legacy.id))).repo).toBeUndefined();
+    // The card reads back with its board's repository, the one its runs are bound to below.
+    expect((await withService((s) => s.get(legacy.id))).repo).toBe(board.repo);
+    expect(
+      (await withService((s) => s.list({ boardId: board.id }))).find(
+        (task) => task.id === legacy.id,
+      )?.repo,
+    ).toBe(board.repo);
 
     const sessions = ManagedRuntime.make(
       SessionServiceLive({

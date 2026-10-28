@@ -433,10 +433,21 @@ const TASK_COLUMN_NAMES = [
   "created_at",
   "updated_at",
 ];
-const TASK_COLUMNS = TASK_COLUMN_NAMES.join(", ");
+/**
+ * The list a read selects, `table` qualifying every column. A card made before cards carried a
+ * repository reads back with its board's (LOB-255), the same one `SessionService` binds its runs
+ * to, so the card and its runs never disagree about where the work is.
+ */
+const taskColumns = (table: string): string =>
+  TASK_COLUMN_NAMES.map((name) =>
+    name === "repo"
+      ? `COALESCE(${table}.repo, (SELECT b.repo FROM board_instances b WHERE b.id = ${table}.board_id)) AS repo`
+      : `${table}.${name}`,
+  ).join(", ");
+const TASK_COLUMNS = taskColumns("tasks");
 
 /** The same list qualified by `t.`, for a read that joins `tasks` to tables sharing column names. */
-const TASK_COLUMNS_T = TASK_COLUMN_NAMES.map((name) => `t.${name}`).join(", ");
+const TASK_COLUMNS_T = taskColumns("t");
 
 /**
  * One run of a card as the exit checks read it (`cardEvidence`): its session, and the branch binding
