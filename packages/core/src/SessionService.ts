@@ -60,6 +60,7 @@ import type {
   CreateSessionInput,
   ForkSessionInput,
   GetRepoInput,
+  InterruptSessionResult,
   ListReposOutput,
   ListSessionsInput,
   ListSessionsOutput,
@@ -167,6 +168,8 @@ import {
   recordMergeEvent,
   readRecordedMerge,
   interrupt as interruptConversation,
+  stopRun,
+  rootHasWork,
   isBusy,
   liveSessionEvents,
   openSession,
@@ -351,9 +354,13 @@ export type SessionServiceShape = {
   readonly send: (
     input: SendMessageInput,
   ) => Effect.Effect<SendMessageResult, SessionError>;
+  /**
+   * Stop the session's run (C8). The answer says what happened: a session with no run to stop is
+   * `not_running`, an outcome rather than a failure, and the call changed nothing.
+   */
   readonly interrupt: (
     sessionId: SessionId,
-  ) => Effect.Effect<SessionSummary, SessionError>;
+  ) => Effect.Effect<InterruptSessionResult, SessionError>;
   /**
    * Withdraw a queued message before a run places it (LOB-166). The answer says what happened: a
    * message a run already took, or one already over, is an outcome rather than a failure.
@@ -1129,13 +1136,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
       /**
        * Whether an acquisition must find a free slot: not one its new session already reserved, and
-       * not a boot's resume of work admitted before the process died (`admission: "resume"`).
+       * not a boot's resume of work admitted before the process died (`admission: "resume"`), and
+       * not an interrupt's open to stop work (`admission: "stop"`).
        */
       const needsSlot = (acquisition: {
         readonly slot?: SlotReservation | undefined;
-        readonly admission?: "resume" | "background";
+        readonly admission?: "resume" | "background" | "stop";
       }) =>
-        acquisition.admission === "resume"
+        acquisition.admission === "resume" || acquisition.admission === "stop"
           ? Effect.succeed(false)
           : Effect.map(holdsSlot(acquisition.slot), (held) => !held);
       /** Whether a reservation still holds its slot (not yet handed in). */
@@ -2171,9 +2179,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
          * before the crash, so it is never refused (a refusal would strand it until the next boot)
          * and its owner counts against the cap like any other. `"background"`: a reopen the server
          * makes on its own (a replay's comparison commit), refused at capacity like a request but not
-         * counted as one in `factory.refusals`. Absent: a request's open.
+         * counted as one in `factory.refusals`. `"stop"`: an interrupt's open of a session whose log
+         * holds work to stop (C8) — never refused, because stopping work is how an operator frees
+         * capacity, and a paused run a dead process left would otherwise be unstoppable on a full
+         * server. Absent: a request's open.
          */
-        readonly admission?: "resume" | "background";
+        readonly admission?: "resume" | "background" | "stop";
       };
 
       /** The part of an acquisition that is serialized: everything but the network (below). */
@@ -3034,16 +3045,37 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
 
       const interrupt = (
         sessionId: SessionId,
-      ): Effect.Effect<SessionSummary, SessionError> =>
+      ): Effect.Effect<InterruptSessionResult, SessionError> =>
         Effect.gen(function* () {
           const row = yield* requireSession(sessionId);
+          const notRunning = (session: SessionSummary) => ({
+            session,
+            outcome: "not_running" as const,
+            message: `session ${sessionId} is not running: there was no run to interrupt`,
+          });
+          // No owner here: the committed log answers first, so an interrupt with nothing to stop
+          // opens no workspace, fetches no mirror and takes no slot to say so.
+          if (!HashMap.has(yield* Ref.get(live), sessionId)) {
+            const working = yield* withReader(sessionId, rootHasWork);
+            if (!working) return notRunning(yield* describe(sessionId, row));
+          }
           // Steering wakes the session first (D8): acquiring the owner is what waking means here.
           // Paused (LOB-25): a run a dead process left behind is stopped, not first continued.
-          const owner = yield* acquireOwner(sessionId, row, { resume: false });
-          yield* interruptConversation(owner.root);
+          // `stop`: never refused at capacity — stopping work is what frees a slot.
+          const owner = yield* acquireOwner(sessionId, row, {
+            resume: false,
+            admission: "stop",
+          });
+          const outcome = yield* stopRun(owner.harness, owner.root);
           yield* continueRemaining(sessionId, owner);
           yield* touchActivity(sessionId);
-          return yield* describe(sessionId, row);
+          const session = yield* describe(sessionId, row);
+          if (outcome === "not_running") return notRunning(session);
+          return {
+            session,
+            outcome,
+            message: `session ${sessionId} was interrupted: its run stopped, and the session is ${session.status}`,
+          };
         });
 
       const withdraw = (

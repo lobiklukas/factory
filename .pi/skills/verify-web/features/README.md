@@ -39,6 +39,9 @@ web `:3560`), its board now made through the form.
 `model.sh` (the New session model picker, LOB-274) last passed **11/11** on 2026-10-28 from the
 `agent/LOB-274` worktree, API `:9505` / web `:3505`.
 
+`interrupt.sh` (the Interrupt button, C8) last passed **10/10** on 2026-10-28 from the `agent/C8`
+worktree, API `:9541` / web `:3541`, `FAUX_SLEEP_MS=4000`.
+
 `cost.sh` (cost prediction on the New session form and `/spend`, LOB-38) last passed **12/12** on
 2026-10-28 from the `agent/LOB-38` worktree, API `:9552` / web `:3552`; `spend.sh` and `model.sh`
 re-passed there beside it, as the strip and the form sit on their pages.
@@ -69,6 +72,7 @@ re-passed there beside it, as the strip and the form sit on their pages.
 | New session form           | passing | [session-new.md](session-new.md) (`session-new.sh`)                           |
 | New session model picker   | passing | [model-picker.md](model-picker.md) (`model.sh`)                               |
 | Cost prediction            | passing | [cost.md](cost.md) (`cost.sh`)                                                |
+| Interrupt a busy run       | passing | [interrupt.md](interrupt.md) (`interrupt.sh`)                                 |
 | The dashboard's credential | passing | verify-api's [identity.md](../../verify-api/features/identity.md) (`auth.sh`) |
 
 ## Known gaps

@@ -191,6 +191,9 @@ import {
   PR_OPENED_ENTRY_KIND,
   PR_INHERITED_ENTRY_KIND,
   NO_CHANGE_ENTRY_KIND,
+  INTERRUPTED_ENTRY_KIND,
+  INTERRUPT_DOC_KIND,
+  LIVE_DOC,
   PAGE_ENTRY_KIND,
   type PageLogRecord,
   TITLE_ENTRY_KIND,
@@ -1704,6 +1707,131 @@ export const interrupt = (
   conversation: Conversation,
 ): Effect.Effect<void, SessionError> =>
   attempt("interrupt", () => conversation.abort(BACKGROUND_CONTEXT));
+
+/**
+ * An operator's interrupt, announced in the transcript (C8). It carries no model content, so the
+ * agent never sees it: a later message starts a run whose context is the turns before it.
+ */
+export const InterruptedEntry = defineEntry<{
+  readonly text: string;
+}>(INTERRUPTED_ENTRY_KIND);
+
+/** The line an interrupted turn ends with, in the transcript and in a terminal. */
+export const INTERRUPTED_TEXT =
+  "interrupted: the run was stopped before it finished";
+
+/**
+ * What an interrupt came to (C8): `interrupted` when there was a run to stop, `not_running` when the
+ * root had no run and no unsettled submission, so nothing was aborted and nothing was written.
+ */
+export type StopOutcome = "interrupted" | "not_running";
+
+/**
+ * Which work an interrupt marked (C8): the run's task, or — for a root holding only queued or placed
+ * submissions and no run, a log a dead process left behind — those submissions. `""` before the
+ * first interrupt. `fork: "initial"`: a fork's task ids are its own log's, so a parent's key would
+ * match a fork's first run by number alone.
+ */
+export const InterruptDoc = defineDoc({
+  kind: INTERRUPT_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  initial: () => ({ marked: "" }),
+});
+
+/** The work `stopRun` marks: the run in flight, or the root's unsettled submissions without one. */
+const workKey = (
+  run: { readonly taskId: TaskId } | undefined,
+  pending: readonly number[],
+): string | undefined =>
+  run !== undefined
+    ? `task:${String(run.taskId)}`
+    : pending.length > 0
+      ? `submissions:${pending.join(",")}`
+      : undefined;
+
+/**
+ * Stop the root's run, and say so in the transcript (C8).
+ *
+ * Work is a run in flight (`pi.live`'s `run`) or a root submission still queued or placed — the
+ * latter is what a log a dead process left behind holds before anything continued it (LOB-25), and
+ * aborting withdraws it. With neither, the abort is skipped: an interrupt of an idle session is an
+ * answer, not a write.
+ *
+ * Otherwise the entry is committed first and the abort settles the run `unanswered` after it, as a
+ * budget stop records itself before its abort (`./budget`): a client following the run stops
+ * reading when the session goes idle, so an entry written after the abort would reach a watcher
+ * that `factory run` had already let go of. So the marker is the turn's, not necessarily its last
+ * entry: an interrupt that lands during a tool call or a streamed answer is followed by what Pi
+ * Durable commits for the work it stopped — the call's aborted result, a committed partial.
+ *
+ * The commit decides from what it reads, not from the check before it: a run that settled on its
+ * own in between is gone from `pi.live`, so nothing is written and the answer is `not_running`; and
+ * work already marked (`InterruptDoc`) — two interrupts that overlap, or a retry after an abort
+ * that failed — is not marked again, though it is aborted again.
+ */
+export const stopRun = (
+  harness: Harness,
+  root: Conversation,
+): Effect.Effect<StopOutcome, SessionError> =>
+  Effect.gen(function* () {
+    const inspection = yield* attempt("inspect pending work", () =>
+      harness.inspect(BACKGROUND_CONTEXT),
+    );
+    const pending = inspection.submissions
+      .filter((record) => record.conversationId === root.id)
+      .map((record) => Number(record.id));
+    const marked = yield* attempt("write interrupted", () =>
+      root.commit(
+        (tx) =>
+          Promise.all([
+            tx.doc(LiveDoc, root.id),
+            tx.doc(InterruptDoc, root.id),
+          ]).then(([live, doc]) => {
+            const key = workKey(live.run, pending);
+            if (key === undefined) return false;
+            if (doc.marked === key) return true;
+            doc.marked = key;
+            return tx
+              .appendEntry(InterruptedEntry, root.id, {
+                data: { text: INTERRUPTED_TEXT },
+              })
+              .then(() => true);
+          }),
+        BACKGROUND_CONTEXT,
+      ),
+    );
+    if (!marked) return "not_running";
+    yield* interrupt(root);
+    return "interrupted";
+  });
+
+/**
+ * Whether a log's root has work an interrupt would stop, read without owning it (C8): a run in
+ * `pi.live`, or a root submission still queued or placed. What `stopRun` would find, so a caller
+ * that holds no owner can answer `not_running` without opening one.
+ */
+export const rootHasWork = (
+  storage: Storage,
+): Effect.Effect<boolean, SessionError> =>
+  Effect.gen(function* () {
+    const live = yield* readLogDocument(storage, LIVE_DOC);
+    if (live !== undefined && live["run"] !== undefined) return true;
+    for (const status of ["queued", "placed"] as const) {
+      const page = yield* attempt("scan unsettled submissions", () =>
+        storage.scanSubmissions(
+          { conversationId: ROOT_CONVERSATION_ID, status },
+          1,
+          undefined,
+          BACKGROUND_CONTEXT,
+        ),
+      );
+      if (page.items.length > 0) return true;
+    }
+    return false;
+  });
 
 /** Submissions read per storage page while looking one up by its wire id. */
 const SUBMISSION_PAGE = 100;

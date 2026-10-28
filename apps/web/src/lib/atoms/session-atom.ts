@@ -228,6 +228,21 @@ export const withdrawMessageAtom = runtime.fn((input: WithdrawMessageInput) =>
   }),
 );
 
+/**
+ * Stops the session's run (C8). The answer is what the interrupt came to: a stopped run reaches the
+ * pane over the stream it already follows (the status goes idle, the transcript gains its
+ * `interrupted` row), and `not_running` is an answer the pane reports, not a failure.
+ * `SESSIONS_KEY` re-reads the sidebar's list, whose row shows the status too.
+ */
+export const interruptSessionAtom = runtime.fn(
+  (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.interruptSession({ sessionId });
+    }),
+  { reactivityKeys: [SESSIONS_KEY] },
+);
+
 /** Sends a message into a session the pane is already attached to. */
 export const sendMessageAtom = runtime.fn(
   (input: { readonly sessionId: SessionId; readonly content: string }) =>
