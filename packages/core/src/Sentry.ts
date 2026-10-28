@@ -34,8 +34,25 @@
  * whatever `Request-ID` it arrived with; the rules are the seam's own (`sentryDelivery`'s `rules`),
  * so the key and the filter agree on which deliveries are work, as Linear's do (LOB-164). A delivery
  * that cannot start work is keyed by its `Request-ID`, one row per delivery, and one with no
- * `Request-ID` is refused — it is not something Sentry sends. Binding a *repeat* alert for the same
- * issue (a new event in one fingerprint) to the open session is LOB-82's, not this key's.
+ * `Request-ID` is refused — it is not something Sentry sends.
+ *
+ * **One Sentry issue is one session while that session is open (LOB-82).** The key is the event, so
+ * a *new* event in the same issue — the alert firing again — is a new delivery. The event carries
+ * its issue as the fingerprint (`data.event.issue_id`, `TriggerEvent.fingerprint`), and the seam
+ * binds that to the session the first event opened, in Postgres (`trigger_fingerprints`), so a repeat
+ * alert is a recorded skip naming the open session — before and after a restart — and only an issue
+ * whose session was closed (its workspace released: done, canceled, merged, discarded) opens another.
+ *
+ * **The filter is the deployment's, and a refusal names the field (LOB-82).** `SENTRY_MIN_LEVEL`,
+ * `SENTRY_ENVIRONMENTS` and `SENTRY_RELEASES` (`sentryFilterFromEnv`) narrow which alerts are work:
+ * an alert outside them keeps its `create` but carries `filtered` — `level "warning" is below
+ * SENTRY_MIN_LEVEL "error"` — which the seam records as the delivery's skip reason. It is keyed by
+ * its `Request-ID` like any delivery that cannot start work, and spends no rate-cap token.
+ *
+ * **The title says where it broke.** A session's title is the event's title with its environment and
+ * release (`ReferenceError: x (production, release web@1.2.3)`), so a list of sessions tells a
+ * production alert from a staging one without opening either. The rule's prompt, when it writes
+ * none, is `SENTRY_PROMPT_TEMPLATE`: investigate before editing.
  *
  * **The labels are the mapping.** Sentry names no repository, so a rule says which repo an alert
  * means: every delivery carries `sentry`, and one that names its project also carries
@@ -67,6 +84,177 @@ export const SENTRY_LABEL = "sentry";
 /** The label naming a delivery's Sentry project, so one rule can route one project. */
 export const sentryProjectLabel = (projectId: string): string =>
   `${SENTRY_LABEL}:project:${projectId}`;
+
+/**
+ * The default Sentry rule's prompt (LOB-82): what a session opened by an alert is told when the rule
+ * that routed it writes no prompt of its own (a blank `prompt`). `{{title}}` and `{{body}}` are
+ * `renderPrompt`'s; the body is the alert's facts, one `name: value` line each (`alertBody`).
+ *
+ * An alert is a symptom with a stack trace, not a task: the cheapest wrong outcome is an agent that
+ * edits the line the trace points at and silences the error. So the session is told to establish the
+ * cause, and say it, before it changes anything — and that "this is not ours" or "this is noise" is
+ * an answer that ends the run without a change. Documented in `.pi/skills/verify-api/features/sentry.md`.
+ */
+export const SENTRY_PROMPT_TEMPLATE = [
+  "A Sentry alert fired: {{title}}",
+  "",
+  "{{body}}",
+  "",
+  "Investigate before you edit anything. Find where this error is raised and why: read the culprit and the code around it, and reproduce the failure with a test if you can. Then state the root cause in a short paragraph before you change any file.",
+  "",
+  "If the cause is outside this repository, or the alert is noise, say so and stop without editing. Otherwise fix the root cause rather than the symptom, keep the change as small as the fix needs, and open a pull request whose description names the Sentry issue and the root cause.",
+].join("\n");
+
+/** Sentry's event levels, least to most severe: what `SENTRY_MIN_LEVEL` compares against. */
+export const SENTRY_LEVELS = [
+  "debug",
+  "info",
+  "warning",
+  "error",
+  "fatal",
+] as const;
+export type SentryLevel = (typeof SENTRY_LEVELS)[number];
+
+/**
+ * Which alerts are work (LOB-82). Each field absent is "any"; an alert that fails one is a recorded
+ * skip naming that field and the value it carried.
+ *
+ * - `minLevel`: the alert's `level` is at least this severe (`SENTRY_LEVELS`).
+ * - `environments`: the alert's `environment` is one of these.
+ * - `releases`: the alert's `release` is one of these; an entry ending in `*` is a prefix
+ *   (`web@2.*`), because a release is a version and an exact list would need an edit per deploy.
+ *
+ * An alert that names no environment (or release) fails a filter that lists some: the operator asked
+ * for these and only these, and "unknown" is not one of them.
+ */
+export type SentryFilter = {
+  readonly minLevel?: SentryLevel | undefined;
+  readonly environments?: ReadonlyArray<string> | undefined;
+  readonly releases?: ReadonlyArray<string> | undefined;
+};
+
+/** The variables a filter is read from. */
+export const SENTRY_MIN_LEVEL_VARIABLE = "SENTRY_MIN_LEVEL";
+export const SENTRY_ENVIRONMENTS_VARIABLE = "SENTRY_ENVIRONMENTS";
+export const SENTRY_RELEASES_VARIABLE = "SENTRY_RELEASES";
+
+const isSentryLevel = (value: string): value is SentryLevel =>
+  (SENTRY_LEVELS as ReadonlyArray<string>).includes(value);
+
+const commaList = (
+  raw: string | undefined,
+): ReadonlyArray<string> | undefined => {
+  const entries = (raw ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+  return entries.length === 0 ? undefined : entries;
+};
+
+/**
+ * The filter an environment names. A blank or unset variable is "any"; a `SENTRY_MIN_LEVEL` that is
+ * not a Sentry level is an error naming the variable and the levels it may be, which the route
+ * answers `503` — a typo must not quietly admit every alert, or none.
+ */
+export const sentryFilterFromEnv = (
+  env: Readonly<Record<string, string | undefined>>,
+):
+  | { readonly ok: true; readonly filter: SentryFilter }
+  | { readonly ok: false; readonly message: string } => {
+  const level = (env[SENTRY_MIN_LEVEL_VARIABLE] ?? "").trim().toLowerCase();
+  const minLevel = level === "" || !isSentryLevel(level) ? undefined : level;
+  if (level !== "" && minLevel === undefined) {
+    return {
+      ok: false,
+      message: `${SENTRY_MIN_LEVEL_VARIABLE} is "${level}"; it must be one of ${SENTRY_LEVELS.join(", ")}`,
+    };
+  }
+  const environments = commaList(env[SENTRY_ENVIRONMENTS_VARIABLE]);
+  const releases = commaList(env[SENTRY_RELEASES_VARIABLE]);
+  return {
+    ok: true,
+    filter: {
+      ...(minLevel === undefined ? {} : { minLevel }),
+      ...(environments === undefined ? {} : { environments }),
+      ...(releases === undefined ? {} : { releases }),
+    },
+  };
+};
+
+/** Whether `value` is one of `allowed`, where an entry ending in `*` is a prefix. */
+const listed = (value: string, allowed: ReadonlyArray<string>): boolean =>
+  allowed.some((entry) =>
+    entry.endsWith("*")
+      ? value.startsWith(entry.slice(0, -1))
+      : value === entry,
+  );
+
+const quotedList = (entries: ReadonlyArray<string>): string =>
+  `[${entries.join(", ")}]`;
+
+/**
+ * Why `filter` refuses an alert with these facts, or `undefined` when it admits it. The reason names
+ * the field, the value the alert carried and what the filter asked for — the first field that fails,
+ * in the order level, environment, release.
+ */
+export const sentryFilterRefusal = (
+  facts: {
+    readonly level?: string | undefined;
+    readonly environment?: string | undefined;
+    readonly release?: string | undefined;
+  },
+  filter: SentryFilter,
+): string | undefined => {
+  if (filter.minLevel !== undefined) {
+    const level = facts.level?.toLowerCase();
+    if (level === undefined) {
+      return `level is missing; ${SENTRY_MIN_LEVEL_VARIABLE} is "${filter.minLevel}"`;
+    }
+    if (!isSentryLevel(level)) {
+      return `level "${facts.level}" is not a Sentry level, so it is not at least ${SENTRY_MIN_LEVEL_VARIABLE} "${filter.minLevel}"`;
+    }
+    if (SENTRY_LEVELS.indexOf(level) < SENTRY_LEVELS.indexOf(filter.minLevel)) {
+      return `level "${level}" is below ${SENTRY_MIN_LEVEL_VARIABLE} "${filter.minLevel}"`;
+    }
+  }
+  if (filter.environments !== undefined) {
+    if (facts.environment === undefined) {
+      return `environment is missing; ${SENTRY_ENVIRONMENTS_VARIABLE} is ${quotedList(filter.environments)}`;
+    }
+    if (!listed(facts.environment, filter.environments)) {
+      return `environment "${facts.environment}" is not in ${SENTRY_ENVIRONMENTS_VARIABLE} ${quotedList(filter.environments)}`;
+    }
+  }
+  if (filter.releases !== undefined) {
+    if (facts.release === undefined) {
+      return `release is missing; ${SENTRY_RELEASES_VARIABLE} is ${quotedList(filter.releases)}`;
+    }
+    if (!listed(facts.release, filter.releases)) {
+      return `release "${facts.release}" is not in ${SENTRY_RELEASES_VARIABLE} ${quotedList(filter.releases)}`;
+    }
+  }
+  return undefined;
+};
+
+/**
+ * A session's title for an alert: the event's title, then its environment and release when the
+ * payload has them — `ReferenceError: x (production, release web@1.2.3)`.
+ */
+export const sentryTitle = (
+  title: string,
+  facts: {
+    readonly environment?: string | undefined;
+    readonly release?: string | undefined;
+  },
+): string => {
+  const where = [
+    facts.environment,
+    facts.release === undefined ? undefined : `release ${facts.release}`,
+  ].filter((part): part is string => part !== undefined);
+  if (where.length === 0) return title;
+  const suffix = `(${where.join(", ")})`;
+  return title === "" ? suffix : `${title} ${suffix}`;
+};
 
 /** Why a delivery's signature was not accepted. A route answers `401` for both and logs which. */
 export const SentrySignatureRefusal = Schema.Literals([
@@ -187,6 +375,7 @@ const alertBody = (
 export const sentryEvent = (
   payload: unknown,
   headers: { readonly resource?: string | undefined } = {},
+  filter: SentryFilter = {},
 ): TriggerEvent | undefined => {
   const body = asRecord(payload);
   if (body === undefined) return undefined;
@@ -207,6 +396,13 @@ export const sentryEvent = (
     const event = asRecord(data?.["event"]);
     const eventId = stringField(event, "event_id");
     if (event === undefined || eventId === undefined) return undefined;
+    const facts = {
+      level: stringField(event, "level"),
+      environment: stringField(event, "environment"),
+      release: stringField(event, "release"),
+    };
+    const issueId = idField(event, "issue_id");
+    const filtered = sentryFilterRefusal(facts, filter);
     return {
       source: "sentry",
       key: eventId,
@@ -214,22 +410,32 @@ export const sentryEvent = (
         action === SENTRY_ALERT_ACTION
           ? TRIGGER_ACTION
           : `${resource}:${action}`,
-      title: stringField(event, "title") ?? "",
+      title: sentryTitle(stringField(event, "title") ?? "", facts),
       body: alertBody(event, stringField(data, "triggered_rule")),
       labels: labelsOf(event),
+      // Every event in one Sentry issue shares its `issue_id`: the seam binds the issue to the
+      // session its first alert opened.
+      ...(issueId === undefined ? {} : { fingerprint: issueId }),
+      ...(filtered === undefined ? {} : { filtered }),
     };
   }
 
   // Another resource: its own key space, and an action the filter cannot mistake for an alert's.
   // The delivery, not this key, is what tells two of them apart (`sentryDelivery`).
   const subject = asRecord(data?.[resource]);
+  const subjectId = idField(subject, "id");
   return {
     source: "sentry",
-    key: `${resource}:${idField(subject, "id") ?? NO_ID}`,
+    key: `${resource}:${subjectId ?? NO_ID}`,
     action: `${resource}:${action}`,
     title: stringField(subject, "title") ?? "",
     body: stringField(subject, "culprit") ?? "",
     labels: labelsOf(subject),
+    // An `issue` delivery is about the issue an alert's `issue_id` names, so a rule that opts
+    // `issue:created` in and the alerts that follow share one binding.
+    ...(resource === "issue" && subjectId !== undefined
+      ? { fingerprint: subjectId }
+      : {}),
   };
 };
 
@@ -267,6 +473,8 @@ export const sentryStartsWork = (
   event: TriggerEvent,
   rules: ReadonlyArray<TriggerRule> = [],
 ): boolean => {
+  // An alert the deployment's filter refuses starts nothing, whatever a rule admits.
+  if (event.filtered !== undefined) return false;
   const routing = rules.find((rule) => ruleClaims(rule, event));
   return startsWork(
     event.action,
@@ -277,22 +485,24 @@ export const sentryStartsWork = (
 /**
  * A payload as the seam takes it: the normalized event, named by its derived delivery id. An issue
  * alert is keyed by its event and an action `rules` opt in by its subject and action (both
- * `keyedByWork`); anything else by the `Request-ID` it arrived with. `rules` must be the ones the
- * seam maps with, or the key could call a delivery work the filter refuses, or the reverse.
+ * `keyedByWork`); anything else — an alert `filter` refuses included — by the `Request-ID` it
+ * arrived with. `rules` must be the ones the seam maps with, or the key could call a delivery work
+ * the filter refuses, or the reverse.
  */
 export const sentryDelivery = (
   payload: unknown,
   headers: SentryDeliveryHeaders = {},
   rules: ReadonlyArray<TriggerRule> = [],
+  filter: SentryFilter = {},
 ): TriggerDelivery | SentryRefusal => {
-  const event = sentryEvent(payload, { resource: headers.resource });
+  const event = sentryEvent(payload, { resource: headers.resource }, filter);
   if (event === undefined) {
     return {
       refused: "the payload does not name a Sentry resource and event",
       code: "bad-payload",
     };
   }
-  if (event.action === TRIGGER_ACTION) {
+  if (event.action === TRIGGER_ACTION && event.filtered === undefined) {
     return {
       requestId: sentryEventRequestId(event.key),
       event,

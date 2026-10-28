@@ -13,6 +13,9 @@
  * - **The cap counts signed deliveries that can start work only**, so a caller without the secret
  *   cannot spend the budget an honest alert needs, and neither can a firehose of `issue` deliveries
  *   the seam would only skip — unless a rule opts that action in, when it is work and counts.
+ * - **The filter is read from the environment per delivery (LOB-82)**: an alert outside it reaches
+ *   the seam marked `filtered` with the field that failed, keyed by its `Request-ID` and spending no
+ *   token; a `SENTRY_MIN_LEVEL` that is not a level is `503 not-configured`, before the seam.
  *
  * The seam is a recording fake, as in `Webhook.test.ts`: the question is whether the route let a
  * delivery through. Each case serves the routes afresh, so its rate-cap window starts empty.
@@ -35,6 +38,9 @@ const VARIABLES = [
   "SENTRY_CLIENT_SECRET",
   "SENTRY_RATE_LIMIT",
   "SENTRY_RATE_WINDOW_SECONDS",
+  "SENTRY_MIN_LEVEL",
+  "SENTRY_ENVIRONMENTS",
+  "SENTRY_RELEASES",
   "TRIGGER_SECRET",
 ] as const;
 const saved = new Map(VARIABLES.map((name) => [name, process.env[name]]));
@@ -88,7 +94,7 @@ const serve = (rules: ReadonlyArray<TriggerRule> = []) =>
   );
 
 /** An issue alert as Sentry's documented example shapes one, for one event. */
-const alert = (eventId: string) => ({
+const alert = (eventId: string, over: Record<string, unknown> = {}) => ({
   action: "triggered",
   installation: { uuid: "a8e5d37a-696c-4c54-adb5-b3f28d64c7de" },
   data: {
@@ -100,6 +106,7 @@ const alert = (eventId: string) => ({
       culprit: `?(${CANARY})`,
       project: 1,
       web_url: "https://sentry.example/organizations/acme/issues/1117540176/",
+      ...over,
     },
     triggered_rule: "Very Important Alert!",
   },
@@ -418,5 +425,108 @@ describe("the Sentry rate cap", () => {
       "sentry",
       "generic",
     ]);
+  });
+});
+
+describe("the Sentry filter and title on the route (LOB-82)", () => {
+  it("hands the seam an alert titled with its environment and release, bound to its issue", async () => {
+    const answer = await post(
+      served,
+      alert("titled-event", {
+        environment: "production",
+        release: "web@1.2.3",
+      }),
+    );
+
+    expect(answer.status).toBe(200);
+    expect(delivered[0]?.event).toMatchObject({
+      title: `ReferenceError: ${CANARY} (production, release web@1.2.3)`,
+      fingerprint: "1117540176",
+    });
+    expect(delivered[0]?.event.filtered).toBeUndefined();
+  });
+
+  it("marks an alert outside the environment's filter, keys it by its Request-ID, and spends no token on it", async () => {
+    configure({
+      SENTRY_CLIENT_SECRET: SECRET,
+      SENTRY_RATE_LIMIT: "1",
+      SENTRY_MIN_LEVEL: "error",
+      SENTRY_ENVIRONMENTS: "production",
+      SENTRY_RELEASES: "web@2.*",
+    });
+    const refusals = [
+      {
+        over: {
+          level: "warning",
+          environment: "production",
+          release: "web@2.1",
+        },
+        filtered: 'level "warning" is below SENTRY_MIN_LEVEL "error"',
+      },
+      {
+        over: { environment: "staging", release: "web@2.1" },
+        filtered:
+          'environment "staging" is not in SENTRY_ENVIRONMENTS [production]',
+      },
+      {
+        over: { environment: "production", release: "web@1.0" },
+        filtered: 'release "web@1.0" is not in SENTRY_RELEASES [web@2.*]',
+      },
+    ];
+    for (const [n, { over, filtered }] of refusals.entries()) {
+      const answer = await post(served, alert(`filtered-${n}`, over), {
+        requestId: `req-filtered-${n}`,
+      });
+      expect(answer.status).toBe(200);
+      expect(delivered[n]).toMatchObject({
+        requestId: `sentry:delivery:req-filtered-${n}`,
+        event: { action: "create", filtered },
+      });
+      expect(delivered[n]?.keyedByWork).toBeUndefined();
+    }
+
+    // None of the three spent the one token: an alert inside the filter still has it.
+    const admitted = await post(
+      served,
+      alert("admitted", { environment: "production", release: "web@2.1" }),
+    );
+    expect(admitted.status).toBe(200);
+    expect(delivered[3]).toMatchObject({
+      requestId: "sentry:event:admitted",
+      keyedByWork: true,
+    });
+    expect(delivered[3]?.event.filtered).toBeUndefined();
+    expect(
+      (
+        await post(
+          served,
+          alert("past-the-cap", {
+            environment: "production",
+            release: "web@2.2",
+          }),
+        )
+      ).status,
+    ).toBe(429);
+  });
+
+  it("refuses every delivery 503 naming the variable while SENTRY_MIN_LEVEL is not a level", async () => {
+    configure({ SENTRY_CLIENT_SECRET: SECRET, SENTRY_MIN_LEVEL: "severe" });
+    const answer = await post(served, alert("misconfigured"), {
+      requestId: "req-misconfigured",
+    });
+
+    expect(answer.status).toBe(503);
+    expect(answer.body).toEqual({
+      ok: false,
+      code: "not-configured",
+      error:
+        'SENTRY_MIN_LEVEL is "severe"; it must be one of debug, info, warning, error, fatal',
+    });
+    expect(delivered).toHaveLength(0);
+    const refusal = logged.filter((line) => line.includes("refused"));
+    expect(refusal).toHaveLength(1);
+    expect(refusal[0]).toContain("not-configured");
+    expect(refusal[0]).toContain("req-misconfigured");
+    expect(logged.join("\n")).not.toContain(CANARY);
   });
 });

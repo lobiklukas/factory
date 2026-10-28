@@ -1,4 +1,4 @@
-# The Sentry receiver (LOB-81, part 1 of LOB-33)
+# The Sentry receiver and its mapping (LOB-81 and LOB-82, parts 1 and 2 of LOB-33)
 
 **What it is.** The inbound path for Sentry alerts, and its safety: `POST /webhooks/sentry` →
 `apps/api/src/Api/Webhook.ts` (the body cap, the signature, the rate cap) →
@@ -12,6 +12,49 @@ recorded as a skip that names it (`action "issue:resolved" is not "create"`), un
 routes it opts its action in with `startsWorkFor` (`["issue:created"]`): then it is work, keyed by
 its subject and action (`sentry:work:issue:<id>:issue:created`), so a re-send under a new
 `Request-ID` is a replay rather than a second session.
+
+**The mapping (LOB-82).** Three things decide what an alert becomes:
+
+- **The filter.** `SENTRY_MIN_LEVEL` (one of `debug`, `info`, `warning`, `error`, `fatal`),
+  `SENTRY_ENVIRONMENTS` and `SENTRY_RELEASES` (comma-separated; an entry ending in `*` is a prefix,
+  `web@2.*`) narrow which alerts are work; each unset or blank is "any". An alert outside them is
+  answered `200` and recorded as a skip in `webhook_deliveries` whose reason names the field and the
+  value — `level "warning" is below SENTRY_MIN_LEVEL "error"`, `environment "staging" is not in
+SENTRY_ENVIRONMENTS [production]`, `release "web@1.9.0" is not in SENTRY_RELEASES [web@2.*]` (a
+  missing field fails a filter that names it: `environment is missing; …`). It is keyed by its
+  `Request-ID`, like any delivery that cannot start work, and spends no rate-cap token. A
+  `SENTRY_MIN_LEVEL` that is not a level is `503 not-configured` naming the variable, for every
+  delivery, until it is fixed.
+- **The title.** A session's title is the event's title with its environment and release when the
+  payload has them: `ReferenceError: x (production, release web@1.2.3)`.
+- **The fingerprint.** An alert carries its Sentry issue (`data.event.issue_id`) as the event's
+  fingerprint, and the seam binds `sentry:<issue_id>` to the session the issue's first alert opened,
+  in Postgres (`trigger_fingerprints`), so the binding outlives a restart. Another event in the same
+  issue — the alert firing again, under a new `event_id` — opens no second session while that
+  session is open: it is a recorded skip naming it, `sentry:<issue_id> is bound to open session
+ses_… (delivery sentry:event:<first event>), so this delivery opens no second session`. Two events
+  racing for an unbound issue cannot both open one (the binding is a single `INSERT … ON CONFLICT`).
+  Once the session is closed — its workspace released: the card done or canceled, the PR merged, the
+  session discarded — the issue's next alert opens a new session and the binding moves to it. A
+  delivery that fails before opening its session gives the binding back.
+
+**The default prompt (LOB-82).** A rule whose `prompt` is blank (`""`) gets Sentry's own template,
+`SENTRY_PROMPT_TEMPLATE` in `packages/core/src/Sentry.ts`, rendered by `renderPrompt` over the
+alert's title and the `{{body}}` the receiver writes (one `name: value` line per fact: `alert rule`,
+`level`, `culprit`, `release`, `environment`, `issue`, `event`, `link`). Verbatim:
+
+```text
+A Sentry alert fired: {{title}}
+
+{{body}}
+
+Investigate before you edit anything. Find where this error is raised and why: read the culprit and the code around it, and reproduce the failure with a test if you can. Then state the root cause in a short paragraph before you change any file.
+
+If the cause is outside this repository, or the alert is noise, say so and stop without editing. Otherwise fix the root cause rather than the symptom, keep the change as small as the fix needs, and open a pull request whose description names the Sentry issue and the root cause.
+```
+
+So the documented default rule is `{"label":"sentry","repo":"<owner/name>","prompt":""}`; a rule
+that writes its own prompt keeps it.
 
 **How a user reaches it.** An operator creates a Sentry internal integration whose webhook URL is
 the route, sets `SENTRY_CLIENT_SECRET` to its Client Secret, and adds a rule to `TRIGGER_RULES` for
@@ -27,13 +70,20 @@ the seam — `401`, `413`, `429` — writes one warning naming the route, the co
 the body's size, and never the body.
 
 **How the skill drives it.** `./sentry.sh` boots the skill's API (`up.sh`) with
-`SENTRY_CLIENT_SECRET`, `SENTRY_RATE_LIMIT=6`, a `sentry` rule on a per-run repo and, ahead of it,
-a `sentry:project:404` rule on a repo nobody registers, then runs
+`SENTRY_CLIENT_SECRET`, `SENTRY_RATE_LIMIT=6`, the filter `SENTRY_MIN_LEVEL=error`, `SENTRY_ENVIRONMENTS=production`,
+`SENTRY_RELEASES=verify@*`, a `sentry` rule on a per-run repo and, ahead of it, a
+`sentry:project:404` rule on a repo nobody registers and a `sentry:project:777` rule with a blank
+prompt, then runs
 `bun sentry.ts` in two phases around a restart, in `sigterm.sh`'s shape:
 
 1. **first** — a signed alert opens a session; the same payload with the same headers again is
    `replayed: true`, and the repo has one session; the session's first message carries the alert's
-   title and rule. A missing signature is `401 missing-signature` and a signature of another body
+   title and rule. The session's title is the alert's title with `(production, release verify@1.0.0)`;
+   the alert's issue is bound to the session in `trigger_fingerprints`; a new event in the same issue
+   is `200` and a recorded skip whose reason names the open session, and the repo still has one
+   session. Three alerts of the wrong level, environment and release are each a recorded skip whose
+   reason names the field and the value, and open nothing. An alert for project 777 opens a session
+   whose first message is exactly the default template rendered over that alert. A missing signature is `401 missing-signature` and a signature of another body
    `401 bad-signature`; neither opens a session or leaves a `webhook_deliveries` row (read from the
    API's database); each refusal is one log line naming its reason and its `Request-ID`, and no line
    in the API's log carries the canary string both payloads contain. Then a firehose of ten signed
@@ -46,22 +96,33 @@ rate-limited` with `Retry-After` equal to the body's `retryAfterSeconds` and `li
    boots a fresh one on the same database; the script checks the pid changed.
 3. **after-restart** — the same alert (a new `Request-ID`) is `replayed: true` with status
    `processed`, the repo still has one session, and the row the first process wrote is still
-   `processed`. The control: a new alert in the restarted process opens its session, so the replay
+   `processed`. A new event in the first alert's issue is still a skip naming the first process's
+   session, and the `trigger_fingerprints` row still names it. The control: a new alert in the restarted process opens its session, so the replay
    is the dedupe and not a process that cannot create.
 
-**What proves it works.** `.verify/evidence/lob-81/` (gitignored): `sentry-first.json` and
+**What proves it works.** `.verify/evidence/lob-82/` (gitignored; LOB-81's run is in
+`.verify/evidence/lob-81/`): `sentry-first.json` and
 `sentry-after-restart.json` (each phase's checks and every delivery's answer), `sentry-process.json`
 (the script's checks), and both processes' logs. `packages/core/src/Sentry.test.ts` proves the
 signature, the filter and the key in isolation, and the dedupe through the real seam on Postgres —
-including across two runtimes; `apps/api/src/Api/SentryWebhook.test.ts` proves the route's 401s and
-their log line with a recording logger, and that the cap counts only signed deliveries that can
-start work — an opted-in action counts, an `issue` firehose does not.
+including across two runtimes — and, for LOB-82, the filter's reasons, the title, the default
+prompt verbatim, and the binding through the real seam: readable after a restart, a repeat event
+skipped naming the session across processes, four racing events opening one session, a closed
+session's issue rebound, a failed delivery's binding given back; `apps/api/src/Api/SentryWebhook.test.ts`
+proves the route's 401s and their log line with a recording logger, that the cap counts only signed
+deliveries that can start work — an opted-in action counts, an `issue` firehose does not, and
+neither does a filtered alert — and the `503` for a `SENTRY_MIN_LEVEL` that is not a level.
 
-**Non-vacuity.** `mutation-key-by-request-id/`: keying an alert by its `Request-ID` instead of its
-event (the "obvious" key) passes the whole first phase — the drive's two posts share one request id —
-and fails three after-restart checks: the fresh process opens a second session for the same alert.
+**Non-vacuity.** `.verify/evidence/lob-81/mutation-key-by-request-id/`: keying an alert by its
+`Request-ID` instead of its event (the "obvious" key) passes the whole first phase — the drive's two
+posts share one request id — and fails three after-restart checks: the fresh process opens a second
+session for the same alert. `.verify/evidence/lob-82/mutation-no-binding/`: skipping the fingerprint
+claim fails the binding, repeat-alert and session-count checks in both phases (a repeat event opens a
+second session), and four cases in `Sentry.test.ts`.
 
 **What it cannot prove.** That Sentry signs the bytes it sends, whether Sentry retries a delivery
 or keeps its `Request-ID`, and its 1-second response budget (the route answers after the session
-is opened). See `docs/testing-third-parties.md`'s Sentry row. The release/environment/severity
-filter and the fingerprint binding are LOB-82; the link back to the alert is LOB-83.
+is opened). See `docs/testing-third-parties.md`'s Sentry row. That `environment` is on
+`data.event` (the documented example does not show it), so the drive's environment filter is our
+reading. The filter is deployment-wide, not per project or per rule. A repeat alert is recorded on
+the delivery, not posted into the open session. The link back to the alert is LOB-83.

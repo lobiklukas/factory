@@ -69,8 +69,33 @@ export const TriggerEvent = Schema.Struct({
    * `url`. A card made from the delivery links it (LOB-254); nothing routes on it.
    */
   url: Schema.optional(Schema.String),
+  /**
+   * The item this event is one occurrence of, when the source groups occurrences (LOB-82): a Sentry
+   * issue's id, which every event in that issue shares. The seam binds it to the session the first
+   * occurrence opened (`fingerprintOf`, `trigger_fingerprints`), so a later occurrence finds that
+   * session while it is open instead of opening a second one. Absent means every event is its own.
+   */
+  fingerprint: Schema.optional(Schema.String),
+  /**
+   * Why the adapter's own filter refuses this event, when it does (LOB-82): a sentence naming the
+   * field and the value that failed (`level "warning" is below SENTRY_MIN_LEVEL "error"`). The seam
+   * records it as the delivery's skip reason and starts nothing — a recorded decision, not a drop.
+   */
+  filtered: Schema.optional(Schema.String),
 });
 export type TriggerEvent = typeof TriggerEvent.Type;
+
+/**
+ * The key a fingerprinted event is bound under: `<source>:<fingerprint>` — `sentry:<issue id>` — so
+ * two sources' ids cannot collide. `undefined` for an event the source does not group.
+ */
+export const fingerprintOf = (event: {
+  readonly source: TriggerSource;
+  readonly fingerprint?: string | undefined;
+}): string | undefined =>
+  event.fingerprint === undefined
+    ? undefined
+    : `${event.source}:${event.fingerprint}`;
 
 /**
  * What a mapped delivery starts (LOB-254). `session` — the default, and what every rule meant before
@@ -297,16 +322,25 @@ export const ruleName = (rule: TriggerRule): string =>
  *
  * The event's own repo wins over the rule's when it names one: a rule says *which events start
  * work*, and for GitHub the answer to *which repo* is in the payload.
+ *
+ * `defaultPrompt` is the source's own template (LOB-82: Sentry's investigate-before-edit one), used
+ * when the rule's `prompt` is blank: a rule that only says *where* an alert goes still tells the
+ * session *how* to start. A rule that writes a prompt always gets its own.
  */
 export const resolveMapping = (
   rules: ReadonlyArray<TriggerRule>,
   event: TriggerEvent,
+  defaultPrompt?: string,
 ): TriggerMapping | undefined => {
   const rule = findRule(rules, event);
   if (rule === undefined) return undefined;
+  const template =
+    rule.prompt.trim() === "" && defaultPrompt !== undefined
+      ? defaultPrompt
+      : rule.prompt;
   return {
     repo: event.repo ?? rule.repo,
-    prompt: renderPrompt(rule.prompt, event),
+    prompt: renderPrompt(template, event),
     label: ruleName(rule),
     mode: rule.mode ?? "session",
     ...(rule.baseRef === undefined ? {} : { baseRef: rule.baseRef }),

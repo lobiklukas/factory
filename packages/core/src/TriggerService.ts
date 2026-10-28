@@ -41,6 +41,16 @@
  * refused: it is cut to the cap with a marker (`cardBodyOf`), as a session's prompt would carry it
  * whole, and the reason says so.
  *
+ * **A fingerprinted event binds its item to one session (LOB-82).** An adapter whose source groups
+ * occurrences (a Sentry issue's events) names the group on the event (`TriggerEvent.fingerprint`).
+ * Before a session is opened for it, the seam claims `trigger_fingerprints` for `<source>:<fingerprint>`
+ * — one `INSERT … ON CONFLICT … RETURNING`, so two occurrences racing cannot both win — and records
+ * the session it opens there. A later occurrence whose bound session is still open (its workspace
+ * not released) is a recorded skip naming that session; one whose session was closed takes the
+ * binding over and opens the next. The row is Postgres, so a restart keeps it, as it keeps the
+ * delivery's own dedupe row. An adapter's own filter (`TriggerEvent.filtered`) is a recorded skip
+ * too, with the adapter's reason, before any rule is consulted.
+ *
  * **The write-back is optional and injected.** No adapter in part 1 needs one (the generic webhook
  * has no place to write, and the Linear route only delegates), so the default is a no-op: a
  * deployment that configures no client never fails a delivery because of one.
@@ -48,14 +58,16 @@
 import { Context, Duration, Effect, Exit, Layer, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
-import type {
-  CreateSessionInput,
-  RepoSlug,
-  SessionId,
+import {
+  SessionId as SessionIdSchema,
+  type CreateSessionInput,
+  type RepoSlug,
+  type SessionId,
 } from "@repo/domain/Session";
 import { isWebLink, MAX_TASK_BODY_CHARS, type TaskId } from "@repo/domain/Task";
 import {
   externalRefOf,
+  fingerprintOf,
   resolveMapping,
   ruleClaims,
   startsWork,
@@ -68,6 +80,7 @@ import {
   type TriggerOutcome,
   type TriggerRule,
 } from "@repo/domain/Trigger";
+import { SENTRY_PROMPT_TEMPLATE } from "./Sentry";
 import { SessionService } from "./SessionService";
 import { TaskService } from "./TaskService";
 import { envRoutedRules, readRoutedRules } from "./TriggerRoutes";
@@ -256,6 +269,9 @@ export const TriggerCardsFromTaskService = Layer.effect(
   }),
 );
 
+/** The prefix `sessionRequestIdOf` puts on a delivery id, for the SQL that joins the two. */
+const SESSION_REQUEST_PREFIX = "trigger:";
+
 /**
  * The request id a delivery's session is created under: the delivery's own id, namespaced, because
  * `sessions.request_id` dedupes client retries too and a delivery id that happened to equal a
@@ -266,7 +282,7 @@ export const TriggerCardsFromTaskService = Layer.effect(
  * it, and cannot break the day it changes.
  */
 export const sessionRequestIdOf = (deliveryId: string): string =>
-  `trigger:${deliveryId}`;
+  `${SESSION_REQUEST_PREFIX}${deliveryId}`;
 
 /**
  * The actor a trigger-started session's spend is attributed to (LOB-162): the source that started
@@ -438,6 +454,63 @@ const noBoard = (repo: RepoSlug): string =>
   `repo ${repo} has no board (create one with \`factory board create --repo ${repo}\`)`;
 const NO_BOARD_PATTERN = "repo % has no board (%";
 
+/**
+ * A source's own prompt template, used when the rule that routes its event writes a blank `prompt`
+ * (`resolveMapping`'s `defaultPrompt`): Sentry's investigate-before-edit template (LOB-82).
+ */
+export const DEFAULT_PROMPTS: Partial<Record<TriggerSource, string>> = {
+  sentry: SENTRY_PROMPT_TEMPLATE,
+};
+
+/** What `trigger_fingerprints` says about one fingerprint: the delivery that holds it and its session. */
+export type FingerprintBinding = {
+  readonly fingerprint: string;
+  /** The delivery that opened (or is opening) the bound session. */
+  readonly requestId: string;
+  /** The bound session; absent while its delivery has not opened it yet. */
+  readonly sessionId?: SessionId;
+  /** Whether that session is still open: it exists and its workspace was not released. */
+  readonly open: boolean;
+};
+
+/**
+ * The binding a fingerprint (`fingerprintOf`: `sentry:<issue id>`) has, or `undefined` for one no
+ * session was ever opened for. The session is the one recorded on the row, or — when the delivery
+ * holding it died between opening the session and recording it — the one opened under that
+ * delivery's request id.
+ */
+export const readFingerprintBinding = (
+  fingerprint: string,
+): Effect.Effect<FingerprintBinding | undefined, SqlError, SqlClient> =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const rows = yield* sql<{
+      readonly requestId: string;
+      readonly sessionId: string | null;
+      readonly open: boolean;
+    }>`
+      SELECT b.request_id, s.id AS session_id,
+        (s.id IS NOT NULL AND s.workspace_released_at IS NULL) AS open
+      FROM trigger_fingerprints b
+      LEFT JOIN sessions s
+        ON s.id = COALESCE(
+          b.session_id,
+          (SELECT id FROM sessions WHERE request_id = ${SESSION_REQUEST_PREFIX} || b.request_id LIMIT 1)
+        )
+      WHERE b.fingerprint = ${fingerprint}
+    `;
+    const row = rows[0];
+    if (row === undefined) return undefined;
+    return {
+      fingerprint,
+      requestId: row.requestId,
+      ...(Schema.is(SessionIdSchema)(row.sessionId)
+        ? { sessionId: row.sessionId }
+        : {}),
+      open: row.open,
+    };
+  });
+
 const toTriggerError =
   (what: string) =>
   (cause: { readonly message: string }): TriggerError =>
@@ -600,6 +673,67 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           } as const;
         });
 
+      /**
+       * Claim `fingerprint` for the delivery `requestId` (LOB-82): `undefined` when this delivery
+       * holds it — it was free, it is already this delivery's (a retry), or the session it was bound
+       * to is closed — and otherwise the skip reason naming who holds it.
+       *
+       * One statement, as the delivery claim is: of two occurrences racing for a free fingerprint
+       * only one gets a row back. The holder's session is the one recorded on the row, or the one
+       * opened under the holder's request id (a process that died between opening the session and
+       * recording it). "Closed" is a released workspace — the card done or canceled, the PR merged,
+       * the session discarded — or a session that no longer exists; a holder with no session yet is
+       * only overtaken once its claim is older than the reclaim window, as a dead delivery is.
+       */
+      const bindFingerprint = (
+        fingerprint: string,
+        requestId: string,
+      ): Effect.Effect<string | undefined, TriggerError> =>
+        Effect.gen(function* () {
+          const claimed = yield* storage(
+            "claim the fingerprint",
+            sql<{ readonly requestId: string }>`
+              INSERT INTO trigger_fingerprints AS b (fingerprint, request_id)
+              VALUES (${fingerprint}, ${requestId})
+              ON CONFLICT (fingerprint) DO UPDATE
+                SET request_id = EXCLUDED.request_id,
+                    session_id = CASE WHEN b.request_id = EXCLUDED.request_id
+                      THEN b.session_id ELSE NULL END,
+                    bound_at = CASE WHEN b.request_id = EXCLUDED.request_id
+                      THEN b.bound_at ELSE now() END
+                WHERE b.request_id = EXCLUDED.request_id
+                  OR (
+                    NOT EXISTS (
+                      SELECT 1 FROM sessions s
+                      WHERE (s.id = b.session_id
+                          OR s.request_id = ${SESSION_REQUEST_PREFIX} || b.request_id)
+                        AND s.workspace_released_at IS NULL
+                    )
+                    AND (
+                      b.session_id IS NOT NULL
+                      OR EXISTS (
+                        SELECT 1 FROM sessions s
+                        WHERE s.request_id = ${SESSION_REQUEST_PREFIX} || b.request_id
+                      )
+                      OR b.bound_at < now() - make_interval(secs => ${reclaimSeconds})
+                    )
+                  )
+              RETURNING request_id
+            `,
+          );
+          if (claimed.length > 0) return undefined;
+          const holder = yield* storage(
+            "read the fingerprint's binding",
+            readFingerprintBinding(fingerprint).pipe(
+              Effect.provideService(SqlClient, sql),
+            ),
+          );
+          if (holder?.sessionId !== undefined) {
+            return `${fingerprint} is bound to open session ${holder.sessionId} (delivery ${holder.requestId}), so this delivery opens no second session`;
+          }
+          return `${fingerprint} is being bound by delivery ${holder?.requestId ?? "another delivery"}, which has not opened its session yet, so this delivery opens no second session`;
+        });
+
       const deliver = (
         delivery: TriggerDelivery,
       ): Effect.Effect<TriggerOutcome, TriggerError> =>
@@ -659,6 +793,7 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           // the same id, so a retry after a failed write-back finds its prompt already submitted
           // instead of appending it again (LOB-218).
           const sessionRequestId = sessionRequestIdOf(requestId);
+          const fingerprint = fingerprintOf(event);
           const claimedWork: Effect.Effect<TriggerOutcome, TriggerError> =
             Effect.gen(function* () {
               // The filter. `create` always starts work; a lifecycle action (`push`, `schedule`)
@@ -690,12 +825,22 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                 );
               }
 
+              // The adapter's own filter (a Sentry alert outside the deployment's level, environment
+              // or release): its reason names the field and the value, and is the recorded skip.
+              if (event.filtered !== undefined) {
+                return yield* skip(requestId, event.filtered);
+              }
+
               // The rule the filter consulted is the one that maps, and its origin comes from the same
               // list, so the reason cannot name a rule other than the one that chose the repo.
               const mapping =
                 matched === undefined
                   ? undefined
-                  : resolveMapping([matched.rule], event);
+                  : resolveMapping(
+                      [matched.rule],
+                      event,
+                      DEFAULT_PROMPTS[event.source],
+                    );
               if (matched === undefined || mapping === undefined) {
                 return yield* skip(
                   requestId,
@@ -729,6 +874,16 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                 return yield* fileCard(requestId, event, mapping, routedBy);
               }
 
+              // A fingerprinted event (one occurrence of a Sentry issue) opens a session only if it
+              // wins its fingerprint's binding; otherwise the session another occurrence opened is
+              // the one this work belongs to, and the skip names it.
+              if (fingerprint !== undefined) {
+                const held = yield* bindFingerprint(fingerprint, requestId);
+                if (held !== undefined) {
+                  return yield* skip(requestId, held);
+                }
+              }
+
               const session = yield* sessions.create({
                 source: event.source,
                 title: event.title,
@@ -744,6 +899,14 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
               // still has a session with a title rather than one that was never told why it exists.
               // Keyed on the delivery: everything after this can fail and be retried, and the
               // retry must not tell the session the same thing twice.
+              if (fingerprint !== undefined) {
+                yield* storage(
+                  "record the fingerprint's session",
+                  sql`UPDATE trigger_fingerprints SET session_id = ${session.id}
+                      WHERE fingerprint = ${fingerprint} AND request_id = ${requestId}`,
+                );
+              }
+
               yield* sessions.send({
                 sessionId: session.id,
                 content: mapping.prompt,
@@ -784,6 +947,23 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                 WHERE request_id = ${requestId}
                   AND claimed_at = ${claim}::timestamptz`,
           ).pipe(
+            // A fingerprint this attempt claimed and opened no session under goes back too, so the
+            // issue's next occurrence is not told a session is on its way that never will be. One
+            // it did open a session under stays bound: that session is the issue's.
+            Effect.andThen(
+              fingerprint === undefined
+                ? Effect.void
+                : storage(
+                    "release an unbound fingerprint",
+                    sql`DELETE FROM trigger_fingerprints
+                        WHERE fingerprint = ${fingerprint}
+                          AND request_id = ${requestId}
+                          AND session_id IS NULL
+                          AND NOT EXISTS (
+                            SELECT 1 FROM sessions WHERE request_id = ${sessionRequestId}
+                          )`,
+                  ),
+            ),
             // The original failure is what the caller needs; a failed release must not mask it.
             // The next attempt re-claims the row if this one did land.
             Effect.tapError(() =>
