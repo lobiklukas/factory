@@ -266,6 +266,9 @@ export type TriggerOutcome = typeof TriggerOutcome.Type;
  * Why a delivery failed. `at-capacity` (LOB-70) is the session layer's `at_capacity`: the delivery
  * would have opened one more session than the server runs at once. It is the one code a route
  * answers `503` with `Retry-After` rather than `500`, because it is a "not now", not a fault.
+ * `setup-failed` (S-env-setup) is the session layer's `setup_failed` from the seam's `send`: the
+ * session's worktree setup failed, so its prompt was not sent. The seam records that as the
+ * delivery's processed outcome rather than failing it, so a delivery never answers it.
  */
 export const TriggerErrorCode = Schema.Literals([
   "storage",
@@ -273,6 +276,7 @@ export const TriggerErrorCode = Schema.Literals([
   "card-create",
   "write-back",
   "at-capacity",
+  "setup-failed",
 ]);
 export type TriggerErrorCode = typeof TriggerErrorCode.Type;
 

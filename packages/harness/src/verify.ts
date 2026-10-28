@@ -62,7 +62,10 @@
  * attributable to the session only on a host where this control plane is the one running skills.
  */
 import type { Context, JsonValue } from "@earendil-works/chord";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import {
+  BACKGROUND_CONTEXT,
+  withAbortSignal,
+} from "@earendil-works/chord/context";
 import { Type } from "@earendil-works/pi-ai";
 import type {
   Cursor,
@@ -330,9 +333,10 @@ export const tailOf = (
 
 /**
  * A running tail: holds at most twice the character bound, so a driver that prints megabytes costs
- * a bounded buffer, and remembers that it dropped something.
+ * a bounded buffer, and remembers that it dropped something. Shared with `./setup`, whose install
+ * and build print as much as a driver does.
  */
-const runningTail = () => {
+export const runningTail = () => {
   let text = "";
   let dropped = false;
   return {
@@ -351,15 +355,18 @@ const runningTail = () => {
 };
 
 /** A command the environment could not run to an exit code. */
-class ExecFailure extends Schema.TaggedError<ExecFailure>()("ExecFailure", {
-  code: Schema.String,
-  message: Schema.String,
-}) {}
+export class ExecFailure extends Schema.TaggedError<ExecFailure>()(
+  "ExecFailure",
+  {
+    code: Schema.String,
+    message: Schema.String,
+  },
+) {}
 
 const describe = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);
 
-type ExecInput = {
+export type ExecInput = {
   readonly env: ExecutionEnv;
   readonly command: string | readonly string[];
   readonly cwd: string;
@@ -369,10 +376,19 @@ type ExecInput = {
   readonly context: Context;
 };
 
-/** Run one command to its exit code, crossing the Promise boundary once. */
-const exec = (input: ExecInput): Effect.Effect<number, ExecFailure> =>
+/**
+ * Run one command to its exit code, crossing the Promise boundary once: the `verify` tool's runs and
+ * `./setup`'s install and build alike, so both go through the session's `ExecutionEnv` one way.
+ *
+ * Interrupting it stops the command: the fiber's abort signal joins `input.context`, and the
+ * environment kills what it spawned when that signal fires. Without it an interrupted caller would
+ * leave the process running, unrecorded, beside whatever ran next in the same directory.
+ */
+export const execToExit = (
+  input: ExecInput,
+): Effect.Effect<number, ExecFailure> =>
   Effect.tryPromise({
-    try: () =>
+    try: (signal) =>
       input.env.exec(
         input.command,
         {
@@ -384,7 +400,7 @@ const exec = (input: ExecInput): Effect.Effect<number, ExecFailure> =>
             : { timeout: input.timeoutSeconds }),
           onOutput: (text, _context, info) => input.onOutput(text, info.stream),
         },
-        input.context,
+        withAbortSignal(signal, input.context),
       ),
     catch: (cause) =>
       new ExecFailure({ code: "unknown", message: describe(cause) }),
@@ -440,7 +456,7 @@ export const changedPaths = (input: {
       Effect.gen(function* () {
         let stdout = "";
         let stderr = "";
-        const exitCode = yield* exec({
+        const exitCode = yield* execToExit({
           env,
           command: ["git", ...args],
           cwd,
@@ -620,7 +636,7 @@ const verifySurface = (input: {
       input.onOutput(text);
     };
     const ran = yield* Effect.result(
-      exec({
+      execToExit({
         env,
         command,
         cwd,
@@ -636,7 +652,7 @@ const verifySurface = (input: {
       // what `up.sh` started would outlive the session. Its exit code is not the verdict.
       onOutput(`== ${surface}: running down.sh after ${ran.failure.code}\n`);
       yield* Effect.ignore(
-        exec({
+        execToExit({
           env,
           command: "bash down.sh",
           cwd,

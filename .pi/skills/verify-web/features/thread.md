@@ -59,7 +59,7 @@ ask. The drive requires:
    `createdAt`, the composer turned into **Answer**, and the card marked blocked;
 3. the attention view's question row to link `?card=<task>#thread`, and a click on it to land with the
    section in view and the composer focused;
-4. with the page's `getBoard`/`listTasks`/`listTaskComments` held at the network, a note from the run
+4. with the page's `getBoard`/`listBoardCards`/`listTaskComments` held at the network, a note from the run
    (`commentTask` from the drive, the run's session id as actor: revision +1, still blocked); the
    answer typed and sent from the stale pane to be refused `StaleRevision` with the service's `is at
 revision N, not M`, the card still blocked on the server, and the typed text still in the

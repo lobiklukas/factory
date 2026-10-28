@@ -20,6 +20,8 @@
 //             worktree on disk and the branch in the checkout; one opened on the repo while it had no checkout has a directory but no worktree
 //   follow    the checkout moved away behind the registry's back: the open page flips the row to
 //             `not runnable`, cause `not_a_work_tree`, on its next poll, without a reload
+//   park      a card on a registered repo whose install exits 7: its run's first message is refused
+//             `setup_failed`, and the card pane shows the block's note (the step, exit 7, stderr)
 //
 // Env: WEB_URL, API_URL, EVIDENCE_DIR, RUN_DIR.
 import { spawnSync } from "node:child_process";
@@ -82,6 +84,9 @@ for (const dir of [WIDGETS_DIR, NOPATH_DIR]) {
   );
   if (commit.status !== 0) throw new Error(`git commit: ${commit.stderr}`);
 }
+// One readiness check the widgets checkout passes (LOB-29, S-env-setup): an AGENTS.md, so the page
+// shows `1/4` and names the other three, as the server scored them.
+await writeFile(path.join(WIDGETS_DIR, "AGENTS.md"), "# widgets\n");
 // The server reports the path it was given; macOS's /var is a link to /private/var, so a checkout
 // under a symlinked directory is compared by the path registered, not by its real path.
 const WIDGETS_REAL = await realpath(WIDGETS_DIR);
@@ -342,6 +347,36 @@ try {
       added.text.includes("base main"),
     JSON.stringify(oracle ?? null),
   );
+  const readiness = await page.$eval(rowSel(WIDGETS), (node) => ({
+    score:
+      node
+        .querySelector("[data-repo-readiness]")
+        ?.getAttribute("data-repo-readiness") ?? null,
+    missing: [...node.querySelectorAll("[data-repo-readiness-missing]")].map(
+      (item) => item.textContent?.trim() ?? "",
+    ),
+  }));
+  observed.readiness = { row: readiness, oracle: oracle?.readiness ?? null };
+  assert(
+    "the row shows the checkout's readiness score and every failed check, as listRepos scored it",
+    oracle?.readiness !== undefined &&
+      readiness.score === `${oracle.readiness.score}/${oracle.readiness.max}` &&
+      readiness.score === "1/4" &&
+      JSON.stringify(readiness.missing) ===
+        JSON.stringify(
+          oracle.readiness.checks
+            .filter((check) => !check.passed)
+            .map((check) => check.reason),
+        ),
+    JSON.stringify(readiness),
+  );
+  assert(
+    "a repo with no checkout is not scored, and the row says none rather than 0",
+    (await page
+      .locator(`${rowSel(NOPATH)} [data-repo-readiness='none']`)
+      .count()) === 1 && (await listed(NOPATH))?.readiness === undefined,
+    "nopath readiness none",
+  );
   assert(
     "a landed registration clears the form, says so, and drops the refusal",
     (await page.locator("input[name='repo']").inputValue()) === "" &&
@@ -450,6 +485,88 @@ try {
       (await readRow(NOPATH)).runnable === "true" &&
       (await page.locator(rowSel(BAD)).count()) === 0,
     JSON.stringify(reloaded),
+  );
+
+  // --- park: a card whose run's worktree setup failed (S-env-setup) ----------------------------
+  // Last, because it leaves the Repositories page: `follow` above needs that page open.
+  const BROKEN = `verify-repos-${TAG}/broken`;
+  const BROKEN_DIR = path.join(CHECKOUTS, "broken");
+  await mkdir(path.join(BROKEN_DIR, ".factory"), { recursive: true });
+  await writeFile(
+    path.join(BROKEN_DIR, ".factory", "config"),
+    JSON.stringify({
+      install:
+        'echo "resolving deps"; echo "error: registry unreachable" >&2; exit 7',
+    }),
+  );
+  for (const args of [
+    ["init", "-q", "-b", "main"],
+    ["add", "-A"],
+    [
+      "-c",
+      "user.email=verify-repos@localhost",
+      "-c",
+      "user.name=verify-repos",
+      "commit",
+      "-q",
+      "-m",
+      "seed",
+    ],
+  ]) {
+    const ran = spawnSync("git", ["-C", BROKEN_DIR, ...args], {
+      encoding: "utf8",
+    });
+    if (ran.status !== 0) throw new Error(`git ${args[0]}: ${ran.stderr}`);
+  }
+  await rpc("registerRepo", {
+    repo: BROKEN,
+    defaultBaseRef: "main",
+    localPath: BROKEN_DIR,
+  });
+  const parkBoard = await rpc("createBoard", {
+    repo: BROKEN,
+    definitionId: "default",
+  });
+  const parkCard = await rpc("createTask", {
+    boardId: parkBoard.id,
+    title: `repos: a card whose repo does not install (${TAG})`,
+    actor: "person:verify-repos",
+  });
+  const parkRun = await rpc("createSession", {
+    taskId: parkCard.id,
+    taskColumn: parkCard.column,
+  });
+  const parkRefused = await rpcFailure("sendMessage", {
+    sessionId: parkRun.id,
+    content: "build it",
+  });
+  await page.goto(`${WEB_URL}/boards/${parkBoard.id}?card=${parkCard.id}`, {
+    waitUntil: "domcontentloaded",
+  });
+  const noteSel = `aside[data-card-pane='${parkCard.id}'] [data-card-block-note='setup_failed']`;
+  await page.waitForSelector(noteSel, { timeout: 20_000 });
+  const note = await page.$eval(noteSel, (node) => ({
+    heading: node.querySelector("h3")?.textContent?.trim() ?? null,
+    text: node.querySelector("pre")?.textContent ?? "",
+  }));
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "repos-setup-failed-card.png"),
+    fullPage: true,
+  });
+  observed.park = {
+    board: parkBoard.id,
+    card: parkCard.id,
+    run: parkRun.id,
+    refused: parkRefused.message ?? null,
+    note,
+  };
+  assert(
+    "a card parked setup_failed shows its note in the card pane: the step, exit code and output tail",
+    (parkRefused.message ?? "").includes("setup failed: install") &&
+      note.heading === "Blocked: its worktree setup failing" &&
+      note.text.includes("exited 7") &&
+      note.text.includes("error: registry unreachable"),
+    JSON.stringify(note).slice(0, 200),
   );
 
   assert(

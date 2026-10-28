@@ -193,11 +193,11 @@ execSync("git commit --allow-empty -m init", {
   cwd: repoRoot,
   stdio: "ignore",
 });
+// No `install` or `build`: a declared setup runs in every worktree cut from this checkout before
+// its first turn (S-env-setup), and this one has nothing to install. `setup` below declares its own.
 writeFileSync(
   join(repoRoot, ".factory", "config"),
   JSON.stringify({
-    install: "bun install",
-    build: "bun run build",
     test: "bun run test",
     verify: "bun .pi/skills/verify-api/drive.ts",
   }),

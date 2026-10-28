@@ -7,6 +7,7 @@ import { LIST_BOARDS_LIMIT } from "@repo/domain/Task";
 import { boardsAtom } from "@/lib/atoms/board-atom";
 import { NEW_BOARD } from "@/lib/board-create-view";
 import { EmptyPane } from "@/components/empty-pane";
+import { GettingStarted } from "@/components/getting-started";
 import { NewBoardDialog } from "@/components/new-board";
 import { buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -77,15 +78,22 @@ function BoardsRoute() {
       <EmptyPane
         icon={<KanbanSquareIcon strokeWidth={1.75} />}
         title="No boards yet"
-        detail="A board binds one repository to a definition version. None exists on this control plane yet; make one here, or with factory board create --repo owner/name."
+        detail="A board binds one repository to a definition version. None exists on this control plane yet: register a repository, make a board for it, put a card on it and start a run. The steps tick off as the control plane holds each."
         visible={boards.length === 0}
-        action={<NewBoardLink where="empty" />}
+        action={
+          <div className="flex w-full flex-col items-center gap-4">
+            <NewBoardLink where="empty" />
+            <GettingStarted className="w-full" />
+          </div>
+        }
       >
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-6">
           <div className="mb-4 flex max-w-xl items-center justify-between gap-3">
             <h1 className="text-sm font-medium">Boards</h1>
             <NewBoardLink where="header" />
           </div>
+          {/* Until a run has started from a card, the checklist stays above the list (C9). */}
+          <GettingStarted className="mb-4 max-w-xl" />
           {boards.length >= LIST_BOARDS_LIMIT && (
             <p className="mb-3 max-w-xl text-xs text-muted-foreground">
               The {LIST_BOARDS_LIMIT} newest boards; older ones are on the

@@ -611,6 +611,15 @@ const showCommand = Command.make(
             : `${card.blocked.reason} from ${card.blocked.column} since ${card.blocked.since}`
         }`,
       );
+      // What the block says it waits on (a run parked `setup_failed` names the step and its
+      // output's last lines, S-env-setup), indented under it. A question is the thread's to print.
+      if (
+        card.blocked?.note !== undefined &&
+        card.blocked.reason !== "needs_input"
+      ) {
+        for (const line of card.blocked.note.split("\n"))
+          yield* Console.log(`          ${line}`);
+      }
       yield* Console.log(`title     ${card.title}`);
       for (const line of bodyLines(card)) yield* Console.log(line);
       for (const line of specLines(spec)) yield* Console.log(line);

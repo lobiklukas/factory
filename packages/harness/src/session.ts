@@ -40,6 +40,7 @@ import {
 import { createRegistry } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
+import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import type { BindableSandboxRuntimeShape } from "@repo/sandbox";
 import { Effect, Queue, Schema, Stream } from "effect";
 import type {
@@ -168,6 +169,8 @@ import {
   projectApprovals,
   projectBudgetDoc,
   projectEntry,
+  runEndingOf,
+  type RunEnding,
   projectMergeDoc,
   projectPrDoc,
   projectPages,
@@ -191,6 +194,7 @@ import {
   PR_OPENED_ENTRY_KIND,
   PR_INHERITED_ENTRY_KIND,
   NO_CHANGE_ENTRY_KIND,
+  PR_NOT_OPENED_ENTRY_KIND,
   INTERRUPTED_ENTRY_KIND,
   INTERRUPT_DOC_KIND,
   LIVE_DOC,
@@ -454,6 +458,12 @@ export type OpenSession = {
    * that order.
    */
   readonly releaseEnvironment: Effect.Effect<void>;
+  /**
+   * The environment the session's commands run in for a working directory (LOB-244): the one the
+   * harness's tools get, so what the control plane runs on the session's behalf before a turn — the
+   * repo's setup (`./setup`) — runs where the tools would, sandbox and all.
+   */
+  readonly env: (cwd: string) => Promise<ExecutionEnv>;
   /**
    * The model the root conversation is pinned to, which its requests go to and its compaction
    * thresholds follow: the role's (or the deployment's) when this open created the root, and the
@@ -723,6 +733,7 @@ const openSessionIn = (
         root,
         model,
         releaseEnvironment: environment.release,
+        env: environment.env,
         resumed,
       };
     }).pipe(Effect.onError(() => Effect.exit(closeHarness(harness))));
@@ -1436,6 +1447,57 @@ export const writeNoDocumentationChange = (
       )
       .then((entry) => entry.id),
   );
+
+/**
+ * A settled run whose PR step opened no PR, announced in the transcript (C18). Like the no-change
+ * entry it carries no model content, so the agent never reads it as a turn, and nothing else is
+ * written: the next settle (or an operator's call) runs the step afresh.
+ */
+export const PullRequestNotOpenedEntry = defineEntry<{
+  readonly text: string;
+}>(PR_NOT_OPENED_ENTRY_KIND);
+
+/** Announce why a settled run's PR step opened nothing; `text` is the control plane's sentence. */
+export const writePullRequestNotOpened = (
+  conversation: Conversation,
+  text: string,
+): Effect.Effect<EntryId, SessionError> =>
+  attempt("write PR not opened", () =>
+    conversation
+      .commit(
+        (tx) =>
+          tx.appendEntry(PullRequestNotOpenedEntry, conversation.id, {
+            data: { text },
+          }),
+        BACKGROUND_CONTEXT,
+      )
+      .then((entry) => entry.id),
+  );
+
+/** Entries per round trip while reading back to a run's start; most runs fit in one page. */
+const RUN_ENDING_PAGE = 50;
+
+/**
+ * How the root's newest run ended (C18, `runEndingOf`), read newest first and only as far back as
+ * that run's newest user input, so a long session costs a page, not its whole transcript.
+ */
+export const readRunEnding = (
+  conversation: Conversation,
+): Effect.Effect<RunEnding, SessionError> =>
+  Effect.gen(function* () {
+    const read: EntryRecord[] = [];
+    let cursor: Cursor | undefined;
+    for (;;) {
+      const page = yield* attempt("scan the run's entries", () =>
+        conversation.entries({}, RUN_ENDING_PAGE, cursor, BACKGROUND_CONTEXT),
+      );
+      read.push(...page.items);
+      cursor = page.next;
+      if (cursor === undefined) break;
+      if (page.items.some((entry) => entry.kind === "pi.user")) break;
+    }
+    return runEndingOf(read);
+  });
 
 /**
  * A cited knowledge page, announced in the transcript (LOB-204).

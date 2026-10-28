@@ -61,8 +61,9 @@ export const boardsAtom = runtime
  * One board as the lanes need it: the instance with the definition version it binds, and its cards.
  *
  * Two calls, issued together. `getBoard` answers the definition in one statement, so the lane order
- * is the pinned version's (B2); `listTasks` answers every card on the board in the server's order
- * (B9). A failure of either fails the read, rather than showing lanes with no cards — an empty lane
+ * is the pinned version's (B2); `listBoardCards` answers every card on the board in the server's
+ * order (B9), each with its runs' newest status, PR link and summed spend (C10) — one read for the
+ * whole board, so a card face never costs a call of its own. A failure of either fails the read, rather than showing lanes with no cards — an empty lane
  * and a lane whose cards failed to load must not look the same.
  *
  * A card's moves are its pinned definition version's (B2, LOB-267). Every card made on a board pins
@@ -79,10 +80,14 @@ export const boardAtom = Atom.family((boardId: BoardInstanceId) =>
     .atom(
       Effect.gen(function* () {
         const rpc = yield* RpcClient;
-        const [view, tasks] = yield* Effect.all(
-          [rpc.client.getBoard({ boardId }), rpc.client.listTasks({ boardId })],
+        const [view, cards] = yield* Effect.all(
+          [
+            rpc.client.getBoard({ boardId }),
+            rpc.client.listBoardCards({ boardId }),
+          ],
           { concurrency: 2 },
         );
+        const tasks = cards.map((card) => card.task);
         const others = [
           ...new Set(
             tasks
@@ -112,7 +117,7 @@ export const boardAtom = Atom.family((boardId: BoardInstanceId) =>
         const pinned: ReadonlyMap<number, BoardDefinition> = new Map(
           read.flatMap((entry) => (Option.isSome(entry) ? [entry.value] : [])),
         );
-        return { ...view, tasks, pinned };
+        return { ...view, tasks, cards, pinned };
       }),
     )
     .pipe(Atom.withReactivity([BOARD_KEY]), Atom.withRefresh(BOARD_POLL)),
@@ -307,7 +312,8 @@ export const decideApprovalAtom = runtime.fn(
 
 /**
  * Which definitions exist and the versions each holds (LOB-270): what the "New board" form's
- * pickers offer. Read once per opening of the form — definitions are written by migrations, so a
+ * pickers offer, and how the settings page (LOB-245) knows a version newer than a board's pin exists.
+ * Read once per opening of the form or the page — definitions are written by migrations, so a
  * poll would only re-ask a fixed answer.
  */
 export const definitionsAtom = runtime.atom(
@@ -315,6 +321,25 @@ export const definitionsAtom = runtime.atom(
     const rpc = yield* RpcClient;
     return yield* rpc.client.listDefinitions({});
   }),
+);
+
+/**
+ * A board's configuration (LOB-245): `getBoardConfig`, the instance with the definition version it pins
+ * described exactly as `getDefinition` describes that version — each column's kind, role and the
+ * model it resolves to, skills, requirements marked checked or not, exits and human gates. What the
+ * settings page and a lane header's disclosure render, and nothing else.
+ *
+ * Read once per opening, not polled: a version is never edited in place (B2) and a board's pin does
+ * not move under it, so a poll would re-ask a fixed answer. One read rather than `getBoard` and then
+ * `getDefinition`, so the version described is the one the instance pins, never a later one.
+ */
+export const boardConfigAtom = Atom.family((boardId: BoardInstanceId) =>
+  runtime.atom(
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.getBoardConfig({ boardId });
+    }),
+  ),
 );
 
 /**

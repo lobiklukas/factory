@@ -1,7 +1,13 @@
-// The drive's PR phase (C7): the build run's pull request is opened in the browser, from the card
-// pane's run row, and never with `factory pr`.
+// The drive's PR phase in the browser. Two modes:
 //
-//   node pr-browser.mjs
+//   PR_MODE=recorded node pr-browser.mjs   (what `drive.sh` runs since C18)
+//     The build run's PR was opened when its run settled, by nobody. The card pane must show it
+//     without a press: the run's row and the run pane's header carry PR_URL, and neither offers
+//     "Open pull request" any more. Prints `pr       <url>` on success.
+//
+//   node pr-browser.mjs                    (C7's press, for a run whose PR nobody opened yet)
+//     The build run's pull request is opened in the browser, from the card pane's run row, and
+//     never with `factory pr`.
 //
 // Env:
 //   WEB_URL       default http://localhost:3400
@@ -31,6 +37,8 @@ const WEB_URL = process.env["WEB_URL"] ?? "http://localhost:3400";
 const BOARD_ID = process.env["BOARD_ID"] ?? "";
 const TASK_ID = process.env["TASK_ID"] ?? "";
 const SESSION_ID = process.env["SESSION_ID"] ?? "";
+const PR_MODE = process.env["PR_MODE"] ?? "press";
+const PR_URL = process.env["PR_URL"] ?? "";
 const EVIDENCE_DIR =
   process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest/board";
 
@@ -59,18 +67,66 @@ try {
   await page.evaluate(() => {
     window.__prNoReload = true;
   });
-  const offered = await page
-    .waitForSelector(`${row} [data-open-pr='available']`, { timeout: 20_000 })
-    .then(
-      () => true,
-      () => false,
+  if (PR_MODE === "recorded") {
+    const shown = await page
+      .waitForSelector(`${row} [data-pr-link]`, { timeout: 20_000 })
+      .then(
+        () => true,
+        () => false,
+      );
+    await page.screenshot({
+      path: path.join(EVIDENCE_DIR, "pr-browser.png"),
+      fullPage: true,
+    });
+    const rowHref = shown
+      ? await page.locator(`${row} [data-pr-link]`).first().getAttribute("href")
+      : null;
+    const paneHref = await page
+      .locator(`${pane} [data-pr-link]`)
+      .first()
+      .getAttribute("href", { timeout: 10_000 })
+      .catch(() => null);
+    observed.rowHref = rowHref;
+    observed.paneHref = paneHref;
+    check(
+      "the settled run's PR is on its row and in the run pane's header, with nothing pressed",
+      rowHref !== null && rowHref === PR_URL && paneHref === PR_URL,
+      `row=${rowHref} header=${paneHref} recorded=${PR_URL || "none"}`,
     );
-  check(
-    "the build run's row offers Open pull request",
-    offered,
-    offered ? "[data-open-pr='available'] on the row" : "never offered",
-  );
-  if (!offered) {
+    check(
+      "and neither offers Open pull request: the PR is already open",
+      (await page.locator(`${row} [data-open-pr]`).count()) === 0 &&
+        (await page.locator(`${pane} [data-open-pr]`).count()) === 0,
+      "no [data-open-pr] on the row or in the header",
+    );
+    console.log(
+      rowHref === null
+        ? "error: the card pane's run row shows no PR link"
+        : `pr       ${rowHref}`,
+    );
+    printed = true;
+  }
+  const offered =
+    PR_MODE === "recorded"
+      ? false
+      : await page
+          .waitForSelector(`${row} [data-open-pr='available']`, {
+            timeout: 20_000,
+          })
+          .then(
+            () => true,
+            () => false,
+          );
+  if (PR_MODE !== "recorded") {
+    check(
+      "the build run's row offers Open pull request",
+      offered,
+      offered ? "[data-open-pr='available'] on the row" : "never offered",
+    );
+  }
+  if (PR_MODE === "recorded") {
+    // Done above: nothing to press.
+  } else if (!offered) {
     console.log(
       "error: the card pane's run row never offered Open pull request",
     );

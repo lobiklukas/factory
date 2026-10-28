@@ -8,7 +8,8 @@ The four board reads and writes an operator needs to triage from a terminal (LOB
 RPC that already existed: `blockTask`, `unblockTask`, `listAttention` and `listTaskRuns`.
 
 - `block` parks a card for a reason (`dependency`, `needs_input`, `capability`, `transient`) with an
-  optional `--note`; `unblock` lifts it and the card is back in the column it blocked from.
+  optional `--note` (a fifth reason, `setup_failed`, is a run's own block when its worktree's setup
+  failed, S-env-setup; a person unblocks it like any other); `unblock` lifts it and the card is back in the column it blocked from.
   `--expect-revision` is optional on both: named, it is sent as named and a stale one is the server's
   `stale_revision`; omitted, the command reads the card and uses its current revision (`move` still
   requires one, because a move is a decision taken from a read).

@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { TerminalIcon } from "lucide-react";
 import { EmptyPane } from "@/components/empty-pane";
+import { EmptyLink } from "@/components/empty-link";
 
 export const Route = createFileRoute("/sessions/")({
   // Below `md` the session list is this route's whole width (LOB-210), so the empty pane beside it
@@ -12,6 +13,7 @@ export const Route = createFileRoute("/sessions/")({
         icon={<TerminalIcon strokeWidth={1.75} />}
         title="Pick a session"
         detail="Or start one: it creates a session, sends the first message, and follows the stream. Everything the agent does lands in the transcript below the header."
+        action={<EmptyLink to="/boards">Or work from a board</EmptyLink>}
         visible
       />
     </div>

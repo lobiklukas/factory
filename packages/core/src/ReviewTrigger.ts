@@ -396,9 +396,11 @@ export const ReviewSessionsFromSessionService = (
               Effect.mapError(triggerErrorOfSession),
             );
         },
+        // A trigger never waits for a worktree's setup (S-env-setup): its sender would give
+        // up first, taking the prompt with it. The message is sent once the setup succeeds.
         send: (input) =>
           sessions
-            .send({
+            .sendDeferringSetup({
               sessionId: input.sessionId,
               content: input.content,
               requestId: input.requestId,
