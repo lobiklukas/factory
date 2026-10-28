@@ -982,6 +982,82 @@ export const TaskPlan = Schema.Struct({
 export type TaskPlan = typeof TaskPlan.Type;
 
 /**
+ * The largest patch a handed-off card carries, in bytes (S-local-agent-handoff-mcp). The patch is
+ * stored on the card's `created` event and sent whole over the RPC, so it is a storage and a wire
+ * budget, not a prompt one (the prompt names the handoff; the patch is a commit in the worktree).
+ * Half a mebibyte is several thousand changed lines of source — far more than a change a person
+ * hands over mid-stride — and a diff past it is a vendored tree, a lockfile churn or a build output
+ * that belongs in a pushed branch rather than in a card.
+ */
+export const MAX_HANDOFF_PATCH_BYTES = 524_288;
+
+/** A patch's size as the cap counts it: its UTF-8 bytes (a `--binary` patch is ASCII). */
+export const handoffPatchBytes = (patch: string): number =>
+  new TextEncoder().encode(patch).byteLength;
+
+/**
+ * The refusal of an oversized handoff, in one set of words for the CLI (which measures first and
+ * sends nothing) and the server (which holds every caller to the same cap).
+ */
+export const handoffCapRefusal = (bytes: number): string =>
+  `the handoff patch is ${bytes} bytes, over the ${MAX_HANDOFF_PATCH_BYTES}-byte cap a card carries: commit and push the work to a branch and hand off from it (--base), or hand off a smaller change`;
+
+/**
+ * The paths a patch touches, in the order git wrote them: each `diff --git a/<old> b/<new>` header's
+ * new path. A quoted path (one with a special character) is kept as git quoted it.
+ */
+export const handoffPatchFiles = (patch: string): ReadonlyArray<string> =>
+  patch
+    .split("\n")
+    .filter((line) => line.startsWith("diff --git "))
+    .map((line) => {
+      const header = line.slice("diff --git ".length);
+      const split = header.lastIndexOf(" b/");
+      return split === -1 ? header : header.slice(split + 3);
+    });
+
+/**
+ * What a local agent handed off with a card (S-local-agent-handoff-mcp): its work in progress as one
+ * git patch, the local branch it was on, and the commit the patch is against. The patch is the diff
+ * from `baseCommit` to the local working tree — committed and uncommitted changes and untracked
+ * files alike — written by `git diff --binary --full-index`, so a three-way apply can find every
+ * pre-image blob. The card's `baseRef` is where its runs start; a run cut on a fresh branch there
+ * applies the patch and commits it before its agent's first turn.
+ */
+export const TaskHandoffFields = {
+  patch: Schema.String,
+  /**
+   * The local branch the work was on, for the reader: never a ref a run starts from. At most
+   * `MAX_TASK_REF_CHARS` (written out: that constant is declared below this one).
+   */
+  branch: Schema.optional(
+    Schema.String.pipe(Schema.check(Schema.isMaxLength(1_024))),
+  ),
+  /** The commit the patch was taken against, when the local checkout named one. */
+  baseCommit: Schema.optional(
+    Schema.String.pipe(Schema.check(Schema.isPattern(/^[0-9a-f]{40,64}$/))),
+  ),
+} as const;
+
+export const TaskHandoffInput = Schema.Struct(TaskHandoffFields);
+export type TaskHandoffInput = typeof TaskHandoffInput.Type;
+
+/** A card's handoff as a client reads it (`getTaskHandoff`): the patch, its size and its files. */
+export const TaskHandoff = Schema.Struct({
+  taskId: TaskId,
+  ...TaskHandoffFields,
+  baseRef: Schema.optional(Schema.String),
+  bytes: Schema.Int,
+  files: Schema.Array(Schema.String),
+  actor: Schema.String,
+  createdAt: Timestamp,
+});
+export type TaskHandoff = typeof TaskHandoff.Type;
+
+export const GetTaskHandoffInput = Schema.Struct({ taskId: TaskId });
+export type GetTaskHandoffInput = typeof GetTaskHandoffInput.Type;
+
+/**
  * The column a move abandons a card into: it checks no exit requirement, because a card nobody will
  * finish cannot be asked to prove the work it is abandoning (`exitRequirements`).
  */
@@ -1164,6 +1240,8 @@ export const TaskEvent = Schema.TaggedUnion({
     externalRef: Schema.optional(Schema.String),
     externalUrl: Schema.optional(Schema.String),
     priority: Schema.optional(TaskPriority),
+    /** The handoff the create carried (S-local-agent-handoff-mcp): the card's input, so its event's. */
+    handoff: Schema.optional(TaskHandoffInput),
   },
   moved: {
     taskId: TaskId,
@@ -1608,6 +1686,12 @@ export const CreateTaskInput = Schema.Struct({
   externalUrl: Schema.optional(
     Schema.String.pipe(Schema.check(Schema.isMaxLength(MAX_TASK_REF_CHARS))),
   ),
+  /**
+   * The work in progress a local agent hands over with the card (S-local-agent-handoff-mcp,
+   * `factory handoff`): a patch of at most `MAX_HANDOFF_PATCH_BYTES`, which a run cut on a fresh
+   * branch applies and commits before its first turn. Absent: an ordinary card.
+   */
+  handoff: Schema.optional(TaskHandoffInput),
   actor: Schema.String,
 });
 export type CreateTaskInput = typeof CreateTaskInput.Type;

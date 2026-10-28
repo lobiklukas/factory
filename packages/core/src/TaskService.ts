@@ -91,12 +91,16 @@ import {
   DefinitionSummary,
   gatedColumns,
   gatedExit,
+  handoffCapRefusal,
+  handoffPatchBytes,
+  handoffPatchFiles,
   HUMAN_MERGE_REQUIREMENT,
   initialColumnOf,
   isTerminalColumn,
   isWebLink,
   LIST_BOARDS_LIMIT,
   MERGED_COLUMN,
+  MAX_HANDOFF_PATCH_BYTES,
   MAX_TASK_BODY_CHARS,
   MAX_TASK_REF_CHARS,
   MAX_TASK_TITLE_CHARS,
@@ -107,6 +111,8 @@ import {
   Task,
   TaskExit,
   TaskEvent,
+  TaskHandoff,
+  type TaskHandoffInput,
   TaskId,
   TaskPlan,
   TaskRun,
@@ -365,6 +371,11 @@ export type CreateTaskInput = {
    * is `InvalidTaskInput`, since the card pane renders it as a link.
    */
   readonly externalUrl?: string;
+  /**
+   * The work a local agent hands over with the card (S-local-agent-handoff-mcp, `handoffOf`): a
+   * patch of at most `MAX_HANDOFF_PATCH_BYTES`, recorded on the `created` event. Absent: none.
+   */
+  readonly handoff?: TaskHandoffInput;
   readonly actor: Actor;
 };
 
@@ -663,6 +674,14 @@ export type TaskServiceShape = {
     taskId: string,
   ) => Effect.Effect<TaskPlan | undefined, TaskError>;
   /**
+   * The work a local agent handed off with the card (S-local-agent-handoff-mcp): the patch its
+   * `created` event carries, or `undefined` for a card made without one. An unknown card is
+   * `TaskNotFound`.
+   */
+  readonly handoff: (
+    taskId: string,
+  ) => Effect.Effect<TaskHandoff | undefined, TaskError>;
+  /**
    * What the card needs to leave its column, judged now (D9): the column's whole `requires[]`
    * under the card's pinned definition, each key met, unmet with the reason `move` would refuse
    * with, or not checked. An unknown card is `TaskNotFound`.
@@ -862,6 +881,41 @@ export const cardText = (input: {
       });
     }
     return { body, baseRef, externalRef, externalUrl };
+  });
+
+/**
+ * A create's handoff, checked (S-local-agent-handoff-mcp): a patch that is a git diff, within
+ * `MAX_HANDOFF_PATCH_BYTES`. The cap is the CLI's too, which measures before it sends, so a caller
+ * that skipped it is refused in the same words. A blank patch is no handoff — there is nothing to
+ * apply — and is refused rather than stored as a card that claims one.
+ */
+export const handoffOf = (
+  handoff: TaskHandoffInput | undefined,
+): Effect.Effect<TaskHandoffInput | undefined, InvalidTaskInput> =>
+  Effect.gen(function* () {
+    if (handoff === undefined) return undefined;
+    const bytes = handoffPatchBytes(handoff.patch);
+    if (bytes > MAX_HANDOFF_PATCH_BYTES) {
+      return yield* new InvalidTaskInput({
+        field: "handoff.patch",
+        message: handoffCapRefusal(bytes),
+      });
+    }
+    if (handoffPatchFiles(handoff.patch).length === 0) {
+      return yield* new InvalidTaskInput({
+        field: "handoff.patch",
+        message:
+          "the handoff patch changes no file: it is not a `git diff` (no `diff --git` header), so there is nothing for a run to apply",
+      });
+    }
+    const branch = present(handoff.branch)?.trim();
+    return {
+      patch: handoff.patch,
+      ...(branch === undefined ? {} : { branch }),
+      ...(handoff.baseCommit === undefined
+        ? {}
+        : { baseCommit: handoff.baseCommit }),
+    };
   });
 
 /**
@@ -1841,6 +1895,9 @@ export const TaskServiceLive = Layer.effect(
         // empty body is no body — the row's '' and the event's absence — and no prompt section.
         const { body, baseRef, externalRef, externalUrl } =
           yield* cardText(input);
+        // The handoff is the card's input like its body, so it rides on the `created` event and the
+        // row holds none of it: `handoff` reads it back from there.
+        const handoff = yield* handoffOf(input.handoff);
         const rows = yield* sql<TaskRow>`
               INSERT INTO tasks (
                 id, board_id, title, "column", repo, definition_version,
@@ -1870,6 +1927,7 @@ export const TaskServiceLive = Layer.effect(
           ...(baseRef === undefined ? {} : { baseRef }),
           ...(externalRef === undefined ? {} : { externalRef }),
           ...(externalUrl === undefined ? {} : { externalUrl }),
+          ...(handoff === undefined ? {} : { handoff }),
         });
         return yield* toTask(rows[0] as TaskRow);
       });
@@ -3182,6 +3240,67 @@ export const TaskServiceLive = Layer.effect(
         }),
       );
 
+    const decodeHandoffView = Schema.decodeUnknownEffect(TaskHandoff);
+
+    const handoff = (
+      taskId: string,
+    ): Effect.Effect<TaskHandoff | undefined, TaskError> =>
+      withStorage(
+        Effect.gen(function* () {
+          // The card's first event is its `created`, and only it carries a handoff: one row read by
+          // its kind, with no fold of the rest of the history.
+          const rows = yield* sql<{
+            id: string | null;
+            payload: string | null;
+            createdAt: Date | string | null;
+            baseRef: string | null;
+          }>`
+            SELECT e.id::text AS id, e.payload::text AS payload, e.created_at,
+                   t.base_ref
+            FROM tasks t
+            LEFT JOIN task_events e ON e.task_id = t.id AND e.kind = 'created'
+            WHERE t.id = ${taskId}
+            ORDER BY e.id
+            LIMIT 1
+          `;
+          const row = rows[0];
+          if (row === undefined) {
+            return yield* new TaskNotFound({
+              taskId,
+              message: `no task ${taskId}`,
+            });
+          }
+          const { id, payload, createdAt } = row;
+          if (id === null || payload === null || createdAt === null)
+            return undefined;
+          return yield* Effect.gen(function* () {
+            const event = yield* decodeEvent(payload);
+            if (event._tag !== "created") {
+              return yield* Effect.fail(
+                `event ${id} is stored as created but is ${event._tag}`,
+              );
+            }
+            if (event.handoff === undefined) return undefined;
+            return yield* decodeHandoffView({
+              taskId: event.taskId,
+              ...event.handoff,
+              ...(row.baseRef === null ? {} : { baseRef: row.baseRef }),
+              bytes: handoffPatchBytes(event.handoff.patch),
+              files: handoffPatchFiles(event.handoff.patch),
+              actor: event.actor,
+              createdAt: iso(createdAt),
+            });
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new TaskStorageError({
+                  message: `task ${taskId} holds an unreadable handoff ${id}: ${String(cause)}`,
+                }),
+            ),
+          );
+        }),
+      );
+
     const decodeRun = Schema.decodeUnknownEffect(TaskRun);
     const decodeCard = Schema.decodeUnknownEffect(BoardCard);
 
@@ -3606,6 +3725,7 @@ export const TaskServiceLive = Layer.effect(
       spec,
       declarePlan,
       plan,
+      handoff,
       exit,
       replay,
       listCards,

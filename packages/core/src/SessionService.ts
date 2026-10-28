@@ -322,6 +322,7 @@ import {
   recordRunDuration,
   shiftSessionsActive,
 } from "./metrics";
+import { applyHandoff } from "./handoff";
 import type { DiffCap, PrError, PullRequestStep } from "./pr";
 import { DEFAULT_DIFF_CAP } from "./pr";
 import { openPullRequest, type OpenPullRequestInput } from "./prStep";
@@ -3911,6 +3912,18 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             if (budget !== undefined) {
               yield* writeBudget(owner.root, budget);
             }
+            // A handed-off card's work in progress, on a branch this run has just cut at the card's
+            // base (S-local-agent-handoff-mcp): applied and committed before create answers, so the
+            // agent's first turn — whoever sends it — starts on the same diff.
+            if (
+              input.taskId !== undefined &&
+              column !== undefined &&
+              input.review === undefined &&
+              binding.repo !== undefined &&
+              binding.branch === undefined
+            ) {
+              yield* applyCardHandoff(id, input.taskId, binding.repo, owner);
+            }
           });
           // A card's run whose owner or first log writes fail here was committed above: it is
           // ended rather than left holding a cap slot no turn will free (`endOpenRun`).
@@ -3922,6 +3935,55 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* countSessionCreate("create");
           return yield* describe(id, row);
         }).pipe(Effect.scoped);
+
+      /**
+       * Put a handed-off card's patch on a run's fresh branch (S-local-agent-handoff-mcp, `./handoff`).
+       * Only a run in the card's own repository takes it — the patch is that repository's — and only
+       * one whose branch it has just cut: a run that continues the card's branch (C19) finds the
+       * commit already there. A patch that cannot land refuses the create (`invalid_input`, naming
+       * git's reason), and the card's run is ended like any other refused open: a run that started
+       * without the work it was handed would be a run on the wrong change.
+       */
+      const applyCardHandoff = (
+        sessionId: SessionId,
+        taskId: string,
+        repo: RepoSlug,
+        owner: LiveOwner,
+      ): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          const card = yield* cardBindingFor(taskId);
+          if (card?.repo !== repo) return;
+          const handoff = yield* tasks.handoff(taskId).pipe(
+            Effect.mapError(
+              (error) =>
+                new SessionErrorClass({
+                  code: "storage",
+                  message: `read task ${taskId}'s handoff: ${error.message}`,
+                }),
+            ),
+          );
+          if (handoff === undefined) return;
+          const applied = yield* applyHandoff({
+            worktree: owner.workspace.path,
+            patch: handoff.patch,
+            taskId,
+            branch: handoff.branch,
+            baseCommit: handoff.baseCommit,
+          }).pipe(
+            Effect.mapError(
+              (error) =>
+                new SessionErrorClass({
+                  code: "invalid_input",
+                  message: `session ${sessionId}: ${error.message}`,
+                }),
+            ),
+          );
+          yield* Effect.logInfo(
+            applied === undefined
+              ? `session ${sessionId}: task ${taskId}'s handoff changes nothing on ${owner.workspace.branch ?? "its branch"}: the base already holds it`
+              : `session ${sessionId}: applied task ${taskId}'s handoff (${applied.files.length} file(s)) as ${applied.commit} on ${owner.workspace.branch ?? "its branch"}`,
+          );
+        }).pipe(Effect.withSpan("SessionService.applyCardHandoff"));
 
       /**
        * The live lease of another process on a session (LOB-18), or none: none when nobody holds one,
