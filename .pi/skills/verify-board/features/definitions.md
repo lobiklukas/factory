@@ -26,6 +26,8 @@ every column with:
 Under the header, `initial` names the column a new card starts in: the definition's `initialColumn`,
 or its first column for a version that names none (`intake` in default v1–v3).
 
+`factory board vocabulary` (F5) lists the requirement keys (checked, human gate) and roles a definition file may name, as `getDefinitionVocabulary` answers them; `./definitions.sh` compares it with the RPC line for line (`vocabulary.ts`).
+
 The description is `packages/core`'s `describeDefinition`, a pure join of the row with those three
 tables, so the read cannot drift from what a move or a run does.
 

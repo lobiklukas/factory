@@ -2,7 +2,8 @@
 
 **Status: passing.** D4, 2026-10-28, `agent/D4`: `./define.sh` exit 0, **29/29**, twice against one
 `./up.sh` instance (API on `:9510`, web on `:3510`, the GitHub fake on `:9513`), with
-`./definitions.sh` green beside it.
+`./definitions.sh` green beside it. F5-F7-F8 added the round trip and author checks (see below): `./define.sh` exit 0, **39/39**
+(API `:9570`).
 
 ## What it is
 
@@ -42,6 +43,16 @@ The rules are `packages/core`'s `authoredDefinitionFaults` (`boardDefine.ts`), p
 of one id take consecutive versions. The API handler hands the rules the skill table, read afresh per
 call, and the session layer's role table; `TaskService.defineBoard` adds the roles the definitions it
 holds declare. The handler describes the answer as `getDefinition` does.
+
+## Round trip and author (F5, F7, F8)
+
+`definition show <id> --version N --json` prints the version as the file `define` takes
+(`getDefinitionSource`); `./define.sh` defines it back `--dry-run` and gets `unchanged`, edits the
+name and gets v3 differing in that line only, and reads a legacy version (`default` v1) with its
+moves and initial column spelled out. With auth off `board define` attributes its version to `cli` (and the editor writes `dashboard`), as a
+card move does, shown as `by cli` in `board definitions`; a credential's actor overrides it, proven by
+verify-api's `identity.sh` (`author:` checks) and shown on the settings page by verify-web's `board-settings.sh`.
+`./definitions.sh` compares `factory board vocabulary` with the RPC line for line (`vocabulary.ts`).
 
 ## How a user reaches it
 

@@ -11,6 +11,7 @@ import {
   TaskStorageError,
 } from "@repo/core";
 import { TasksRpc } from "@repo/domain/Rpc";
+import { definitionSourceOf } from "@repo/domain/Task";
 import { Effect } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { attributed } from "./Auth";
@@ -64,12 +65,18 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
               describeDefinition(definition, deployment),
             ),
           ),
+      // The file `defineBoard` takes for a version (F8), from the same read `getDefinition` describes.
+      getDefinitionSource: (input) =>
+        tasks
+          .getDefinition(input.definitionId, input.version)
+          .pipe(Effect.map(definitionSourceOf)),
       // The rules are core's (`./boardDefine`); the library they check against is the skill table
       // and the session layer's role table, the two a run in the version's columns would resolve.
+      // The version's author is the credential's actor's, as `putSkill`'s (F7).
       defineBoard: (input) =>
-        skillNames.pipe(
-          Effect.flatMap((names) =>
-            tasks.defineBoard(input, {
+        Effect.all([skillNames, attributed(input)]).pipe(
+          Effect.flatMap(([names, owned]) =>
+            tasks.defineBoard(owned, {
               skills: names,
               roles: sessions.roles,
               // The harness's roles and the deployment's own role policy rows (D10, `ROLE_POLICIES`).

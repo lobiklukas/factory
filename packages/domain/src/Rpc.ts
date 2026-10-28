@@ -37,6 +37,7 @@ import {
   DefinedBoard,
   DefinitionConfig,
   DefinitionNotFound,
+  DefinitionSource,
   DefinitionSummary,
   DefinitionVocabulary,
   EmptyComment,
@@ -480,6 +481,15 @@ export class TasksRpc extends RpcGroup.make(
   Rpc.make("getDefinition", {
     payload: GetDefinitionInput,
     success: DefinitionConfig,
+    error: TaskErrorSchema,
+  }),
+  // One definition version as the file `defineBoard` takes (F8): the version's own columns with the
+  // moves and the initial column a legacy version leaves implicit spelled out, and none of what the
+  // server assigns (version, author). `factory board definition show --json` prints it. An unknown id
+  // or version is `DefinitionNotFound`.
+  Rpc.make("getDefinitionSource", {
+    payload: GetDefinitionInput,
+    success: DefinitionSource,
     error: TaskErrorSchema,
   }),
   // A new version of a definition, authored (D4): newest + 1, never an edit of a row (B2). Content

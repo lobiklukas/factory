@@ -17,7 +17,8 @@ board-configuration umbrella).
   requirement states, exits, gates and models are the ones a move and a run meet. Read once per
   opening, not polled: a version is never edited in place (docs/board.md B2).
 - The header names the definition (`[data-settings-definition]`, `[data-settings-version]`), the
-  column a new card starts in and the version's run caps.
+  column a new card starts in and the version's run caps, and, for a version someone wrote, who
+  authored it (`[data-settings-author]`, F7; a seeded version shows none).
 - `listDefinitions` (`definitionsAtom`, the New board form's read) says whether a newer version
   exists: `[data-newer-versions="3,4,5"]` and "Newer versions of default exist: v3, v4 and v5. This
   board stays pinned to v2; a board created now pins v5.", or `[data-newest-version]` on the newest.
