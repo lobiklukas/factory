@@ -100,6 +100,7 @@ import type {
 import {
   RepoCloneFailed,
   RepoNotFound,
+  RepoPolicyRejected,
   RepoSlug,
   SessionActor,
   SessionError as SessionErrorClass,
@@ -142,8 +143,10 @@ import {
   MISSION_TASKS,
   missionInFlight,
   NO_ROLE_MODELS,
+  NO_REPO_POLICY,
   Policy,
   PolicyLive,
+  repoPolicyWidening,
   resolveRole,
   // `startMission` is the harness's: it creates the task and commits the documents. The service
   // method below resolves the workspace and the owner first, so the two names mark which layer
@@ -157,6 +160,9 @@ import {
   type MergeRecord,
   type PullRequestRecord,
   type ApprovalAsker,
+  type PolicyRecord,
+  type PolicyRecordInput,
+  type RepoPolicy,
   type SessionPolicy,
   type VerifyOptions,
 } from "@repo/harness";
@@ -188,6 +194,7 @@ import {
   readPinnedModelKey,
   readRecordedReview,
   readSetupRecord,
+  readPolicyRecord,
   readSkillPins,
   readTranscriptPage,
   readVerifyRecords,
@@ -290,6 +297,7 @@ import type { RepoMirror } from "./RepoMirror";
 import { forgeUrlFor, measureBaseOf, type RepoRemote } from "./RepoRemote";
 import { mintSessionId } from "./ids";
 import { readRepoContext } from "./repoContext";
+import { readRepoPolicy } from "./repoPolicy";
 import { homeOf, makePresence, type Lease } from "./Presence";
 import { SessionBus, SessionBusPostgres } from "./SessionBus";
 import { atCapacity, runCapReached, SESSION_MAX_CONCURRENT } from "./admission";
@@ -343,6 +351,7 @@ import {
   removeWorkspace,
   resolveWorkspace,
   sessionDirectory,
+  workTreePrefix,
   type WorkspaceInput,
 } from "./workspace";
 
@@ -2215,6 +2224,80 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return context;
         });
 
+      /**
+       * The repository's policy a session's open runs under (S-factory-config-as-code,
+       * `./repoPolicy`), and where it came from.
+       *
+       * Pinned per session: a log whose record says it read the base (`source` set) keeps what it
+       * read, so neither an edit to `.factory/config` on the run's branch nor a base that moved under
+       * the session changes the rules of a run in flight — the next session reads the base again.
+       * The pinned policy is checked against the deployment again, because the deployment may have
+       * narrowed since. Otherwise the base is read in the registered checkout, or the factory's
+       * clone of a URL-only repo, at the tip the worktree is cut from (`fetchedStart`) or at the
+       * session's base ref: a git object read, never the worktree's files. A scratch session, a repo
+       * with no checkout yet, and a base git cannot answer for have no repository policy, and record
+       * none, so a later open reads it then. A config that cannot be loaded is `policy_rejected`.
+       */
+      const repoPolicyFor = (
+        row: SessionRow,
+        recorded: PolicyRecord | undefined,
+        fetchedStart: string | undefined,
+      ): Effect.Effect<PolicyRecordInput, SessionError> =>
+        Effect.gen(function* () {
+          const none: PolicyRecordInput = { source: null, repo: NO_REPO_POLICY };
+          if (row.repo === null) return none;
+          const repo = yield* toRepoSlug(row.repo);
+          const rejected = (error: RepoPolicyRejected) =>
+            new SessionErrorClass({
+              code: "policy_rejected",
+              message: error.message,
+            });
+          if (recorded?.source != null) {
+            const pinned: RepoPolicy = {
+              approvalRequired: recorded.repo.approvalRequired,
+              denied: recorded.repo.denied,
+              ...(recorded.repo.allowedHosts === null
+                ? {}
+                : { allowedHosts: recorded.repo.allowedHosts }),
+            };
+            const widening = repoPolicyWidening(policy.config, pinned);
+            if (widening.length > 0)
+              return yield* rejected(
+                new RepoPolicyRejected({
+                  repo,
+                  ref: recorded.source.ref,
+                  commit: recorded.source.commit,
+                  path: recorded.source.path,
+                  kind: "widens",
+                  reasons: widening,
+                  message: `repo ${repo}: the policy this session pinned from ${recorded.source.path} at ${recorded.source.ref} (${recorded.source.commit.slice(0, 12)}) cannot be loaded: ${widening.join("; ")}`,
+                }),
+              );
+            return { source: recorded.source, repo: pinned };
+          }
+          const registered = (yield* paper("read repo", readRepo(repo)))[0];
+          if (registered === undefined) return none;
+          const localPath = registered.localPath ?? undefined;
+          const checkout = localPath ?? (yield* mirrorClonedAt(registered));
+          if (checkout === undefined) return none;
+          const prefix =
+            localPath === undefined
+              ? ""
+              : yield* workTreePrefix(localPath, { fs, path });
+          const ref = fetchedStart ?? row.baseRef ?? "main";
+          const read = yield* readRepoPolicy(
+            { repo, checkout, prefix, ref },
+            policy.config,
+          ).pipe(Effect.mapError(rejected));
+          if (read._tag === "unread") {
+            yield* Effect.logWarning(
+              `session ${row.id}: ${read.problem}, so it runs under the deployment's policy alone until an open can read ${repo}'s .factory/config`,
+            );
+            return none;
+          }
+          return { source: read.source, repo: read.policy };
+        });
+
       /** The base's fetched tip for a worktree about to be cut: the mirror's, or the checkout's. */
       const fetchedStartFor = (
         row: SessionRow,
@@ -2673,6 +2756,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly storage: PostgresStorage;
         readonly cwd: string;
         readonly policy: SessionPolicy;
+        /**
+         * The repository's half of `policy` and where it was read (S-factory-config-as-code), for
+         * the open to commit beside the rules (`PolicyDoc`).
+         */
+        readonly policyRecord: PolicyRecordInput;
         readonly run: RunProfile;
         /** The cited pages the session's prompt carries (LOB-205), read at every acquisition. */
         readonly pages: readonly Page[];
@@ -2820,6 +2908,15 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             const column = yield* runProfileFor(id, pins).pipe(
               Effect.tapError(() => Effect.promise(() => storage.dispose())),
             );
+            // The repository's policy (S-factory-config-as-code): the one this log pinned, or the
+            // base's, read in the checkout the worktree was cut from — never the worktree, so a run
+            // cannot relax its own rules. A config that would widen the deployment refuses the open.
+            const repoPolicy = yield* readPolicyRecord(storage).pipe(
+              Effect.flatMap((recorded) =>
+                repoPolicyFor(row, recorded, fetchedStart),
+              ),
+              Effect.tapError(() => Effect.promise(() => storage.dispose())),
+            );
             // A review run (LOB-36) is the read-only reviewing stage, offered the review tool.
             const reviews =
               acquisition.reviewing === true ||
@@ -2854,11 +2951,15 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               // The deployment's policy, narrowed by what the run's column declares (C22): its
               // gates added, its push scope applied. The same `run` the prompt came from, so the
               // column a run is told about is the column whose autonomy it runs under.
+              // Under the column, the repository's policy (S-factory-config-as-code): the deployment's
+              // rules tightened by what the base's `.factory/config` declares, then by the column.
               policy: policy.forWorktree(
                 workspace.path,
                 branchOwnerOf(id, workspace.branch),
                 run.autonomy,
+                repoPolicy.repo,
               ),
+              policyRecord: repoPolicy,
               run,
               pages,
               ...(repoContext === undefined ? {} : { repo: repoContext }),
@@ -3008,6 +3109,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             storage,
             cwd,
             policy: sessionPolicy,
+            policyRecord,
             run,
             pages,
             repo,
@@ -3054,6 +3156,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               // D11's boundary, resolved for this session's worktree: the one place the policy
               // needs a fact the service does not hold as data.
               policy: sessionPolicy,
+              policyRecord,
               run,
             }),
           acquisition,
@@ -4939,15 +5042,20 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         worktree: string,
         workers: readonly MissionWorker[],
         runSession: SessionId,
+        row: SessionRow,
       ): Effect.Effect<void, SessionError> =>
         Effect.gen(function* () {
-          // The session's column narrows its checks as it narrows its agent (C22): a check is held to
-          // the policy the session's own `bash` calls meet, gates and push scope included.
+          // The session's column narrows its checks as it narrows its agent (C22), and so does its
+          // repository's policy (S-factory-config-as-code): a check is held to the policy the
+          // session's own `bash` calls meet, gates, denials and push scope included.
           const column = yield* runColumnFor(runSession);
+          const recorded = yield* withReader(runSession, readPolicyRecord);
+          const repoPolicy = yield* repoPolicyFor(row, recorded, undefined);
           const sessionPolicy = policy.forWorktree(
             worktree,
             sessionId,
             column?.autonomy,
+            repoPolicy.repo,
           );
           for (const worker of workers) {
             if (worker.check === undefined) continue;
@@ -5030,6 +5138,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             planned.path,
             workers,
             input.sessionId,
+            row,
           );
           const owner = yield* acquireOwner(input.sessionId, row, {
             starts: true,

@@ -204,6 +204,36 @@ export class RepoCloneFailed extends Schema.TaggedError<RepoCloneFailed>()(
   },
 ) {}
 
+/**
+ * A repository's `.factory/config` policy that cannot be loaded (S-factory-config-as-code): read at
+ * the session's base ref, it is not a JSON object, its `policy` block is not the policy's shape (an
+ * unknown key is refused, so a key that would widen something is never silently dropped), or it tries
+ * to allow something the deployment denies (`widens`: a host off the deployment's allowlist).
+ * `reasons` names each problem; `ref` and `commit` say which base it was read at, and `path` where.
+ * A session on the repository does not open until the config on its base is fixed
+ * (`policy_rejected`), because running under part of a policy its author wrote would be running
+ * under a policy nobody wrote.
+ */
+export const RepoPolicyRejectionKind = Schema.Literals([
+  "unreadable",
+  "invalid",
+  "widens",
+]);
+export type RepoPolicyRejectionKind = typeof RepoPolicyRejectionKind.Type;
+
+export class RepoPolicyRejected extends Schema.TaggedError<RepoPolicyRejected>()(
+  "RepoPolicyRejected",
+  {
+    repo: Schema.String,
+    ref: Schema.String,
+    commit: Schema.String,
+    path: Schema.String,
+    kind: RepoPolicyRejectionKind,
+    reasons: Schema.Array(Schema.String),
+    message: Schema.String,
+  },
+) {}
+
 export const SessionSummary = Schema.Struct({
   id: SessionId,
   title: Schema.String,
@@ -1076,6 +1106,10 @@ export type CompactSessionResult = typeof CompactSessionResult.Type;
  * - `setup_running` — the session's worktree setup is still running after the send waited the time
  *   it waits for one (S-env-setup), so nothing was submitted. Transient: the setup goes on without
  *   the request, and the same send again waits for that setup rather than starting another.
+ * - `policy_rejected` — the repository's `.factory/config` at the session's base declares a policy
+ *   that cannot be loaded (S-factory-config-as-code, `RepoPolicyRejected`): not JSON, not the
+ *   policy's shape, or allowing something the deployment denies. Nothing ran; the message names the
+ *   repo, the base, the commit and each problem. Fix the config on the base and try again.
  */
 export const SessionErrorCode = Schema.Literals([
   "not_found",
@@ -1088,6 +1122,7 @@ export const SessionErrorCode = Schema.Literals([
   "at_capacity",
   "setup_failed",
   "setup_running",
+  "policy_rejected",
 ]);
 export type SessionErrorCode = typeof SessionErrorCode.Type;
 

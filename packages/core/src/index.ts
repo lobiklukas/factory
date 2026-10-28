@@ -2,6 +2,7 @@ export * from "./rebuild";
 export * from "./SessionService";
 export * from "./ids";
 export * from "./workspace";
+export * from "./repoPolicy";
 export * from "./credentials";
 export * from "./TaskService";
 export * from "./taskProjection";
