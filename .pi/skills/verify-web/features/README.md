@@ -50,9 +50,10 @@ worktree, API `:9541` / web `:3541`, `FAUX_SLEEP_MS=4000`.
 from the `agent/C10` worktree, API `:9581` / web `:3581`, `FAUX_SLEEP_MS=5000`. `drive.mjs` re-passed there
 (120 checks, 0 failed) once `listBoardCards` joined its read allowlist.
 
-`board-settings.sh` (the board settings page and each lane's disclosure, LOB-245) last passed **23/23** on
-2026-10-28 from the `agent/D3` worktree, API `:9540` / web `:3540`; `drive.mjs` re-passed there
-(API `:9541` / web `:3541`), its lane-control count now leaving the settings disclosure out.
+`board-settings.sh` (the board settings page and each lane's disclosure, LOB-245) last passed **28/28** on
+2026-10-28 from the `agent/C22` worktree, API `:9520` / web `:3520`, with each column's effective autonomy
+shown and a run in a gated column parked on its approval (C22). Before it, 23/23 from `agent/D3`, where
+`drive.mjs` re-passed (API `:9541` / web `:3541`), its lane-control count leaving the settings disclosure out.
 
 `cost.sh` (cost prediction on the New session form and `/spend`, LOB-38) last passed **12/12** on
 2026-10-28 from the `agent/LOB-38` worktree, API `:9552` / web `:3552`; `spend.sh` and `model.sh`

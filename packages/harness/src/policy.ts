@@ -2071,9 +2071,7 @@ export const columnAutonomy = (
   );
   const effective = withColumnAutonomy(config, column.autonomy);
   const gates: AutonomyGate[] = [];
-  for (const command of (effective.approvalRequired ?? []).map(
-    normalizeGate,
-  )) {
+  for (const command of (effective.approvalRequired ?? []).map(normalizeGate)) {
     if (command.length === 0 || gates.some((gate) => gate.command === command))
       continue;
     gates.push({

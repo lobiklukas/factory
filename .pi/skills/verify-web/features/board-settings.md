@@ -3,8 +3,10 @@
 **Status: passing.** `/boards/<id>/settings` says what a board will do: the definition version it
 pins, and every column of it in order with its kind, its role and the model that role resolves to,
 its skills, its exit requirements each marked **checked** or **not yet checked**, its moves out and
-the human gate a move crosses. Each lane header on `/boards/<id>` has a disclosure with the same
-facts for its column (LOB-245, the board-configuration umbrella).
+the human gate a move crosses, and its effective autonomy — the commands a run in it asks a person
+before running, each marked the deployment's or the column's, and where it may write and push (C22).
+Each lane header on `/boards/<id>` has a disclosure with the same facts for its column (LOB-245, the
+board-configuration umbrella).
 
 ## Sub-features
 
@@ -26,6 +28,13 @@ facts for its column (LOB-245, the board-configuration umbrella).
   `[data-column-skill]` per skill, `li[data-requirement]` with `[data-requirement-key]`,
   `[data-requirement-description]` and `[data-requirement-state]`, `li[data-exit]` with
   `[data-exit-to]` and `[data-exit-gate]`, and `[data-column-wip]` when the column has a WIP limit.
+- The column's autonomy (C22), as the server resolved it (`SessionService.columnAutonomy`, built by
+  the functions the run's policy is built with): `li[data-gate=<command>]` with `data-gate-source`
+  (`deployment` or `column`, worded "deployment" / "this column") and `[data-gate-command]`, or
+  `[data-column-gates-none]`; `[data-column-write]` (`worktree`, `docs`, `none`) and
+  `[data-column-push]` (`branch`, `none`). Effective, not declared: a specifier column reads
+  `none` for writes whether or not its definition says so. A server that describes no autonomy
+  shows none of these.
 - A lane's disclosure (`[data-lane-settings-toggle=<column>]`, panel `[data-lane-settings=<column>]`)
   is closed by default and mounts its read only when opened, so a board nobody inspects never reads
   its config. It renders the same `ColumnSettings` and links to the page.
@@ -66,15 +75,24 @@ requires:
    columns to equal `getDefinition` for v2 — which differs from the newest;
 7. every lane's disclosure to be closed on load, each to show its column's facts equal to
    `getDefinition` once pressed, a second press to close it, and its link to open the page;
-8. no console error, a malformed id refused, and a missing board reading `No such board`.
+8. no console error, a malformed id refused, and a missing board reading `No such board`;
+9. (C22) a definition authored over `defineBoard` whose `careful` column gates `sleep` and pushes
+   nothing: `getDefinition` to describe `careful` with the deployment's gate (`APPROVAL_REQUIRED=npm
+publish`, which the script boots the API with) and its own, `building` with the deployment's
+   only; its settings page to show every column's autonomy equal to `getDefinition`; and a run
+   started on a card in `careful` (the faux run calls `sleep 0 && echo faux-ok`) to park idle on one
+   approval for `sleep`, its command not run, while the same call in `building` runs unasked.
 
 Evidence goes to `.verify/evidence/latest/board-settings/`: `board-settings-newest.png`,
 `board-settings-pinned.png`, `board-settings-lanes.png` (every disclosure open),
-`board-settings-missing.png`, `observed.json` (both oracles, what the page showed, every check).
+`board-settings-missing.png`, `board-settings-autonomy.png` (the gated column),
+`board-settings-autonomy-page.png`, `observed.json` (every oracle, what the page showed, both
+autonomy runs, every check).
 
 `drive.mjs`'s lane checks ([board.md](board.md)) count every button in the lanes as a move control
 except a settings disclosure's, and its write check still fails on any write the board pages send.
 
 ## Last run
 
-2026-10-28 from the `agent/D3` worktree, API `:9540` / web `:3540`: **23/23** passed.
+2026-10-28 from the `agent/C22` worktree, API `:9520` / web `:3520`: **28/28** passed (C22 added the
+five autonomy checks). Before it: 2026-10-28 from `agent/D3`, API `:9540` / web `:3540`, 23/23.

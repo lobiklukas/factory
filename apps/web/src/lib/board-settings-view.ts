@@ -1,5 +1,8 @@
 import type {
+  AutonomyGate,
   BoardCaps,
+  ColumnPushScope,
+  ColumnWriteScope,
   DefinitionSummary,
   RequirementConfig,
   ResolvedModel,
@@ -97,3 +100,25 @@ export const wipLabel = (wipLimit: number | undefined): string | null =>
   wipLimit === undefined
     ? null
     : `at most ${wipLimit} run${wipLimit === 1 ? "" : "s"} in flight`;
+
+/** Where a run in the column may write (C22), as a reader is told it: the scope the server resolved. */
+export const writeScopeLabel = (scope: ColumnWriteScope): string =>
+  ({
+    worktree: "anywhere in its worktree",
+    docs: "documentation only",
+    none: "nothing — read-only",
+  })[scope];
+
+/** Which ref a run in the column may push itself (C22); the PR step's own push is the factory's. */
+export const pushScopeLabel = (scope: ColumnPushScope): string =>
+  ({
+    branch: "its own branch",
+    none: "nothing — the PR step pushes",
+  })[scope];
+
+/**
+ * Whose gate a command is (C22): the deployment's `APPROVAL_REQUIRED`, which every column meets, or
+ * this column's own `autonomy`, which only its runs do.
+ */
+export const gateSource = (gate: Pick<AutonomyGate, "source">): string =>
+  gate.source === "column" ? "this column" : "deployment";

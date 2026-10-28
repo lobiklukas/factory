@@ -19,7 +19,8 @@ import {
 } from "./boardConfig";
 
 /** A deployment with D11's defaults and no gate: what every case but C22's describes against. */
-const ungated: AutonomyOf = (column) => columnAutonomy(DEFAULT_AUTONOMY, column);
+const ungated: AutonomyOf = (column) =>
+  columnAutonomy(DEFAULT_AUTONOMY, column);
 const facts = (modelOf: RoleModelOf, autonomyOf: AutonomyOf = ungated) => ({
   modelOf,
   autonomyOf,
@@ -183,9 +184,9 @@ describe("describeDefinition over a definition's own transitions (LOB-267)", () 
         facts(deploymentModel),
       ).initialColumn,
     ).toBe("doing");
-    expect(describeDefinition(definition, facts(deploymentModel)).initialColumn).toBe(
-      "planning",
-    );
+    expect(
+      describeDefinition(definition, facts(deploymentModel)).initialColumn,
+    ).toBe("planning");
     // No columns: no initial column, rather than a default name it lacks.
     const { initialColumn: _declaredInitial, ...undeclared } = declared;
     expect(

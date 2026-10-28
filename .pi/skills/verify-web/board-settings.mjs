@@ -13,6 +13,12 @@
 //             requirement (plan_doc where the version declares it) is labelled "not yet checked",
 //             and the page says the version is the newest
 //   pinned    a board pinned to v2 says v3 exists, and its columns are v2's, not the newest's
+//   autonomy  (C22) a definition authored with `defineBoard` whose `careful` column gates `sleep` and
+//             pushes nothing: its settings page shows each column's effective autonomy — the
+//             deployment's gate (`APPROVAL_REQUIRED=npm publish`) on every column, the column's own
+//             only on `careful`, write and push scopes — equal to `getDefinition`; and a run started
+//             on a card in `careful` parks on an approval for the same command a run in `building`
+//             runs unasked
 //   lanes     each lane header's disclosure is closed until pressed, then shows its column's facts,
 //             equal to the same `getDefinition` column; its link opens the settings page
 //   read-only the page holds no form, input or button, and every RPC it sends is a read
@@ -29,11 +35,16 @@ const API_URL = process.env["API_URL"] ?? "http://localhost:9471";
 const EVIDENCE_DIR =
   process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest/board-settings";
 const ROLE_MODEL = "faux/faux-spec";
+// What `board-settings.sh` boots the API with: the deployment's one gate, and the faux run's one call.
+const DEPLOYMENT_GATE = "npm publish";
+const FAUX_COMMAND = "sleep 0 && echo faux-ok";
 const NONE = "—";
 
 const TAG = randomBytes(4).toString("hex");
 const NEWEST_REPO = `verify-board-settings-${TAG}/newest`;
 const PINNED_REPO = `verify-board-settings-${TAG}/pinned`;
+const AUTONOMY_REPO = `verify-board-settings-${TAG}/autonomy`;
+const AUTONOMY_DEFINITION = `autonomy-${TAG}`;
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
 // A failure shot from an earlier run must not sit beside this run's passing evidence.
@@ -99,6 +110,17 @@ const expectedColumn = (column) => ({
     column.wipLimit === undefined
       ? null
       : `at most ${column.wipLimit} run${column.wipLimit === 1 ? "" : "s"} in flight`,
+  autonomy:
+    column.autonomy === undefined
+      ? null
+      : {
+          gates: column.autonomy.approvalRequired.map((gate) => ({
+            command: gate.command,
+            source: gate.source,
+          })),
+          write: column.autonomy.write,
+          push: column.autonomy.push,
+        },
 });
 
 const browser = await chromium.launch({ channel: "chrome", headless: true });
@@ -173,6 +195,23 @@ const readColumns = (scope) =>
           gate: text(item.querySelector("[data-exit-gate]")),
         })),
         wipLimit: text(node.querySelector("[data-column-wip]")),
+        autonomy:
+          node.querySelector("[data-column-write]") === null
+            ? null
+            : {
+                gates: [...node.querySelectorAll("[data-gate]")].map(
+                  (item) => ({
+                    command: text(item.querySelector("[data-gate-command]")),
+                    source: item.getAttribute("data-gate-source"),
+                  }),
+                ),
+                write: node
+                  .querySelector("[data-column-write]")
+                  ?.getAttribute("data-column-write"),
+                push: node
+                  .querySelector("[data-column-push]")
+                  ?.getAttribute("data-column-push"),
+              },
       };
     }),
   );
@@ -414,6 +453,182 @@ try {
     controls.length === 0
       ? `page found=${pinnedPageShown}`
       : JSON.stringify(controls),
+  );
+
+  // --- autonomy: a column's gates and scopes, shown and enforced (C22) ---------------------------
+  const authored = await rpc("defineBoard", {
+    id: AUTONOMY_DEFINITION,
+    name: "Autonomy per column",
+    initialColumn: "todo",
+    columns: [
+      {
+        name: "todo",
+        kind: "resting",
+        skills: [],
+        requires: [],
+        transitions: [
+          { to: "building" },
+          { to: "careful" },
+          { to: "canceled" },
+        ],
+      },
+      {
+        name: "building",
+        kind: "working",
+        skills: [],
+        requires: [],
+        transitions: [{ to: "done" }, { to: "canceled" }],
+      },
+      {
+        name: "careful",
+        kind: "working",
+        skills: [],
+        requires: [],
+        transitions: [{ to: "done" }, { to: "canceled" }],
+        autonomy: { approvalRequired: ["sleep"], push: "none" },
+      },
+      {
+        name: "done",
+        kind: "terminal",
+        skills: [],
+        requires: [],
+        transitions: [],
+      },
+      {
+        name: "canceled",
+        kind: "terminal",
+        skills: [],
+        requires: [],
+        transitions: [],
+      },
+    ],
+  });
+  const autonomyBoard = await rpc("createBoard", {
+    repo: AUTONOMY_REPO,
+    definitionId: AUTONOMY_DEFINITION,
+  });
+  observed.boards.autonomy = autonomyBoard.id;
+  const autonomyDefinition = await rpc("getDefinition", {
+    definitionId: AUTONOMY_DEFINITION,
+    version: autonomyBoard.definitionVersion,
+  });
+  observed.oracle.autonomy = autonomyDefinition;
+  const described = (name) =>
+    autonomyDefinition.columns.find((column) => column.name === name)?.autonomy;
+  assert(
+    "getDefinition describes the gated column with the deployment's gate and its own, and pushes nothing",
+    authored.outcome === "created" &&
+      same(described("careful"), {
+        approvalRequired: [
+          { command: DEPLOYMENT_GATE, source: "deployment" },
+          { command: "sleep", source: "column" },
+        ],
+        write: "worktree",
+        push: "none",
+      }) &&
+      same(described("building"), {
+        approvalRequired: [{ command: DEPLOYMENT_GATE, source: "deployment" }],
+        write: "worktree",
+        push: "branch",
+      }),
+    JSON.stringify({
+      careful: described("careful"),
+      building: described("building"),
+    }),
+  );
+  await openSettings(autonomyBoard.id);
+  const autonomyShown = await readColumns("[data-settings-column]");
+  const autonomyExpected = autonomyDefinition.columns.map(expectedColumn);
+  observed.autonomyShown = autonomyShown;
+  assert(
+    "the settings page shows each column's effective autonomy, equal to getDefinition",
+    same(autonomyShown, autonomyExpected) &&
+      autonomyExpected.every((column) => column.autonomy !== null),
+    same(autonomyShown, autonomyExpected)
+      ? JSON.stringify(
+          autonomyShown.map((column) => [column.name, column.autonomy]),
+        )
+      : `shown=${JSON.stringify(autonomyShown)} expected=${JSON.stringify(autonomyExpected)}`,
+  );
+  const carefulText = await page
+    .locator("[data-settings-column='careful'] [data-column-settings]")
+    .textContent();
+  assert(
+    "the gated column reads its gate as its own and the deployment's as the deployment's",
+    (carefulText ?? "").includes("this column") &&
+      (carefulText ?? "").includes("deployment") &&
+      (carefulText ?? "").includes("the PR step pushes"),
+    JSON.stringify(carefulText),
+  );
+  await page
+    .locator("[data-settings-column='careful']")
+    .screenshot({
+      path: path.join(EVIDENCE_DIR, "board-settings-autonomy.png"),
+    });
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "board-settings-autonomy-page.png"),
+    fullPage: true,
+  });
+
+  /** A card moved into `column`, a run started on it, one message sent, and the run settled. */
+  const runIn = async (column) => {
+    const task = await rpc("createTask", {
+      boardId: autonomyBoard.id,
+      title: `a run in ${column}`,
+      actor: "verify@local",
+    });
+    await rpc("moveTask", {
+      taskId: task.id,
+      expectedRevision: task.revision,
+      to: column,
+      actor: "verify@local",
+    });
+    const session = await rpc("createSession", {
+      taskId: task.id,
+      taskColumn: column,
+    });
+    await rpc("sendMessage", { sessionId: session.id, content: "go" });
+    let snapshot;
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      snapshot = await rpc("getSession", { sessionId: session.id });
+      const settled =
+        !snapshot.live.busy &&
+        snapshot.entries.some((entry) => entry.kind === "toolResult");
+      if (settled) break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    const approvals = await rpc("listApprovals", { sessionId: session.id });
+    const result = snapshot?.entries.find(
+      (entry) => entry.kind === "toolResult",
+    );
+    return {
+      sessionId: session.id,
+      status: snapshot?.session.status,
+      pending: approvals.approvals.map((approval) => ({
+        action: approval.action,
+        detail: approval.detail,
+      })),
+      result: result?.text ?? null,
+    };
+  };
+  const careful = await runIn("careful");
+  const building = await runIn("building");
+  observed.autonomyRuns = { careful, building };
+  assert(
+    "a run in the gated column parks on an approval for the column's gate, its command not run",
+    careful.status === "idle" &&
+      careful.pending.length === 1 &&
+      careful.pending[0]?.action === "sleep" &&
+      careful.pending[0]?.detail === FAUX_COMMAND &&
+      (careful.result ?? "").includes("asked for") &&
+      !(careful.result ?? "").includes("faux-ok"),
+    JSON.stringify(careful),
+  );
+  assert(
+    "the same command in the other column of the same board runs unasked",
+    building.pending.length === 0 &&
+      (building.result ?? "").includes("faux-ok"),
+    JSON.stringify(building),
   );
 
   // --- lanes: each header's disclosure says the same as the page ---------------------------------

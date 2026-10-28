@@ -2,10 +2,13 @@ import type { ReactNode } from "react";
 import type { ColumnConfig } from "@repo/domain/Task";
 import { cn } from "cn";
 import {
+  gateSource,
   modelSource,
   NONE,
+  pushScopeLabel,
   requirementState,
   wipLabel,
+  writeScopeLabel,
 } from "@/lib/board-settings-view";
 import { Badge } from "@/components/ui/badge";
 
@@ -34,6 +37,10 @@ const Fact = ({
  * screen back and compares it with `getDefinition`'s answer (`board-settings.mjs`).
  *
  * Skill names are plain text: there is no skill page to link them to yet.
+ *
+ * Its autonomy (C22) is the effective one — the deployment's gates and scopes narrowed by the column,
+ * its role and its skills — so a gate reads with whose it is, and a specifier column reads read-only
+ * whether or not its definition says so. A server that does not describe autonomy shows none of it.
  */
 export const ColumnSettings = ({
   column,
@@ -163,6 +170,43 @@ export const ColumnSettings = ({
         <Fact label="WIP limit">
           <span data-column-wip={column.wipLimit}>{wip}</span>
         </Fact>
+      )}
+      {column.autonomy === undefined ? null : (
+        <>
+          <Fact label="Asks first">
+            {column.autonomy.approvalRequired.length === 0 ? (
+              <span data-column-gates-none>{NONE}</span>
+            ) : (
+              <ul className="flex flex-col gap-1">
+                {column.autonomy.approvalRequired.map((gate) => (
+                  <li
+                    key={gate.command}
+                    data-gate={gate.command}
+                    data-gate-source={gate.source}
+                    className="flex flex-wrap items-center gap-1.5"
+                  >
+                    <span data-gate-command className="font-mono">
+                      {gate.command}
+                    </span>
+                    <span className="text-muted-foreground">
+                      {gateSource(gate)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Fact>
+          <Fact label="Writes">
+            <span data-column-write={column.autonomy.write}>
+              {writeScopeLabel(column.autonomy.write)}
+            </span>
+          </Fact>
+          <Fact label="Pushes">
+            <span data-column-push={column.autonomy.push}>
+              {pushScopeLabel(column.autonomy.push)}
+            </span>
+          </Fact>
+        </>
       )}
     </dl>
   );

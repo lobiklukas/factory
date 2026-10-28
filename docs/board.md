@@ -221,6 +221,23 @@ cards can move from `review` to `done`; they can only be canceled. The API warns
 secret is unset, and the refusal says where review runs come from. A person's or the CLI's way to
 request a review of the PR's current head is a follow-up on LOB-241, not built.
 
+Built (C22): **a column's autonomy**. `BoardColumn.autonomy` declares what a column's runs may do
+without asking: `approvalRequired[]` (command prefixes, `APPROVAL_REQUIRED`'s shape), `write`
+(`worktree`, `docs`, `none`) and `push` (`branch`, `none`). It narrows the deployment's policy and
+never widens it (D11 makes widening the deployment's act, and a definition row is not the
+deployment): a column's gates are added to the deployment's, `push: none` leaves no ref the run may
+push itself (the PR step's push, C17, is the control plane's and still runs), `write: docs` is the
+docs rule a `docs` skill already brings, and `write: none` is a read-only stage named after the
+column, its tools withheld as a read-only role's are. A scope wider than what the column's role or
+skills make it reads as the narrower one, so a specifier column that says `worktree` still writes
+nothing. The merge is `withColumnAutonomy` and `columnWriteScope` (`packages/harness/src/policy.ts`),
+applied when a run's column resolves (`runColumnFor`, then `Policy.forWorktree(…, run.autonomy)` in
+`SessionService`'s acquisition), so a run in a column that gates `git push` parks on an approval while
+the same call in a column that does not runs. `getDefinition` describes every column's **effective**
+autonomy with the same functions (`ColumnConfig.autonomy`: each gate with whose it is, and both
+scopes), which the settings view, the lane disclosures and `factory board definition show` print. An
+absent `autonomy` — every version written before the field — is the deployment's policy unchanged.
+
 ## B7 — Asking a human happens on the task, never in the transcript
 
 A run that needs something **ends** — parked, not hanging — with the question recorded on the task: a

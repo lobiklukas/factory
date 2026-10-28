@@ -8,6 +8,8 @@ import {
   LIST_BOARDS_LIMIT,
   type BoardInstance,
   type ColumnConfig,
+  type ColumnPushScope,
+  type ColumnWriteScope,
   type DefinedBoard,
   type DefinitionConfig,
   type DefinitionSummary,
@@ -125,8 +127,46 @@ export const columnLines = (column: ColumnConfig): ReadonlyArray<string> => {
             `at most ${column.wipLimit} run${column.wipLimit === 1 ? "" : "s"} in flight`,
           ),
         ]),
+    ...autonomyLines(column.autonomy, field),
   ];
 };
+
+/** How a write scope reads (C22): where a run in the column may write. */
+const WRITE_SCOPE_LABELS: Readonly<Record<ColumnWriteScope, string>> = {
+  worktree: "its worktree",
+  docs: "documentation only",
+  none: "nothing (read-only)",
+};
+
+/** How a push scope reads (C22): which ref a run in the column may push itself. */
+const PUSH_SCOPE_LABELS: Readonly<Record<ColumnPushScope, string>> = {
+  branch: "its own branch",
+  none: "nothing",
+};
+
+/**
+ * A column's effective autonomy (C22), three lines: the commands a run asks a person before running,
+ * each marked as the deployment's or the column's, and where it may write and push. None for a
+ * server that does not describe autonomy.
+ */
+const autonomyLines = (
+  autonomy: ColumnConfig["autonomy"],
+  field: (label: string, value: string) => string,
+): ReadonlyArray<string> =>
+  autonomy === undefined
+    ? []
+    : [
+        field(
+          "asks",
+          autonomy.approvalRequired.length === 0
+            ? NONE
+            : autonomy.approvalRequired
+                .map((gate) => `${gate.command} (${gate.source})`)
+                .join(", "),
+        ),
+        field("writes", WRITE_SCOPE_LABELS[autonomy.write]),
+        field("pushes", PUSH_SCOPE_LABELS[autonomy.push]),
+      ];
 
 /**
  * A definition version's run caps (B9, LOB-71), one line, or none for a version that declares none:

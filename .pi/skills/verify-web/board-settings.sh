@@ -8,7 +8,10 @@
 # A column's model is deployment configuration, so this script owns its own API and dashboard (its
 # own ports, session root, logs and pid files), booted with `ROLE_MODELS=specifier=faux/faux-spec`:
 # one role resolves to a role model and every other column to the deployment's own, so the page has
-# both kinds to show. The instance ./up.sh starts is not touched and nothing is left running.
+# both kinds to show, and with `APPROVAL_REQUIRED="npm publish"` so every column has a deployment gate
+# beside a column's own (C22); its faux run calls `sleep 0 && echo faux-ok`, which a column gating
+# `sleep` must park and every other column runs. The instance ./up.sh starts is not touched and
+# nothing is left running.
 #
 #   ./board-settings.sh
 #   BOARD_SETTINGS_API_PORT=9541 BOARD_SETTINGS_WEB_PORT=3541 ./board-settings.sh   # another port pair
@@ -65,7 +68,8 @@ rm -rf "$RUN_DIR/sessions"
     ALLOWED_ORIGINS="http://localhost:$WEB_PORT" \
     MODEL_BACKEND=faux \
     ROLE_MODELS=specifier=faux/faux-spec \
-    FAUX_COMMAND="echo faux-ok" \
+    APPROVAL_REQUIRED="npm publish" \
+    FAUX_COMMAND="sleep 0 && echo faux-ok" \
     SESSION_ROOT="$RUN_DIR/sessions" \
     SESSION_IDLE_TIMEOUT_MS=600000 \
     bun run src/index.ts ) > "$RUN_DIR/api.log" 2>&1 &

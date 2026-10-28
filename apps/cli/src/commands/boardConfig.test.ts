@@ -71,6 +71,36 @@ describe("columnLines (LOB-270)", () => {
       "  exits     —",
     ]);
   });
+
+  /** Mutation: print only the column's gates, or drop the source — `npm publish` reads as the column's. */
+  it("prints a column's effective autonomy: each gate and whose it is, and its write and push scope (C22)", () => {
+    const careful = Schema.decodeSync(ColumnConfig)({
+      ...Schema.encodeSync(ColumnConfig)(done),
+      name: "careful",
+      autonomy: {
+        approvalRequired: [
+          { command: "npm publish", source: "deployment" },
+          { command: "git push", source: "column" },
+        ],
+        write: "docs",
+        push: "none",
+      },
+    });
+    expect(columnLines(careful).slice(-3)).toEqual([
+      "  asks      npm publish (deployment), git push (column)",
+      "  writes    documentation only",
+      "  pushes    nothing",
+    ]);
+    const open = Schema.decodeSync(ColumnConfig)({
+      ...Schema.encodeSync(ColumnConfig)(done),
+      autonomy: { approvalRequired: [], write: "worktree", push: "branch" },
+    });
+    expect(columnLines(open).slice(-3)).toEqual([
+      "  asks      —",
+      "  writes    its worktree",
+      "  pushes    its own branch",
+    ]);
+  });
 });
 
 describe("definitionLines (LOB-270)", () => {

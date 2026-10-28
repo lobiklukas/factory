@@ -10152,7 +10152,13 @@ describe("a column's autonomy reaches its runs' policy (C22)", () => {
       transitions: [{ to: "done" }, { to: "canceled" }],
       autonomy: { approvalRequired: ["git push"] },
     },
-    { name: "done", kind: "terminal", skills: [], requires: [], transitions: [] },
+    {
+      name: "done",
+      kind: "terminal",
+      skills: [],
+      requires: [],
+      transitions: [],
+    },
     {
       name: "canceled",
       kind: "terminal",
@@ -10213,9 +10219,8 @@ describe("a column's autonomy reaches its runs' policy (C22)", () => {
             };
           });
         return {
-          stored: definition.columns.find(
-            (column) => column.name === "careful",
-          )?.autonomy,
+          stored: definition.columns.find((column) => column.name === "careful")
+            ?.autonomy,
           careful: yield* run("careful"),
           building: yield* run("building"),
         };

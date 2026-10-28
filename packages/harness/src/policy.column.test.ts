@@ -49,16 +49,21 @@ const decide = (autonomy: ColumnAutonomy | undefined, command: string) =>
 describe("a column's gates are added to the deployment's", () => {
   /** Mutation: ignore `autonomy.approvalRequired` — the push runs unasked. */
   it("asks before a push in a column that gates `git push`, and runs it in one that does not", () => {
-    expect(decide({ approvalRequired: ["git push"] }, OWN_PUSH)).toMatchObject(
-      { _tag: "ask", action: "git push", detail: OWN_PUSH },
-    );
+    expect(decide({ approvalRequired: ["git push"] }, OWN_PUSH)).toMatchObject({
+      _tag: "ask",
+      action: "git push",
+      detail: OWN_PUSH,
+    });
     expect(decide(undefined, OWN_PUSH)._tag).toBe("allow");
     expect(decide({}, OWN_PUSH)._tag).toBe("allow");
   });
 
   /** Mutation: replace the deployment's gates with the column's — `npm publish` runs unasked. */
   it("keeps every deployment gate: a column cannot lift one", () => {
-    const deployment = { ...DEFAULT_AUTONOMY, approvalRequired: ["npm publish"] };
+    const deployment = {
+      ...DEFAULT_AUTONOMY,
+      approvalRequired: ["npm publish"],
+    };
     const merged = withColumnAutonomy(deployment, {
       approvalRequired: ["git push"],
     });
@@ -70,7 +75,10 @@ describe("a column's gates are added to the deployment's", () => {
   });
 
   it("adds a gate the deployment already holds once, and drops a blank one", () => {
-    const deployment = { ...DEFAULT_AUTONOMY, approvalRequired: ["npm publish"] };
+    const deployment = {
+      ...DEFAULT_AUTONOMY,
+      approvalRequired: ["npm publish"],
+    };
     expect(
       withColumnAutonomy(deployment, {
         approvalRequired: ["/usr/bin/npm  publish", " ", "git push"],
@@ -101,9 +109,7 @@ describe("a column's push scope", () => {
   });
 
   it("leaves every other command alone", () => {
-    expect(decide({ push: "none" }, "git commit -m change")._tag).toBe(
-      "allow",
-    );
+    expect(decide({ push: "none" }, "git commit -m change")._tag).toBe("allow");
   });
 
   /** Nothing a column declares widens D11: hosts and prefixes are the deployment's. */
@@ -204,7 +210,10 @@ describe("the policy a run is built with is the column's", () => {
 
   /** The description is built from the same merge: what a reader is told is what the run meets. */
   it("describes the column with the gates and scopes the run's policy holds", () => {
-    const deployment = { ...DEFAULT_AUTONOMY, approvalRequired: ["npm publish"] };
+    const deployment = {
+      ...DEFAULT_AUTONOMY,
+      approvalRequired: ["npm publish"],
+    };
     const column = {
       role: "builder",
       skills: [],
