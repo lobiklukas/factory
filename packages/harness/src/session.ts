@@ -414,7 +414,8 @@ export type OpenSessionOptions = {
    * The open assembles them into the `repo_instructions` section and the `repo_skills` index under
    * their caps, defers to the column's skills where a name overlaps, and commits what that came to
    * (`RepoPromptDoc`). Absent — a scratch session, a released workspace, a directory that is not a
-   * checkout — installs nothing and records nothing, so such a session runs as it did before.
+   * checkout — installs nothing, so such a session runs as it did before, and clears a record an
+   * earlier open left rather than letting it name sections this prompt does not carry.
    */
   readonly repo?: RepoContext;
   /**
@@ -591,6 +592,13 @@ const openSessionIn = (
     // The skill versions the log already pins (D7), read before the root opens like the model is:
     // the open adds a pin only for a skill it has not recorded, and writes nothing when there is none.
     const recordedPins = yield* readSkillPins(options.storage);
+    // Whether an earlier open recorded what the repository told it, for an open that reads none
+    // (S-repo-instructions-and-skills): that record is cleared below rather than left standing for
+    // sections this prompt no longer carries. A session that never had one writes nothing.
+    const recordedRepo =
+      options.repo === undefined
+        ? yield* readRepoPrompt(options.storage)
+        : undefined;
     const chosen = options.sessionModel ?? role.model;
     const model =
       pinned === undefined
@@ -757,7 +765,11 @@ const openSessionIn = (
           dropped: pagesPrompt.dropped,
         },
         mergeSkillPins(recordedPins, skills),
-        repoPrompt === undefined ? undefined : repoPromptRecord(repoPrompt),
+        repoPrompt !== undefined
+          ? repoPromptRecord(repoPrompt)
+          : recordedRepo !== undefined
+            ? null
+            : undefined,
       );
 
       // Last, once the harness is fully set up (LOB-25): a run a dead process left in the log carries
@@ -855,9 +867,10 @@ export const writePagePrompt = (
   skillPins?: readonly SkillPin[],
   /**
    * What the repository's sections came to (S-repo-instructions-and-skills), for an open that read
-   * a repository; absent leaves the document alone.
+   * a repository; `null` resets the document to its seed, for an open that read none after one that
+   * did, so the record never names sections the prompt no longer carries; absent leaves it alone.
    */
-  repoPrompt?: RepoPromptRecord,
+  repoPrompt?: RepoPromptRecord | null,
 ): Effect.Effect<void, SessionError> =>
   attempt("write page prompt", () =>
     conversation.commit(
@@ -884,24 +897,40 @@ export const writePagePrompt = (
                 }),
             repoPrompt === undefined
               ? Promise.resolve()
-              : tx.doc(RepoPromptDoc, conversation.id).then((doc) => {
-                  doc.ref = repoPrompt.ref;
-                  doc.commit = repoPrompt.commit;
-                  doc.instructions =
-                    repoPrompt.instructions === null
-                      ? null
-                      : { ...repoPrompt.instructions };
-                  doc.skills = {
-                    tokens: repoPrompt.skills.tokens,
-                    cap: repoPrompt.skills.cap,
-                    listed: repoPrompt.skills.listed.map(({ name, path }) => ({
-                      name,
-                      path,
-                    })),
-                    dropped: [...repoPrompt.skills.dropped],
-                    shadowed: [...repoPrompt.skills.shadowed],
-                  };
-                }),
+              : repoPrompt === null
+                ? tx.doc(RepoPromptDoc, conversation.id).then((doc) => {
+                    // The seed's values: `skills.cap` 0 is what `readRepoPrompt` reads as none.
+                    doc.ref = "";
+                    doc.commit = "";
+                    doc.instructions = null;
+                    doc.skills = {
+                      tokens: 0,
+                      cap: 0,
+                      listed: [],
+                      dropped: [],
+                      shadowed: [],
+                    };
+                  })
+                : tx.doc(RepoPromptDoc, conversation.id).then((doc) => {
+                    doc.ref = repoPrompt.ref;
+                    doc.commit = repoPrompt.commit;
+                    doc.instructions =
+                      repoPrompt.instructions === null
+                        ? null
+                        : { ...repoPrompt.instructions };
+                    doc.skills = {
+                      tokens: repoPrompt.skills.tokens,
+                      cap: repoPrompt.skills.cap,
+                      listed: repoPrompt.skills.listed.map(
+                        ({ name, path }) => ({
+                          name,
+                          path,
+                        }),
+                      ),
+                      dropped: [...repoPrompt.skills.dropped],
+                      shadowed: [...repoPrompt.skills.shadowed],
+                    };
+                  }),
           ]).then(() => undefined),
         ),
       BACKGROUND_CONTEXT,

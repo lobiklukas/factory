@@ -2097,8 +2097,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * its `AGENTS.md` and skills at `base`, the ref its `verify` measures against, so the run is told
        * what the base it was cut from says. Only for a repository's own checkout that is still there:
        * a scratch session, a released one, or a directory with no `.git` reads nothing, and so does a
-       * base that does not resolve. What it came to is said in the process's log — the prompt record
-       * itself is the open's to commit.
+       * base that does not resolve. Why a read came to nothing, or to less than the repository
+       * holds, is said in the process's log, in the reader's words — the prompt record itself is the
+       * open's to commit.
        */
       const repoContextFor = (
         workspace: SessionWorkspace,
@@ -2116,13 +2117,16 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             .exists(path.join(workspace.path, ".git"))
             .pipe(Effect.orElseSucceed(() => false));
           if (!checkout) return undefined;
-          const context = yield* readRepoContext({
+          const { context, problems } = yield* readRepoContext({
             directory: workspace.path,
             ref: base,
           });
-          if (context === undefined) {
+          // The reader knows why it read nothing, or less than the whole: the log names that cause.
+          for (const problem of problems) {
             yield* Effect.logWarning(
-              `${workspace.path}: ${base} names no commit in the worktree, so the run is told nothing of the repository's AGENTS.md or skills`,
+              context === undefined
+                ? `${workspace.path}: ${problem}, so the run is told nothing of the repository's AGENTS.md or skills at ${base}`
+                : `${workspace.path}: ${problem} at ${base}, so the run is told less of the repository than it holds`,
             );
           }
           return context;

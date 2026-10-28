@@ -53,8 +53,11 @@ const fixture = (name: string, files: Record<string, string>): string => {
   return root;
 };
 
-const read = (directory: string, ref = "main") =>
+const readWithProblems = (directory: string, ref = "main") =>
   Effect.runPromise(readRepoContext({ directory, ref }));
+
+const read = async (directory: string, ref = "main") =>
+  (await readWithProblems(directory, ref)).context;
 
 const SKILL = (name: string, description: string, body = "the body") =>
   `---\nname: ${name}\ndescription: |\n  ${description}\n---\n\n# ${name}\n\n${body}\n`;
@@ -180,6 +183,59 @@ describe(
       // A session directory inside some other checkout is not that checkout's session.
       expect(await read(join(root, "sub"))).toBeUndefined();
       expect(await read(join(scratch, "not-a-repo-at-all"))).toBeUndefined();
+    });
+
+    it("says why it read nothing: an unresolved base is not a nested directory", async () => {
+      const root = fixture("reasons", {
+        "AGENTS.md": "rules\n",
+        "sub/file.txt": "inside\n",
+      });
+
+      // Mutation: one message for every undefined — the base is blamed for the nested directory.
+      expect(await readWithProblems(root, "no-such-branch")).toEqual({
+        problems: ["no-such-branch names no commit there"],
+      });
+      expect(await readWithProblems(join(root, "sub"))).toEqual({
+        problems: ["it is not the root of a work tree (it is sub/ inside one)"],
+      });
+      const outside = await readWithProblems(join(scratch, "no-repo-here"));
+      expect(outside.context).toBeUndefined();
+      expect(outside.problems).toEqual([
+        "git could not say whether it is a work tree (not one, or git failed or timed out)",
+      ]);
+      // A whole read has nothing to report.
+      expect((await readWithProblems(root)).problems).toEqual([]);
+    });
+
+    it("finds a skill however many files its directory holds", async () => {
+      const root = fixture("crowded", {
+        ".pi/skills/alpha/SKILL.md": SKILL("alpha", "The first skill."),
+        ".pi/skills/zeta/SKILL.md": SKILL("zeta", "The last skill."),
+      });
+      // 15k committed evidence files under one skill: a recursive listing of the skill roots runs
+      // past 1 MiB, which execFile's default buffer refuses. Staged through the index from one
+      // blob, so the fixture costs no 15k file writes.
+      const blob = execSync("git hash-object -w --stdin", {
+        cwd: root,
+        input: "evidence\n",
+        encoding: "utf8",
+      }).trim();
+      const index = Array.from(
+        { length: 15_000 },
+        (_, i) =>
+          `100644 ${blob}\t.pi/skills/alpha/evidence/run-${String(i).padStart(5, "0")}/output.txt`,
+      ).join("\n");
+      execSync("git update-index --index-info", { cwd: root, input: index });
+      git(root, "git commit -q -m evidence");
+
+      const { context, problems } = await readWithProblems(root);
+
+      // Mutation: list the roots recursively under the default buffer — no skills, and no word why.
+      expect(context?.skills.map((skill) => skill.name)).toEqual([
+        "alpha",
+        "zeta",
+      ]);
+      expect(problems).toEqual([]);
     });
   },
 );

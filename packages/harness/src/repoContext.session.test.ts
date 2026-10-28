@@ -215,4 +215,19 @@ describe("what the repository tells a run", () => {
     expect(record?.instructions?.bytes).toBe(moved.length);
     expect(record?.skills.listed).toEqual([]);
   }, 120_000);
+
+  it("clears the record when a reopen reads no repository context", async () => {
+    const logId = freshLogId();
+    const first = await openAndSend(logId, { repo: REPO });
+    expect(first.record?.commit).toBe(REPO.commit);
+
+    // A released workspace, a base that no longer resolves, a git read that timed out: the
+    // control plane hands the open nothing, so the sections go and the record must say so.
+    // Mutation: leave the document alone when `repo` is absent — the first open's record stands.
+    const { sections, record } = await openAndSend(logId, {});
+
+    expect(sections["repo_instructions"]).toBeUndefined();
+    expect(sections["repo_skills"]).toBeUndefined();
+    expect(record).toBeUndefined();
+  }, 120_000);
 });

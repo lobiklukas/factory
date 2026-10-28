@@ -216,7 +216,9 @@ export const SkillPinsDoc = defineDoc({
  *
  * Written by every open of a session on a repository checkout, in the open's one commit, so "what did
  * this run's repo tell it, and what did that cost" is a read rather than a reconstruction; a
- * scratch session, which has no repository, never writes it. `instructions` is `null` for a repo with
+ * scratch session, which has no repository, never writes it. An open that reads nothing after one
+ * that recorded something (a released workspace, a base that no longer resolves, a git read that
+ * timed out) resets it to the seed, so the record never names sections its prompt does not carry. `instructions` is `null` for a repo with
  * no `AGENTS.md`, which is the record of the absence. `skills.cap` is the sentinel: the seed's `0`
  * says no open recorded one.
  */
