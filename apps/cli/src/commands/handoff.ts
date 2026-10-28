@@ -271,7 +271,8 @@ export const handoffCommand = Command.make(
       });
       const slug = yield* handoffRepo(Option.getOrUndefined(repo), collected);
       if (dryRun) {
-        for (const line of handoffPreview(collected, slug)) yield* Console.log(line);
+        for (const line of handoffPreview(collected, slug))
+          yield* Console.log(line);
         return;
       }
       const { client } = yield* BoardClient;

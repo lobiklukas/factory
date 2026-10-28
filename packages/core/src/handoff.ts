@@ -22,7 +22,7 @@
  *   nothing in it was written by the agent yet. Every call still runs with no hook and no fsmonitor (`./git.ts`'s rule), and the commit is
  *   `--no-verify` and unsigned, under a fixed identity, so no configuration decides what it is.
  */
-import { Effect, Schema } from "effect";
+import { DateTime, Effect, Option, Schema } from "effect";
 // oxlint-disable-next-line effecttsgo/node-builtin-import -- the apply is the local git CLI, the same one `workspace.ts` cuts the worktree with.
 import { execFile } from "node:child_process";
 import { handoffPatchFiles } from "@repo/domain/Task";
@@ -153,13 +153,14 @@ const trailerCommit = (
   );
 
 /** When the trailer walk may stop: a day before the card was made, so clock skew cannot cut it short. */
-const sinceOf = (createdAt: string | undefined): string | undefined => {
-  if (createdAt === undefined) return undefined;
-  const millis = Date.parse(createdAt);
-  return Number.isNaN(millis)
+const sinceOf = (createdAt: string | undefined): string | undefined =>
+  createdAt === undefined
     ? undefined
-    : new Date(millis - 86_400_000).toISOString();
-};
+    : Option.getOrUndefined(
+        Option.map(DateTime.make(createdAt), (made) =>
+          DateTime.formatIso(DateTime.subtract(made, { days: 1 })),
+        ),
+      );
 
 /**
  * Make sure the branch `worktree` has checked out carries the card's handoff, and commit `patch` on

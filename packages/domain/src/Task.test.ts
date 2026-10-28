@@ -1114,7 +1114,7 @@ describe("a handoff patch (S-local-agent-handoff-mcp)", () => {
       "a\u{d800}b",
     ]) {
       expect(handoffPatchWireBytes(sample)).toBe(
-        new TextEncoder().encode(JSON.stringify(sample)).length - 2,
+        handoffPatchBytes(JSON.stringify(sample)) - 2,
       );
     }
     expect(handoffPatchWireBytes("\u001b")).toBe(6);

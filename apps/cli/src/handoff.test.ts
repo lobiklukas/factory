@@ -202,7 +202,10 @@ describe("collectHandoff (S-local-agent-handoff-mcp)", () => {
       readFileSync(join(local, "utf8.txt")),
     );
 
-    writeFileSync(join(local, "latin1.txt"), Buffer.from([99, 97, 102, 233, 10]));
+    writeFileSync(
+      join(local, "latin1.txt"),
+      Buffer.from([99, 97, 102, 233, 10]),
+    );
     const refused = await refusal({ cwd: local });
     expect(refused.message).toBe(
       "latin1.txt is a text file that is not UTF-8, which a handoff patch cannot carry byte for byte: commit and push the work to a branch and hand off from it (--base), or convert it to UTF-8",

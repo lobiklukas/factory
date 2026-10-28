@@ -3728,7 +3728,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // open here. One that is not open is held to it by the message that first prompts it.
           const owner = HashMap.get(yield* Ref.get(live), sessionId);
           if (input.taskId !== undefined && Option.isSome(owner))
-            yield* ensureHandoffBeforeFirstTurn(sessionId, already, owner.value);
+            yield* ensureHandoffBeforeFirstTurn(
+              sessionId,
+              already,
+              owner.value,
+            );
           return yield* describe(sessionId, already);
         });
 
