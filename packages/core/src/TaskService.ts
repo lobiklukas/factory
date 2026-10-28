@@ -3057,21 +3057,55 @@ export const TaskServiceLive = Layer.effect(
                 : { question: row.question }),
             }),
           );
-          const gateItems = yield* Effect.forEach(gates, (row) => {
-            const definition = definitions.get(
-              `${row.definitionId}@${row.definitionVersion}`,
-            );
-            const exit =
-              definition === undefined
-                ? undefined
-                : gatedExit(definition, row.column);
-            return toAttention(row, {
-              _tag: "gate",
-              gate: exit?.gate,
-              to: exit?.to,
-              sessionId: row.runSession,
-            });
-          });
+          // A gate whose exit still misses a checked requirement (a planning run that posted no
+          // plan: `plan_doc`, D10) is still a person's — someone must start or prompt a run — but
+          // not yet the gate's move, which would be refused naming the key. The item names what is
+          // unmet, judged exactly as `move` judges it, so the view says "needs a plan" rather than
+          // inviting an approval the service refuses.
+          const gateItems = yield* Effect.forEach(gates, (row) =>
+            Effect.gen(function* () {
+              const definition = definitions.get(
+                `${row.definitionId}@${row.definitionVersion}`,
+              );
+              const exit =
+                definition === undefined
+                  ? undefined
+                  : gatedExit(definition, row.column);
+              const requirements =
+                exit === undefined
+                  ? []
+                  : exitRequirements(
+                      definition?.columns.find(
+                        (column) => column.name === row.column,
+                      ),
+                      exit.to,
+                    );
+              const unmet =
+                requirements.length === 0
+                  ? []
+                  : yield* cardEvidence(
+                      row.id,
+                      new Set(requirements.map((requirement) => requirement.key)),
+                      row.column,
+                    ).pipe(
+                      Effect.map((evidence) =>
+                        requirements
+                          .filter(
+                            (requirement) =>
+                              !requirementVerdict(requirement, evidence).met,
+                          )
+                          .map((requirement) => requirement.key),
+                      ),
+                    );
+              return yield* toAttention(row, {
+                _tag: "gate",
+                gate: exit?.gate,
+                to: exit?.to,
+                sessionId: row.runSession,
+                ...(unmet.length === 0 ? {} : { unmet }),
+              });
+            }),
+          );
           return [
             ...mergeByRequest(approvalItems, sessionApprovalItems),
             ...questionItems,

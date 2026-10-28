@@ -73,6 +73,24 @@ describe("a deployment's ROLE_POLICIES", () => {
     });
   });
 
+  /**
+   * Mutation: drop the read-only requirement — `architect=plan` is a row whose runs may change the
+   * code and still post the plan that meets `plan_doc`.
+   */
+  it("refuses a role that declares the spec or the plan without read-only", () => {
+    expect(parsed("architect=plan")).toEqual({
+      error:
+        "role architect: plan needs read-only (a run that declares the plan only reads)",
+    });
+    expect(parsed("drafter=spec")).toEqual({
+      error:
+        "role drafter: spec needs read-only (a run that declares the spec only reads)",
+    });
+    expect(parsed("architect=plan+read-only")).toEqual({
+      ok: [["architect", { writesPlan: true, readOnly: true }]],
+    });
+  });
+
   it("extends the factory's table, keeping its rows whatever the extension says", () => {
     const extended = extendRolePolicies(
       new Map([

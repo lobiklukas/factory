@@ -2128,6 +2128,8 @@ describe("TaskService — what needs a person (LOB-77)", () => {
       "specifying",
       "planning",
     ]);
+    // The plan is posted, so the gate is the approval itself (D10); `planless` below has none.
+    await withService((s) => planned(s, gated));
     const merge = await cardIn(boardId, "merge waits", [
       "specifying",
       "planning",
@@ -2164,6 +2166,10 @@ describe("TaskService — what needs a person (LOB-77)", () => {
       "specifying",
     ]);
     const planAsks = await cardIn(boardId, "plan run waits on an approval", [
+      "specifying",
+      "planning",
+    ]);
+    const planless = await cardIn(boardId, "no plan yet", [
       "specifying",
       "planning",
     ]);
@@ -2206,6 +2212,7 @@ describe("TaskService — what needs a person (LOB-77)", () => {
     const approvalRun = newSession();
     const capabilityRun = newSession();
     const planAskRun = newSession();
+    const planlessRun = newSession();
     const [onBoard, everywhere, clean] = await attentionWith(
       {
         runs: [
@@ -2248,6 +2255,14 @@ describe("TaskService — what needs a person (LOB-77)", () => {
             ago: 15,
             sessionId: planAskRun,
           },
+          // Settled without a plan (D10): still a gate row, naming what the approval needs first.
+          {
+            taskId: planless.id,
+            column: "planning",
+            status: "idle",
+            ago: 3,
+            sessionId: planlessRun,
+          },
         ],
         approvals: [
           {
@@ -2288,6 +2303,7 @@ describe("TaskService — what needs a person (LOB-77)", () => {
       ["question", "blocked needs_input by hand"],
       ["gate", "plan waits"],
       ["gate", "merge waits"],
+      ["gate", "no plan yet"],
     ]);
     const listed = new Set((onBoard ?? []).map((item) => item.task?.id));
     for (const absent of [resting, busy, noRun, waiting, building]) {
@@ -2329,6 +2345,15 @@ describe("TaskService — what needs a person (LOB-77)", () => {
       _tag: "gate",
       gate: "merge",
       to: "done",
+    });
+    // Mutation: build gate rows without judging the exit — this row invites an approval `move`
+    // refuses naming `plan_doc`.
+    expect(reasons[7]).toEqual({
+      _tag: "gate",
+      gate: "plan approval",
+      to: "building",
+      sessionId: planlessRun,
+      unmet: ["plan_doc"],
     });
     expect(
       (onBoard ?? []).every(
@@ -2911,7 +2936,6 @@ describe("TaskService — exit requirements", () => {
             });
             for (const to of ["specifying", "planning", "building"]) {
               if (to === "planning") task = yield* specified(s, task);
-              if (to === "building") task = yield* planned(s, task);
               if (to === "building") task = yield* planned(s, task);
               task = yield* s.move({
                 taskId: task.id,

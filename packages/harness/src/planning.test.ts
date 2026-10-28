@@ -29,6 +29,8 @@ import {
 import { decodePlan, projectPlan, type Plan } from "./plan";
 import {
   describePlan,
+  PLAN_STAGE_SECTION_KEY,
+  PLAN_STAGE_TEXT,
   PLAN_TOOL,
   type PlanOptions,
   type PlanReceipt,
@@ -39,6 +41,7 @@ import {
   openSession,
   readOfferedTools,
   readPlan,
+  readPromptSections,
   readSessionLog,
   submitMessage,
 } from "./session";
@@ -117,8 +120,15 @@ const runOnce = (options: {
       const plan = yield* readPlan(harness, root);
       const log = yield* readSessionLog(storage);
       const offered = yield* readOfferedTools(storage);
+      const sections = yield* readPromptSections(storage);
       yield* closeHarness(harness);
-      return { plan, stored: log.plan, offered, entries: log.entries };
+      return {
+        plan,
+        stored: log.plan,
+        offered,
+        sections,
+        entries: log.entries,
+      };
     }),
   );
 
@@ -261,6 +271,25 @@ describe("who is offered the plan tool", () => {
       expect(ran.plan).toBeUndefined();
     }
     expect(posts).toHaveLength(0);
+  });
+
+  /**
+   * A planning column with no `plan` skill (every definition version before 0042's) still exits on
+   * `plan_doc`, so the run is told so beside the tool. Mutation: drop the section — `skills: []`'s
+   * planner is told nothing about its exit.
+   */
+  it("tells a planner with no skill that the stage exits only with a declared plan", async () => {
+    const { options } = recorder();
+    const ran = await runOnce({ run: planner, plan: options, attempts: [] });
+    expect(ran.sections[PLAN_STAGE_SECTION_KEY]).toBe(
+      `<plan_stage>\n${PLAN_STAGE_TEXT}\n</plan_stage>`,
+    );
+    const builder = await runOnce({
+      run: { column: "building", role: "builder", skills: [] },
+      plan: options,
+      attempts: [],
+    });
+    expect(builder.sections[PLAN_STAGE_SECTION_KEY]).toBeUndefined();
   });
 
   it("is not offered to a planner with no card to post on", async () => {

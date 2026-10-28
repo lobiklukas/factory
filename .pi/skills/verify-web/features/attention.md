@@ -31,7 +31,10 @@ approval is walked from the browser. `TaskService.attention` decides; the page o
   column, no run of the card is busy (`session_activity`), and no run of the card holds an
   undecided approval (a run parked on one is idle, but is waiting on the decision — it is listed as
   the approval only). `li[data-attention-reason=gate]`, text
-  `The <column> run is idle; <column> → <to> is the <gate>, a person's move`.
+  `The <column> run is idle; <column> → <to> is the <gate>, a person's move`. When the exit still
+  misses a checked requirement (D10: a planning run that settled without a plan), the server names it
+  (`reason.unmet`) and the text is `The <column> run is idle without <keys>; <column> → <to> needs it
+  before the <gate>`, because the gate's move would be refused naming the key.
 
 Not listed: a resting card (`intake`), a card in a column with no human gate, a card in a gated
 column with no run there yet or with a run still busy, and a card blocked on a `dependency`,

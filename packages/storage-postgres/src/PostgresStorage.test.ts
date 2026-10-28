@@ -63,7 +63,7 @@ import {
   READER_PAGE_ROWS,
 } from "./PostgresStorage";
 import { Skill } from "@repo/domain/Skill";
-import { BoardDefinition } from "@repo/domain/Task";
+import { BoardColumn, BoardDefinition } from "@repo/domain/Task";
 
 /**
  * Pi Durable's storage conformance suite is the acceptance oracle (docs/design.md M1).
@@ -1771,6 +1771,102 @@ describe("the board's tables and seed", () => {
         migration.pipe(Effect.provideService(SqlClient, sql)),
       );
       expect(await read(6)).toHaveLength(1);
+    },
+  );
+
+  /**
+   * 0042 (D10) against an id an operator already authored past the seeds (docs/board.md: seed
+   * migrations and authored versions share one id space). Driven on an id of its own, so the shared
+   * `default` is never touched: a seeded version 1, then an authored version 2 with its own name and
+   * no caps; binding writes version 3 over version 2 — never a fixed number — and a second pass
+   * writes nothing. A newest version with no planning column gets no new version.
+   *
+   * Mutation: insert at a fixed version 2 with `ON CONFLICT DO NOTHING` — no version 3. Mutation:
+   * read version 1 instead of the newest — version 3's name is the seed's. Mutation: drop the
+   * `skills.includes("plan")` guard — the second pass writes version 4.
+   */
+  it(
+    "binds the plan skill at the newest version + 1 over an authored version",
+    { timeout: 30_000 },
+    async () => {
+      const { bindPlanSkill } = await import(
+        "./migrations/0042_seed_plan_skill"
+      );
+      const ColumnsJson = Schema.fromJsonString(Schema.Array(BoardColumn));
+      const suffix = randomBytes(6).toString("hex");
+      const id = `d10_plan_${suffix}`;
+      const flat = `d10_flat_${suffix}`;
+      const [seed] = await Effect.runPromise(
+        sql<{ columns: string; initialColumn: string | null }>`
+          SELECT columns::text AS columns, initial_column FROM board_definitions
+          WHERE id = 'default' AND version = 5
+        `,
+      );
+      expect(seed).toBeDefined();
+      if (seed === undefined) return;
+      const withoutPlanning = JSON.stringify(
+        Schema.decodeUnknownSync(ColumnsJson)(seed.columns).filter(
+          (column) => column.name !== "planning",
+        ),
+      );
+      const read = (definitionId: string) =>
+        Effect.runPromise(
+          sql<{
+            version: number;
+            name: string;
+            columns: string;
+            caps: string | null;
+          }>`
+            SELECT version, name, columns::text AS columns, caps::text AS caps
+            FROM board_definitions WHERE id = ${definitionId} ORDER BY version
+          `,
+        );
+      const run = (definitionId: string) =>
+        Effect.runPromise(
+          bindPlanSkill(definitionId).pipe(
+            Effect.provideService(SqlClient, sql),
+          ),
+        );
+      const planningSkills = (columns: string | undefined) =>
+        Schema.decodeUnknownSync(ColumnsJson)(columns ?? "[]").find(
+          (column) => column.name === "planning",
+        )?.skills;
+      const others = (columns: string | undefined) =>
+        Schema.decodeUnknownSync(ColumnsJson)(columns ?? "[]").filter(
+          (column) => column.name !== "planning",
+        );
+
+      try {
+        await Effect.runPromise(
+          sql`
+            INSERT INTO board_definitions (id, version, name, columns, initial_column, caps)
+            VALUES
+              (${id}, 1, 'Seeded', ${seed.columns}::jsonb, ${seed.initialColumn}, '{"board":2,"task":1,"repo":2}'::jsonb),
+              (${id}, 2, 'Authored', ${seed.columns}::jsonb, ${seed.initialColumn}, NULL),
+              (${flat}, 1, 'No planning', ${withoutPlanning}::jsonb, ${seed.initialColumn}, NULL)
+          `,
+        );
+
+        await run(id);
+        const rows = await read(id);
+        expect(rows.map((row) => row.version)).toEqual([1, 2, 3]);
+        const [, authored, bound] = rows;
+        expect(bound?.name).toBe("Authored");
+        expect(bound?.caps).toBeNull();
+        expect(planningSkills(bound?.columns)).toEqual(["plan"]);
+        expect(planningSkills(authored?.columns)).toEqual([]);
+        expect(others(bound?.columns)).toEqual(others(authored?.columns));
+
+        await run(id);
+        expect((await read(id)).map((row) => row.version)).toEqual([1, 2, 3]);
+
+        await run(flat);
+        expect((await read(flat)).map((row) => row.version)).toEqual([1]);
+      } finally {
+        await Effect.runPromise(
+          sql`DELETE FROM board_definitions WHERE id IN (${id}, ${flat})`,
+        );
+      }
     },
   );
 

@@ -546,6 +546,25 @@ describe("attentionLines (LOB-264)", () => {
     );
   });
 
+  /** D10: a planning run that posted no plan — the approval would be refused naming plan_doc. */
+  it("says what a gate's exit still needs before it is a person's move", () => {
+    const lines = attentionLines(
+      item(
+        {
+          _tag: "gate",
+          gate: "plan approval",
+          to: "building",
+          sessionId: SESSION_B,
+          unmet: ["plan_doc"],
+        },
+        { column: "planning" },
+      ),
+    );
+    expect(lines[1]).toBe(
+      `  plan approval: ${SESSION_B} is idle; planning → building needs plan_doc first (start or prompt a run), then is a person's`,
+    );
+  });
+
   it("keeps a multi-line card title on the head row", () => {
     const lines = attentionLines(
       item(

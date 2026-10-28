@@ -132,6 +132,15 @@ describe("attentionReasonText", () => {
       "The planning run is idle; planning → building is the plan approval, a person's move",
     );
   });
+
+  /** D10: the gate's move would be refused naming plan_doc, so the row says so instead. */
+  it("says what the exit still needs before the gate, not the approval", () => {
+    expect(
+      attentionReasonText(item("g", { ...gate, unmet: ["plan_doc"] })),
+    ).toBe(
+      "The planning run is idle without plan_doc; planning → building needs it before the plan approval",
+    );
+  });
 });
 
 describe("attentionLink", () => {

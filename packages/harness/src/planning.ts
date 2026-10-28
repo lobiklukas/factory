@@ -19,20 +19,38 @@
  *   call id, so a replay posts nothing twice.
  * - **Only for the planner.** The tool is installed for a run whose role's row says `writesPlan`
  *   (`./loader`'s `resolveRole`), and only when there is a card to post on.
+ * - **Told, not only offered.** The extension carries a short `plan_stage` section saying the stage
+ *   exits only with a declared plan, so a run on a version whose planning column binds no `plan`
+ *   skill (versions before 0042's) is still told to call the tool.
  */
 import type { JsonValue } from "@earendil-works/chord";
 import { Type } from "@earendil-works/pi-ai";
 import type { ConversationId, Extension, Tx } from "@earendil-works/pi-durable";
-import { defineExtension, defineTool } from "@earendil-works/pi-durable";
-import { Cause, Effect, Exit, Option } from "effect";
+import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import { PlanDoc } from "./docs";
 import { decodePlan, type Plan } from "./plan";
+import { items, listed, validated } from "./stageTool";
 
 /** The tool's name, as the model calls it and as its result is found in the log. */
 export const PLAN_TOOL = "plan";
 
 /** The name the extension carrying the tool is installed under. */
 export const PLAN_EXTENSION = "factory.planning";
+
+/** The stage's section key, and so its `<plan_stage>` tag in the rendered prompt. */
+export const PLAN_STAGE_SECTION_KEY = "plan_stage";
+
+/**
+ * What every planner run is told about its exit, whatever skills its column binds. `plan_doc` is
+ * checked on every definition version, but only the versions seeded since 0042 bind the `plan` skill
+ * to `planning`: a card pinned to an earlier one would otherwise learn of the tool only from its
+ * description, and could settle in prose with a card that cannot leave the column.
+ */
+export const PLAN_STAGE_TEXT =
+  "This is the planning stage: the card leaves it only once its plan is declared with the `plan` " +
+  "tool (summary, steps, surfaces, risks). Read the card and the code, then declare the plan before " +
+  "you finish; a plan written only in prose does not count. Do not build, and do not move the card: " +
+  "a person approves the plan by moving it on.";
 
 /** Where a posted plan left the card: the receipt the tool reports to the model. */
 export type PlanReceipt = {
@@ -71,10 +89,6 @@ export const commitPlan = (
     doc.risks = [...plan.risks];
   });
 
-/** A list as the result's sentence names it: `none`, or each item quoted, in order. */
-const listed = (items: readonly string[]): string =>
-  items.length === 0 ? "none" : items.map((item) => `"${item}"`).join("; ");
-
 /**
  * What the model is told after its plan was committed and posted: where it is, and that a person
  * approves it — the run does not move the card on, the plan approval gate is a person's move.
@@ -84,19 +98,6 @@ export const describePlan = (plan: Plan, receipt: PlanReceipt): string =>
   `(revision ${receipt.revision}): ${plan.steps.length} step(s), surfaces ${listed(plan.surfaces)}, ` +
   `risks ${listed(plan.risks)}. A person approves the plan by moving the card on; ` +
   "do not start the work. Call the tool again to replace the plan.";
-
-/** Validate the arguments, or reject with the refusal's own sentence (it names the field). */
-const validated = (args: unknown): Promise<Plan> =>
-  Effect.runPromiseExit(decodePlan(args)).then((exit) => {
-    if (Exit.isSuccess(exit)) return exit.value;
-    const refused = Cause.findErrorOption(exit.cause);
-    throw new Error(
-      Option.isSome(refused) ? refused.value.message : Cause.pretty(exit.cause),
-    );
-  });
-
-const items = (description: string) =>
-  Type.Optional(Type.Array(Type.String(), { description }));
 
 /**
  * The `plan` tool, bound to one run's card. `replay: "safe"` because both halves are idempotent:
@@ -125,7 +126,7 @@ export const planTool = (options: PlanOptions) =>
     replay: "safe",
     executionMode: "sequential",
     execute: (args, api, context) =>
-      validated(args).then((plan) =>
+      validated(decodePlan, args).then((plan) =>
         api
           .commit((tx) => commitPlan(tx, api.conversationId, plan), context)
           .then(() => options.post({ plan, callId: api.callId }))
@@ -150,4 +151,8 @@ export const planTool = (options: PlanOptions) =>
 
 /** The extension installed beside `CodingTools` at `openSession`, for a planner run on a card. */
 export const planExtension = (options: PlanOptions): Extension =>
-  defineExtension({ name: PLAN_EXTENSION, tools: [planTool(options)] });
+  defineExtension({
+    name: PLAN_EXTENSION,
+    tools: [planTool(options)],
+    sections: [section(PLAN_STAGE_SECTION_KEY, () => PLAN_STAGE_TEXT)],
+  });

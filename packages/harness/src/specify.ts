@@ -29,9 +29,9 @@ import type { JsonValue } from "@earendil-works/chord";
 import { Type } from "@earendil-works/pi-ai";
 import type { ConversationId, Extension, Tx } from "@earendil-works/pi-durable";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
-import { Cause, Effect, Exit, Option } from "effect";
 import { SpecDoc } from "./docs";
 import { decodeSpec, type Spec } from "./spec";
+import { items, listed, validated } from "./stageTool";
 
 /** The tool's name, as the model calls it and as its result is found in the log. */
 export const SPEC_TOOL = "spec";
@@ -78,10 +78,6 @@ export const commitSpec = (
     doc.openQuestions = [...spec.openQuestions];
   });
 
-/** A list as the result's sentence names it: `none`, or each item quoted, in order. */
-const listed = (items: readonly string[]): string =>
-  items.length === 0 ? "none" : items.map((item) => `"${item}"`).join("; ");
-
 /**
  * What the model is told after its spec was committed and posted. A spec with gaps points the run at
  * the ask, because declaring a gap is not the same as asking anyone to close it.
@@ -96,19 +92,6 @@ export const describeSpec = (spec: Spec, receipt: SpecReceipt): string => {
     "your open questions with the ask tool, in one question, as the only tool call of its response."
   );
 };
-
-/** Validate the arguments, or reject with the refusal's own sentence (it names the field). */
-const validated = (args: unknown): Promise<Spec> =>
-  Effect.runPromiseExit(decodeSpec(args)).then((exit) => {
-    if (Exit.isSuccess(exit)) return exit.value;
-    const refused = Cause.findErrorOption(exit.cause);
-    throw new Error(
-      Option.isSome(refused) ? refused.value.message : Cause.pretty(exit.cause),
-    );
-  });
-
-const items = (description: string) =>
-  Type.Optional(Type.Array(Type.String(), { description }));
 
 /**
  * The `spec` tool, bound to one run's card.
@@ -142,7 +125,7 @@ export const specTool = (options: SpecOptions) =>
     replay: "safe",
     executionMode: "sequential",
     execute: (args, api, context) =>
-      validated(args).then((spec) =>
+      validated(decodeSpec, args).then((spec) =>
         api
           .commit((tx) => commitSpec(tx, api.conversationId, spec), context)
           .then(() => options.post({ spec, callId: api.callId }))

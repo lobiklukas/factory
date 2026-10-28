@@ -190,7 +190,9 @@ table (`packages/harness/src/rolePolicy.ts`, `DEFAULT_ROLE_POLICIES`) is the one
 may do — `readOnly` (and the stage it names), `writesSpec`, `writesPlan` — replacing the per-feature
 `READ_ONLY_ROLES` and `SPEC_ROLES` sets. A deployment extends it with rows for its own roles
 (`ROLE_POLICIES=auditor=read-only,architect=read-only+plan`); a row redefining the factory's own
-`specifier` or `planner` fails the boot, because the default pipeline's exits are checked against them.
+`specifier` or `planner` fails the boot, because the default pipeline's exits are checked against them,
+and so does a `spec` or `plan` row without `read-only` (`architect=plan`): a declaration that meets a
+checked exit comes only from a run that only reads.
 A review run stays read-only because it is a review, not by a row.
 
 Built (LOB-238): the specifier's writer. A run whose role `writesSpec` (since D10 a row of `rolePolicy.ts`; it was `SPEC_ROLES`)
@@ -213,8 +215,10 @@ The tool validates a typed plan — `summary`, `steps` and `surfaces` (at least 
 (required, `[]` when there are none) — commits `factory.plan` to the run's log and posts it on the
 card as a `planned` task event, idempotent by `<session id>:<tool call id>`, as the spec's is. The card's
 plan is its newest `planned` event (`getTaskPlan`, `factory board show`, the card pane's Plan section):
-what the person crossing the plan approval gate reads. The run does not move the card on. Default
-definition v6 (`0042_seed_plan_skill.ts`) binds the seeded `plan` skill to `planning`; earlier
+what the person crossing the plan approval gate reads. The run does not move the card on.
+`0042_seed_plan_skill.ts` binds the seeded `plan` skill to `planning` on a new version of `default`:
+the id's newest version + 1, read under `defineBoard`'s advisory lock (v6 over the seeded v5; over an
+operator's authored `default`, that version with the skill added), per the seed rule above. Earlier
 versions keep a planning column with no skill, and their planners are still read-only and offered the
 tool, because both follow the role.
 

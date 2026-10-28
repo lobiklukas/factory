@@ -1371,7 +1371,9 @@ export const attentionLines = (item: AttentionItem): ReadonlyArray<string> => {
     case "gate":
       return [
         head,
-        `  ${reason.gate}: ${reason.sessionId} is idle; ${task?.column ?? "-"} → ${reason.to} is a person's`,
+        reason.unmet === undefined || reason.unmet.length === 0
+          ? `  ${reason.gate}: ${reason.sessionId} is idle; ${task?.column ?? "-"} → ${reason.to} is a person's`
+          : `  ${reason.gate}: ${reason.sessionId} is idle; ${task?.column ?? "-"} → ${reason.to} needs ${reason.unmet.join(", ")} first (start or prompt a run), then is a person's`,
       ];
   }
 };

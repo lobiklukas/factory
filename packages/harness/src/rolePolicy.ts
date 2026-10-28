@@ -83,8 +83,9 @@ const FLAGS: ReadonlyMap<string, "readOnly" | "writesSpec" | "writesPlan"> =
  * Read the deployment's extra rows as it writes them (`ROLE_POLICIES`): a comma-separated list of
  * `role=flag+flag`, in the shape `ROLE_MODELS` uses, where a flag is `read-only`, `spec` or `plan`
  * (`auditor=read-only`, `architect=read-only+plan`). Blank entries are skipped, so an empty value is
- * no extra rows. A row with no `=`, an empty side, an unknown flag, a role named twice, or a role
- * the default table holds is refused rather than guessed at.
+ * no extra rows. A row with no `=`, an empty side, an unknown flag, a role named twice, a role the
+ * default table holds, or a `spec` or `plan` row without `read-only` is refused rather than guessed
+ * at: the stage tools' declarations meet checked exits, so they come only from runs that only read.
  */
 export const parseRolePolicies = (
   text: string,
@@ -125,6 +126,19 @@ export const parseRolePolicies = (
           });
         }
         policy[field] = true;
+      }
+      // A stage tool's declaration meets a checked exit (`spec_doc`, `plan_doc`) by existing, so it
+      // must come from a run that only reads — the invariant the factory's own rows hold.
+      const stageTool =
+        policy.writesPlan === true
+          ? "plan"
+          : policy.writesSpec === true
+            ? "spec"
+            : undefined;
+      if (stageTool !== undefined && policy.readOnly !== true) {
+        return yield* new InvalidRolePolicies({
+          message: `role ${role}: ${stageTool} needs read-only (a run that declares the ${stageTool} only reads)`,
+        });
       }
       table.set(role, policy);
     }
