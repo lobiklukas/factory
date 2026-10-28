@@ -5,11 +5,11 @@
 //
 // A card has to exist before any command can be proven: `factory board ls` prints lanes from the
 // definition and cards from the rows, and `board move` needs a revision to expect. No command
-// creates a card, because card creation is a trigger's job (docs/board.md B2) and this skill drives
-// the *reading and moving* that a person does by hand.
+// creates a card here: `drive.sh` adds its own with `factory board add` (LOB-261), and this skill
+// drives the reading and moving that a person does by hand.
 //
 // `SEED_CARD=0` seeds the board alone (LOB-84): `./up.sh` does, because `drive.sh` creates its own
-// card through the API's `createTask` — the door a trigger uses — so every drive starts from a card
+// card with `factory board add` — the command a person types — so every drive starts from a card
 // at revision 1 and the drive can be run twice against one instance. `ask.sh` keeps the default.
 //
 // `SEED_DEFINITION_VERSION=newest` pins the default definition's newest version instead of version 1
