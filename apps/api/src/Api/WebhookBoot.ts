@@ -17,11 +17,16 @@
  *   `503` while unarmed (`handle`'s secret check), so this is the same fact stated before a sender
  *   hits it. Only whether a secret is set is logged, never its value.
  *
+ * - `sentry filter: …` names what `SENTRY_MIN_LEVEL`, `SENTRY_ENVIRONMENTS` and `SENTRY_RELEASES`
+ *   admit (LOB-82), or, for a level that is not a Sentry level, an error naming the variable. The
+ *   route reads the filter per delivery and answers `503` while it does not parse; this line says so
+ *   before the first alert does. It does not refuse the boot: the other routes are unaffected.
+ *
  * Pure `describe…` functions build the lines so a test names them exactly; `logTriggerBoot` is the
  * effect `index.ts` runs. Both read the environment through the `env` they are given, so a test
  * does not mutate the process's.
  */
-import { ENV_RULES_ORIGIN } from "@repo/core";
+import { ENV_RULES_ORIGIN, sentryFilterFromEnv } from "@repo/core";
 import { ruleName, TriggerRules, type TriggerRule } from "@repo/domain/Trigger";
 import { Effect, Schema } from "effect";
 
@@ -99,6 +104,29 @@ export const describeWebhookRoutes = (env: Env): ReadonlyArray<string> =>
   });
 
 /**
+ * `sentry filter: level ≥ error, environments [production], releases any`, or the error that the
+ * Sentry route answers every delivery with while the filter does not parse.
+ */
+export const describeSentryFilter = (
+  env: Env,
+): { readonly ok: boolean; readonly line: string } => {
+  const read = sentryFilterFromEnv(env);
+  if (!read.ok) {
+    return {
+      ok: false,
+      line: `sentry filter: ${read.message}; /webhooks/sentry answers 503 not-configured until it is fixed`,
+    };
+  }
+  const { minLevel, environments, releases } = read.filter;
+  const list = (entries: ReadonlyArray<string> | undefined) =>
+    entries === undefined ? "any" : `[${entries.join(", ")}]`;
+  return {
+    ok: true,
+    line: `sentry filter: level ${minLevel === undefined ? "any" : `>= ${minLevel}`}, environments ${list(environments)}, releases ${list(releases)}`,
+  };
+};
+
+/**
  * Read `TRIGGER_RULES`, say what it mapped (or why it did not decode), say which webhook routes are
  * armed, and answer the rules. A malformed value is logged at error level with the decode message and
  * then fails the boot; the log line is what an operator greps, and the failure is what stops the API.
@@ -118,14 +146,19 @@ export const logTriggerBoot = (
         ? Effect.logWarning(line)
         : Effect.logInfo(line);
     }
+    const sentry = describeSentryFilter(env);
+    yield* sentry.ok
+      ? Effect.logInfo(sentry.line)
+      : Effect.logError(sentry.line);
     return rules;
   });
 
 /**
- * The live environment, for `index.ts`: the rules variable and every route's secret, each read by
- * name. A read through a variable (`process.env[name]`) is invisible to the scan that keeps
- * `apps/api/turbo.json` declaring everything the API reads (LOB-257), so every name is a literal
- * here, and `WebhookBoot.test.ts` checks the snapshot covers every row of `WEBHOOK_ROUTES`.
+ * The live environment, for `index.ts`: the rules variable, every route's secret and the Sentry
+ * filter (LOB-82), each read by name. A read through a variable (`process.env[name]`) is invisible
+ * to the scan that keeps `apps/api/turbo.json` declaring everything the API reads (LOB-257), so
+ * every name is a literal here, and `WebhookBoot.test.ts` checks the snapshot covers every row of
+ * `WEBHOOK_ROUTES`.
  */
 export const bootEnvFromProcess = (): Env => ({
   TRIGGER_RULES: process.env["TRIGGER_RULES"],
@@ -135,6 +168,9 @@ export const bootEnvFromProcess = (): Env => ({
   GITHUB_WEBHOOK_SECRET: process.env["GITHUB_WEBHOOK_SECRET"],
   JIRA_WEBHOOK_SECRET: process.env["JIRA_WEBHOOK_SECRET"],
   SLACK_SIGNING_SECRET: process.env["SLACK_SIGNING_SECRET"],
+  SENTRY_MIN_LEVEL: process.env["SENTRY_MIN_LEVEL"],
+  SENTRY_ENVIRONMENTS: process.env["SENTRY_ENVIRONMENTS"],
+  SENTRY_RELEASES: process.env["SENTRY_RELEASES"],
 });
 
 export const logTriggerBootFromProcess = Effect.suspend(() =>

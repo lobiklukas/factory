@@ -1,5 +1,5 @@
-// Drive the Sentry receiver (LOB-81) over real HTTP against a running API, in two phases around a
-// restart that `sentry.sh` performs between them.
+// Drive the Sentry receiver (LOB-81) and its mapping (LOB-82) over real HTTP against a running API,
+// in two phases around a restart that `sentry.sh` performs between them.
 //
 //   MODE=first bun sentry.ts          # the API's first process
 //   MODE=after-restart bun sentry.ts  # a fresh process on the same database
@@ -7,13 +7,17 @@
 // Env:
 //   API_URL               default http://localhost:9400
 //   API_LOG               the API process's log file, which the refusal checks read
-//   EVIDENCE_DIR          default .verify/evidence/lob-81
+//   EVIDENCE_DIR          default .verify/evidence/lob-82
 //   SENTRY_STATE          where `first` writes what `after-restart` checks against
 //   TRIGGER_REPO          the repo the `sentry` rule maps to (sentry.sh passes the same value in
 //                         TRIGGER_RULES, so the two cannot disagree); project 404's rule maps to
 //                         `<TRIGGER_REPO>-unregistered`, which nobody registers
 //   SENTRY_CLIENT_SECRET  the secret sentry.sh booted the API with
 //   SENTRY_RATE_LIMIT     the cap sentry.sh booted the API with
+//   SENTRY_MIN_LEVEL, SENTRY_ENVIRONMENTS, SENTRY_RELEASES
+//                         the filter sentry.sh booted the API with (error, production, verify@*):
+//                         every alert the drive means to be work carries `level: error`,
+//                         `environment: production` and `release: verify@1.0.0`
 //   DATABASE_URL          the database the API serves, read for the delivery rows
 //
 // The deliveries are signed exactly the way Sentry's documented verification recomputes them
@@ -23,10 +27,14 @@
 import { SQL } from "bun";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { sentrySignature } from "@repo/core";
+import {
+  SENTRY_PROMPT_TEMPLATE,
+  sentryEvent,
+  sentrySignature,
+} from "@repo/core";
 import { SessionRpc } from "@repo/domain/Rpc";
 import { RepoSlug } from "@repo/domain/Session";
-import { TriggerOutcome } from "@repo/domain/Trigger";
+import { renderPrompt, TriggerOutcome } from "@repo/domain/Trigger";
 import { Effect, Option, Schema } from "effect";
 import { RpcClient } from "effect/rpc";
 import { makeChecker, protocolFor, type CheckRecord } from "./harness.ts";
@@ -37,7 +45,7 @@ const API_LOG = process.env["API_LOG"];
 const DATABASE_URL =
   process.env["DATABASE_URL"] ??
   "postgres://factory:factory@localhost:5442/factory";
-const EVIDENCE_DIR = process.env["EVIDENCE_DIR"] ?? ".verify/evidence/lob-81";
+const EVIDENCE_DIR = process.env["EVIDENCE_DIR"] ?? ".verify/evidence/lob-82";
 const STATE =
   process.env["SENTRY_STATE"] ?? path.join(EVIDENCE_DIR, "sentry-state.json");
 const REPO = RepoSlug.make(
@@ -47,6 +55,10 @@ const SECRET = process.env["SENTRY_CLIENT_SECRET"] ?? "";
 /** The project sentry.sh routes to a repo nobody registered, and that repo. */
 const UNREGISTERED_PROJECT = 404;
 const UNREGISTERED_REPO = `${REPO}-unregistered`;
+/** The project sentry.sh routes with a blank prompt, so the default template is what it gets. */
+const DEFAULT_PROMPT_PROJECT = 777;
+/** The release every alert meant as work carries: inside sentry.sh's `SENTRY_RELEASES=verify@*`. */
+const RELEASE = "verify@1.0.0";
 const RATE_LIMIT = Number(process.env["SENTRY_RATE_LIMIT"] ?? "20");
 
 /** A string that is only ever in a payload: no API log line may contain it. */
@@ -79,25 +91,49 @@ const Refusal = Schema.Struct({
   retryAfterSeconds: Schema.optional(Schema.Finite),
 });
 
-/** Sentry's documented issue-alert example, for one event in one project. */
-const alert = (eventId: string, title: string, project = 1) => ({
-  action: "triggered",
-  installation: { uuid: "a8e5d37a-696c-4c54-adb5-b3f28d64c7de" },
-  data: {
-    event: {
-      event_id: eventId,
-      issue_id: "1117540176",
-      title,
-      level: "error",
-      culprit: "?(<anonymous>)",
-      project,
-      release: null,
-      web_url: `https://sentry.example/organizations/acme/issues/1117540176/events/${eventId}/`,
+/** The Sentry issue an event belongs to, unless a case names another: one issue per event. */
+const issueOf = (eventId: string): string => `issue-${eventId}`;
+
+/**
+ * Sentry's documented issue-alert example, for one event in one project and one issue — inside the
+ * drive's filter (`level: error`, `environment: production`, `release: verify@1.0.0`) unless `over`
+ * says otherwise.
+ */
+const alert = (
+  eventId: string,
+  title: string,
+  options: {
+    readonly project?: number;
+    readonly issue?: string;
+    readonly over?: Record<string, unknown>;
+  } = {},
+) => {
+  const issue = options.issue ?? issueOf(eventId);
+  return {
+    action: "triggered",
+    installation: { uuid: "a8e5d37a-696c-4c54-adb5-b3f28d64c7de" },
+    data: {
+      event: {
+        event_id: eventId,
+        issue_id: issue,
+        title,
+        level: "error",
+        culprit: "?(<anonymous>)",
+        project: options.project ?? 1,
+        release: RELEASE,
+        environment: "production",
+        web_url: `https://sentry.example/organizations/acme/issues/${issue}/events/${eventId}/`,
+        ...options.over,
+      },
+      triggered_rule: "Very Important Alert!",
     },
-    triggered_rule: "Very Important Alert!",
-  },
-  actor: { type: "application", id: "sentry", name: "Sentry" },
-});
+    actor: { type: "application", id: "sentry", name: "Sentry" },
+  };
+};
+
+/** The title a session opened for `alert(…, title)` carries: its environment and release (LOB-82). */
+const sessionTitleOf = (title: string): string =>
+  `${title} (production, release ${RELEASE})`;
 
 /**
  * One POST to `/webhooks/sentry`, with the headers Sentry sends. `signature` defaults to the body
@@ -149,8 +185,12 @@ const deliveryRows = (requestIds: ReadonlyArray<string>) =>
   Effect.promise(async () => {
     const db = new SQL(DATABASE_URL);
     try {
-      const rows: Array<{ request_id: string; status: string }> = await db`
-        SELECT request_id, status FROM webhook_deliveries
+      const rows: Array<{
+        request_id: string;
+        status: string;
+        skip_reason: string | null;
+      }> = await db`
+        SELECT request_id, status, skip_reason FROM webhook_deliveries
         WHERE request_id IN ${db(requestIds)}
       `;
       return rows;
@@ -158,6 +198,26 @@ const deliveryRows = (requestIds: ReadonlyArray<string>) =>
       await db.close();
     }
   });
+
+/** The `trigger_fingerprints` row a Sentry issue is bound by (LOB-82), as the API recorded it. */
+const bindingOf = (issue: string) =>
+  Effect.promise(async () => {
+    const db = new SQL(DATABASE_URL);
+    try {
+      const rows: Array<{ request_id: string; session_id: string | null }> =
+        await db`
+          SELECT request_id, session_id FROM trigger_fingerprints
+          WHERE fingerprint = ${`sentry:${issue}`}
+        `;
+      return rows[0] ?? null;
+    } finally {
+      await db.close();
+    }
+  });
+
+/** The skip reason a repeat alert for `issue` records while its first session is open. */
+const boundReason = (issue: string, sessionId: string, eventId: string) =>
+  `sentry:${issue} is bound to open session ${sessionId} (delivery sentry:event:${eventId}), so this delivery opens no second session; it frees when that session's workspace is released or after 3 days without activity, and \`factory discard ${sessionId}\` frees it now`;
 
 /** The API's log, once it holds `needle` (or after a short wait, as it stands). */
 const readLog = (needle: string) =>
@@ -231,7 +291,147 @@ const program = Effect.gen(function* () {
           (prompt ?? "").includes("alert rule: Very Important Alert!"),
         `prompt=${JSON.stringify(prompt ?? null)}`,
       );
+
+      // Feature (LOB-82): the session's title says where it broke.
+      const listed = yield* client.listSessions({ limit: 100 });
+      const summary = listed.sessions.find((entry) => entry.id === sessionId);
+      assert(
+        "the session's title carries the alert's environment and release",
+        summary?.title === sessionTitleOf(title),
+        `title=${JSON.stringify(summary?.title ?? null)}`,
+      );
+
+      // Feature (LOB-82): the Sentry issue is bound to the session, in Postgres.
+      const binding = yield* bindingOf(issueOf(eventId));
+      assert(
+        "the alert's Sentry issue is bound to its session",
+        binding?.session_id === sessionId &&
+          binding.request_id === `sentry:event:${eventId}`,
+        `binding=${JSON.stringify(binding)}`,
+      );
+
+      // Feature (LOB-82): another event in the same issue — the alert firing again — opens no
+      // second session; it is a recorded skip naming the open one.
+      const repeatEvent = `${eventId}repeat`;
+      const repeat = yield* Effect.promise(() =>
+        post(
+          alert(repeatEvent, title, {
+            issue: issueOf(eventId),
+            over: { level: "fatal" },
+          }),
+          { requestId: `req-${runId}-repeat` },
+        ),
+      );
+      const repeatRows = yield* deliveryRows([`sentry:event:${repeatEvent}`]);
+      const afterRepeat = yield* countForRepo;
+      const expectedReason = boundReason(issueOf(eventId), sessionId, eventId);
+      assert(
+        "a new event in the same Sentry issue is a skip naming the open session",
+        repeat.status === 200 &&
+          repeat.outcome?.status === "skipped" &&
+          repeat.outcome.reason === expectedReason &&
+          repeatRows[0]?.status === "skipped" &&
+          repeatRows[0].skip_reason === expectedReason,
+        `status=${repeat.status} body=${JSON.stringify(repeat.body)} rows=${JSON.stringify(repeatRows)}`,
+      );
+      assert(
+        "and it opened no second session",
+        afterRepeat === afterTwice,
+        `sessions ${afterTwice}→${afterRepeat}`,
+      );
     }
+
+    // Feature (LOB-82): the filter. An alert of the wrong severity, environment or release is a
+    // recorded skip that names the field and the value, and opens nothing.
+    const filterCases = [
+      {
+        name: "level",
+        over: { level: "warning" },
+        reason: 'level "warning" is below SENTRY_MIN_LEVEL "error"',
+      },
+      {
+        name: "environment",
+        over: { environment: "staging" },
+        reason:
+          'environment "staging" is not in SENTRY_ENVIRONMENTS [production]',
+      },
+      {
+        name: "release",
+        over: { release: "other@2.0.0" },
+        reason: 'release "other@2.0.0" is not in SENTRY_RELEASES [verify@*]',
+      },
+    ];
+    const filtered = [];
+    for (const { name, over, reason } of filterCases) {
+      const requestId = `req-${runId}-filtered-${name}`;
+      filtered.push({
+        name,
+        reason,
+        requestId,
+        answer: yield* Effect.promise(() =>
+          post(
+            alert(`lob82${runId}filtered${name}`, `filtered ${name}`, { over }),
+            {
+              requestId,
+            },
+          ),
+        ),
+      });
+    }
+    const filteredRows = yield* deliveryRows(
+      filtered.map((entry) => `sentry:delivery:${entry.requestId}`),
+    );
+    const afterFiltered = yield* countForRepo;
+    for (const entry of filtered) {
+      const row = filteredRows.find(
+        (candidate) =>
+          candidate.request_id === `sentry:delivery:${entry.requestId}`,
+      );
+      assert(
+        `an alert of the wrong ${entry.name} is a recorded skip naming the field`,
+        entry.answer.status === 200 &&
+          entry.answer.outcome?.status === "skipped" &&
+          entry.answer.outcome.reason === entry.reason &&
+          row?.status === "skipped" &&
+          row.skip_reason === entry.reason,
+        `status=${entry.answer.status} body=${JSON.stringify(entry.answer.body)} row=${JSON.stringify(row ?? null)}`,
+      );
+    }
+    assert(
+      "the filtered alerts opened no session",
+      afterFiltered === afterTwice,
+      `sessions ${afterTwice}→${afterFiltered}`,
+    );
+
+    // Feature (LOB-82): a rule that writes no prompt gets the default investigate-before-edit one,
+    // rendered over the alert's own title and facts.
+    const defaultEvent = `lob82${runId}default`;
+    const defaultPayload = alert(defaultEvent, `default prompt ${runId}`, {
+      project: DEFAULT_PROMPT_PROJECT,
+    });
+    const defaulted = yield* Effect.promise(() =>
+      post(defaultPayload, { requestId: `req-${runId}-default` }),
+    );
+    const normalized = sentryEvent(defaultPayload, {
+      resource: "event_alert",
+    });
+    const defaultSession = defaulted.outcome?.sessionId;
+    const defaultPrompt =
+      defaultSession === undefined
+        ? undefined
+        : (yield* client.getSession({
+            sessionId: defaultSession,
+          })).entries.find((entry) => entry.kind === "user")?.text;
+    assert(
+      "a rule with no prompt opens its session with the default investigate-before-edit prompt",
+      defaulted.status === 200 &&
+        defaulted.outcome?.status === "processed" &&
+        normalized !== undefined &&
+        defaultPrompt === renderPrompt(SENTRY_PROMPT_TEMPLATE, normalized) &&
+        defaultPrompt.includes("Investigate before you edit anything."),
+      `status=${defaulted.status} prompt=${JSON.stringify(defaultPrompt ?? null)}`,
+    );
+    const afterDefault = yield* countForRepo;
 
     // Feature: authentication. A missing and a wrong signature are refused before anything is
     // recorded, and the refusal is logged without the payload: the bodies carry the canary.
@@ -270,8 +470,8 @@ const program = Effect.gen(function* () {
     );
     assert(
       "a refused signature creates no session and records no delivery",
-      afterRefusals === afterTwice && refusedRows.length === 0,
-      `sessions ${afterTwice}→${afterRefusals} rows=${JSON.stringify(refusedRows)}`,
+      afterRefusals === afterDefault && refusedRows.length === 0,
+      `sessions ${afterDefault}→${afterRefusals} rows=${JSON.stringify(refusedRows)}`,
     );
     const log = yield* readLog(badRequest);
     const missingLine = log
@@ -334,7 +534,9 @@ const program = Effect.gen(function* () {
     // the cap are 429 rate-limited with Retry-After — typed, never a 500 — and record nothing.
     // They name project 404, whose rule routes to a repo nobody registered, so the ones inside the
     // cap are recorded skips that open no session, and the burst measures the cap, not the
-    // session layer. The two alerts above spent two of this window's tokens already.
+    // session layer. The four alerts above that can start work (the first, its replay, the repeat
+    // in its issue and the default-prompt one) spent four of this window's tokens already; the
+    // filtered ones spent none.
     const burst = RATE_LIMIT + 4;
     const answers = [];
     for (let n = 1; n <= burst; n += 1) {
@@ -344,9 +546,12 @@ const program = Effect.gen(function* () {
         requestId,
         eventId: burstEvent,
         answer: yield* Effect.promise(() =>
-          post(alert(burstEvent, `burst ${n}`, UNREGISTERED_PROJECT), {
-            requestId,
-          }),
+          post(
+            alert(burstEvent, `burst ${n}`, {
+              project: UNREGISTERED_PROJECT,
+            }),
+            { requestId },
+          ),
         ),
       });
     }
@@ -390,8 +595,8 @@ const program = Effect.gen(function* () {
     const afterBurst = yield* countForRepo;
     assert(
       "the burst opened no session",
-      afterBurst === afterTwice,
-      `sessions ${afterTwice}→${afterBurst}`,
+      afterBurst === afterDefault,
+      `sessions ${afterDefault}→${afterBurst}`,
     );
 
     if (sessionId !== undefined) {
@@ -434,6 +639,31 @@ const program = Effect.gen(function* () {
     "the dedupe row the first process wrote is still processed",
     rows.length === 1 && rows[0]?.status === "processed",
     `rows=${JSON.stringify(rows)}`,
+  );
+
+  // LOB-82: the binding is a Postgres row, so the restarted process still knows the issue's session:
+  // another event in it is a skip naming that session, and the row still names it.
+  const repeatEvent = `${state.eventId}afterrestart`;
+  const repeat = yield* Effect.promise(() =>
+    post(alert(repeatEvent, state.title, { issue: issueOf(state.eventId) }), {
+      requestId: `req-${state.runId}-repeat-after-restart`,
+    }),
+  );
+  const afterRepeat = yield* countForRepo;
+  assert(
+    "after a restart, a new event in the same Sentry issue is a skip naming the open session",
+    repeat.status === 200 &&
+      repeat.outcome?.status === "skipped" &&
+      repeat.outcome.reason ===
+        boundReason(issueOf(state.eventId), state.sessionId, state.eventId) &&
+      afterRepeat === state.sessions,
+    `status=${repeat.status} body=${JSON.stringify(repeat.body)} sessions ${state.sessions}→${afterRepeat}`,
+  );
+  const binding = yield* bindingOf(issueOf(state.eventId));
+  assert(
+    "the Sentry issue's binding is readable after the restart",
+    binding?.session_id === state.sessionId,
+    `binding=${JSON.stringify(binding)}`,
   );
 
   // The control: the restarted process does open work, so the replay above is the dedupe and not
