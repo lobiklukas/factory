@@ -232,11 +232,9 @@ export const laneLines = (
       : [
           `elsewhere  ${strays.length} in a column the board's version does not declare`,
           ...strays.map((card) =>
-            [
-              laneCard(card),
-              card.column,
-              `v${card.definitionVersion}`,
-            ].join("  "),
+            [laneCard(card), card.column, `v${card.definitionVersion}`].join(
+              "  ",
+            ),
           ),
         ]),
   ];

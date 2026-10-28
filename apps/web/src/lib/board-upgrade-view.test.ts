@@ -41,17 +41,21 @@ describe("upgradeTargets", () => {
    * left behind can never be re-pinned from the dashboard.
    */
   it("offers the newer versions, and the pin itself while a card still pins an older one", () => {
-    expect(upgradeTargets(3, [4, 5], [{ column: "a", definitionVersion: 3 }])).toEqual(
-      [4, 5],
-    );
-    expect(upgradeTargets(3, [], [{ column: "a", definitionVersion: 3 }])).toEqual(
-      [],
-    );
     expect(
-      upgradeTargets(3, [], [
-        { column: "a", definitionVersion: 3 },
-        { column: "b", definitionVersion: 2 },
-      ]),
+      upgradeTargets(3, [4, 5], [{ column: "a", definitionVersion: 3 }]),
+    ).toEqual([4, 5]);
+    expect(
+      upgradeTargets(3, [], [{ column: "a", definitionVersion: 3 }]),
+    ).toEqual([]);
+    expect(
+      upgradeTargets(
+        3,
+        [],
+        [
+          { column: "a", definitionVersion: 3 },
+          { column: "b", definitionVersion: 2 },
+        ],
+      ),
     ).toEqual([3]);
   });
 });
