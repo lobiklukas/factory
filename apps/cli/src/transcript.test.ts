@@ -47,6 +47,34 @@ describe("a budget stop in a terminal (LOB-163)", () => {
   });
 });
 
+describe("entry ids in a terminal (C15)", () => {
+  it("names the entry in the bracket with ids, and not without", () => {
+    const entry = {
+      id: "7",
+      kind: "assistant" as const,
+      text: "hi",
+      toolCalls: [],
+    };
+    expect(formatEntry(entry)).toBe("[assistant] hi");
+    expect(formatEntry(entry, { ids: true })).toBe("[assistant#7] hi");
+  });
+
+  it("keeps the tool name beside the id on a result", () => {
+    expect(
+      formatEntry(
+        {
+          id: "8",
+          kind: "toolResult" as const,
+          toolName: "bash",
+          text: "ok",
+          toolCalls: [],
+        },
+        { ids: true },
+      ),
+    ).toBe("[tool:bash#8] ok");
+  });
+});
+
 describe("an inherited PR line in a terminal (LOB-211)", () => {
   it("prints under its own kind, not as `other`", () => {
     const text =

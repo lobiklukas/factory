@@ -23,6 +23,13 @@ the turns-delta arithmetic; the cost-delta arithmetic check was proven by hand a
 were verified **2026-10-28** from the `agent/LOB-265` worktree with `./clone.sh` (API on `:9660`, the
 loopback git forge on `:9661`) — **21/21** checks.
 
+`factory fork` / `reset` / `compact` / `spend` were verified **2026-10-28** from the `agent/C15`
+worktree with `./session.sh` (API on `:9580`, re-run after merging main with D7's `factory skill`) —
+**29/29** checks, which include `watch --ids` / `history --ids` printing the entry id `fork --at` takes
+(matched against the RPC's). A mutation run (`--at` and `--note`
+dropped before the RPC) failed 4 of them: the fork prefix, the refused entry, the reset marker and the
+transcript order.
+
 `factory discard` was verified **2026-10-28** from the `agent/LOB-268` worktree with
 `./discard.sh` (API on `:9541`) — **11/11** checks.
 
@@ -73,6 +80,7 @@ mutation run (the row always printing `-`) failed "ls shows the recorded PR URL"
 | `factory approve` / `deny`                        | passing | [approve.md](approve.md)                                              |
 | `factory discard`                                 | passing | [discard.md](discard.md)                                              |
 | `factory replay`                                  | passing | [replay.md](replay.md)                                                |
+| `factory fork` / `reset` / `compact` / `spend`    | passing | [session.md](session.md)                                              |
 | `factory repo add --url`, `repo sync`, `doctor`   | passing | [clone.md](clone.md)                                                  |
 | `factory pr`                                      | passing | [verify-board build.md](../../verify-board/features/build.md)         |
 | Feature                                           | Status  | File                                                                  |
