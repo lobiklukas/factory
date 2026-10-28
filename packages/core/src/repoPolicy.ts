@@ -176,13 +176,14 @@ export const decodePolicy = (
   text: string,
 ): Effect.Effect<RepoPolicy, Undecodable> =>
   Effect.gen(function* () {
-    const parsed = yield* Effect.try({
-      try: (): unknown => JSON.parse(text),
-      catch: (): Undecodable => ({
+    const parsed = yield* Schema.decodeEffect(
+      Schema.fromJsonString(Schema.Unknown),
+    )(text).pipe(
+      Effect.mapError((): Undecodable => ({
         kind: "unreadable",
         reasons: [".factory/config is not JSON"],
-      }),
-    });
+      })),
+    );
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
       return yield* Effect.fail<Undecodable>({
         kind: "unreadable",
