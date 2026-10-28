@@ -156,6 +156,17 @@ every later open resolves from those pins (`loadRun`'s `pinned`), so a put reach
 reopened run keeps the body it opened with. A pinned version the table no longer holds refuses the open
 by name and version rather than moving the run onto another body.
 
+Built (S-repo-instructions-and-skills): the repository speaks too, beside the factory's skills rather
+than as a copy of them. Every open of a session on a repository reads its `AGENTS.md` and its
+`.pi/skills/*/SKILL.md` and `.agents/skills/*/SKILL.md` at the commit the session's base names — not
+the worktree's files, which the run's own branch may have changed — and `openSession` installs them
+as two capped sections: `repo_instructions` (the file verbatim, ahead of the column's skills) and
+`repo_skills` (one line per skill — name, description, path — after them; the run reads a body on
+demand with its own tools, and the factory's skills table never holds it). A repo skill whose name the
+column binds is left out of the index: the factory's skill is authoritative. What both cost is the
+log's `factory.repo.prompt` record. Importing a repository's skill _into_ the factory (wave 2, below)
+is still a copy, `factory skill put --file`, and it is still unbuilt as a flow.
+
 **The tool policy** is a filter on what a run is _offered_: a read-only role is not given `write`,
 `edit` or `verify` at all (`STAGE_REFUSED_TOOLS`), so a call to one meets Pi Durable's
 `tool_unavailable`. LOB-74's hook refusal still judges every `bash` call, and it is the only line for
@@ -393,7 +404,8 @@ customization, decomposition, and board metrics.
 4. **Failure policy** — B10 in full, plus `maxRuntime` and the breaker. Trigger: the first `faulted`
    run, or the first retry you care about.
 5. **Skills platform** — authoring UI and repo-skill import (version pinning per run and editing
-   without a migration are built, D7). Trigger: the second repository.
+   without a migration are built, D7; a repository's own skills are listed into every run, B6).
+   Trigger: the second repository.
 6. **Sync map** — per-column declarative mapping, Jira and GitHub, conflict rules. Trigger: the second
    tracker.
 7. **Identity** — real authentication, per-column move permissions, audit views (LOB-20). Trigger: the

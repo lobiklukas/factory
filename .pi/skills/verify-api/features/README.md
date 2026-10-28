@@ -184,6 +184,11 @@ send whose install ran once, a webhook delivery answered before its install fini
 on this repo running its own `bun install`; and `factory board show` on the parked card), evidence
 `.verify/evidence/latest/api/setup.json` and `setup-board-show.txt`. See [setup.md](setup.md).
 
+The repo instructions and skills checks (S-repo-instructions-and-skills) were run from the
+`agent/S-repo-instructions-and-skills` worktree on 2026-10-28 (`API_PORT=9530`, faux,
+`DATABASE_URL=…/factory_agent_s_repo_instructions_and_skills` on 5442): `./repo-context.sh` **9/9**,
+evidence `repo-context.json`. See [repo-context.md](repo-context.md).
+
 The `verify` tool checks (LOB-78) were run from the `agent/LOB-78` worktree on 2026-10-27
 (`DATABASE_URL` the worker's own `factory_agent_lob_78` on 5442, faux): `./verify-tool.sh` **13/13** (re-run after the second review: the declared command once per call, and the `VERIFY_NO_DATABASE` check in `pass`),
 evidence `.verify/evidence/lob-78/api/`. Like `./docs-run.sh` it starts no API process. `bun drive.ts`
@@ -333,6 +338,7 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | A docs run on a trigger  | passing | [docs-trigger.md](docs-trigger.md)           |
 | The `verify` tool        | passing | [verify-tool.md](verify-tool.md)             |
 | A worktree's setup       | passing | [setup.md](setup.md)                         |
+| Repo instructions        | passing | [repo-context.md](repo-context.md)           |
 | PR evidence block        | passing | [pr-evidence.md](pr-evidence.md)             |
 | The spec document        | passing | [spec.md](spec.md)                           |
 | A budget cap             | passing | [budget.md](budget.md)                       |

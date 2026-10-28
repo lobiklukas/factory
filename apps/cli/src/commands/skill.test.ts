@@ -8,11 +8,14 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { SkillRecord, SkillSummary } from "@repo/domain/Skill";
+import {
+  parseSkillDocument,
+  type SkillRecord,
+  type SkillSummary,
+} from "@repo/domain/Skill";
 import { describe, expect, it } from "vitest";
 import {
   NONE,
-  parseSkillDocument,
   putInputFor,
   SKILL_LS_HEADER,
   skillLsLines,

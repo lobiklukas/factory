@@ -370,6 +370,59 @@ describe("getServerInfo on a booted API (LOB-269)", () => {
 });
 
 /**
+ * `checkDeployment` against the real boot (E8): what `factory doctor` reads of a process that is up
+ * while Postgres is not. The registry cannot be read here, which is the case the RPC exists to
+ * answer: the boot's own facts (the rules `TRIGGER_RULES` mapped, the env files it loaded) still
+ * arrive, and the registry's failure arrives as `reposError` rather than as a failed call.
+ */
+describe("checkDeployment on a booted API (E8)", () => {
+  const TOKEN = "dummy-github-token-boot-e8-0123456789";
+
+  const checkDeployment = (url: string) =>
+    Effect.gen(function* () {
+      const client = yield* HttpClient.HttpClient;
+      const response = yield* client.execute(
+        HttpClientRequest.post(`${url}/rpc`).pipe(
+          HttpClientRequest.bodyText(
+            `${JSON.stringify({ _tag: "Request", id: "1", tag: "checkDeployment", payload: {}, headers: [] })}\n`,
+            "application/ndjson",
+          ),
+        ),
+      );
+      return yield* response.text;
+    }).pipe(Effect.provide(FetchHttpClient.layer), Effect.runPromise);
+
+  it("answers the mapped trigger rules and, with the registry down, reposError, and never a credential", async () => {
+    const { code, output, asked } = await boot(
+      {
+        MODEL_BACKEND: "faux",
+        GITHUB_TOKEN: TOKEN,
+        TRIGGER_RULES: JSON.stringify([
+          {
+            label: "factory",
+            repo: "acme/x",
+            baseRef: "main",
+            prompt: "{{title}}",
+          },
+        ]),
+      },
+      checkDeployment,
+    );
+    expect(code, output).toBeNull();
+    if (asked === undefined) throw new Error("the boot never answered");
+    const line = asked.split("\n").find((text) => text.includes('"Exit"'));
+    const exit = JSON.parse(line ?? "{}").exit;
+    expect(exit._tag, asked).toBe("Success");
+    expect(exit.value.triggerRules).toBe(1);
+    // `--no-env-file`: the process loaded no file, and says so.
+    expect(exit.value.envFiles).toEqual([]);
+    expect(exit.value.repos).toEqual([]);
+    expect(typeof exit.value.reposError).toBe("string");
+    expect(asked).not.toContain(TOKEN);
+  }, 30_000);
+});
+
+/**
  * Control-plane identity on the real boot (LOB-20): `index.ts` reads the token table from its
  * environment, says which mode it runs in, refuses a table it cannot trust, and serves `/rpc` behind
  * the middleware — read here as raw NDJSON, so the refusal is the typed `Unauthenticated` a client
