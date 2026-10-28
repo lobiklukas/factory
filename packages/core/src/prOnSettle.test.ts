@@ -143,7 +143,11 @@ describe("opensPullRequestOnSettle", () => {
     expect(settleDeclarationOf({ ...recorded, waiting: true })).toBe("parked");
     // A person's session with a PR is still the person's to push.
     expect(
-      settleDeclarationOf({ ...recorded, actor: "person:lukas", requestId: null }),
+      settleDeclarationOf({
+        ...recorded,
+        actor: "person:lukas",
+        requestId: null,
+      }),
     ).toBe("undeclared");
   });
 

@@ -5073,13 +5073,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                         settled.run.prUrl !== null
                       ? ("up-to-date" as const)
                       : ("opened" as const);
-                yield* (decision === "up-to-date"
+                yield* decision === "up-to-date"
                   ? Effect.logDebug(
                       `session ${sessionId}: its run settled on the commit ${answer.url} was published at, so nothing was pushed`,
                     )
                   : Effect.logInfo(
                       `session ${sessionId}: its run settled and the PR step ${decision === "updated" ? "pushed its new commits to" : "opened"} ${answer.url} (${answer.outcome})`,
-                    ));
+                    );
                 return decision;
               }
               reason = answer;
@@ -7895,8 +7895,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         // settle takes the step as any live one does.
         const rows = yield* paper(
           "read settled sessions that may owe a PR",
-          sql<{ readonly id: string }>`
-            SELECT s.id FROM sessions s
+          sql<{ readonly id: string; readonly repo: string }>`
+            SELECT s.id, s.repo FROM sessions s
             WHERE s.repo IS NOT NULL AND s.pr_url IS NULL
               AND s.workspace_released_at IS NULL AND s.forked_from IS NULL
               AND s.run_session_root IS NULL AND NOT s.mission_in_flight
@@ -7909,28 +7909,32 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           `,
         );
         const stepped: SessionId[] = [];
-        for (const { id } of rows) {
+        for (const { id, repo } of rows) {
           const outcome = yield* Effect.result(
             Effect.gen(function* () {
               const sessionId = yield* toSessionId(id);
-              // Decided from the index alone before anything is opened: an undeclared or parked
-              // session is left exactly as it was.
+              // Where this process would open it, without cutting or reading anything else: a
+              // session whose worktree is not here is another root's (or was never cut), and a plain
+              // directory has no branch a settle would step.
+              const directory = sessionDirectory(
+                path,
+                options.sessionRoot,
+                sessionId,
+                yield* toRepoSlug(repo),
+              );
+              const checkout = yield* fs
+                .exists(path.join(directory, ".git"))
+                .pipe(Effect.orElseSucceed(() => false));
+              if (!checkout) return undefined;
+              // Decided from the index before anything is opened: an undeclared or parked session
+              // is left exactly as it was.
               const settled = yield* settledRunOf(sessionId);
               if (
                 settled === undefined ||
                 settleDeclarationOf(settled.run) !== "declared"
               )
-                return false;
-              const row = yield* requireSession(sessionId);
-              // Where this process would open it, without cutting anything: a session whose
-              // worktree is not here is another root's (or was never cut), and a plain directory has
-              // no branch a settle would step.
-              const workspace = yield* workspaceFor(row, { cut: false });
-              const checkout = yield* fs
-                .exists(path.join(workspace.path, ".git"))
-                .pipe(Effect.orElseSucceed(() => false));
-              if (!checkout) return false;
-              const tip = yield* resolveCommit(workspace.path, "HEAD");
+                return undefined;
+              const tip = yield* resolveCommit(directory, "HEAD");
               const { turn, announced } = yield* withReader(
                 sessionId,
                 (storage) =>
@@ -7940,23 +7944,24 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   }),
               );
               // No run settled yet (none started, or one still placed): nothing to step.
-              if (turn === "unfinished") return false;
+              if (turn === "unfinished") return undefined;
               // Already answered at this tip — or by an entry that names no tip, written before
               // the tip was recorded, which is the same settle as far as anyone can tell.
               if (
                 announced !== undefined &&
                 (announced === "" || announced === tip)
               )
-                return false;
+                return undefined;
+              const row = yield* requireSession(sessionId);
               const owner = yield* acquireOwner(sessionId, row, {
                 admission: "resume",
               });
               const busy = yield* isBusy(owner.harness, owner.root).pipe(
                 Effect.orElseSucceed(() => true),
               );
-              if (busy) return false;
+              if (busy) return undefined;
               yield* settlePullRequest(sessionId, forge);
-              return true;
+              return sessionId;
             }),
           );
           if (outcome._tag === "Failure") {
@@ -7965,7 +7970,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             );
             continue;
           }
-          if (outcome.success) stepped.push(yield* toSessionId(id));
+          if (outcome.success !== undefined) stepped.push(outcome.success);
         }
         return stepped;
       });
