@@ -158,6 +158,10 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
         tasks.spec(input.taskId).pipe(Effect.map((spec) => spec ?? null)),
       getTaskPlan: (input) =>
         tasks.plan(input.taskId).pipe(Effect.map((plan) => plan ?? null)),
+      getTaskHandoff: (input) =>
+        tasks
+          .handoff(input.taskId)
+          .pipe(Effect.map((handoff) => handoff ?? null)),
       // Opening the card reads its PR (C20): a merge moves it to done and a close blocks it, as the
       // webhook would, and the checklist is judged on the card that read leaves.
       getTaskExit: (input) =>

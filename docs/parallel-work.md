@@ -162,6 +162,22 @@ Milestone **L** (LOB-40) is the gate that changes this; after it passes, the spl
 | Debugging with motel / DevTools / a live dashboard  | Keep it local; the sandbox has no motel.                                                                       |
 | Anything that needs your uncommitted tree           | Keep it local (or commit first — isolation snapshots the working tree, and a 1 GiB dirty checkout is the cap). |
 
+**The handover itself (S-local-agent-handoff-mcp).** Two ways across the line, both in `apps/cli`:
+
+- `factory handoff --repo <owner/name> --note "<what to do with it>" [--start [--column building]]`
+  takes the checkout's work in progress — local commits, edits and untracked files against the
+  remote's default branch (`--base` names another) — as one patch, refuses one over 512 KiB
+  (`MAX_HANDOFF_PATCH_BYTES`) before sending anything, and makes a card carrying it. The card's run is
+  cut on `factory/<session-id>` at the base with that patch committed on it before its agent's first
+  turn. Nothing local changes. "Anything that needs your uncommitted tree" above is now this, within
+  the cap.
+- `factory mcp` serves the factory to a local agent as an MCP server on stdio: `create_card`,
+  `start_run`, `send_message`, `get_status`, `answer_question` and `handoff`, each the CLI command's
+  own code path. Configure Claude Code with
+  `claude mcp add factory -- bun run apps/cli/src/index.ts mcp --api http://localhost:9000` from the
+  checkout (`--repo` when the remote does not name the repository); `FACTORY_API_TOKEN` is the
+  credential, as for every CLI call. `.pi/skills/verify-cli/mcp.sh` proves both.
+
 **The handover contract.** Hand a task to the factory only when all four are true: (1) it is an issue
 with a track label and an observable acceptance criterion; (2) it names a repository and base ref;
 (3) "done" means green gates plus the evidence of that track's driver; (4) nobody has to answer a

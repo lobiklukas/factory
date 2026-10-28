@@ -49,6 +49,7 @@ import {
   GetTaskExitInput,
   GetTaskSpecInput,
   GetTaskPlanInput,
+  GetTaskHandoffInput,
   HumanGateRequired,
   InvalidDefinition,
   InvalidTaskInput,
@@ -70,6 +71,7 @@ import {
   TaskExit,
   TaskSpec,
   TaskPlan,
+  TaskHandoff,
   TaskStorageError,
   UndeclaredTransition,
   UnblockTaskInput,
@@ -590,6 +592,13 @@ export class TasksRpc extends RpcGroup.make(
   Rpc.make("getTaskPlan", {
     payload: GetTaskPlanInput,
     success: Schema.NullOr(TaskPlan),
+    error: TaskErrorSchema,
+  }),
+  // The work a local agent handed off with the card (S-local-agent-handoff-mcp): the patch its create
+  // carried, or `null` for a card made without one. Written only by `createTask`, so this only reads.
+  Rpc.make("getTaskHandoff", {
+    payload: GetTaskHandoffInput,
+    success: Schema.NullOr(TaskHandoff),
     error: TaskErrorSchema,
   }),
   // What the card needs to leave its column (D9): each exit requirement met, unmet with the reason

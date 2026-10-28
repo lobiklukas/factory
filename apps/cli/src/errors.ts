@@ -41,17 +41,27 @@ export const reportFailures = <A, E, R>(
   effect: Effect.Effect<A, E, R>,
 ): Effect.Effect<A | void, never, R> =>
   effect.pipe(
-    Effect.catch((error) =>
-      Schema.is(SessionError)(error)
-        ? reportFailure(error.code, error.message)
-        : typeof error === "object" &&
-            error !== null &&
-            "_tag" in error &&
-            hasMessage(error)
-          ? reportFailure(
-              refusalCode(String((error as { _tag: unknown })._tag)),
-              error.message,
-            )
-          : reportFailure("error", String(error)),
-    ),
+    Effect.catch((error) => {
+      const { code, message } = describeFailure(error);
+      return reportFailure(code, message);
+    }),
   );
+
+/**
+ * A failure as `reportFailures` names it — the code a caller branches on and the service's own
+ * message — for a surface that reports it without exiting (`factory mcp`'s tool results).
+ */
+export const describeFailure = (
+  error: unknown,
+): { readonly code: string; readonly message: string } =>
+  Schema.is(SessionError)(error)
+    ? { code: error.code, message: error.message }
+    : typeof error === "object" &&
+        error !== null &&
+        "_tag" in error &&
+        hasMessage(error)
+      ? {
+          code: refusalCode(String((error as { _tag: unknown })._tag)),
+          message: error.message,
+        }
+      : { code: "error", message: String(error) };

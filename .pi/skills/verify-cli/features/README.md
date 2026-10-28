@@ -3,6 +3,11 @@
 One file per user-facing feature of `factory`. Each answers: what it is, how a user reaches it, how
 the skill drives it, and what observable end state proves it works.
 
+`factory mcp` (an MCP server on stdio for a local agent) and `factory handoff` (the checkout's work in
+progress as a card whose run starts on it) were verified **2026-10-28** from the
+`agent/S-local-agent-handoff-mcp` worktree with `./mcp.sh` (API on `:9530`) — **22/22** checks
+([mcp.md](mcp.md)), Claude Code 2.1.312's own `claude mcp get` health check among them.
+
 `factory skill ls` / `show` / `put` were verified **2026-10-28** from the `agent/D7` worktree with
 `./skill.sh` (API on `:9520`) — **16/16** checks ([skill.md](skill.md)) — and `./drive.sh` (API on
 `:9520`, approve on `:9522`, the seed's GitHub fake on `:9523`) at **31/31**, one check being
