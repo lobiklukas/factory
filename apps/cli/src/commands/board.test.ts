@@ -28,6 +28,7 @@ import {
   RUNS_HEADER,
   attentionLines,
   blockCard,
+  bodyLines,
   createdLines,
   runsLines,
   specLines,
@@ -67,6 +68,63 @@ describe("threadLines", () => {
     expect(threadLines(comment("question", "ses_run", "Which repo?"))).toEqual([
       "  [question] ses_run (revision 4)",
       "    Which repo?",
+    ]);
+  });
+});
+
+describe("bodyLines (LOB-260)", () => {
+  const card = (fields: Record<string, string>): Task =>
+    Schema.decodeSync(Task)({
+      id: `tsk_${"0".repeat(26)}`,
+      boardId: `brd_${"0".repeat(26)}`,
+      title: "release notes",
+      column: "intake",
+      definitionVersion: 3,
+      revision: 1,
+      priority: "normal",
+      createdAt: "2026-10-28T00:00:00.000Z",
+      updatedAt: "2026-10-28T00:00:00.000Z",
+      ...fields,
+    });
+
+  /** Mutation: trim each body line, or join them — the indented markdown loses its own shape. */
+  it("prints the base ref, the external ref, then the body's lines verbatim", () => {
+    expect(
+      bodyLines(
+        card({
+          body: "## Goal\n  keep 5442  \n",
+          baseRef: "release",
+          externalRef: "LOB-42",
+        }),
+      ),
+    ).toEqual([
+      "base      release",
+      "external  LOB-42",
+      "body      2 lines",
+      "    ## Goal",
+      "      keep 5442  ",
+    ]);
+  });
+
+  /** Mutation: count `split("\n")` as is — `"a\n"` reads as two lines and prints a blank one. */
+  it("counts neither a trailing newline nor the empty line after it", () => {
+    expect(bodyLines(card({ body: "a\n\n" })).slice(2)).toEqual([
+      "body      1 line",
+      "    a",
+    ]);
+    expect(bodyLines(card({ body: "a\n\nb" })).slice(2)).toEqual([
+      "body      3 lines",
+      "    a",
+      "    ",
+      "    b",
+    ]);
+  });
+
+  it("prints a dash for each a card does not have", () => {
+    expect(bodyLines(card({}))).toEqual([
+      "base      -",
+      "external  -",
+      "body      -",
     ]);
   });
 });

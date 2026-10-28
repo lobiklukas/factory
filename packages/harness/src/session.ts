@@ -116,6 +116,7 @@ import {
   type VerifyOptions,
   type VerifyRecord,
 } from "./verify";
+import { bodyExtension, renderBody } from "./body";
 import {
   askExtension,
   threadExtension,
@@ -370,6 +371,12 @@ export type OpenSessionOptions = {
    */
   readonly thread?: ThreadReader;
   /**
+   * The card's body (LOB-260, `./body`): what the task asks for, quoted verbatim as the `task_body`
+   * section beside the thread. Read by the control plane when it opens the owner, like the pages.
+   * Absent (a session with no card), empty, or all whitespace: no section.
+   */
+  readonly body?: string;
+  /**
    * How a specifying run posts its spec on its card (LOB-238, `./specify`): the control plane's
    * callback that records the spec as a `specified` event. The `spec` tool is installed only when
    * this is given *and* the run's role writes the spec (`SPEC_ROLES`); any other run — a planner on
@@ -444,6 +451,11 @@ export const openSession = (
     const pages = options.pages ?? [];
     const pagesPrompt = assemblePages(pages, PAGES_TOKEN_CAP);
     if (pages.length > 0) registry.install(pagesExtension(pagesPrompt));
+    // The card's body (LOB-260): what the task asks for, as it was filed, before the thread that
+    // answers questions about it. A card with an empty body installs nothing.
+    if (options.body !== undefined && renderBody(options.body) !== undefined) {
+      registry.install(bodyExtension(options.body));
+    }
     // The card's thread beside them (B7, LOB-73): what earlier runs asked and what a person answered,
     // so a run that follows a parked one starts from the answer rather than from the bare card.
     if (options.thread !== undefined) {

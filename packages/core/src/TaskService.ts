@@ -73,6 +73,8 @@ import {
   GATED_COLUMNS,
   gatedExit,
   LIST_BOARDS_LIMIT,
+  MAX_TASK_BODY_CHARS,
+  MAX_TASK_REF_CHARS,
   humanGate,
   NON_EMPTY_DIFF_REQUIREMENT,
   isDeclaredTransition,
@@ -96,7 +98,9 @@ import {
   readVerifyCalls,
 } from "@repo/harness";
 import { PostgresStorage } from "@repo/storage-postgres";
+import { isSafeBranchName } from "./git";
 import { mintBoardId, mintTaskId } from "./ids";
+import { projectTask, type TaskProjection } from "./taskProjection";
 import { branchDiffSize } from "./prStep";
 import { noCheckoutWarning } from "./workspace";
 import {
@@ -228,6 +232,17 @@ export class EmptyComment extends Schema.TaggedError<EmptyComment>()(
   { taskId: Schema.String, message: Schema.String },
 ) {}
 
+/**
+ * A create carried a field the card cannot take (LOB-260): a body or ref over its cap, or a base ref
+ * that is not a plain git ref. `field` names it. Checked in the service, not only in the RPC schema,
+ * so every in-process caller (a trigger, a sync) is held to it, and a base ref — which every run on
+ * the card hands to git — is refused once, at create, rather than failing each run's worktree cut.
+ */
+export class InvalidTaskInput extends Schema.TaggedError<InvalidTaskInput>()(
+  "InvalidTaskInput",
+  { field: Schema.String, message: Schema.String },
+) {}
+
 export type TaskError =
   | TaskNotFound
   | BoardNotFound
@@ -241,6 +256,7 @@ export type TaskError =
   | AlreadyBlocked
   | NotBlocked
   | EmptyComment
+  | InvalidTaskInput
   | TaskStorageError;
 
 export type CreateTaskInput = {
@@ -249,6 +265,19 @@ export type CreateTaskInput = {
   /** Defaults to the board's repository; any other is `BoardRepoMismatch` (LOB-255). */
   readonly repo?: string;
   readonly priority?: TaskPriorityType;
+  /**
+   * The card's description, in markdown (LOB-260). Stored verbatim; an empty or all-whitespace body
+   * is stored as none, so a card with nothing to say gets no `task_body` prompt section.
+   */
+  readonly body?: string;
+  /**
+   * The ref the card's runs cut their worktree from (LOB-260). Blank is none: the repo's default.
+   * Trimmed, then held to `isSafeBranchName` (a branch, a tag, `origin/main` or a sha), since every
+   * run on the card passes it to git: anything else is `InvalidTaskInput`.
+   */
+  readonly baseRef?: string;
+  /** The tracker issue the card was filed from (LOB-260): a URL or a key. Blank is none. */
+  readonly externalRef?: string;
   readonly actor: Actor;
 };
 
@@ -380,6 +409,12 @@ export type TaskServiceShape = {
   readonly spec: (
     taskId: string,
   ) => Effect.Effect<TaskSpec | undefined, TaskError>;
+  /**
+   * The card as its `task_events` say it is (LOB-260, `./taskProjection`): the history folded,
+   * oldest first. An unknown card is `TaskNotFound`; a history that does not start with `created`,
+   * or holds an event that does not decode, is `TaskStorageError`.
+   */
+  readonly replay: (taskId: string) => Effect.Effect<TaskProjection, TaskError>;
   /** A card's runs, newest first (LOB-76). An unknown card is `TaskNotFound`, not an empty list. */
   readonly listRuns: (
     taskId: string,
@@ -409,6 +444,9 @@ type TaskRow = {
   readonly definitionVersion: number;
   readonly revision: number;
   readonly priority: string;
+  readonly body: string;
+  readonly baseRef: string | null;
+  readonly externalRef: string | null;
   readonly blockedReason: string | null;
   readonly blockedColumn: string | null;
   readonly blockedNote: string | null;
@@ -445,6 +483,9 @@ const TASK_COLUMN_NAMES = [
   "definition_version",
   "revision",
   "priority",
+  "body",
+  "base_ref",
+  "external_ref",
   "blocked_reason",
   "blocked_column",
   "blocked_note",
@@ -492,6 +533,58 @@ type ExitJudgement = {
 
 const iso = (value: Date | string): string =>
   DateTime.formatIso(DateTime.makeUnsafe(value));
+
+/** A create's optional text, or `undefined` when it is absent or says nothing but whitespace. */
+const present = (value: string | undefined): string | undefined =>
+  value === undefined || value.trim() === "" ? undefined : value;
+
+/**
+ * A create's body, base ref and external ref as the card stores them (LOB-260), or the first field
+ * it cannot take. The body is kept verbatim; the refs are trimmed, since a ref or a key never means
+ * its surrounding whitespace. The caps are the domain schema's, so an in-process caller is held to
+ * what the RPC decode already enforces.
+ */
+export const cardText = (input: {
+  readonly body?: string | undefined;
+  readonly baseRef?: string | undefined;
+  readonly externalRef?: string | undefined;
+}): Effect.Effect<
+  {
+    readonly body: string | undefined;
+    readonly baseRef: string | undefined;
+    readonly externalRef: string | undefined;
+  },
+  InvalidTaskInput
+> =>
+  Effect.gen(function* () {
+    const body = present(input.body);
+    const baseRef = present(input.baseRef)?.trim();
+    const externalRef = present(input.externalRef)?.trim();
+    if (body !== undefined && body.length > MAX_TASK_BODY_CHARS) {
+      return yield* new InvalidTaskInput({
+        field: "body",
+        message: `a card's body takes at most ${MAX_TASK_BODY_CHARS} characters; this one has ${body.length}`,
+      });
+    }
+    for (const [field, value] of [
+      ["baseRef", baseRef],
+      ["externalRef", externalRef],
+    ] as const) {
+      if (value !== undefined && value.length > MAX_TASK_REF_CHARS) {
+        return yield* new InvalidTaskInput({
+          field,
+          message: `a card's ${field} takes at most ${MAX_TASK_REF_CHARS} characters; this one has ${value.length}`,
+        });
+      }
+    }
+    if (baseRef !== undefined && !isSafeBranchName(baseRef)) {
+      return yield* new InvalidTaskInput({
+        field: "baseRef",
+        message: `"${baseRef}" is not a base ref a run can start from: name a branch, a tag or a commit (letters, digits, '.', '_', '-' and '/', no '..')`,
+      });
+    }
+    return { body, baseRef, externalRef };
+  });
 
 /**
  * Merge two lists each already in the order `session_approvals` is read in (oldest request first,
@@ -574,6 +667,9 @@ export const TaskServiceLive = Layer.effect(
         createdAt: iso(row.createdAt),
         updatedAt: iso(row.updatedAt),
         ...(row.repo === null ? {} : { repo: row.repo }),
+        ...(row.body === "" ? {} : { body: row.body }),
+        ...(row.baseRef === null ? {} : { baseRef: row.baseRef }),
+        ...(row.externalRef === null ? {} : { externalRef: row.externalRef }),
         ...(row.blockedReason === null ||
         row.blockedColumn === null ||
         row.blockedSince === null
@@ -998,17 +1094,23 @@ export const TaskServiceLive = Layer.effect(
             }
             const id = yield* mintTaskId;
             const priority = input.priority ?? "normal";
+            // What the card says and where its runs start (LOB-260). A blank value is none, so an
+            // empty body is no body — the row's '' and the event's absence — and no prompt section.
+            const { body, baseRef, externalRef } = yield* cardText(input);
             const rows = yield* sql<TaskRow>`
               INSERT INTO tasks (
                 id, board_id, title, "column", repo, definition_version,
-                revision, priority, created_at, updated_at
+                revision, priority, body, base_ref, external_ref, created_at, updated_at
               )
               VALUES (
                 ${id}, ${board.id}, ${input.title}, ${INITIAL_COLUMN}, ${repo},
-                ${board.definitionVersion}, 1, ${priority}, now(), now()
+                ${board.definitionVersion}, 1, ${priority}, ${body ?? ""},
+                ${baseRef ?? null}, ${externalRef ?? null}, now(), now()
               )
               RETURNING ${sql.literal(TASK_COLUMNS)}
             `;
+            // The event carries the create's whole input, so the row is derivable from the history
+            // (`./taskProjection`): the projection rebuilt from `task_events` is this card.
             yield* appendEvent({
               _tag: "created",
               taskId: id,
@@ -1017,6 +1119,10 @@ export const TaskServiceLive = Layer.effect(
               column: INITIAL_COLUMN,
               actor: input.actor,
               revision: 1,
+              priority,
+              ...(body === undefined ? {} : { body }),
+              ...(baseRef === undefined ? {} : { baseRef }),
+              ...(externalRef === undefined ? {} : { externalRef }),
             });
             return yield* toTask(rows[0] as TaskRow);
           }),
@@ -1694,6 +1800,49 @@ export const TaskServiceLive = Layer.effect(
         }),
       );
 
+    /**
+     * The card its history describes (LOB-260): every event in write order — the identity column,
+     * as the thread is read — decoded and folded by `projectTask`. Read from `task_events` alone,
+     * never from the row, so a test can wipe the row's columns and still find the card here.
+     */
+    const replay = (taskId: string): Effect.Effect<TaskProjection, TaskError> =>
+      withStorage(
+        Effect.gen(function* () {
+          const exists = yield* sql<{ id: string }>`
+            SELECT id FROM tasks WHERE id = ${taskId}
+          `;
+          if (exists[0] === undefined) {
+            return yield* new TaskNotFound({
+              taskId,
+              message: `no task ${taskId}`,
+            });
+          }
+          const rows = yield* sql<{ id: string; payload: string }>`
+            SELECT id::text AS id, payload::text AS payload
+            FROM task_events
+            WHERE task_id = ${taskId}
+            ORDER BY task_events.id
+          `;
+          const events = yield* Effect.forEach(rows, (row) =>
+            decodeEvent(row.payload).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new TaskStorageError({
+                    message: `task ${taskId} holds an unreadable event ${row.id}: ${String(cause)}`,
+                  }),
+              ),
+            ),
+          );
+          const card = projectTask(events);
+          if (card === undefined) {
+            return yield* new TaskStorageError({
+              message: `task ${taskId}'s history does not start with one created event`,
+            });
+          }
+          return card;
+        }),
+      );
+
     const decodeRun = Schema.decodeUnknownEffect(TaskRun);
 
     /**
@@ -2016,6 +2165,7 @@ export const TaskServiceLive = Layer.effect(
       comments,
       declareSpec,
       spec,
+      replay,
       listRuns,
       attention,
     } satisfies TaskServiceShape;

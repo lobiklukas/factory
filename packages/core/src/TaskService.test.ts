@@ -1055,7 +1055,7 @@ describe("TaskService — a card's repository (LOB-255)", () => {
    * made before cards carried a repo: each is bound to the board's repository, on `factory/<id>`, in
    * a worktree linked into the repository's registered checkout.
    *
-   * Mutation: drop `cardRepoFor` — the run with no repo named is a scratch session with no branch.
+   * Mutation: drop `cardBindingFor` — the run with no repo named is a scratch session with no branch.
    * Mutation: read `t.repo` alone — the legacy card's run is a scratch session.
    */
   it("binds every run on the card to the board's repository, in a factory/<session-id> worktree", async () => {

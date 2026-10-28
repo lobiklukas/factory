@@ -15,4 +15,5 @@ export * from "./mission";
 export * from "./mission-worker";
 export * from "./verify";
 export * from "./ask";
+export * from "./body";
 export * from "./budget";
