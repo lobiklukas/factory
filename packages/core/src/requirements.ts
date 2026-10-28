@@ -125,6 +125,30 @@ export const CHECKED_REQUIREMENTS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The keys a definition may declare that nothing checks yet (module doc): the default pipeline's
+ * `spec_doc`, `plan_doc` and `run_completed`, whose artifacts are not recorded, and B5's human gates
+ * `human_move` and `human_merge`, which the move's actor check enforces. A reader is told they are
+ * unchecked (`describeDefinition`).
+ */
+export const UNCHECKED_REQUIREMENTS: ReadonlySet<string> = new Set([
+  "spec_doc",
+  "plan_doc",
+  "run_completed",
+  "human_move",
+  "human_merge",
+]);
+
+/**
+ * Every key the factory knows (D4): the checked ones and the declared-but-unchecked ones. An authored
+ * definition version (`defineBoard`) may declare only these — any other key is a typo, or a gate
+ * nothing will ever hold a card to that a reader of the board would take for one that is.
+ */
+export const KNOWN_REQUIREMENTS: ReadonlySet<string> = new Set([
+  ...CHECKED_REQUIREMENTS,
+  ...UNCHECKED_REQUIREMENTS,
+]);
+
+/**
  * One run of the card and the `verify` calls its log holds, oldest first — a call that left no
  * record included, as `undefined` (`readVerifyCalls`) — and the PR link its `factory.pr` document
  * records, when it opened one.

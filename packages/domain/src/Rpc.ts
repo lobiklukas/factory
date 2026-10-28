@@ -24,6 +24,8 @@ import {
   CreateBoardInput,
   CreatedBoard,
   CreateTaskInput,
+  DefineBoardInput,
+  DefinedBoard,
   DefinitionConfig,
   DefinitionNotFound,
   DefinitionSummary,
@@ -34,6 +36,7 @@ import {
   GetTaskInput,
   GetTaskSpecInput,
   HumanGateRequired,
+  InvalidDefinition,
   InvalidTaskInput,
   ListAttentionInput,
   ListBoardsInput,
@@ -393,6 +396,7 @@ const TaskErrorSchema = Schema.Union([
   NotBlocked,
   EmptyComment,
   InvalidTaskInput,
+  InvalidDefinition,
   TaskStorageError,
 ]);
 
@@ -431,6 +435,15 @@ export class TasksRpc extends RpcGroup.make(
   Rpc.make("getDefinition", {
     payload: GetDefinitionInput,
     success: DefinitionConfig,
+    error: TaskErrorSchema,
+  }),
+  // A new version of a definition, authored (D4): newest + 1, never an edit of a row (B2). Content
+  // identical to the newest version writes nothing and answers it; `dryRun` validates only. A
+  // version that cannot be used as written — or names a skill the library lacks, or a role the
+  // deployment's role table lacks — is `InvalidDefinition`, naming the field, and nothing is written.
+  Rpc.make("defineBoard", {
+    payload: DefineBoardInput,
+    success: DefinedBoard,
     error: TaskErrorSchema,
   }),
   // A board's full configuration (LOB-270): `getBoard`'s instance with its pinned version described

@@ -39,6 +39,16 @@ refuses by), each requirement marked checked or unchecked (`CHECKED_REQUIREMENTS
 its role's model as the deployment's `ROLE_MODELS` resolves it (B6) — read-only, joined by
 `describeDefinition` in `packages/core`.
 
+Built (D4): a new definition version is authored without a migration — `defineBoard` over RPC and
+`factory board define --file def.json [--dry-run]`. It is written as the id's newest version + 1, never
+over a row (one transaction under an advisory lock on the id); content identical to the newest version
+writes nothing and answers it; a dry run validates only. A version is refused as `InvalidDefinition`,
+naming the field, for a duplicate column, no (or a terminal, or an undeclared) initial column, a move to
+an undeclared column, a terminal column with exits, a non-terminal one with none, no terminal column, an
+unknown requires key, a skill the skill library lacks, or a role outside `ROLE_MODELS` when it has rows
+(`authoredDefinitionFaults` in `packages/core`). An authored version therefore always declares its own
+moves and its initial column.
+
 Built (LOB-267): transitions, human gates and the initial column are definition data. A column
 declares `transitions: [{ to, gate? }]` and a definition its `initialColumn`
 (`board_definitions.initial_column`); `TaskService.move`, `create`, the attention view's gate rows and
