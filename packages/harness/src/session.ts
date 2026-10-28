@@ -3251,7 +3251,22 @@ export type SessionRef = {
    * row's. Absent, a fold reads it from the log's `pi.agent` instead.
    */
   readonly model?: string;
+  /**
+   * Whether this process serves a `provider/modelId` (E9): the control plane's catalog lookup. With
+   * it, the summary says `modelAvailable` for the model the session is pinned to; without it the
+   * field is absent, because a reader that knows no catalog cannot say.
+   */
+  readonly serves?: (model: string) => boolean;
 };
+
+/** The summary's `modelAvailable` for a pinned model, absent when the answer is not known (E9). */
+const modelAvailability = (
+  ref: SessionRef,
+  model: string | undefined,
+): { readonly modelAvailable?: boolean } =>
+  model === undefined || ref.serves === undefined
+    ? {}
+    : { modelAvailable: ref.serves(model) };
 
 const pendingOf = (
   sessionId: SessionId,
@@ -3295,6 +3310,7 @@ const snapshotOf = (
       ...(ref.prUrl === undefined ? {} : { prUrl: ref.prUrl }),
       ...(ref.forkedFrom === undefined ? {} : { forkedFrom: ref.forkedFrom }),
       ...(ref.model === undefined ? {} : { model: ref.model }),
+      ...modelAvailability(ref, ref.model),
     },
     workspace: ref.workspace,
     entries: projection.entries,
@@ -3881,6 +3897,7 @@ export const readFoldedSnapshot = (
         ...(ref.prUrl === undefined ? {} : { prUrl: ref.prUrl }),
         ...(ref.forkedFrom === undefined ? {} : { forkedFrom: ref.forkedFrom }),
         ...(model === undefined ? {} : { model }),
+        ...modelAvailability(ref, model),
       },
       workspace: ref.workspace,
       entries: log.entries,

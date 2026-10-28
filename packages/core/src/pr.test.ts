@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Effect, Layer, Option, Redacted, Schema } from "effect";
+import { Cause, Effect, Layer, Option, Redacted, Schema } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { describe, expect, it } from "vitest";
 import { SessionId, RepoSlug, type PrEvidence } from "@repo/domain/Session";
@@ -19,6 +19,7 @@ import {
   evidenceSection,
   PR_BODY_MAX_CHARS,
   PR_CHANGED_LIST_MAX,
+  PrError,
 } from "./pr";
 import { diffCapRefusal, parseDiffSize } from "./prStep";
 
@@ -69,6 +70,7 @@ const makeRoutedFake = (
   answers: (request: { readonly method: string; readonly path: string }) => {
     readonly status: number;
     readonly body: unknown;
+    readonly headers?: Record<string, string>;
   },
 ) => {
   const requests: Array<{
@@ -102,7 +104,10 @@ const makeRoutedFake = (
         );
         const response = new Response(text, {
           status: answer.status,
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            ...answer.headers,
+          },
         });
         return HttpClientResponse.fromWeb(request, response);
       }).pipe(Effect.orDie),
@@ -580,6 +585,161 @@ describe("createPullRequest", () => {
     expect(error?.operation).toBe("createPullRequest");
     expect(error?.message).toBe("GitHub answered HTTP 422");
     expect(requests).toHaveLength(2);
+  });
+
+  /** The `PrError` a `createPullRequest` over a forge that answers `answer` fails with. */
+  const refusedBy = async (
+    answer: (request: { method: string }) => {
+      status: number;
+      body: unknown;
+      headers?: Record<string, string>;
+    },
+  ) => {
+    const { client } = makeRoutedFake(answer);
+    const provider = staticTokenProvider(Option.some(Redacted.make("tok")));
+    const result = await Effect.runPromiseExit(
+      createPullRequest({
+        repo: "o/r" as RepoSlug,
+        base: "main",
+        head: "factory/s-1",
+        title: "PR",
+        body: "b",
+        apiUrl: "http://127.0.0.1:9411",
+      }).pipe(
+        Effect.provide(
+          Layer.merge(Layer.succeed(CredentialProvider, provider), client),
+        ),
+      ),
+    );
+    if (result._tag !== "Failure")
+      throw new Error("the create was not refused");
+    const error = Cause.findErrorOption(result.cause);
+    if (Option.isNone(error) || !Schema.is(PrError)(error.value))
+      throw new Error("no typed PrError");
+    return error.value;
+  };
+
+  // C7b: a refusal that will repeat has to be told from one that will not, by the status the forge
+  // answered, and carry the forge's own reason.
+  it("carries the status and the forge's reason on a refusal, so a client can tell a repeat from a blip", async () => {
+    const duplicate = await refusedBy(({ method }) =>
+      method === "POST"
+        ? {
+            status: 422,
+            body: {
+              message: "Validation Failed",
+              errors: [
+                { message: "A pull request already exists for o:factory/s-1." },
+              ],
+            },
+          }
+        : { status: 200, body: [] },
+    );
+    expect(duplicate.status).toBe(422);
+    expect(duplicate.message).toBe(
+      "GitHub answered HTTP 422: A pull request already exists for o:factory/s-1.",
+    );
+    expect(duplicate.existing).toBeUndefined();
+
+    const blip = await refusedBy(() => ({
+      status: 502,
+      body: { message: "Bad Gateway" },
+    }));
+    expect(blip.status).toBe(502);
+    expect(blip.message).toBe("GitHub answered HTTP 502");
+
+    // A body with no reason in it still answers with its status.
+    const mute = await refusedBy(() => ({ status: 401, body: "nope" }));
+    expect(mute.status).toBe(401);
+    expect(mute.message).toBe("GitHub answered HTTP 401");
+  });
+
+  // A real GitHub rate limit is a 403 whose reason is the body's top-level `message` (not `errors`),
+  // so the signal has to ride on the error itself, or the client reads it as a verdict.
+  it("marks a rate-limit 403 or 429 as rateLimited, by header or by the body's own words", async () => {
+    const primary = await refusedBy(() => ({
+      status: 403,
+      body: { message: "API rate limit exceeded for user ID 1." },
+    }));
+    expect(primary.status).toBe(403);
+    expect(primary.rateLimited).toBe(true);
+
+    const secondary = await refusedBy(() => ({
+      status: 403,
+      body: {
+        message:
+          "You have exceeded a secondary rate limit. Please wait a few minutes.",
+      },
+      headers: { "retry-after": "60" },
+    }));
+    expect(secondary.rateLimited).toBe(true);
+
+    const exhausted = await refusedBy(() => ({
+      status: 403,
+      body: { message: "Forbidden" },
+      headers: { "x-ratelimit-remaining": "0" },
+    }));
+    expect(exhausted.rateLimited).toBe(true);
+
+    const throttled = await refusedBy(() => ({ status: 429, body: {} }));
+    expect(throttled.rateLimited).toBe(undefined);
+    const throttledByHeader = await refusedBy(() => ({
+      status: 429,
+      body: {},
+      headers: { "retry-after": "5" },
+    }));
+    expect(throttledByHeader.rateLimited).toBe(true);
+
+    // A plain 403 (a token the forge will not take) is a verdict, and a 422 never is a rate limit.
+    const denied = await refusedBy(() => ({
+      status: 403,
+      body: { message: "Resource not accessible by personal access token" },
+      headers: { "x-ratelimit-remaining": "4999" },
+    }));
+    expect(denied.rateLimited).toBeUndefined();
+    const invalid = await refusedBy(({ method }) =>
+      method === "POST"
+        ? { status: 422, body: { message: "rate limit", errors: [] } }
+        : { status: 200, body: [] },
+    );
+    expect(invalid.rateLimited).toBeUndefined();
+  });
+
+  it("links the existing PR when the forge's refusal names its page, and no other URL", async () => {
+    const named = await refusedBy(({ method }) =>
+      method === "POST"
+        ? {
+            status: 422,
+            body: {
+              message: "Validation Failed",
+              documentation_url:
+                "https://docs.github.com/rest/pulls/pulls#create-a-pull-request",
+              errors: [
+                {
+                  message:
+                    "A pull request already exists: https://github.com/o/r/pull/41",
+                },
+              ],
+            },
+          }
+        : { status: 200, body: [] },
+    );
+    expect(named.existing).toBe("https://github.com/o/r/pull/41");
+
+    const unnamed = await refusedBy(({ method }) =>
+      method === "POST"
+        ? {
+            status: 422,
+            body: {
+              message: "Validation Failed",
+              documentation_url:
+                "https://docs.github.com/rest/pulls/pulls#create-a-pull-request",
+              errors: [{ message: "head is invalid" }],
+            },
+          }
+        : { status: 200, body: [] },
+    );
+    expect(unnamed.existing).toBeUndefined();
   });
 
   it("calls GITHUB_API_URL when the caller names no root", async () => {

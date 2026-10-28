@@ -1,13 +1,18 @@
 import { useEffect, useRef } from "react";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
-import { Exit } from "effect";
-import { Atom } from "effect/reactivity";
+import { Exit, Option } from "effect";
+import { Atom, AsyncResult } from "effect/reactivity";
 import { GitPullRequestIcon } from "lucide-react";
 import { toast } from "sonner";
 import type { SessionId, SessionStatus } from "@repo/domain/Session";
-import { openPullRequestAtom } from "@/lib/atoms/session-atom";
+import {
+  openPullRequestAtom,
+  openPullRequestMarkAtom,
+  sessionActivityAtom,
+} from "@/lib/atoms/session-atom";
 import { prLink } from "@/lib/pr-link";
 import {
+  activityMoved,
   attemptOfCause,
   attemptOfResult,
   attemptOfStep,
@@ -148,6 +153,10 @@ const usePrControl = (session: PrSession) => {
       : offer._tag === "available"
         ? offer.retry
         : undefined;
+  // The PR the forge named as already open for this branch, linked beside the refusal (C7b).
+  const existing = offer._tag === "blocked" ? offer.existing : undefined;
+  // A remembered verdict is what the server-state watch is for (`PrRefusalWatch`).
+  const watching = attempt._tag === "refused" || attempt._tag === "failed";
   const press = () => {
     void open(prTitleFor(session.title, session.id)).then((exit) => {
       // The pane that was pressed says so once; the other reads the shared atom.
@@ -161,7 +170,29 @@ const usePrControl = (session: PrSession) => {
       }
     });
   };
-  return { url, offer, reason, press };
+  return { url, offer, reason, existing, watching, press };
+};
+
+/**
+ * Drops a remembered refusal once the server reports the session has moved on (C7b): its
+ * `lastActivityAt` is not the one read when the press settled (`activityMoved`). This is what ends a
+ * refusal for a run no pane watched — the CLI's, another browser's, one that began and ended between
+ * two polls — because `staleRefusal` needs this pane to see the status go busy. Rendered only while
+ * there is a refusal to date, so the poll costs nothing otherwise; the reset it makes is the same one
+ * a run seen under the pane's eyes makes, so the control is offered afresh.
+ */
+const PrRefusalWatch = ({ sessionId }: { readonly sessionId: SessionId }) => {
+  const mark = useAtomValue(openPullRequestMarkAtom(sessionId));
+  const activity = useAtomValue(sessionActivityAtom(sessionId));
+  const reset = useAtomSet(openPullRequestAtom(sessionId));
+  const current = Option.getOrUndefined(
+    Option.flatMap(AsyncResult.value(activity), Option.fromNullishOr),
+  );
+  const moved = activityMoved(mark, current);
+  useEffect(() => {
+    if (moved) reset(Atom.Reset);
+  }, [moved, reset]);
+  return null;
 };
 
 const reasonIdOf = (variant: "header" | "row", id: SessionId) =>
@@ -184,7 +215,11 @@ export const PrControl = ({
   readonly session: PrSession;
   readonly variant: "header" | "row";
 }) => {
-  const { url, offer, reason, press } = usePrControl(session);
+  const { url, offer, reason, existing, watching, press } =
+    usePrControl(session);
+  // The watch is beside the control, not inside a branch of it: a refusal outlives the offer (a busy
+  // session hides the button, the verdict is still the one a later idle session would show).
+  const watch = watching ? <PrRefusalWatch sessionId={session.id} /> : null;
 
   if (url !== undefined && prLink(url) !== null) {
     return variant === "header" ? (
@@ -195,7 +230,7 @@ export const PrControl = ({
       </div>
     );
   }
-  if (offer._tag === "hidden") return null;
+  if (offer._tag === "hidden") return watch;
 
   const reasonId = reasonIdOf(variant, session.id);
   const button = (
@@ -207,15 +242,20 @@ export const PrControl = ({
     />
   );
   return variant === "header" ? (
-    <span className="shrink-0">{button}</span>
+    <span className="shrink-0">
+      {watch}
+      {button}
+    </span>
   ) : (
     <div data-run-pr={session.id} className="flex flex-col items-start gap-1">
+      {watch}
       {button}
       {reason === undefined ? null : (
         <PrReasonText
           id={reasonId}
           kind={offer._tag}
           reason={reason}
+          existing={existing}
           className="font-mono text-[10px] text-destructive"
         />
       )}
@@ -227,23 +267,43 @@ const PrReasonText = ({
   id,
   kind,
   reason,
+  existing,
   className,
 }: {
   readonly id: string;
   readonly kind: string;
   readonly reason: string;
+  /** The PR the forge named as already open for this branch, linked after the reason (C7b). */
+  readonly existing?: string | undefined;
   readonly className: string;
-}) => (
-  <span
-    id={id}
-    role="status"
-    data-open-pr-reason={kind}
-    title={reason}
-    className={className}
-  >
-    {reason}
-  </span>
-);
+}) => {
+  const link = prLink(existing);
+  return (
+    <span
+      id={id}
+      role="status"
+      data-open-pr-reason={kind}
+      title={reason}
+      className={className}
+    >
+      {reason}
+      {link === null ? null : (
+        <>
+          {" "}
+          <a
+            data-existing-pr
+            href={link.href}
+            target="_blank"
+            rel="noreferrer"
+            className="text-foreground underline underline-offset-2"
+          >
+            Open the existing pull request ({link.label})
+          </a>
+        </>
+      )}
+    </span>
+  );
+};
 
 /**
  * The header's refusal, on a line of its own under it: the server's reason in full, for as long as
@@ -251,7 +311,7 @@ const PrReasonText = ({
  * beside them would cost the session its name.
  */
 export const PrReason = ({ session }: { readonly session: PrSession }) => {
-  const { url, offer, reason } = usePrControl(session);
+  const { url, offer, reason, existing } = usePrControl(session);
   if (url !== undefined || offer._tag === "hidden" || reason === undefined)
     return null;
   return (
@@ -260,6 +320,7 @@ export const PrReason = ({ session }: { readonly session: PrSession }) => {
         id={reasonIdOf("header", session.id)}
         kind={offer._tag}
         reason={reason}
+        existing={existing}
         className="font-mono text-[11px] text-destructive"
       />
     </div>

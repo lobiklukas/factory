@@ -274,6 +274,14 @@ export const SessionSummary = Schema.Struct({
    * yet, and only on a read that does not fold the log.
    */
   model: Schema.optional(Schema.String),
+  /**
+   * Whether this process serves the model the session is pinned to (E9): `false` when a pin names a
+   * model the catalog it was booted with does not hold (a faux session after the API switched to
+   * anthropic), so a send is refused as `model_unavailable` and the dashboard says why. Absent when
+   * the session names no model, which is to say there is nothing to serve; `true` is a model this
+   * process serves.
+   */
+  modelAvailable: Schema.optional(Schema.Boolean),
 });
 export type SessionSummary = typeof SessionSummary.Type;
 
@@ -959,6 +967,8 @@ export const SessionListEntry = Schema.Struct({
    * list names it without folding a log (R6). Absent for a row nothing has written it on yet.
    */
   model: Schema.optional(Schema.String),
+  /** Whether this process serves `model` (E9); see `SessionSummary.modelAvailable`. */
+  modelAvailable: Schema.optional(Schema.Boolean),
 });
 export type SessionListEntry = typeof SessionListEntry.Type;
 
@@ -967,6 +977,16 @@ export const ListSessionsInput = Schema.Struct({
   limit: Schema.optional(Schema.Int),
   /** Opaque keyset cursor from a previous page's `nextCursor`. */
   cursor: Schema.optional(Schema.String),
+  /**
+   * Only the runs of this card (C7b): the sessions `task_runs` binds to it, however many sessions
+   * the index holds, so a card's run rows are not limited to the newest page of every session.
+   */
+  taskId: Schema.optional(Schema.String),
+  /**
+   * Only this session (C7b): one index row, read without folding its log — what the "Open pull
+   * request" control watches to tell that a session has moved on since it was refused.
+   */
+  sessionId: Schema.optional(SessionId),
 });
 export type ListSessionsInput = typeof ListSessionsInput.Type;
 
@@ -1153,6 +1173,10 @@ export type CompactSessionResult = typeof CompactSessionResult.Type;
  *   base (S-factory-config-as-code, `RepoPolicyUnavailable`): the lookup or read failed or timed out
  *   rather than answering, so the policy is unknown and nothing ran. Transient: not a fault in the
  *   config, and the same request succeeds once git can read the base again.
+ * - `model_unavailable` — the session is pinned to a model this process does not serve (E9): it
+ *   was created under another backend (a faux session after the API switched to anthropic), and a
+ *   pin never changes. The message names the model; no run was started and nothing was written. The
+ *   fix is a replay onto a model this process serves (`replaySession`), not a retry.
  */
 export const SessionErrorCode = Schema.Literals([
   "not_found",
@@ -1167,6 +1191,7 @@ export const SessionErrorCode = Schema.Literals([
   "setup_running",
   "policy_rejected",
   "policy_unreadable",
+  "model_unavailable",
 ]);
 export type SessionErrorCode = typeof SessionErrorCode.Type;
 
