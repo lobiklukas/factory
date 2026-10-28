@@ -312,7 +312,8 @@ export const decideApprovalAtom = runtime.fn(
 
 /**
  * Which definitions exist and the versions each holds (LOB-270): what the "New board" form's
- * pickers offer. Read once per opening of the form — definitions are written by migrations, so a
+ * pickers offer, and how the settings page (LOB-245) knows a version newer than a board's pin exists.
+ * Read once per opening of the form or the page — definitions are written by migrations, so a
  * poll would only re-ask a fixed answer.
  */
 export const definitionsAtom = runtime.atom(
@@ -320,6 +321,25 @@ export const definitionsAtom = runtime.atom(
     const rpc = yield* RpcClient;
     return yield* rpc.client.listDefinitions({});
   }),
+);
+
+/**
+ * A board's configuration (LOB-245): `getBoardConfig`, the instance with the definition version it pins
+ * described exactly as `getDefinition` describes that version — each column's kind, role and the
+ * model it resolves to, skills, requirements marked checked or not, exits and human gates. What the
+ * settings page and a lane header's disclosure render, and nothing else.
+ *
+ * Read once per opening, not polled: a version is never edited in place (B2) and a board's pin does
+ * not move under it, so a poll would re-ask a fixed answer. One read rather than `getBoard` and then
+ * `getDefinition`, so the version described is the one the instance pins, never a later one.
+ */
+export const boardConfigAtom = Atom.family((boardId: BoardInstanceId) =>
+  runtime.atom(
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.getBoardConfig({ boardId });
+    }),
+  ),
 );
 
 /**

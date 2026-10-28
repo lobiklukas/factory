@@ -13,7 +13,8 @@ order, with the cards the server lists in each (LOB-75, part 1 of LOB-22).
 - `/boards/<id>` reads `getBoard` and `listBoardCards` together (`boardAtom`), so the lane order is the
   pinned version's and the cards are the server's, urgent first then FIFO (docs/board.md B2, B9).
 - Each lane is a `section[data-lane=<column>]` with the column's kind and role; an empty lane reads
-  `No cards` rather than disappearing.
+  `No cards` rather than disappearing. Its header's chevron opens what the column does — model,
+  skills, requirements, moves and gates — read-only ([board-settings.md](board-settings.md)).
 - Each card is an `li[data-card=<task id>]`: title, `urgent` when it is, the block reason when it is
   blocked (B4 — blocked is a card state, so the card says it), then the id and revision a
   `factory board move` needs.
