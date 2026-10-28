@@ -1,11 +1,11 @@
 import { RepoSlug, SessionActor, SessionBudgetCap } from "@repo/domain/Session";
-import { Console, Effect, Layer, Option } from "effect";
+import { Console, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/cli";
 import { resolveApiUrl } from "../api";
 import { reportFailures } from "../errors";
-import { ServerClient, SessionClient } from "../rpc";
+import { BoardClient } from "../rpc";
 import { followSession, formatDollars } from "../transcript";
-import { fauxWarning } from "./status";
+import { runModelLines } from "./status";
 
 /**
  * `factory run "<task>"` — mint a session, hand it the task, and follow the transcript until the
@@ -54,8 +54,7 @@ export const runCommand = Command.make(
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
-      const { client } = yield* SessionClient;
-      const server = yield* ServerClient;
+      const { client } = yield* BoardClient;
 
       const input: {
         repo?: RepoSlug;
@@ -73,13 +72,13 @@ export const runCommand = Command.make(
         yield* Console.log(`budget ${formatDollars(budget.value)}`);
       }
 
-      yield* Console.log(`model ${session.model ?? "unknown"}`);
       // A server that cannot answer `getServerInfo` costs the run its warning, never the run.
-      const info = yield* server.client
+      const info = yield* client
         .getServerInfo({})
         .pipe(Effect.option, Effect.map(Option.getOrUndefined));
-      const warning = info === undefined ? undefined : fauxWarning(info);
-      if (warning !== undefined) yield* Console.log(warning);
+      for (const line of runModelLines(session.model, info)) {
+        yield* Console.log(line);
+      }
 
       const opened = yield* client.getSession({ sessionId: session.id });
       yield* Console.log(`workspace ${opened.workspace.path}`);
@@ -110,12 +109,7 @@ export const runCommand = Command.make(
       }
     });
 
-    yield* reportFailures(
-      Effect.provide(
-        program,
-        Layer.merge(SessionClient.layer(apiUrl), ServerClient.layer(apiUrl)),
-      ),
-    );
+    yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
   }),
 ).pipe(
   Command.withDescription(

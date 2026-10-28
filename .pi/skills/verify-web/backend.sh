@@ -64,7 +64,9 @@ fi
 
 # No MODEL_BACKEND: the backend is chosen by the credential, which is what a real deployment does.
 # The other ambient credentials are cleared, so the dummy key is the one pi-ai resolves.
-( cd "$ROOT/apps/api" && exec env -u MODEL_BACKEND -u ANTHROPIC_OAUTH_TOKEN \
+( cd "$ROOT/apps/api" && exec env -u MODEL_BACKEND -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_OAUTH_TOKEN \
+    -u ANTHROPIC_FEDERATION_RULE_ID -u ANTHROPIC_ORGANIZATION_ID -u ANTHROPIC_IDENTITY_TOKEN_FILE \
+    -u ANTHROPIC_SERVICE_ACCOUNT_ID -u ANTHROPIC_WORKSPACE_ID \
     PORT="$API_PORT" \
     ALLOWED_ORIGINS="http://localhost:$WEB_PORT" \
     ANTHROPIC_API_KEY="sk-ant-verify-backend-dummy-not-a-credential" \

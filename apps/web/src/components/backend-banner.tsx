@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { Option } from "effect";
 import { AsyncResult } from "effect/reactivity";
 import { TriangleAlertIcon } from "lucide-react";
 import { serverInfoAtom } from "@/lib/atoms/server-info-atom";
@@ -34,14 +35,16 @@ export const BackendBannerView = ({
     </div>
   );
 
-/** The banner for what the control plane answered; nothing until it has answered. */
+/**
+ * The banner for what the control plane answered; nothing until it has answered. A poll that fails
+ * keeps the last answer (`AsyncResult.value` falls back to the previous success), as every other
+ * polled view does, so a restart or a dropped request neither hides a faux banner nor re-announces it.
+ */
 export const BackendBannerSlot = () => {
   const result = useAtomValue(serverInfoAtom);
   return (
     <BackendBannerView
-      banner={backendBanner(
-        AsyncResult.isSuccess(result) ? result.value : undefined,
-      )}
+      banner={backendBanner(Option.getOrUndefined(AsyncResult.value(result)))}
     />
   );
 };

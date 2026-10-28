@@ -3,7 +3,7 @@ import { Command, Flag } from "effect/cli";
 import type { ServerInfo } from "@repo/domain/Server";
 import { resolveApiUrl } from "../api";
 import { reportFailures } from "../errors";
-import { ServerClient } from "../rpc";
+import { BoardClient } from "../rpc";
 import { formatDollars } from "../transcript";
 
 /**
@@ -20,6 +20,21 @@ export const fauxWarning = (info: ServerInfo): string | undefined =>
         info.warnings[0] === undefined ? "" : ` (${info.warnings[0]})`
       }`
     : undefined;
+
+/**
+ * The `model` line and, under a faux backend, the warning under it that `factory run` prints once the
+ * session exists. `info` is absent when the server could not answer `getServerInfo`: the run then
+ * loses its warning, never its model line.
+ */
+export const runModelLines = (
+  model: string | undefined,
+  info: ServerInfo | undefined,
+): readonly string[] => {
+  const warning = info === undefined ? undefined : fauxWarning(info);
+  return warning === undefined
+    ? [`model ${model ?? "unknown"}`]
+    : [`model ${model ?? "unknown"}`, warning];
+};
 
 const list = (items: readonly string[]): string =>
   items.length === 0 ? "none" : items.join(", ");
@@ -82,14 +97,14 @@ export const statusCommand = Command.make(
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
-      const { client } = yield* ServerClient;
+      const { client } = yield* BoardClient;
       const info = yield* client.getServerInfo({});
       for (const line of statusLines(info)) {
         yield* Console.log(line);
       }
     });
 
-    yield* reportFailures(Effect.provide(program, ServerClient.layer(apiUrl)));
+    yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
   }),
 ).pipe(
   Command.withDescription(

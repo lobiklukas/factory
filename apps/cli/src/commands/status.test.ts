@@ -9,7 +9,7 @@
 import { Schema } from "effect";
 import { ServerInfo } from "@repo/domain/Server";
 import { describe, expect, it } from "vitest";
-import { fauxWarning, statusLines } from "./status";
+import { fauxWarning, runModelLines, statusLines } from "./status";
 
 const FAUX_WARNING =
   "sessions run against the faux provider and produce scripted answers (chosen by MODEL_BACKEND=faux)";
@@ -69,6 +69,33 @@ describe("fauxWarning", () => {
     expect(fauxWarning(faux({ warnings: [] }))).toBe(
       "warning: faux backend, sessions do not reach a real model",
     );
+  });
+});
+
+describe("runModelLines", () => {
+  /** Mutation: print the warning before the model, or drop the model line. */
+  it("prints the model line first, then the faux warning", () => {
+    const lines = runModelLines("faux/scripted", faux());
+    expect(lines[0]).toBe("model faux/scripted");
+    expect(lines[1]?.startsWith("warning: faux backend")).toBe(true);
+    expect(lines).toHaveLength(2);
+  });
+
+  it("prints only the model line on an anthropic server", () => {
+    expect(runModelLines("anthropic/claude-sonnet-5-5", anthropic())).toEqual([
+      "model anthropic/claude-sonnet-5-5",
+    ]);
+  });
+
+  /** Mutation: let an unanswered getServerInfo (info absent) throw or warn. */
+  it("keeps the model line when the server could not answer getServerInfo", () => {
+    expect(runModelLines("anthropic/claude-sonnet-5-5", undefined)).toEqual([
+      "model anthropic/claude-sonnet-5-5",
+    ]);
+  });
+
+  it("reads `model unknown` when the session has no model", () => {
+    expect(runModelLines(undefined, undefined)).toEqual(["model unknown"]);
   });
 });
 
