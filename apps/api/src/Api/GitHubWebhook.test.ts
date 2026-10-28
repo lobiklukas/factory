@@ -772,6 +772,145 @@ describe("POST /webhooks/github records the merge on the session's log (LOB-44)"
   }, 120_000);
 });
 
+describe("POST /webhooks/github records an unmerged close on the session's log (F12)", () => {
+  /** A session that opened PR `number`, as the LOB-44 cases make one. */
+  const opened = (number: number) =>
+    inService(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        yield* sessions.registerRepo({ repo, localPath: checkout });
+        const session = yield* sessions.create({
+          title: `close record ${number}`,
+          repo,
+          baseRef: "main",
+        });
+        const url = `https://github.com/${repo}/pull/${number}`;
+        yield* sql`UPDATE sessions SET pr_url = ${url} WHERE id = ${session.id}`;
+        return { id: session.id, url };
+      }),
+    );
+
+  const closedRow = (id: SessionId) =>
+    inService(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const rows = yield* sql<{
+          readonly closedAt: string | null;
+          readonly mergedAt: string | null;
+        }>`
+          SELECT
+            to_char(pr_closed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS closed_at,
+            to_char(pr_merged_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS merged_at
+          FROM sessions WHERE id = ${id}
+        `;
+        return rows[0];
+      }),
+    );
+
+  const close = (number: number, url: string, closedAt: string) => ({
+    action: "closed",
+    pull_request: {
+      number,
+      html_url: url,
+      merged: false,
+      closed_at: closedAt,
+    },
+  });
+
+  /**
+   * Mutation: leave the `closed` branch out of `recordMergedPullRequest` — `pr_closed_at` stays null.
+   * Mutation: fold no `closedAt` in `rebuildIndexes` — the emptied column stays empty after a rebuild.
+   * Mutation: let a close stand on a merged PR — the merged session's row takes a close.
+   */
+  it("sets pr_closed_at once on the PR's session, never on a merged one, and rebuildIndexes reproduces it", async () => {
+    const work = await opened(71);
+    const bystander = await opened(72);
+    const landed = await opened(73);
+    expect(await closedRow(work.id)).toEqual({
+      closedAt: null,
+      mergedAt: null,
+    });
+
+    expect(
+      (await deliver(close(71, work.url, "2026-10-24T08:00:00Z"))).status,
+    ).toBe(200);
+    expect(await closedRow(work.id)).toEqual({
+      closedAt: "2026-10-24T08:00:00Z",
+      mergedAt: null,
+    });
+    // A redelivery naming another time records nothing new: the first close stands.
+    await deliver(close(71, work.url, "2026-10-25T08:00:00Z"));
+    expect(await closedRow(work.id)).toMatchObject({
+      closedAt: "2026-10-24T08:00:00Z",
+    });
+    // Another PR's close, and an unsigned one, touch nothing.
+    expect(
+      (
+        await deliver(
+          close(72, bystander.url, "2026-10-24T09:00:00Z"),
+          () => "sha256=00",
+        )
+      ).status,
+    ).toBe(401);
+    expect(await closedRow(bystander.id)).toMatchObject({ closedAt: null });
+
+    // A merged PR's late close report is no close: the merge stands alone.
+    await deliver({
+      action: "closed",
+      pull_request: {
+        number: 73,
+        html_url: landed.url,
+        merged: true,
+        merged_at: "2026-10-24T10:00:00Z",
+      },
+    });
+    await inService(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        return yield* sessions.recordMerge({
+          sessionId: landed.id,
+          event: {
+            _tag: "closed",
+            url: landed.url,
+            number: 73,
+            closedAt: "2026-10-24T11:00:00Z",
+          },
+        });
+      }),
+    );
+    expect(await closedRow(landed.id)).toEqual({
+      closedAt: null,
+      mergedAt: "2026-10-24T10:00:00Z",
+    });
+
+    // Derived: emptied, a rebuild refolds the close from `factory.merge`.
+    const rebuilt = await inService(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql`UPDATE sessions SET pr_closed_at = NULL WHERE id = ${work.id}`;
+        yield* rebuildIndexes;
+        return yield* Effect.acquireUseRelease(
+          Effect.promise(() => PostgresStorage.reader(sql, work.id)),
+          readSessionLog,
+          (storage) => Effect.promise(() => storage.dispose()),
+        );
+      }),
+    );
+    expect(await closedRow(work.id)).toEqual({
+      closedAt: "2026-10-24T08:00:00Z",
+      mergedAt: null,
+    });
+    expect(rebuilt.merge).toEqual({
+      url: work.url,
+      number: 71,
+      mergedAt: "",
+      closedAt: "2026-10-24T08:00:00Z",
+    });
+    expect(await closedRow(landed.id)).toMatchObject({ closedAt: null });
+  }, 120_000);
+});
+
 describe("POST /webhooks/github settles the PR's card (C20)", () => {
   let boards = 0;
 

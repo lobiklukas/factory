@@ -734,10 +734,11 @@ export type SessionServiceShape = {
     readonly reason: WorkspaceReleaseReason;
   }) => Effect.Effect<ReleaseWorkspaceResult, SessionError>;
   /**
-   * Record what the GitHub webhook reported about the session's PR (LOB-44): its merge, or a later
-   * PR's revert of it. The fact is committed to the log as `factory.merge` and indexed in
-   * `sessions.pr_merged_at` / `pr_reverted_at`, so `rebuildIndexes` reproduces it and the outcome
-   * metrics read it without asking GitHub. Idempotent: the first merge and the first revert stand,
+   * Record what the GitHub webhook reported about the session's PR (LOB-44): its merge, a later
+   * PR's revert of it, or (F12) its close without a merge. The fact is committed to the log as
+   * `factory.merge` and indexed in `sessions.pr_merged_at` / `pr_reverted_at` / `pr_closed_at`, so
+   * `rebuildIndexes` reproduces it, the outcome metrics read it without asking GitHub, and a card's
+   * later run adopts no PR that was closed (`cardPullRequestFor`). Idempotent: the first merge and the first revert stand,
    * and a repeat answers `first: false` with what the log already holds. A released session is
    * recorded on too — a merge releases its workspace first (LOB-268), and its log still takes writes.
    */
@@ -4613,10 +4614,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * Read only for a session whose own log records none; `undefined` for a run of no card, and for
        * a card with no such PR — whose run then opens it. Read under the card's PR gate
        * (`withCardPrGate`), so two runs of the card stepping together adopt one PR rather than each
-       * opening one. A PR closed on GitHub without merging is still adopted, because the index records
-       * merges (`pr_merged_at`) but not closes: the push lands on the closed PR's branch, and
-       * reopening it is a person's call. Recording closes, so a closed PR is not adopted, is a
-       * follow-up.
+       * opening one. A PR closed on GitHub without merging is not adopted (F12): the index records the
+       * close (`pr_closed_at`, from the `pull_request` webhook or the PR-state read when the card is
+       * opened), and a push onto a closed PR's branch is one nobody would review, so the run opens a
+       * fresh PR from the card's branch instead. A person who reopens the old PR gets it back through
+       * GitHub's own refusal of a second PR for the head, which `createPullRequest` adopts (LOB-179).
        */
       const cardPullRequestFor = (
         sessionId: SessionId,
@@ -4635,6 +4637,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               JOIN sessions s ON s.id = other.session_id
               WHERE mine.session_id = ${sessionId} AND s.repo = ${repo}
                 AND s.pr_url IS NOT NULL AND s.pr_merged_at IS NULL
+                AND s.pr_closed_at IS NULL
               ORDER BY other.started_at DESC, other.id DESC
             `,
           );
@@ -4865,13 +4868,15 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                        WHERE sa.session_id = s.id AND sa.decision IS NULL
                      )) AS waiting,
                      tr.task_id, tr."column", bd.columns::text AS columns,
-                     -- C19: another run of the card recorded an unmerged PR from this run's branch.
+                     -- C19: another run of the card recorded an open PR from this run's branch
+                     -- (neither merged nor, F12, closed: the PR cardPullRequestFor would adopt).
                      EXISTS (
                        SELECT 1 FROM task_runs other
                        JOIN sessions os ON os.id = other.session_id
                        WHERE other.task_id = tr.task_id AND other.session_id <> s.id
                          AND os.repo = s.repo
                          AND os.pr_url IS NOT NULL AND os.pr_merged_at IS NULL
+                         AND os.pr_closed_at IS NULL
                          AND COALESCE(os.branch, 'factory/' || os.id)
                            = COALESCE(s.branch, 'factory/' || s.id)
                      ) AS continues_card_pr
@@ -7536,9 +7541,16 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
 
       /** The instant an event says its fact happened at (`recordMerge` refuses one that is not one). */
       const mergeEventAt = (event: MergeEvent): string =>
-        event._tag === "merged" ? event.mergedAt : event.revertedAt;
+        event._tag === "merged"
+          ? event.mergedAt
+          : event._tag === "closed"
+            ? event.closedAt
+            : event.revertedAt;
 
-      /** Whether a session's merge record already holds `event`'s fact: the first one stands. */
+      /**
+       * Whether a session's merge record already holds `event`'s fact: the first one stands. A close
+       * of a PR the record holds as merged is no fact to record (F12).
+       */
       const holdsMergeFact = (
         merge: MergeRecord | undefined,
         event: MergeEvent,
@@ -7546,7 +7558,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         merge !== undefined &&
         (event._tag === "merged"
           ? merge.mergedAt !== ""
-          : merge.revert !== undefined);
+          : event._tag === "closed"
+            ? merge.closedAt !== undefined || merge.mergedAt !== ""
+            : merge.revert !== undefined);
 
       const recordMerge = (input: {
         readonly sessionId: SessionId;
@@ -7592,7 +7606,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             sql`
               UPDATE sessions SET
                 pr_merged_at = ${merge.mergedAt === "" ? null : merge.mergedAt}::timestamptz,
-                pr_reverted_at = ${merge.revert?.at ?? null}::timestamptz
+                pr_reverted_at = ${merge.revert?.at ?? null}::timestamptz,
+                pr_closed_at = ${merge.closedAt ?? null}::timestamptz
               WHERE id = ${input.sessionId}
             `,
           );

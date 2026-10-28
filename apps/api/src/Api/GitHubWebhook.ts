@@ -6,7 +6,8 @@
  *   merge moves it to done, an unmerged close explains itself — a signed merge tears the PR's
  *   sessions' and reviewer runs' worktrees and branches down whatever the mirror answered (LOB-268),
  *   the merge is recorded on those sessions' logs (LOB-44, `factory.merge`, with the revert a merged
- *   `Reverts owner/repo#N` PR is recorded on the PR it names), and (LOB-36) starts the reviewer run
+ *   `Reverts owner/repo#N` PR is recorded on the PR it names; an unmerged close is recorded there too,
+ *   F12, so a card's later run adopts no closed PR), and (LOB-36) starts the reviewer run
  *   its head asks for: `opened`, `reopened`, `ready_for_review` and `synchronize` on a PR the factory
  *   opened from a card (`@repo/core`'s `handlePullRequestReviewWebhook`). The answer carries both, the
  *   review under `review`; a failed mirror's status wins, then a failed review's. A signed close also
@@ -246,10 +247,17 @@ const GitHubWebhookRoute = HttpRouter.add(
       // PR reverts another — on that one's, so the outcome metrics read merges from the log rather
       // than from GitHub. After the release, so the log is opened as a released session's is: in no
       // directory, continuing no run. Gated on the signature like the release, not on the mirror.
+      // An unmerged close is recorded the same way (F12), so a card's later run opens a new PR rather
+      // than adopting the closed one.
       const recorded = yield* recordMergedDelivery({ secret, raw, signature });
       if (recorded.merged > 0 || recorded.reverted > 0) {
         yield* Effect.logInfo(
           `github: recorded a merge on ${recorded.merged} session(s) and a revert on ${recorded.reverted}`,
+        );
+      }
+      if (recorded.closed > 0) {
+        yield* Effect.logInfo(
+          `github: recorded an unmerged close on ${recorded.closed} session(s)`,
         );
       }
       // The card follows its PR (C20): after the merge is recorded, so the card that reaches `done`

@@ -1735,6 +1735,8 @@ export type PullRequestLifecycle =
       readonly mergedAt?: string;
       /** The merge commit (`pull_request.merge_commit_sha`), on a merge that names it. */
       readonly commit?: string;
+      /** When GitHub says the PR closed (`pull_request.closed_at`), on an unmerged close (F12). */
+      readonly closedAt?: string;
       /**
        * The PR this one reverts, when its body opens a line with GitHub's own revert wording
        * (`Reverts owner/repo#N`, what the revert button writes), by its page on the same host.
@@ -1770,6 +1772,7 @@ export const githubPullRequestLifecycle = (
   const merged = pr?.["merged"] === true;
   const mergedAt = pr?.["merged_at"];
   const commit = pr?.["merge_commit_sha"];
+  const closedAt = pr?.["closed_at"];
   const reverts = merged ? revertedPullRequest(url, pr?.["body"]) : undefined;
   return {
     _tag: merged ? "merged" : "closed",
@@ -1780,6 +1783,9 @@ export const githubPullRequestLifecycle = (
       : {}),
     ...(merged && typeof commit === "string" && commit !== ""
       ? { commit }
+      : {}),
+    ...(!merged && typeof closedAt === "string" && closedAt !== ""
+      ? { closedAt }
       : {}),
     ...(reverts === undefined ? {} : { reverts }),
   };

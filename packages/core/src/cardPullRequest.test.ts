@@ -174,9 +174,10 @@ const sessionRow = (sessionId: string) =>
       const sql = yield* SqlClient;
       const rows = yield* sql<{
         prMergedAt: Date | null;
+        prClosedAt: Date | null;
         workspaceReleasedAt: Date | null;
       }>`
-        SELECT pr_merged_at, workspace_released_at FROM sessions WHERE id = ${sessionId}
+        SELECT pr_merged_at, pr_closed_at, workspace_released_at FROM sessions WHERE id = ${sessionId}
       `;
       return rows[0];
     }),
@@ -329,6 +330,35 @@ describe("the card's PR read when the card is opened (C20)", () => {
   }, 60_000);
 
   /**
+   * F12: a box no webhook reaches learns of the close from this read, and records it as the webhook
+   * would, so the card's later run opens a new PR rather than adopting the closed one.
+   *
+   * Mutation: record nothing on a closed read — `pr_closed_at` stays null and the log holds no close.
+   * Mutation: record on an open read — the open PR's run takes a close.
+   */
+  it("records a close GitHub reports on the PR's runs, at GitHub's time, and nothing for an open PR", async () => {
+    const closed = prPage(16);
+    const open = prPage(17);
+    states.set(closed, { _tag: "closed", closedAt: "2026-10-28T09:15:00Z" });
+    states.set(open, { _tag: "open" });
+    const closedCard = await cardWithPrs([closed]);
+    const openCard = await cardWithPrs([open]);
+    await refresh(closedCard.taskId, false);
+    await refresh(openCard.taskId, false);
+    const row = await sessionRow(closedCard.runs[0] ?? "");
+    expect(row?.prClosedAt?.toISOString()).toBe("2026-10-28T09:15:00.000Z");
+    expect(row?.prMergedAt).toBeNull();
+    expect(await loggedMerge(closedCard.runs[0] ?? "")).toEqual({
+      url: closed,
+      number: 16,
+      mergedAt: "",
+      closedAt: "2026-10-28T09:15:00Z",
+    });
+    expect((await sessionRow(openCard.runs[0] ?? ""))?.prClosedAt).toBeNull();
+    expect(await loggedMerge(openCard.runs[0] ?? "")).toBeUndefined();
+  }, 60_000);
+
+  /**
    * Mutation: block on every read of a closed PR — the pane's poll would block the card again after
    * every unblock, so a person could never carry on without reopening the PR.
    */
@@ -465,6 +495,19 @@ describe("readPullRequestState (C20)", () => {
     next = { status: 200, body: { state: "closed", merged: false } };
     expect(await read("https://github.com/o/r/pull/7")).toEqual({
       _tag: "closed",
+    });
+    // F12: GitHub's `closed_at` comes with the close, for the record the read makes.
+    next = {
+      status: 200,
+      body: {
+        state: "closed",
+        merged: false,
+        closed_at: "2026-10-28T11:00:00Z",
+      },
+    };
+    expect(await read("https://github.com/o/r/pull/8")).toEqual({
+      _tag: "closed",
+      closedAt: "2026-10-28T11:00:00Z",
     });
     next = {
       status: 200,

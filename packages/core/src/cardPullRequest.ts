@@ -16,6 +16,9 @@
  *   close blocks it `pr_closed`, naming the PR. Both are idempotent under the card's row lock, so a
  *   redelivery — or two at once — changes the card exactly once; a close blocks the card once per PR,
  *   so a person's unblock stands against every later report of the same close.
+ * - **An unmerged close is recorded on the PR's sessions** (F12, `sessions.pr_closed_at`), by
+ *   `recordMergedDelivery` for the delivery and here for a close the read below finds, so a card's
+ *   later run opens a fresh PR rather than adopting one nobody will review.
  * - **The card's PR is read from GitHub when the card is opened** (`refreshCardPullRequest`, run by
  *   `getTaskExit` — the card pane's checklist and `factory board show` — and before a move into
  *   `done`): a local box with no webhook has no other way to learn of the merge. A merge it finds is
@@ -38,6 +41,7 @@ import {
   Effect,
   Exit,
   Layer,
+  Option,
   Redacted,
   Schema,
 } from "effect";
@@ -63,7 +67,11 @@ export type CardPullRequest = { readonly number: number; readonly url: string };
 /** A PR's state as GitHub answers it now (C20). */
 export type PullRequestState =
   | { readonly _tag: "open" }
-  | { readonly _tag: "closed" }
+  | {
+      readonly _tag: "closed";
+      /** GitHub's `closed_at`, when it named one (F12). */
+      readonly closedAt?: string;
+    }
   | {
       readonly _tag: "merged";
       readonly mergedAt: string;
@@ -98,6 +106,7 @@ const GitHubPullRequestState = Schema.Struct({
   merged: Schema.optional(Schema.NullOr(Schema.Boolean)),
   merged_at: Schema.optional(Schema.NullOr(Schema.String)),
   merge_commit_sha: Schema.optional(Schema.NullOr(Schema.String)),
+  closed_at: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
 /**
@@ -157,7 +166,12 @@ export const readPullRequestState = (
       } satisfies PullRequestState;
     }
     return pr.state === "closed"
-      ? ({ _tag: "closed" } satisfies PullRequestState)
+      ? ({
+          _tag: "closed",
+          ...((pr.closed_at ?? "") === ""
+            ? {}
+            : { closedAt: pr.closed_at ?? "" }),
+        } satisfies PullRequestState)
       : ({ _tag: "open" } satisfies PullRequestState);
   }).pipe(
     // The whole read is bounded, the token included: a GitHub App mints its installation token over
@@ -391,8 +405,9 @@ export const refreshCardPullRequest = (
       readonly id: string;
       readonly prUrl: string;
       readonly prMergedAt: Date | string | null;
+      readonly prClosedAt: Date | string | null;
     }>`
-      SELECT s.id, s.pr_url, s.pr_merged_at
+      SELECT s.id, s.pr_url, s.pr_merged_at, s.pr_closed_at
       FROM task_runs tr
       JOIN sessions s ON s.id = tr.session_id
       WHERE tr.task_id = ${taskId} AND s.pr_url IS NOT NULL
@@ -445,6 +460,34 @@ export const refreshCardPullRequest = (
             Effect.catch((error) =>
               Effect.logWarning(
                 `session ${row.id}: could not record the merge of ${url} GitHub reported: ${error.message}`,
+              ),
+            ),
+          );
+      }
+    }
+    // A close GitHub reports is recorded as the webhook records it (F12), so a card's later run on a
+    // box no webhook reaches opens a new PR rather than adopting the closed one.
+    if (
+      state._tag === "closed" &&
+      !ofPr.some((row) => row.prClosedAt !== null)
+    ) {
+      const sessions = yield* SessionService;
+      const closedAt =
+        state.closedAt !== undefined &&
+        Option.isSome(DateTime.make(state.closedAt))
+          ? state.closedAt
+          : DateTime.formatIso(yield* DateTime.now);
+      for (const row of ofPr) {
+        if (!Schema.is(SessionId)(row.id)) continue;
+        yield* sessions
+          .recordMerge({
+            sessionId: row.id,
+            event: { _tag: "closed", url, number: pr.number, closedAt },
+          })
+          .pipe(
+            Effect.catch((error) =>
+              Effect.logWarning(
+                `session ${row.id}: could not record the close of ${url} GitHub reported: ${error.message}`,
               ),
             ),
           );

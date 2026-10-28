@@ -2,7 +2,9 @@
  * A card's runs share one branch and one PR (C19, `./cardBranch`): a later run on the card continues
  * the branch its first building run cut, its PR step answers the card's PR `already-open` and pushes
  * its commits onto it, a run in `review` is cut with the building run's diff in its worktree, and the
- * board's `pr_link` passes after a follow-up run that opened no PR of its own.
+ * board's `pr_link` passes after a follow-up run that opened no PR of its own. The later run's agent
+ * may push the card's branch it is bound to, and no other (F15), and a later run after the card's PR
+ * was closed unmerged opens a new PR rather than adopting the closed one (F12).
  *
  * Real Postgres, real git worktrees, the real session and task services. The model is faux, and its
  * one `bash` call commits one more numbered file than the branch already holds (`change-<n>.txt`),
@@ -15,7 +17,13 @@
 import { BunServices } from "@effect/platform-bun";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RepoSlug, type SessionId } from "@repo/domain/Session";
@@ -161,6 +169,8 @@ const decisions: Array<{
   readonly decision: SettleDecision;
 }> = [];
 
+const DatabaseLayer = Layer.mergeAll(DatabaseLive, BunServices.layer);
+
 const runtime = ManagedRuntime.make(
   TaskServiceLive.pipe(
     Layer.provideMerge(
@@ -175,11 +185,27 @@ const runtime = ManagedRuntime.make(
           }),
       }),
     ),
-    Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+    Layer.provideMerge(DatabaseLayer),
   ),
 );
 
+/**
+ * Another process's session root over the same directory: a symlink to it. Presence tells the two
+ * apart by the root's spelling (`homeOf`), so each is a process of its own there, while git — which
+ * resolves symlinks — sees one session root, and a card's later run in either takes the branch over
+ * from a worktree the other cut (C19's hand-over stays within one session root).
+ */
+const aliasOf = (root: string): string => {
+  const alias = join(mkdtempSync(join(tmpdir(), "factory-c19-alias-")), "root");
+  symlinkSync(root, alias);
+  return alias;
+};
+
+/** Runtimes a case built for itself (F15's bound agent), disposed with the file's. */
+const extraRuntimes: Array<{ readonly dispose: () => Promise<void> }> = [];
+
 afterAll(async () => {
+  for (const extra of extraRuntimes) await extra.dispose();
   await runtime.dispose();
 });
 
@@ -598,5 +624,195 @@ describe("a card's runs share one branch and one PR (C19)", () => {
     expect(outcome.secondPr?.commit).toBe(outcome.tip);
     expect(outcome.secondPr?.head).toBe(outcome.branch);
     expect(outcome.moved.column).toBe("review");
+  }, 240_000);
+  /**
+   * F15: a card's later run is bound to its first change run's `factory/<that id>` (C19), and its
+   * agent's own `git push` of that branch runs, while a push of any other `refs/heads/factory/*` —
+   * its own id's included — is refused. The agent runs in a process of its own (`aliasOf`) whose
+   * command names the first run's branch (the faux command is fixed per process), and with no settle
+   * PR step, so the forge's branch can only have moved by the agent's push.
+   *
+   * Mutations this catches: hand `forWorktree` the session's own id and no branch — the agent's push
+   * is refused and the forge stays at the first run's commit, and the mission check below is let
+   * through; drop the branch from `refuseUnpolicedChecks` — the same for the check.
+   */
+  it("lets a later run's agent push the card's branch it is bound to, and refuses another factory branch", async () => {
+    const boundRepo = RepoSlug.make(`c19-${runId}/bound`);
+    const { first, card } = await runtime.runPromise(
+      Effect.gen(function* () {
+        const service = yield* SessionService;
+        const tasks = yield* TaskService;
+        const sql = yield* SqlClient;
+        yield* service.registerRepo({
+          repo: boundRepo,
+          url: `https://github.com/${boundRepo}.git`,
+          localPath: checkout,
+        });
+        const board = yield* tasks.createBoard({
+          repo: boundRepo,
+          definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
+        });
+        const card = yield* tasks.create({
+          boardId: BoardInstanceId.make(board.id),
+          title: "push the card's branch",
+          actor: "person:c19",
+        });
+        yield* sql`UPDATE tasks SET "column" = 'building' WHERE id = ${card.id}`;
+        const first = yield* runOnCard(card.id, "building", "build it");
+        yield* decided(first);
+        return { first, card: card.id };
+      }),
+    );
+    const branch = `factory/${first}`;
+    const firstCommit = git(forgeRepo, "rev-parse", `refs/heads/${branch}`);
+
+    const boundRoot = aliasOf(sessionRoot);
+    const boundProcess = ManagedRuntime.make(
+      SessionServiceLive({
+        model: createFauxModelAccess({
+          fauxCommand: [
+            'echo bound > bound-change.txt',
+            'git add -A && git -c user.email=f15@localhost -c user.name=f15 commit -qm "f15 bound change"',
+            `git push -q ${forgeRepo} HEAD:refs/heads/${branch}`,
+            "echo faux-ok",
+          ].join(" && "),
+        }).access,
+        sessionRoot: boundRoot,
+        repoRemote,
+      }).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+    extraRuntimes.push(boundProcess);
+    const outcome = await boundProcess.runPromise(
+      Effect.gen(function* () {
+        const service = yield* SessionService;
+        const later = yield* service.create({
+          taskId: card,
+          taskColumn: "building",
+        });
+        yield* service.send({ sessionId: later.id, content: "push it" });
+        const settled = yield* waitUntil(
+          service.get(later.id),
+          (snapshot) =>
+            !snapshot.live.busy &&
+            snapshot.entries.some((entry) => entry.kind === "assistant"),
+          "the bound run to settle",
+        );
+        const worktree = join(boundRoot, ...boundRepo.split("/"), later.id);
+        // A check is held to the session's own policy (LOB-230): a push of its own id's branch is
+        // another session's branch here, refused naming the one it is bound to.
+        const refusedCheck = yield* service
+          .startMission({
+            sessionId: later.id,
+            feature: "push elsewhere",
+            workers: [
+              {
+                id: "elsewhere",
+                prompt: "push",
+                check: `git push -q ${forgeRepo} HEAD:refs/heads/factory/${later.id}`,
+              },
+            ],
+          })
+          .pipe(Effect.flip);
+        return {
+          later: later.id,
+          bound: git(worktree, "rev-parse", "--abbrev-ref", "HEAD"),
+          tip: git(worktree, "rev-parse", "HEAD"),
+          toolResults: settled.entries
+            .filter((entry) => entry.kind === "toolResult")
+            .map((entry) => ({ text: entry.text, isError: entry.isError })),
+          refusedCheck,
+        };
+      }),
+    );
+
+    expect(outcome.bound).toBe(branch);
+    // The agent's push ran: the forge's card branch is at the later run's own commit.
+    expect(outcome.toolResults).toHaveLength(1);
+    expect(outcome.toolResults[0]?.text).not.toContain("is refused");
+    expect(outcome.toolResults[0]?.text).toContain("faux-ok");
+    expect(outcome.tip).not.toBe(firstCommit);
+    expect(git(forgeRepo, "rev-parse", `refs/heads/${branch}`)).toBe(
+      outcome.tip,
+    );
+    // Any other factory branch — the later run's own id's — is refused, naming the card's.
+    expect(outcome.refusedCheck).toMatchObject({ code: "invalid_input" });
+    expect(outcome.refusedCheck.message).toContain(
+      `pushing refs/heads/factory/${outcome.later} is refused: this session owns refs/heads/${branch}`,
+    );
+  }, 240_000);
+
+  /**
+   * F12: the card's PR closed without merging is recorded on its session (`pr_closed_at`), and the
+   * card's next building run, continuing the same branch, opens a fresh PR from it instead of pushing
+   * onto the closed one. (With the PR open, the first case above: it adopts it.)
+   *
+   * Mutation this catches: drop `pr_closed_at IS NULL` from `cardPullRequestFor` — the later run
+   * adopts the closed PR, GitHub is asked for nothing, and its record names the closed PR.
+   */
+  it("opens a new PR on a later run once the card's PR was closed unmerged", async () => {
+    const closedRepo = RepoSlug.make(`c19-${runId}/closed`);
+    const asked = created.length;
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const service = yield* SessionService;
+        const tasks = yield* TaskService;
+        const sql = yield* SqlClient;
+        yield* service.registerRepo({
+          repo: closedRepo,
+          url: `https://github.com/${closedRepo}.git`,
+          localPath: checkout,
+        });
+        const board = yield* tasks.createBoard({
+          repo: closedRepo,
+          definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
+        });
+        const card = yield* tasks.create({
+          boardId: BoardInstanceId.make(board.id),
+          title: "reopen the work",
+          actor: "person:c19",
+        });
+        yield* sql`UPDATE tasks SET "column" = 'building' WHERE id = ${card.id}`;
+        const first = yield* runOnCard(card.id, "building", "build it");
+        yield* decided(first);
+        const firstPr = yield* recordedPr(first);
+        // The PR is closed on GitHub without a merge, as the webhook reports it.
+        yield* service.recordMerge({
+          sessionId: first,
+          event: {
+            _tag: "closed",
+            url: firstPr?.url ?? "",
+            number: firstPr?.number ?? 0,
+            closedAt: "2026-10-28T12:00:00Z",
+          },
+        });
+        const closedRows = yield* sql<{ closed: boolean }>`
+          SELECT pr_closed_at IS NOT NULL AS closed FROM sessions WHERE id = ${first}
+        `;
+        const second = yield* runOnCard(card.id, "building", "try again");
+        const secondDecision = yield* decided(second);
+        return {
+          first,
+          firstPr,
+          closed: closedRows[0]?.closed,
+          second,
+          secondDecision,
+          secondPr: yield* recordedPr(second),
+          secondRow: (yield* sql<{ prUrl: string | null }>`
+            SELECT pr_url FROM sessions WHERE id = ${second}
+          `)[0]?.prUrl,
+        };
+      }),
+    );
+    const branch = `factory/${outcome.first}`;
+    expect(outcome.closed).toBe(true);
+    // Two PRs asked of GitHub, both from the card's one branch: the first run's, and the new one.
+    expect(created.slice(asked)).toEqual([
+      { head: branch, base: "main" },
+      { head: branch, base: "main" },
+    ]);
+    expect(outcome.secondDecision).toEqual(["opened"]);
+    expect(outcome.secondPr?.head).toBe(branch);
+    expect(outcome.secondPr?.url).not.toBe(outcome.firstPr?.url);
+    expect(outcome.secondRow).toBe(outcome.secondPr?.url);
   }, 240_000);
 });
