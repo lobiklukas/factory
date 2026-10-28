@@ -10,8 +10,9 @@
 # ahead of `main` — an empty commit over main's tree, made with `git commit-tree` so the checkout's
 # working tree is never touched — re-pointed on every run, so its sha is this run's own.
 #
-# No `factory` command creates a card (that is LOB-261's `board add`), so `body.ts` creates both over
-# the API's `createTask`; everything a person reads is a plain subprocess's stdout, as triage.sh.
+# `factory board add` exists (LOB-261, features/add.md), but `body.ts` still creates both cards over
+# the API's `createTask` on purpose: it needs the exact `baseRef` and body, plus a no-body control, as
+# one atomic read-back; everything a person reads is a plain subprocess's stdout, as triage.sh.
 #
 # Requires the instance from ./up.sh (API on API_PORT, default 9400, a seeded board in
 # .verify/run/board.json) and DATABASE_URL naming its database, for the run's log read.

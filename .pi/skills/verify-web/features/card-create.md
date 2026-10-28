@@ -86,14 +86,9 @@ The page requires, in order:
 The terminal half requires `factory board ls` to list the browser's card under `intake`, `factory board
 show` to print it as filed (column, revision 1, `urgent`, the board's repo, the title, `base main`, every
 body line indented), the twin to be made with the same inputs, and its `show` to print the same lines
-but the id. The twin is `factory board add` when the CLI offers it (read off `factory board --help`'s
-subcommand list); on a tree without LOB-261 it is `createTask` with the same inputs as the CLI's actor.
-The check naming the door is judged against the CLI's source, not that help read: it fails when
-`apps/cli/src` declares a `Command.make("add"` other than `repo add` and the twin did not come through
-`factory board add`. The fallback is scaffolding until LOB-261 lands; whichever merges second deletes it.
+but the id. The twin is made with `factory board add` (LOB-261).
 
-Evidence (`.verify/evidence/latest/board/`): `card-create.json` (the terminal's checks, both ids, the
-door), `card-create-web.json` (the page's checks, what it sent, the oracle's reads),
+Evidence (`.verify/evidence/latest/board/`): `card-create.json` (the terminal's checks, both ids), `card-create-web.json` (the page's checks, what it sent, the oracle's reads),
 `card-create-{form,refused,created,followed,link,late}.png`, `card-create-{ls,show-browser,add,show-cli}.txt`.
 
 ## Gotchas

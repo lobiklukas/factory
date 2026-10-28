@@ -54,6 +54,7 @@ mutation run (the row always printing `-`) failed "ls shows the recorded PR URL"
 | `factory repo add` / `ls` / `show`              | passing | [repo.md](repo.md)                                              |
 | `factory pr`                                    | passing | [verify-board build.md](../../verify-board/features/build.md)   |
 | `factory board block\|unblock\|attention\|runs` | passing | [verify-board triage.md](../../verify-board/features/triage.md) |
+| `factory board add`                             | passing | [verify-board add.md](../../verify-board/features/add.md)       |
 
 ## Deliberately absent
 

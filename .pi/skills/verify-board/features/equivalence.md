@@ -51,8 +51,7 @@ The same equivalence for a card being made: after the plan approval, `drive.sh` 
 start from refused by the server in a toast carrying `createTask`'s message verbatim. Its one landed
 `createTask` must be the dashboard's, with the form's inputs and no repo. The terminal then requires
 `factory board ls` to list that card under `intake` and `factory board show` to print it as filed, makes
-its twin with the same inputs (`factory board add`, LOB-261; `createTask` as the CLI's actor on a tree
-without it, the check naming the door), and requires the still-open page to show the twin in `intake`.
+its twin with the same inputs (`factory board add`, LOB-261), and requires the still-open page to show the twin in `intake`.
 Last, `listTasks` must hold the two with the same title, body, repo (the board's), priority and base
 ref. See `.pi/skills/verify-web/features/card-create.md` for the form itself.
 

@@ -9,10 +9,7 @@
 # script is the terminal, a plain subprocess whose stdout is read back as triage.sh's is. They take
 # turns through signal files in .verify/run/card-create/ (see card-create.mjs).
 #
-# The terminal's card is `factory board add` (LOB-261). On a tree where the CLI does not offer `add`
-# yet, the twin is made over the API's `createTask` with the same inputs and the CLI's actor; the
-# door check fails when the CLI's source declares a `board add` and the twin did not come through
-# it. The fallback is scaffolding until LOB-261 lands: whichever of the two merges second deletes it.
+# The terminal's card is made with `factory board add` (LOB-261), the same inputs as the form.
 #
 # Requires the instance from ./up.sh (API on API_PORT, default 9400; web on WEB_PORT, read from
 # .verify/run/web-port; a seeded board in .verify/run/board.json). drive.sh runs it in its both-ways
@@ -158,47 +155,12 @@ check "factory board show prints the browser's card as the form filed it" \
 
 # --- terminal → browser: the twin, with the same inputs ----------------------------------------------
 CLI_TASK=""
-# Read off `board --help`'s subcommand list: an unknown subcommand's `--help` prints the group's help
-# and exits 0, so it cannot tell the two trees apart.
-if "${FACTORY[@]}" board --help 2>/dev/null | grep -qE '^  add  '; then
-  DOOR="factory board add"
-  run add board add --board "$BOARD_ID" --title "$CARD_TITLE" --body "$CARD_BODY" \
-    --priority urgent --base-ref "$CARD_BASE_REF" --api "$API_URL"
-  CLI_TASK="$(grep -o 'tsk_[0-9a-z]\{26\}' "$EVIDENCE_DIR/card-create-add.txt" | head -1)"
-  check "factory board add creates the twin in intake at revision 1" \
-    "$([ "$rc" = "0" ] && [ -n "$CLI_TASK" ] && has add "task $CLI_TASK revision 1 column intake" && echo 0 || echo 1)" \
-    "exit=$rc, task=${CLI_TASK:-none}"
-else
-  # LOB-261 has not landed on this tree: the same inputs over the API's createTask, as the CLI's actor.
-  DOOR="createTask (no factory board add on this tree)"
-  CLI_TASK="$(API_URL="$API_URL" BOARD_ID="$BOARD_ID" CARD_TITLE="$CARD_TITLE" CARD_BODY="$CARD_BODY" \
-    CARD_BASE_REF="$CARD_BASE_REF" bun -e '
-      const env = process.env;
-      const id = `card-create-twin-${Date.now()}`;
-      const payload = { boardId: env.BOARD_ID, title: env.CARD_TITLE, body: env.CARD_BODY,
-        priority: "urgent", baseRef: env.CARD_BASE_REF, actor: "cli" };
-      const response = await fetch(`${env.API_URL}/rpc`, { method: "POST",
-        headers: { "content-type": "application/ndjson" },
-        body: JSON.stringify({ _tag: "Request", id, tag: "createTask", payload, headers: [] }) + "\n" });
-      const exit = (await response.text()).split("\n").filter((l) => l.trim() !== "")
-        .map((l) => { try { return JSON.parse(l); } catch { return null; } })
-        .find((m) => m?.requestId === id)?.exit;
-      if (exit?._tag !== "Success") { console.error(JSON.stringify(exit)); process.exit(1); }
-      console.log(exit.value.id);
-    ' 2> "$RUN_DIR/card-create-twin.log")"
-  check "the twin is created with the same inputs over createTask" \
-    "$([ -n "$CLI_TASK" ] && echo 0 || echo 1)" \
-    "task=${CLI_TASK:-none}, see card-create-twin.log"
-fi
-# The door is checked against the CLI's source, not against the `--help` read above: a tree whose
-# CLI declares a `board add` (a `Command.make("add"` under apps/cli/src other than `repo add`) must
-# make the twin through it, so a help layout the read above stops matching fails here instead of
-# falling back to this script's own copy of the browser's payload.
-CLI_HAS_ADD="$(grep -rzlE 'Command\.make\([[:space:]]*"add"' "$ROOT/apps/cli/src" 2>/dev/null \
-  | grep -v '/commands/repo\.ts$' | head -1)"
-check "the terminal's card came through factory board add wherever the CLI declares it" \
-  "$([ "$DOOR" = "factory board add" ] || [ -z "$CLI_HAS_ADD" ] && echo 0 || echo 1)" \
-  "door=$DOOR, board add declared in ${CLI_HAS_ADD:-no file}"
+run add board add --board "$BOARD_ID" --title "$CARD_TITLE" --body "$CARD_BODY" \
+  --priority urgent --base-ref "$CARD_BASE_REF" --api "$API_URL"
+CLI_TASK="$(grep -o 'tsk_[0-9a-z]\{26\}' "$EVIDENCE_DIR/card-create-add.txt" | head -1)"
+check "factory board add creates the twin in intake at revision 1" \
+  "$([ "$rc" = "0" ] && [ -n "$CLI_TASK" ] && has add "task $CLI_TASK revision 1 column intake" && echo 0 || echo 1)" \
+  "exit=$rc, task=${CLI_TASK:-none}"
 
 run show-cli board show --task "${CLI_TASK:-tsk_none}" --api "$API_URL"
 check "factory board show prints the twin as it prints the browser's card" \
@@ -229,8 +191,8 @@ check "the page's checks pass: refusals, the created card, the twin, the same ca
   "exit=$PAGE_RC, see card-create-web.json"
 
 {
-  printf '{\n  "apiUrl": "%s",\n  "webUrl": "%s",\n  "boardId": "%s",\n  "browserTask": "%s",\n  "cliTask": "%s",\n  "door": "%s",\n  "checks": {\n' \
-    "$API_URL" "$WEB_URL" "$BOARD_ID" "${BROWSER_TASK:-}" "${CLI_TASK:-}" "$DOOR"
+  printf '{\n  "apiUrl": "%s",\n  "webUrl": "%s",\n  "boardId": "%s",\n  "browserTask": "%s",\n  "cliTask": "%s",\n  "checks": {\n' \
+    "$API_URL" "$WEB_URL" "$BOARD_ID" "${BROWSER_TASK:-}" "${CLI_TASK:-}"
   first=1
   for row in "${rows[@]}"; do
     [ "$first" -eq 1 ] || printf ',\n'

@@ -3,7 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Config, Effect, Option, Stream } from "effect";
+import { ServerInfo } from "@repo/domain/Server";
+import { Config, Effect, Option, Schema, Stream } from "effect";
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { afterAll, describe, expect, it } from "vitest";
 
@@ -25,18 +27,31 @@ afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 /** The line the server logs once it is bound: the boot is over. */
 const LISTENING = "Listening on";
 
-type Boot = {
+type Boot<A = never> = {
   /** The exit code when the process ended on its own; `null` when it listened (and was stopped). */
   readonly code: number | null;
   /** stdout and stderr together: every line the process logged until it listened or exited. */
   readonly output: string;
+  /** What `whileListening` answered, when the process listened and a callback was given. */
+  readonly asked?: A;
+};
+
+/** The base URL the `Listening on` line names, e.g. `http://127.0.0.1:53211`. */
+const listeningUrl = (output: string): string => {
+  const match = /Listening on (http:\/\/[^\s"]+)/.exec(output);
+  if (match?.[1] === undefined) throw new Error(`no address in: ${output}`);
+  return match[1];
 };
 
 /**
  * Boot the API with `env` and nothing else, until it listens or exits on its own. Closing the scope
  * kills a process that is still running, so a listening server is stopped here.
  */
-const boot = (env: Readonly<Record<string, string>>): Promise<Boot> =>
+const boot = <A = never>(
+  env: Readonly<Record<string, string>>,
+  /** Called once the server listens, before it is stopped, with its base URL. */
+  whileListening?: (url: string) => Promise<A>,
+): Promise<Boot<A>> =>
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const handle = yield* spawner.spawn(
@@ -65,8 +80,15 @@ const boot = (env: Readonly<Record<string, string>>): Promise<Boot> =>
       Stream.runLast,
       Effect.map(Option.getOrElse(() => "")),
     );
-    if (output.includes(LISTENING)) return { code: null, output };
-    return { code: Number(yield* handle.exitCode), output };
+    if (output.includes(LISTENING)) {
+      if (whileListening === undefined)
+        return { code: null, output } satisfies Boot<A>;
+      const asked = yield* Effect.promise(() =>
+        whileListening(listeningUrl(output)),
+      );
+      return { code: null, output, asked } satisfies Boot<A>;
+    }
+    return { code: Number(yield* handle.exitCode), output } satisfies Boot<A>;
   }).pipe(
     Effect.scoped,
     Effect.timeout("20 seconds"),
@@ -164,5 +186,128 @@ describe.concurrent("the API's boot, per Anthropic auth mode (LOB-258)", () => {
     );
     expect(output).toContain("CLAUDE_CODE_OAUTH_TOKEN is set but not read");
     expect(output).not.toContain("dummy-subscription-token");
+  }, 30_000);
+});
+
+/**
+ * `getServerInfo` against the real boot (LOB-269): the process is configured only through its
+ * environment, and the answer is read over its own `/rpc` as raw NDJSON, so both what the boot
+ * resolved and every byte a client receives are under test. No database is reachable here, which
+ * is the point too: the answer needs none.
+ */
+describe("getServerInfo on a booted API (LOB-269)", () => {
+  /** The NDJSON message that settles a request: its exit, a success carrying the answer. */
+  const ExitMessage = Schema.fromJsonString(
+    Schema.TaggedStruct("Exit", {
+      exit: Schema.TaggedStruct("Success", { value: ServerInfo }),
+    }),
+  );
+
+  /** One `getServerInfo` request, as the RPC client frames it over NDJSON. */
+  const REQUEST = `${JSON.stringify({
+    _tag: "Request",
+    id: "1",
+    tag: "getServerInfo",
+    payload: {},
+    headers: [],
+  })}\n`;
+
+  /** One `getServerInfo` call over HTTP: the decoded answer and the body as it arrived. */
+  const getServerInfo = (url: string) =>
+    Effect.gen(function* () {
+      const client = yield* HttpClient.HttpClient;
+      const response = yield* client.execute(
+        HttpClientRequest.post(`${url}/rpc`).pipe(
+          HttpClientRequest.bodyText(REQUEST, "application/ndjson"),
+        ),
+      );
+      const wire = yield* response.text;
+      const line = wire.split("\n").find((text) => text.includes('"Exit"'));
+      const message = yield* Schema.decodeUnknownEffect(ExitMessage)(line);
+      return { wire, info: message.exit.value };
+    }).pipe(Effect.provide(FetchHttpClient.layer), Effect.runPromise);
+
+  const KEY = "sk-ant-dummy-boot-lob269-0123456789";
+  const SECRETS = {
+    GITHUB_WEBHOOK_SECRET: "dummy-github-webhook-secret-boot-lob269",
+    LINEAR_WEBHOOK_SECRET: "dummy-linear-webhook-secret-boot-lob269",
+    GITHUB_TOKEN: "dummy-github-token-boot-lob269",
+  };
+
+  it("answers backend faux, faux/faux-1 and the ROLE_MODELS rows under MODEL_BACKEND=faux, and no credential's value", async () => {
+    const { code, output, asked } = await boot(
+      {
+        MODEL_BACKEND: "faux",
+        ROLE_MODELS: "specifier=faux/faux-spec,reviewer=faux/faux-review",
+        APPROVAL_REQUIRED: "npm publish",
+        SESSION_BUDGET: "2.5",
+        ANTHROPIC_API_KEY: KEY,
+        ...SECRETS,
+      },
+      getServerInfo,
+    );
+    expect(code, output).toBeNull();
+    if (asked === undefined) throw new Error("the boot never answered");
+    const { info, wire } = asked;
+    expect(info.backend).toBe("faux");
+    expect(info.selectedBy).toBe("MODEL_BACKEND");
+    expect(info.defaultModel).toBe("faux/faux-1");
+    expect(info.roleModels).toEqual([
+      { role: "reviewer", model: "faux/faux-review" },
+      { role: "specifier", model: "faux/faux-spec" },
+    ]);
+    expect(info.models).toEqual([
+      "faux/faux-1",
+      "faux/faux-review",
+      "faux/faux-spec",
+    ]);
+    expect(info.approvalRequired).toEqual(["npm publish"]);
+    expect(info.defaultBudget).toBe(2.5);
+    expect(info.credentialMode).toEqual({
+      model: null,
+      forge: "static-token",
+      reviewer: "none",
+    });
+    expect(
+      info.webhooks.filter((route) => route.armed).map((route) => route.route),
+    ).toEqual(["/webhooks/linear", "/webhooks/github"]);
+    expect(info.linearWriteBack).toEqual({ enabled: false });
+    for (const secret of [KEY, ...Object.values(SECRETS)]) {
+      expect(wire).not.toContain(secret);
+    }
+  }, 30_000);
+
+  it("reports the forge credential as none when neither GITHUB_TOKEN nor a GitHub App is configured", async () => {
+    const { code, output, asked } = await boot(
+      { MODEL_BACKEND: "faux" },
+      getServerInfo,
+    );
+    expect(code, output).toBeNull();
+    if (asked === undefined) throw new Error("the boot never answered");
+    expect(asked.info.credentialMode).toEqual({
+      model: null,
+      forge: "none",
+      reviewer: "none",
+    });
+  }, 30_000);
+
+  it("names ANTHROPIC_API_KEY as the credential mode on an inferred anthropic boot, never its value", async () => {
+    const { code, output, asked } = await boot(
+      { ANTHROPIC_API_KEY: KEY, ...SECRETS },
+      getServerInfo,
+    );
+    expect(code, output).toBeNull();
+    if (asked === undefined) throw new Error("the boot never answered");
+    const { info, wire } = asked;
+    expect(info.backend).toBe("anthropic");
+    expect(info.selectedBy).toBe("credential");
+    expect(info.credentialMode.model).toEqual({
+      source: "ANTHROPIC_API_KEY",
+      type: "api_key",
+    });
+    expect(info.defaultModel).toMatch(/^anthropic\//);
+    for (const secret of [KEY, ...Object.values(SECRETS)]) {
+      expect(wire).not.toContain(secret);
+    }
   }, 30_000);
 });
