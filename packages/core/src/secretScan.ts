@@ -34,7 +34,6 @@ import {
   type SecretFinding,
   type SecretFoundPullRequest,
 } from "@repo/domain/PullRequest";
-import { SECRET_MIN_LENGTH } from "@repo/domain/Secret";
 import type { InjectedSecrets } from "@repo/harness";
 
 /** One credential shape the scan refuses, by the name a finding reports it under. */
@@ -166,7 +165,10 @@ export const parseCommitMetadata = (log: string): ReadonlyArray<AddedLine> => {
   let commit = "";
   let at = 0;
   for (const line of log.split("\n")) {
-    if (line.startsWith(COMMIT_MARK) && /^[0-9a-f]{40,64}$/.test(line.slice(1))) {
+    if (
+      line.startsWith(COMMIT_MARK) &&
+      /^[0-9a-f]{40,64}$/.test(line.slice(1))
+    ) {
       commit = line.slice(1);
       at = 0;
       continue;
@@ -383,8 +385,7 @@ export const scanBranchForSecrets = (input: {
       ],
       { concurrency: 2 },
     );
-    if (patches === undefined || metadata === undefined)
-      return yield* Effect.fail(refused);
+    if (patches === undefined || metadata === undefined) return yield* refused;
     return secretRefusal(
       scanAddedLines(
         [...parseAddedLines(patches), ...parseCommitMetadata(metadata)],

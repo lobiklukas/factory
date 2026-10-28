@@ -224,8 +224,8 @@ describe("the PR step publishes the branch it names", CASE, () => {
    * for a head the forge does not hold, and `headOnRemote` is `undefined`.
    * Mutation: push the branch name instead of the measured commit, or from another checkout — the
    * remote's sha is not the worktree's.
-   * Mutation: resolve the push's token anywhere but the provider — the provider is asked once (the
-   * PR's), and the remote refuses the push.
+   * Mutation: resolve the push's token anywhere but the provider — the provider is asked twice (the
+   * scan's fetch and the PR), and the remote refuses the push.
    */
   it("pushes factory/<id> with the provider's token, then opens the PR, and the remote holds the sha it names", async () => {
     const fixture = makeRepo();
@@ -269,8 +269,13 @@ describe("the PR step publishes the branch it names", CASE, () => {
       headOnRemote: result.tip,
     });
     expect(shaOf(fixture.bare, `refs/heads/${head}`)).toBe(result.tip);
-    // One token for the push, one for the PR: both from the provider, both for this repo.
-    expect(result.askedDuring).toEqual([fixture.repo, fixture.repo]);
+    // One token for the base's fetch that bounds the secret scan (S-agent-secrets), one for the
+    // push, one for the PR: all from the provider, all for this repo.
+    expect(result.askedDuring).toEqual([
+      fixture.repo,
+      fixture.repo,
+      fixture.repo,
+    ]);
     expect(result.seenDuring.length).toBeGreaterThan(0);
     expect(
       result.seenDuring.every(
