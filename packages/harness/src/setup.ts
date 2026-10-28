@@ -35,6 +35,7 @@ import { defineDoc, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import type { RepoCommands, SessionError } from "@repo/domain/Session";
 import { DateTime, Effect, Option, Schema } from "effect";
+import type { InjectedSecrets } from "./secrets";
 import { attempt, readLogDocument } from "./session";
 import {
   execToExit,
@@ -144,6 +145,13 @@ export const runSetup = (input: {
   readonly commands: RepoCommands;
   /** Overrides `SETUP_TIMEOUT_SECONDS`, per step. */
   readonly timeoutSeconds?: number | undefined;
+  /**
+   * The secrets the repo declares for its setup (S-agent-secrets): each step gets them as variables,
+   * and its output is masked before it is streamed or recorded.
+   */
+  readonly secrets?: InjectedSecrets | undefined;
+  /** Names the repo declares for its setup that the store holds no value for, said in the output. */
+  readonly missingSecrets?: readonly string[] | undefined;
   readonly onOutput?: (text: string) => void;
   readonly context?: Context;
 }): Effect.Effect<SetupRecord | undefined> =>
@@ -151,6 +159,7 @@ export const runSetup = (input: {
     const steps = setupSteps(input.commands);
     if (steps.length === 0) return undefined;
     const startedAt = yield* isoNow;
+    const secrets = input.secrets ?? [];
     const results: SetupStepResult[] = [];
     for (const { step, command } of steps) {
       const tail = runningTail();
@@ -159,12 +168,20 @@ export const runSetup = (input: {
         input.onOutput?.(text);
       };
       input.onOutput?.(`== setup ${step}: ${command}\n`);
+      const missing = input.missingSecrets ?? [];
+      if (secrets.length > 0 || missing.length > 0) {
+        // Names only, into the tail the record keeps, so a step that failed for want of one says so.
+        onOutput(
+          `== secrets: ${[...secrets.map((secret) => secret.name), ...missing.map((name) => `${name} (declared, not stored)`)].join(", ")}\n`,
+        );
+      }
       const ran = yield* Effect.result(
         execToExit({
           env: input.env,
           command,
           cwd: input.env.cwd,
           variables: { [VERIFY_DATABASE_VARIABLE]: VERIFY_NO_DATABASE },
+          secrets,
           timeoutSeconds: input.timeoutSeconds ?? SETUP_TIMEOUT_SECONDS,
           onOutput,
           context: input.context ?? BACKGROUND_CONTEXT,

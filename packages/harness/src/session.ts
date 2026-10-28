@@ -147,6 +147,11 @@ import {
   type VerifyOptions,
   type VerifyRecord,
 } from "./verify";
+import {
+  maskingEnv,
+  secretMaskExtension,
+  type InjectedSecrets,
+} from "./secrets";
 import { bodyExtension, renderBody } from "./body";
 import {
   askExtension,
@@ -428,6 +433,13 @@ export type OpenSessionOptions = {
    */
   readonly verify?: VerifyOptions;
   /**
+   * Every secret value the control plane injects into this session's commands (S-agent-secrets,
+   * `./secrets`): the setup's and the `verify` tool's. Each is masked in every tool's settled result
+   * before it is committed (`secretMaskExtension`), beside the masking at the commands' own output.
+   * Absent or empty: nothing is installed.
+   */
+  readonly secrets?: InjectedSecrets;
+  /**
    * How this run asks a person (LOB-73, `./ask`): the control plane's callback that records the
    * question on the run's card and blocks it `needs_input`. Absent: a session with no card, which
    * has nobody to ask on, so it gets no `ask` tool at all.
@@ -648,6 +660,11 @@ const openSessionIn = (
     // Verification beside the tools that make the change (LOB-78): the run can produce evidence of
     // its own surface rather than prose about it.
     registry.install(verifyExtension(options.verify));
+    // The values the session's commands are given never reach a committed tool result
+    // (S-agent-secrets): the agent's shell does not hold them, and this masks what it came to hold.
+    if (options.secrets !== undefined && options.secrets.length > 0) {
+      registry.install(secretMaskExtension(options.secrets));
+    }
     // The ask on the task (B7, LOB-73): only a run bound to a card can ask, because the question is
     // recorded on the card — a scratch session has nobody to ask on and no tool to ask with.
     if (options.ask !== undefined) registry.install(askExtension(options.ask));
@@ -708,6 +725,12 @@ const openSessionIn = (
     // before then, so the hook reads it late rather than taking it here.
     let opened: BudgetSession | undefined;
     registry.install(budgetExtension(() => opened));
+    // Every command the session runs, its tools' and the control plane's setup alike, has the values
+    // it was given masked in its output before anything sees it (S-agent-secrets).
+    const sessionEnv = (cwd: string): Promise<ExecutionEnv> =>
+      environment
+        .env(cwd)
+        .then((env) => maskingEnv(env, options.secrets ?? []));
 
     const harness = yield* attempt("open harness", () =>
       HarnessRuntime.open(
@@ -715,7 +738,7 @@ const openSessionIn = (
         {
           models: model.models,
           registry,
-          env: (target) => environment.env(target.cwd ?? options.cwd),
+          env: (target) => sessionEnv(target.cwd ?? options.cwd),
           settings: {
             progress: SESSION_PROGRESS,
             // Long sessions compact (B4). The thresholds follow the model's context window
@@ -793,7 +816,7 @@ const openSessionIn = (
         root,
         model,
         releaseEnvironment: environment.release,
-        env: environment.env,
+        env: sessionEnv,
         resumed,
       };
     }).pipe(Effect.onError(() => Effect.exit(closeHarness(harness))));
