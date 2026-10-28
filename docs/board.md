@@ -113,6 +113,12 @@ follow that model's window, not today's row. One gap is the faux backend's: its 
 `faux-1` and the `faux/*` ids the current `ROLE_MODELS` names, so dropping a row while a run is open on
 it leaves that run with no model to send to after a restart (a real backend's catalog holds every model,
 so it is not affected). Under faux, keep a row until the runs on it are done.
+A run can also be started on a model of its own (LOB-274): `createSession`'s `model`
+(`factory run --model`, the dashboard's New session picker) is resolved against the same catalog —
+an unserved one is `invalid_input` before anything is written — and pinned ahead of the role's row.
+The deployment's model is `DEFAULT_MODEL` when it is set (validated at boot, like a row), else the
+backend's own. So a run's model is: its session's > its column role's row > `DEFAULT_MODEL` > the
+backend's, decided once, when its root is created.
 **The tool policy** is a filter on what a run is _offered_: a read-only role is not given `write`,
 `edit` or `verify` at all (`STAGE_REFUSED_TOOLS`), so a call to one meets Pi Durable's
 `tool_unavailable`. LOB-74's hook refusal still judges every `bash` call, and it is the only line for

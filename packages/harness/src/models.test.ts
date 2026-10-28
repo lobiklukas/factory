@@ -20,7 +20,9 @@ import {
   createModelAccess,
   fauxAnswer,
   isFauxTurnStep,
+  modelKey,
   parseFauxModelScripts,
+  resolveDefaultModel,
 } from "./models";
 import { VERIFY_TOOL } from "./verify";
 
@@ -83,6 +85,73 @@ describe("createModelAccess", () => {
     expect(
       createModelAccess("faux", { contextWindow: 8_000 }).contextWindow,
     ).toBe(8_000);
+  });
+});
+
+/**
+ * `DEFAULT_MODEL` (LOB-274) is the backend's catalog asked for one model: the deployment's default
+ * when it holds it, the backend's own when the variable is blank, and a typed refusal — the boot's —
+ * naming the key when it does not.
+ */
+describe("resolveDefaultModel", () => {
+  const anthropic = createModelAccess("anthropic", {
+    authContext: { env: async () => undefined, fileExists: async () => false },
+  });
+  const faux = createModelAccess("faux", {
+    fauxModels: ["faux-1", "faux-cheap"],
+  });
+  const resolved = (
+    backend: typeof anthropic,
+    key: string,
+  ):
+    | { readonly model: string; readonly window: number }
+    | { readonly error: string } =>
+    Effect.runSync(
+      resolveDefaultModel(backend, key).pipe(
+        Effect.match({
+          onFailure: (error) => ({ error: `${error._tag}: ${error.message}` }),
+          onSuccess: (access) => ({
+            model: modelKey(access),
+            window: access.contextWindow,
+          }),
+        }),
+      ),
+    );
+
+  it("changes the deployment's model to one the catalog serves, and keeps its registry", () => {
+    expect(resolved(anthropic, "anthropic/claude-haiku-4-5")).toEqual({
+      model: "anthropic/claude-haiku-4-5",
+      window: anthropic.models.getModel("anthropic", "claude-haiku-4-5")
+        ?.contextWindow,
+    });
+    expect(resolved(faux, " faux/faux-cheap ")).toEqual({
+      model: "faux/faux-cheap",
+      window: 128_000,
+    });
+    const access = Effect.runSync(
+      resolveDefaultModel(anthropic, "anthropic/claude-haiku-4-5"),
+    );
+    expect(access.models).toBe(anthropic.models);
+    expect(access.backend).toBe("anthropic");
+  });
+
+  it("keeps the backend's own model when DEFAULT_MODEL is blank", () => {
+    expect(Effect.runSync(resolveDefaultModel(anthropic, ""))).toBe(anthropic);
+    expect(Effect.runSync(resolveDefaultModel(faux, "  "))).toBe(faux);
+  });
+
+  it("refuses a model outside the catalog, naming it and the backend", () => {
+    for (const [backend, key] of [
+      [anthropic, "anthropic/claude-nonexistent-9"],
+      [anthropic, "faux/faux-1"],
+      [faux, "anthropic/claude-haiku-4-5"],
+      [faux, "faux/faux-unpublished"],
+      [faux, "faux-1"],
+    ] as const) {
+      expect(resolved(backend, key)).toEqual({
+        error: `InvalidDefaultModel: DEFAULT_MODEL names model ${key}, which this process does not serve on the ${backend.backend} backend (provider/modelId, one of getServerInfo's models)`,
+      });
+    }
   });
 });
 

@@ -129,6 +129,10 @@ check "run names the session it minted" "$([ -n "$SESSION_ID" ] && echo 0 || ech
 check "run reports the workspace the server resolved" \
   "$(grep -q '^workspace /' "$EVIDENCE_DIR/run.txt" && echo 0 || echo 1)" \
   "workspace=$(grep -m1 '^workspace ' "$EVIDENCE_DIR/run.txt" | cut -c1-40)"
+# The model the server pinned the session to (LOB-274): up.sh's faux backend with no DEFAULT_MODEL.
+check "run prints the model the session runs on" \
+  "$(grep -qx 'model faux/faux-1' "$EVIDENCE_DIR/run.txt" && echo 0 || echo 1)" \
+  "$(grep -m1 '^model ' "$EVIDENCE_DIR/run.txt")"
 check "run streams the tool call" \
   "$(grep -q '^\[tool:bash\] faux-ok' "$EVIDENCE_DIR/run.txt" && echo 0 || echo 1)" \
   "tool result present"
