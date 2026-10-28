@@ -14,10 +14,12 @@
  * - The `repos` row: where a repo is cloned from and which ref sessions start at.
  *
  * The owner registry — *this process* holding the log open — is the one thing that is not durable
- * and cannot be rebuilt. Pi Durable allows one owner per log, so ownership is per process, and a
- * session nobody here owns is served by folding the log (D8's historical read). Locally this
- * process is also the sandbox (D3); when the harness moves into a sandbox, this registry is the
- * seam that changes and `SessionBus` is how streams keep working.
+ * and cannot be rebuilt. Pi Durable allows one owner per log, so ownership is per process, and every
+ * owner holds a presence lease on its session (`./Presence`, LOB-18) that says so to every other
+ * process: a session this process owns streams from its harness, one another process owns is
+ * followed through its log — told when to read by `SessionBus` (`./SessionBus`) — and one nobody
+ * owns is served by folding the log (D8's historical read). Locally this process is also the sandbox
+ * (D3); when the harness moves into a sandbox, the sandbox renews the lease instead.
  */
 import {
   Cause,
@@ -140,6 +142,7 @@ import {
 } from "@repo/harness";
 import {
   closeHarness,
+  followSessionEvents,
   resumePending,
   clampCurationPages,
   compactSession,
@@ -156,6 +159,7 @@ import {
   openSession,
   readHistoricalSnapshot,
   readLiveSnapshot,
+  readFollowedSnapshot,
   readPinnedModelKey,
   readRecordedReview,
   readTranscriptPage,
@@ -220,6 +224,8 @@ import {
 import { isSafeBranchName } from "./git";
 import type { RepoMirror } from "./RepoMirror";
 import { mintSessionId } from "./ids";
+import { homeOf, makePresence, type Lease } from "./Presence";
+import { SessionBus, SessionBusPostgres } from "./SessionBus";
 import {
   countRefusal,
   countSessionCreate,
@@ -388,7 +394,11 @@ export type SessionServiceShape = {
   readonly getRepo: (
     input: GetRepoInput,
   ) => Effect.Effect<RepoSummary, SessionError | RepoNotFound>;
-  /** A session's events: live while this process owns it, a single historical snapshot otherwise. */
+  /**
+   * A session's events: live from the harness while this process owns it; live from its log while
+   * another process does (LOB-18), ending when that ownership does; a single historical snapshot
+   * otherwise.
+   */
   readonly events: (
     sessionId: SessionId,
   ) => Stream.Stream<SessionEvent, SessionError>;
@@ -645,7 +655,20 @@ export type SessionServiceOptions = {
    * worker's.
    */
   readonly reviewPoster?: ReviewPoster;
+  /**
+   * Presence (LOB-18): how long this process's claim on a session it owns lives without a renewal
+   * (`ttlMs`, renewed every third of it), and how often a stream that follows a session owned
+   * elsewhere re-reads its log and asks whether it is still owned (`followPollMs`) — the floor under
+   * the bus's hints, which can be lost. Absent: `DEFAULT_LEASE_TTL_MS` and `DEFAULT_FOLLOW_POLL_MS`.
+   */
+  readonly presence?: {
+    readonly ttlMs?: number;
+    readonly followPollMs?: number;
+  };
 };
+
+/** How often a followed stream reads its log without a hint, when the deployment names nothing. */
+export const DEFAULT_FOLLOW_POLL_MS = 2_000;
 
 /**
  * Whether a clone URL carries a credential: a password anywhere, or a username on http(s), where it
@@ -781,6 +804,8 @@ type PageRow = {
 };
 
 type LiveOwner = {
+  /** The fence of this process's presence lease on the session (LOB-18): what it renews and drops. */
+  readonly fence: number;
   readonly harness: Harness;
   readonly root: Conversation;
   /** Ends the sandboxes the session's commands ran in (LOB-244), after the harness is closed. */
@@ -874,6 +899,21 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * directory, so the comparison is between resolved paths.
        */
       const missionRoot = path.resolve(options.sessionRoot);
+      /**
+       * This process's presence (LOB-18): every owner it opens claims its session here first, so any
+       * other process can tell "owned elsewhere" from "owned by nobody". The home is this host and
+       * session root — where a session's worktree lives — so a process restarted in it takes back
+       * what its predecessor held rather than waiting out the lease (`acquireUnderGate`).
+       */
+      const presence = yield* makePresence({
+        home: homeOf(missionRoot),
+        ...(options.presence?.ttlMs === undefined
+          ? {}
+          : { ttlMs: options.presence.ttlMs }),
+      });
+      const followPollMs =
+        options.presence?.followPollMs ?? DEFAULT_FOLLOW_POLL_MS;
+      const bus = yield* SessionBus;
       const policy = yield* Policy;
       const skills = yield* SkillService;
       const tasks = yield* TaskService;
@@ -1426,6 +1466,16 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * and a run there would start over on an empty one at the base. Reads, approvals, pages and
        * the curator still reach it; a new run is a new session.
        */
+      /**
+       * The refusal of an owner acquisition on a session another process owns (LOB-18). Reads and
+       * streams of it are served here by following its log; work on it goes where it is owned.
+       */
+      const ownedElsewhereError = (id: string, lease: Lease) =>
+        new SessionErrorClass({
+          code: "owned_elsewhere",
+          message: `session ${id} is owned by another process (${lease.holder}, home ${lease.home}) until ${lease.expiresAt} unless it renews; send its work there, or wait for the lease to lapse`,
+        });
+
       const releasedError = (id: string, release: WorkspaceRelease) =>
         new SessionErrorClass({
           code: "invalid_input",
@@ -1849,8 +1899,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         open: OwnerOpening,
         acquisition: OwnerAcquisition,
         mirrorStart: string | undefined,
-      ): Effect.Effect<LiveOwner, SessionError> =>
-        gate.withPermits(1)(
+      ): Effect.Effect<LiveOwner, SessionError> => {
+        /** The fence of the presence claim this acquisition took, once it has taken one (LOB-18). */
+        let claimed: number | undefined;
+        return gate.withPermits(1)(
           Effect.gen(function* () {
             const now = yield* Clock.currentTimeMillis;
             const owners = yield* Ref.get(live);
@@ -1871,6 +1923,22 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               yield* countRefusal("released");
               return yield* releasedError(id, released);
             }
+            // Claimed before anything is opened (LOB-18): a session another process owns is not
+            // opened a second time here, where both would write one log until Postgres poisoned one.
+            // A live claim of this process's own home — this host and session root, where the
+            // session's worktree is — is taken over rather than waited out: it is the process this
+            // one replaced (a SIGKILL, a crash), whose run, mission or parked approval would
+            // otherwise wait a TTL for nothing (LOB-25, LOB-231). Two live processes on one home is
+            // already the misconfiguration D12 names; this makes the newer one win.
+            const claim = yield* paper(
+              "claim the session",
+              presence.acquire("session", id, { takeoverHome: true }),
+            );
+            if (claim._tag === "HeldElsewhere") {
+              return yield* ownedElsewhereError(id, claim.lease);
+            }
+            claimed = claim.fence;
+            const fence = claim.fence;
             const workspace = yield* workspaceFor(row, {
               cut: released === undefined,
               released,
@@ -1972,6 +2040,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ),
             );
             const owner: LiveOwner = {
+              fence,
               harness: opened.harness,
               root: opened.root,
               releaseEnvironment: opened.releaseEnvironment,
@@ -1990,8 +2059,18 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // document read that finds nothing to do.
             yield* armComparison(id);
             return owner;
-          }),
+          }).pipe(
+            // Whatever fails after the claim gives it back — still under the gate, so no other
+            // acquisition here has taken it meanwhile — and a failed open leaves the session to the
+            // next process that asks rather than to a lease nobody renews.
+            Effect.onError(() =>
+              claimed === undefined
+                ? Effect.void
+                : presence.release("session", id, claimed).pipe(Effect.ignore),
+            ),
+          ),
         );
+      };
 
       /**
        * Open this process's owner of one session, or return the one already open.
@@ -2316,6 +2395,62 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return yield* describe(id, row);
         });
 
+      /**
+       * The live lease of another process on a session (LOB-18), or none: none when nobody holds one,
+       * when it lapsed, and when the holder is this process — whose registry, not the table, says
+       * whether it owns the session.
+       */
+      const ownerElsewhere = (
+        sessionId: SessionId,
+      ): Effect.Effect<Option.Option<Lease>, SessionError> =>
+        paper(
+          "read the session's presence",
+          presence.leaseOf("session", sessionId),
+        ).pipe(
+          Effect.map(
+            Option.filter((lease) => lease.holder !== presence.holder),
+          ),
+        );
+
+      /**
+       * A session another process owns, followed through its log (D8's third branch, LOB-18): a
+       * reader-mode storage held for as long as the stream runs, read again on every commit the bus
+       * hints at and on every poll. Each poll also asks whether the session is still owned elsewhere,
+       * and the stream ends — after one last read — once it is not: the owner closed it, died and its
+       * lease lapsed, or handed it to this process. A client then reattaches and is told which.
+       */
+      const followEvents = (
+        sessionId: SessionId,
+        row: SessionRow,
+      ): Stream.Stream<SessionEvent, SessionError> =>
+        Stream.unwrap(
+          Effect.gen(function* () {
+            const workspace = yield* workspaceFor(row, { cut: false });
+            const storage = yield* Effect.acquireRelease(
+              openStorage(sessionId, "reader"),
+              (reader) => Effect.promise(() => reader.dispose()),
+            );
+            // Subscribed before the snapshot is read, so a commit made after the read is hinted.
+            const hints = yield* bus.subscribe(sessionId);
+            const polls = Stream.tick(Duration.millis(followPollMs)).pipe(
+              Stream.mapEffect(() =>
+                ownerElsewhere(sessionId).pipe(
+                  Effect.map(Option.isSome),
+                  // A presence read that fails is not news that the owner left: keep following,
+                  // and let the log reads say whether the database is there.
+                  Effect.orElseSucceed(() => true),
+                ),
+              ),
+              Stream.takeWhile((owned) => owned),
+            );
+            return followSessionEvents(
+              storage,
+              refOf(sessionId, row, workspace),
+              Stream.merge(hints, polls, { haltStrategy: "right" }),
+            );
+          }),
+        );
+
       const get = (
         sessionId: SessionId,
       ): Effect.Effect<SessionSnapshot, SessionError> =>
@@ -2329,6 +2464,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               owner.value,
               refOf(sessionId, row, owner.value.workspace, owner.value.model),
             );
+          }
+          // Owned by another process (LOB-18): live there, so live here too, read from its log.
+          if (Option.isSome(yield* ownerElsewhere(sessionId))) {
+            const workspace = yield* workspaceFor(row, { cut: false });
+            return yield* withReader(sessionId, (storage) =>
+              readFollowedSnapshot(storage, refOf(sessionId, row, workspace)),
+            ).pipe(Effect.map((followed) => followed.snapshot));
           }
           const workspace = yield* workspaceFor(row, { cut: false });
           // A fold is also where a replay whose run settled with no comparison written (the process
@@ -4416,6 +4558,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 refOf(sessionId, row, owner.value.workspace, owner.value.model),
               );
             }
+            // Another process owns it (LOB-18): follow its log for as long as it does.
+            if (Option.isSome(yield* ownerElsewhere(sessionId))) {
+              return followEvents(sessionId, row);
+            }
             // Nobody owns it: fold once, send the snapshot, and end the stream, so a client can
             // tell a completed fold from a dropped connection (D8).
             const workspace = yield* workspaceFor(row, { cut: false });
@@ -4448,6 +4594,17 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // worktree's files, which stay for the session's next run like the worktree itself.
           yield* owner.releaseEnvironment;
           yield* Effect.promise(() => owner.storage.dispose());
+          // The claim goes last, once nothing here can write the log: a process that takes the
+          // session next must not find this one still committing (LOB-18).
+          yield* presence
+            .release("session", sessionId, owner.fence)
+            .pipe(
+              Effect.catch((error) =>
+                Effect.logWarning(
+                  `session ${sessionId}: its presence lease was not released and lapses in ${presence.ttlMs}ms: ${String(error)}`,
+                ),
+              ),
+            );
           // Nobody owns the session now, so the list's honest status is idle (D8).
           yield* setActivityStatus(sessionId, "idle");
         });
@@ -4754,6 +4911,67 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         }
       });
 
+      /**
+       * The presence heartbeat (LOB-18): every third of the TTL, renew the claim of every owner this
+       * process holds. One the renewal does not find was lost — it lapsed while this process could
+       * not renew it (a stall, a lost database) and another process took it — and its owner is
+       * released here at once, because the log is the new holder's now.
+       */
+      const heartbeat = Effect.gen(function* () {
+        const owners = HashMap.toEntries(yield* Ref.get(live));
+        if (owners.length === 0) return;
+        const renewed = yield* presence.renew(
+          "session",
+          owners.map(([sessionId, owner]) => ({
+            key: sessionId,
+            fence: owner.fence,
+          })),
+        );
+        for (const [sessionId, owner] of owners) {
+          if (renewed.has(sessionId)) continue;
+          // Only if it is still the owner the renewal was asked for: one released meanwhile dropped
+          // its own claim, and one opened again since holds a new one.
+          const removed = yield* Ref.modify(live, (current) =>
+            Option.match(HashMap.get(current, sessionId), {
+              onNone: () => [false, current] as const,
+              onSome: (still) =>
+                still === owner
+                  ? ([true, HashMap.remove(current, sessionId)] as const)
+                  : ([false, current] as const),
+            }),
+          );
+          if (!removed) continue;
+          yield* Effect.logWarning(
+            `session ${sessionId}: its presence lease was lost to another process; releasing this owner`,
+          );
+          yield* releaseOwner(sessionId, owner);
+        }
+      }).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning(
+            `presence heartbeat failed; retrying in ${Math.trunc(presence.ttlMs / 3)}ms: ${String(error)}`,
+          ),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        for (;;) {
+          yield* Effect.sleep(Math.max(1, Math.trunc(presence.ttlMs / 3)));
+          yield* heartbeat;
+        }
+      }).pipe(Effect.forkScoped);
+      // A service torn down without `close` (a test's runtime, a layer rebuilt) still closes what it
+      // holds and gives its claims back, rather than leaving them to lapse with nobody renewing.
+      yield* Effect.addFinalizer(() =>
+        closeAll.pipe(
+          Effect.andThen(presence.releaseAll),
+          Effect.catch((error) =>
+            Effect.logWarning(
+              `presence leases were not released at shutdown and lapse in ${presence.ttlMs}ms: ${String(error)}`,
+            ),
+          ),
+        ),
+      );
+
       if (options.idleTimeoutMs !== undefined) {
         // Sweep at least twice per timeout window, so the timeout means what it says. Idle here
         // means nobody has touched the session: a read counts as use, so a client watching a
@@ -4819,4 +5037,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
     // A run's thread and its ask are the card's (B7, LOB-73), so the service reads and writes them
     // through `TaskService` rather than a second writer of `task_events`.
     Layer.provide(TaskServiceLive),
+    // Following a session another process owns is told when to read by the commit bus (LOB-18).
+    Layer.provide(SessionBusPostgres),
   );
