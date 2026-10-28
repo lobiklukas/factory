@@ -284,7 +284,8 @@ branch is its first change run's — a run started in a column that requires `pr
 `non_empty_diff` — for as long as an unreleased run of the card is bound to it; a run of an earlier
 column (a specifier, a planner) keeps a branch of its own. Every later run of the card is bound to the
 card's branch by name (LOB-197), on the base it was cut from, so a second building run and a run in
-`review` start from the change the first building run made. Git checks a branch out in one worktree
+`review` start from the change the first building run made; a run that names its own branch, or a
+base other than that one, starts afresh as before. Git checks a branch out in one worktree
 at a time, so the newest run's worktree takes it over and the earlier run's is left on a detached
 HEAD at the commit it was on, its files and uncommitted edits untouched; an earlier run still going
 when a later one starts commits off the branch from then on (a board that must never run two at once

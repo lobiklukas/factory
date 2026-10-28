@@ -17,7 +17,8 @@
  *   continue, and its next change run cuts a fresh one, which becomes the card's.
  * - **Every later run of the card binds it** (the caller-named branch path, LOB-197), whatever column
  *   it was started in: a second building run, a run in `review`, a run sent back to `planning`. A run
- *   that names its own branch (a review trigger's `factory/review-<n>-<sha>`) keeps it.
+ *   that names its own branch (a review trigger's `factory/review-<n>-<sha>`) keeps it, and one that
+ *   names a base other than the one the card's branch was cut from starts afresh from that base.
  *
  * Derived from what the index already holds — the card's `task_runs`, their sessions' bindings and
  * releases, and the pinned definition's columns — rather than stored on the card: a rebuild re-derives

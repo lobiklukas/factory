@@ -2249,7 +2249,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * A card's run that names no branch continues the card's (C19, `cardBranchFor`) once the card
        * has one, on the base that branch was cut from: a later building run, or a run in `review`,
        * works on the change the first building run made rather than on a fresh branch at the base.
-       * A reviewer run (LOB-36) names its own branch and keeps it.
+       * A reviewer run (LOB-36) names its own branch and keeps it, and a run that names a base other
+       * than the one the card's branch was cut from starts afresh from it.
        */
       const resolveBinding = (
         input: CreateSessionInput,
@@ -2258,12 +2259,20 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const card = yield* cardBindingFor(input.taskId);
           const repo = input.repo ?? card?.repo;
           if (repo === undefined) return {};
-          const continued =
+          const cardBranch =
             input.taskId === undefined ||
             input.branch !== undefined ||
             input.review !== undefined
               ? undefined
               : yield* cardBranchFor(input.taskId, repo);
+          // A run that names a base of its own asks to start from it: it continues the card's branch
+          // only when that is the base the branch was cut from.
+          const continued =
+            cardBranch === undefined ||
+            input.baseRef === undefined ||
+            input.baseRef === cardBranch.baseRef
+              ? cardBranch
+              : undefined;
           const cardBase =
             continued?.baseRef ??
             (card?.repo === repo ? card.baseRef : undefined);
