@@ -1,4 +1,4 @@
-import { RpcApi, SessionRpc } from "@repo/domain/Rpc";
+import { RpcApi, ServerRpc, SessionRpc } from "@repo/domain/Rpc";
 import { Context, Effect, Layer } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { RpcClient as EffectRpcClient, RpcSerialization } from "effect/rpc";
@@ -60,3 +60,24 @@ export class BoardClient extends Context.Service<BoardClient>()("BoardClient", {
 
 /** The merged client, for a board command to hold onto. */
 export type BoardRpcClient = BoardClient["Service"]["client"];
+
+/**
+ * The server group's client (LOB-272): `getServerInfo`, which `factory status` prints and `factory
+ * run` reads to say whether the model is scripted. A client of its own, as `BoardClient` is for the
+ * board, so a command that only needs the session surface does not depend on it.
+ */
+export class ServerClient extends Context.Service<ServerClient>()(
+  "ServerClient",
+  {
+    make: Effect.gen(function* () {
+      return {
+        client: yield* EffectRpcClient.make(ServerRpc),
+      } as const;
+    }),
+  },
+) {
+  static layer = (apiUrl: string) =>
+    Layer.effect(ServerClient)(ServerClient.make).pipe(
+      Layer.provide(protocolLive(apiUrl)),
+    );
+}

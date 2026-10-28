@@ -3,9 +3,13 @@
 One file per user-facing feature. Each answers: what it is, how a user reaches it, how to drive
 it with the harness, and what observable end state proves it works.
 
-Status reflects the last verified run (2026-10-28, `chrome`, headless, API `:9613` / web `:3610` —
-an agent worktree's port block, not the usual 9100/3100; `drive.mjs` 112/112 required checks
-passed, from the `agent/LOB-254` worktree against its own database on 5442, which adds LOB-254's
+Status reflects the last verified run (2026-10-28, `chrome`, headless, API `:9550` / web `:3550`;
+`drive.mjs` 119/119 required checks passed from the `agent/LOB-272` worktree, which adds LOB-272's
+faux banner on `/sessions`, a board and `/spend`, and the session's model in its pane header and row
+([backend-badge.md](backend-badge.md)); `backend.sh` (API `:9551`, web `:3551`, an inferred-anthropic
+instance under a dummy key) passed 10/10: no banner after the page's own `getServerInfo` read, and
+`anthropic/claude-sonnet-5-5` in the pane header and row). The run before it (`agent/LOB-254`, API
+`:9613` / web `:3610`, 112/112) added LOB-254's
 card-pane link to the issue a card was filed from (evidence `card-pane-external-link.png`,
 [card-pane.md](card-pane.md)). The run before it (`agent/LOB-267`, 111/111) added LOB-267's
 card-pane checks over a synthetic definition (todo → doing → done, gated; evidence
@@ -38,6 +42,7 @@ under Known gaps.
 | Repositories             | passing | [repos.md](repos.md) (`repos.sh`)                                  |
 | New card (board page)    | passing | [card-create.md](card-create.md) (verify-board's `card-create.sh`) |
 | Earlier history          | passing | [history.md](history.md) (`history.sh`)                            |
+| Model backend and model  | passing | [backend-badge.md](backend-badge.md) (`backend.sh`)                |
 
 ## Known gaps
 

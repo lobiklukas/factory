@@ -21,8 +21,11 @@ refolds; a fold falls back to the log when the column is blank. Rows older than 
 filled once the API has applied its migrations (`backfillSessionModels`, from each log's
 `pi.agent`), so an existing deployment's list names every session's model without a rebuild.
 
-**How a user reaches it.** Any RPC client: `client.getServerInfo({})`. The dashboard and the CLI
-surfaces are LOB-272.
+**How a user reaches it.** Any RPC client: `client.getServerInfo({})`. The dashboard shows it (the
+faux banner on every route, each session's model; verify-web's
+[backend-badge.md](../../verify-web/features/backend-badge.md)) and the CLI prints it (`factory status`, the
+`model` line of `factory run`, the `model` column of `factory ls`; verify-cli's
+[status.md](../../verify-cli/features/status.md)), LOB-272.
 
 **How the skill drives it.** `DATABASE_URL=… API_PORT=… ./server-info.sh` boots this skill's API
 through `./up.sh` with `MODEL_BACKEND=faux`, `ROLE_MODELS=specifier=faux/faux-spec` (up.sh adds its

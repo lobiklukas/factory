@@ -1,10 +1,11 @@
 import { RepoSlug, SessionActor, SessionBudgetCap } from "@repo/domain/Session";
-import { Console, Effect, Option } from "effect";
+import { Console, Effect, Layer, Option } from "effect";
 import { Argument, Command, Flag } from "effect/cli";
 import { resolveApiUrl } from "../api";
 import { reportFailures } from "../errors";
-import { SessionClient } from "../rpc";
+import { ServerClient, SessionClient } from "../rpc";
 import { followSession, formatDollars } from "../transcript";
+import { fauxWarning } from "./status";
 
 /**
  * `factory run "<task>"` — mint a session, hand it the task, and follow the transcript until the
@@ -13,7 +14,9 @@ import { followSession, formatDollars } from "../transcript";
  * `--repo` binds the session to a repository (and registers it on first use); `--base-ref` picks
  * the ref it starts from, `--actor` who its spend is attributed to (LOB-162; `cli` unless named, as
  * `factory approve` decides as `cli`). The workspace line is the server's own answer for where the work will
- * live, so the run proves the read path as well as the write.
+ * live, so the run proves the read path as well as the write. The `model` line is the model the
+ * session is pinned to (LOB-272), and under the faux backend a `warning: faux backend` line follows
+ * it: a scripted answer reads exactly like a real one, so the run says which it is getting.
  */
 export const runCommand = Command.make(
   "run",
@@ -52,6 +55,7 @@ export const runCommand = Command.make(
 
     const program = Effect.gen(function* () {
       const { client } = yield* SessionClient;
+      const server = yield* ServerClient;
 
       const input: {
         repo?: RepoSlug;
@@ -68,6 +72,14 @@ export const runCommand = Command.make(
       if (Option.isSome(budget)) {
         yield* Console.log(`budget ${formatDollars(budget.value)}`);
       }
+
+      yield* Console.log(`model ${session.model ?? "unknown"}`);
+      // A server that cannot answer `getServerInfo` costs the run its warning, never the run.
+      const info = yield* server.client
+        .getServerInfo({})
+        .pipe(Effect.option, Effect.map(Option.getOrUndefined));
+      const warning = info === undefined ? undefined : fauxWarning(info);
+      if (warning !== undefined) yield* Console.log(warning);
 
       const opened = yield* client.getSession({ sessionId: session.id });
       yield* Console.log(`workspace ${opened.workspace.path}`);
@@ -98,7 +110,12 @@ export const runCommand = Command.make(
       }
     });
 
-    yield* reportFailures(Effect.provide(program, SessionClient.layer(apiUrl)));
+    yield* reportFailures(
+      Effect.provide(
+        program,
+        Layer.merge(SessionClient.layer(apiUrl), ServerClient.layer(apiUrl)),
+      ),
+    );
   }),
 ).pipe(
   Command.withDescription(

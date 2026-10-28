@@ -1941,6 +1941,8 @@ const BOARD_READS = new Set([
   "listApprovals",
   // The rail's "Needs a person" count (LOB-271) polls it from every page.
   "listAttention",
+  // The shell's faux banner (LOB-272) reads it on every page.
+  "getServerInfo",
 ]);
 const boardRpcTags = [];
 const recordRpcTags = (request) => {
@@ -3564,6 +3566,107 @@ assert(
   "and the link opens beside the live pane, not over it",
   prTarget === "_blank",
   `target=${prTarget}`,
+);
+
+// Feature: the model backend and each session's model are on screen (LOB-272). This instance runs
+// `MODEL_BACKEND=faux`, so every route carries the `role="alert"` banner and the session the PR block
+// opened shows its `provider/model` in the pane header and its list row. The oracle for the model is
+// the server's own `getSession`/`getServerInfo`, read from this process. The anthropic half (no
+// banner, `anthropic/claude-sonnet-5-5`) is `backend.sh`'s own instance. See features/backend-badge.md.
+const info = await callRpcOnce("getServerInfo", {});
+const banner = page.locator("[data-backend-banner]");
+const bannerState = async (route) => {
+  await page.goto(`${WEB_URL}${route}`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("nav[aria-label='Sections']", { timeout: 15_000 });
+  await banner
+    .first()
+    .waitFor({ timeout: 15_000 })
+    .catch(() => undefined);
+  const present = (await banner.count()) > 0;
+  return {
+    route,
+    present,
+    role: present ? await banner.first().getAttribute("role") : null,
+    text: present ? (await banner.first().innerText()).trim() : "",
+  };
+};
+const fauxBanner =
+  "Scripted model (faux): sessions do not reach a real model. Set ANTHROPIC_API_KEY in the repo-root .env and restart.";
+const onSessions = await bannerState("/sessions");
+await page.screenshot({ path: path.join(EVIDENCE_DIR, "backend-banner.png") });
+const onBoard = await bannerState(`/boards/${boardId}`);
+const onSpend = await bannerState("/spend");
+observed.backendBanner = { info: info.value, onSessions, onBoard, onSpend };
+assert(
+  "the server reports the faux backend",
+  info.value?.backend === "faux",
+  `getServerInfo backend=${info.value?.backend}`,
+);
+assert(
+  "/sessions carries the faux banner as an alert, in the issue's words",
+  onSessions.present &&
+    onSessions.role === "alert" &&
+    onSessions.text.startsWith(fauxBanner),
+  JSON.stringify(onSessions).slice(0, 220),
+);
+assert(
+  "a board carries the same banner",
+  boardId !== "" &&
+    onBoard.present &&
+    onBoard.role === "alert" &&
+    onBoard.text.startsWith(fauxBanner),
+  JSON.stringify(onBoard).slice(0, 220),
+);
+assert(
+  "so does a page that is not about sessions (/spend)",
+  onSpend.present && onSpend.text.startsWith(fauxBanner),
+  JSON.stringify(onSpend).slice(0, 160),
+);
+
+const modelRead =
+  seeded.sessionId === ""
+    ? { value: null }
+    : await callRpcOnce("getSession", { sessionId: seeded.sessionId });
+const recordedModel = modelRead.value?.session?.model ?? null;
+await page.goto(`${WEB_URL}/sessions/${seeded.sessionId}`, {
+  waitUntil: "domcontentloaded",
+});
+const paneModel = page.locator("header [data-session-model]");
+await paneModel
+  .first()
+  .waitFor({ timeout: 20_000 })
+  .catch(() => undefined);
+const paneModelText =
+  (await paneModel.count()) > 0
+    ? (await paneModel.first().innerText()).trim()
+    : null;
+const rowModel = page.locator(
+  `aside a[href='/sessions/${seeded.sessionId}'] [data-session-model]`,
+);
+await rowModel
+  .first()
+  .waitFor({ timeout: 20_000 })
+  .catch(() => undefined);
+const rowModelText =
+  (await rowModel.count()) > 0
+    ? (await rowModel.first().innerText()).trim()
+    : null;
+await page.screenshot({ path: path.join(EVIDENCE_DIR, "session-model.png") });
+observed.sessionModel = { recordedModel, paneModelText, rowModelText };
+assert(
+  "the server records the session's model, faux/faux-1 under faux",
+  recordedModel === "faux/faux-1",
+  `getSession model=${recordedModel}`,
+);
+assert(
+  "the pane header shows the session's provider/model",
+  recordedModel !== null && paneModelText === recordedModel,
+  `pane=${paneModelText} recorded=${recordedModel}`,
+);
+assert(
+  "its row in the session list shows the same model",
+  recordedModel !== null && rowModelText === recordedModel,
+  `row=${rowModelText} recorded=${recordedModel}`,
 );
 
 observed.consoleErrors = consoleErrors;
