@@ -110,11 +110,17 @@ describe("factory handoff's card (S-local-agent-handoff-mcp)", () => {
         Effect.flip,
       ),
     );
-    expect(malformed.message).toBe('--board "board-1" is not a board id (brd_…)');
-    const unnamed = await Effect.runPromise(
-      handoffRepo(undefined, { ...collected, repo: undefined }).pipe(Effect.flip),
+    expect(malformed.message).toBe(
+      '--board "board-1" is not a board id (brd_…)',
     );
-    expect(unnamed.message).toContain("name the one the factory knows it by with --repo");
+    const unnamed = await Effect.runPromise(
+      handoffRepo(undefined, { ...collected, repo: undefined }).pipe(
+        Effect.flip,
+      ),
+    );
+    expect(unnamed.message).toContain(
+      "name the one the factory knows it by with --repo",
+    );
     expect(await Effect.runPromise(handoffRepo(undefined, collected))).toBe(
       "acme/widget",
     );

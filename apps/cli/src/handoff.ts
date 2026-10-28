@@ -130,7 +130,10 @@ const said = (run: GitRun): string =>
  * or `git@host:owner/name(.git)`. `undefined` for anything else (a local path, a nested group).
  */
 export const repoFromRemoteUrl = (url: string): RepoSlug | undefined => {
-  const trimmed = url.trim().replace(/\/+$/, "").replace(/\.git$/i, "");
+  const trimmed = url
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\.git$/i, "");
   const scp = /^[^@/\s]+@[^:/\s]+:([^/\s]+\/[^/\s]+)$/.exec(trimmed);
   const web = /^[a-z][a-z0-9+.-]*:\/\/[^/\s]+\/([^/\s]+\/[^/\s]+)$/i.exec(
     trimmed,
@@ -202,9 +205,7 @@ export const collectHandoff = (input: {
 }): Effect.Effect<
   CollectedHandoff,
   HandoffRefused,
-  | ChildProcessSpawner.ChildProcessSpawner
-  | FileSystem.FileSystem
-  | Path.Path
+  ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
 > =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;

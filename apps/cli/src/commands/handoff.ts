@@ -128,7 +128,9 @@ export const handOff = Effect.fnUntraced(function* <B, S>(
     handoff: collected.handoff,
     actor: input.actor,
   });
-  yield* emit(`task    ${card.id} revision ${card.revision} column ${card.column}`);
+  yield* emit(
+    `task    ${card.id} revision ${card.revision} column ${card.column}`,
+  );
   yield* emit(
     `handoff ${collected.files.length} file${collected.files.length === 1 ? "" : "s"}, ${collected.bytes} bytes from ${collected.handoff.branch ?? "a detached HEAD"} at ${(collected.handoff.baseCommit ?? "").slice(0, 12)} onto ${collected.baseRef}`,
   );

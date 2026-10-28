@@ -11,10 +11,7 @@ import {
   SessionId,
   WhenBusy,
 } from "@repo/domain/Session";
-import type {
-  SendMessageResult,
-  SessionSnapshot,
-} from "@repo/domain/Session";
+import type { SendMessageResult, SessionSnapshot } from "@repo/domain/Session";
 import { TaskId, TaskPriority } from "@repo/domain/Task";
 import type { Task, TaskComment, TaskRun } from "@repo/domain/Task";
 import { resolveApiUrl } from "../api";
@@ -187,7 +184,10 @@ const AnswerQuestion = Tool.make("answer_question", {
     taskId: described(Schema.String, "The card, tsk_…"),
     answer: described(Schema.String, "The answer, in markdown"),
     start: Schema.optionalKey(
-      described(Schema.Boolean, "Start the next run on the card after answering"),
+      described(
+        Schema.Boolean,
+        "Start the next run on the card after answering",
+      ),
     ),
   }),
   success: Schema.Struct({
@@ -207,7 +207,9 @@ const Handoff = Tool.make("handoff", {
       Schema.String,
       "What the factory session should do with the work: the card's body, its first line the title",
     ),
-    title: optionalString("The card's title (defaults to the note's first line)"),
+    title: optionalString(
+      "The card's title (defaults to the note's first line)",
+    ),
     base: optionalString(
       "The branch the run starts from (defaults to the remote's default branch)",
     ),
@@ -449,10 +451,7 @@ export const mcpHandlers = <B, S>(
         `card ${card.id} "${card.title}" is in ${card.column} (revision ${card.revision})${blocked === undefined ? "" : `, blocked ${blocked}`}`,
         ...(question === undefined
           ? []
-          : [
-              `its run asked: ${question}`,
-              "answer it with answer_question",
-            ]),
+          : [`its run asked: ${question}`, "answer it with answer_question"]),
         runs.length === 0
           ? "no run has been started on it: start one with start_run"
           : `${runs.length} run${runs.length === 1 ? "" : "s"}; the newest is ${latest?.sessionId} in ${latest?.column}`,
@@ -466,9 +465,7 @@ export const mcpHandlers = <B, S>(
         ...(blocked === undefined ? {} : { blocked }),
         ...(question === undefined ? {} : { question }),
         ...(latest === undefined ? {} : { sessionId: latest.sessionId }),
-        ...(snapshot === undefined
-          ? {}
-          : { status: snapshot.session.status }),
+        ...(snapshot === undefined ? {} : { status: snapshot.session.status }),
         ...(snapshot?.session.prUrl === undefined
           ? {}
           : { prUrl: snapshot.session.prUrl }),
@@ -557,8 +554,7 @@ export const mcpHandlers = <B, S>(
         cwd: options.dir,
         base: params.base,
       });
-      const repo =
-        options.repo ?? (yield* handoffRepo(undefined, collected));
+      const repo = options.repo ?? (yield* handoffRepo(undefined, collected));
       const out = printed();
       const { card, sessionId } = yield* handOff(
         client,
@@ -700,7 +696,8 @@ export const mcpCommand = Command.make(
   ),
   Command.withExamples([
     {
-      command: "claude mcp add factory -- factory mcp --api http://localhost:9000",
+      command:
+        "claude mcp add factory -- factory mcp --api http://localhost:9000",
       description:
         "Claude Code launches it in the checkout: create_card, start_run, send_message, get_status, answer_question, handoff",
     },

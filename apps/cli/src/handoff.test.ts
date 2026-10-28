@@ -67,10 +67,7 @@ const collect = (input: Parameters<typeof collectHandoff>[0]) =>
 
 const refusal = (input: Parameters<typeof collectHandoff>[0]) =>
   Effect.runPromise(
-    collectHandoff(input).pipe(
-      Effect.flip,
-      Effect.provide(BunServices.layer),
-    ),
+    collectHandoff(input).pipe(Effect.flip, Effect.provide(BunServices.layer)),
   );
 
 describe("collectHandoff (S-local-agent-handoff-mcp)", () => {

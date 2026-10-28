@@ -143,11 +143,7 @@ export const applyHandoff = (input: {
         message: `the card's handoff patch does not apply on this run's base: ${said(applied)}`,
       });
     }
-    const staged = yield* git(input.worktree, [
-      "diff",
-      "--cached",
-      "--quiet",
-    ]);
+    const staged = yield* git(input.worktree, ["diff", "--cached", "--quiet"]);
     if (staged.exitCode === 0) return undefined;
     const files = handoffPatchFiles(input.patch);
     const from =

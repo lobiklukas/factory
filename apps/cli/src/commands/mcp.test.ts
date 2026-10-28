@@ -71,7 +71,10 @@ const fake = (
   const client: McpClient<SessionError, SessionError> = {
     listBoards: () =>
       failing(() => [
-        { id: "brd_01dddddddddddddddddddddddd" as never, repo: "acme/other" as never },
+        {
+          id: "brd_01dddddddddddddddddddddddd" as never,
+          repo: "acme/other" as never,
+        },
         { id: BOARD as never, repo: "acme/widget" as never },
       ]),
     createTask: (input) =>
@@ -107,7 +110,11 @@ const fake = (
           createdAt: "2026-10-28T00:00:00.000Z",
           prUrl: "https://github.com/acme/widget/pull/7",
         },
-        workspace: { path: "/tmp/w", commands: {}, commandsSource: "none" as never },
+        workspace: {
+          path: "/tmp/w",
+          commands: {},
+          commandsSource: "none" as never,
+        },
         entries: [
           { id: "1", kind: "user" as const, text: "go", toolCalls: [] },
           {
@@ -350,8 +357,11 @@ describe("the MCP tools (S-local-agent-handoff-mcp)", () => {
       fail: { _tag: "RpcClientError", message: "HttpError: " },
     });
     expect(
-      (await refused(mcpHandlers(down.client, options()).get_status({ taskId: TASK })))
-        .message,
+      (
+        await refused(
+          mcpHandlers(down.client, options()).get_status({ taskId: TASK }),
+        )
+      ).message,
     ).toBe(
       `unreachable: the factory control plane at ${API} did not answer (HttpError): start it, or point this server at it with --api or FACTORY_API_URL`,
     );
@@ -359,9 +369,11 @@ describe("the MCP tools (S-local-agent-handoff-mcp)", () => {
       fail: new SessionError({ code: "not_found", message: `no task ${TASK}` }),
     });
     expect(
-      (await refused(
-        mcpHandlers(missing.client, options()).get_status({ taskId: TASK }),
-      )).message,
+      (
+        await refused(
+          mcpHandlers(missing.client, options()).get_status({ taskId: TASK }),
+        )
+      ).message,
     ).toBe(`not_found: no task ${TASK}`);
   });
 });
