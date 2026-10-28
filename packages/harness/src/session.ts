@@ -113,6 +113,8 @@ import {
   ReviewDoc,
   ReplayDoc,
   PLAN_REVISIONS_DOC_KIND,
+  POLICY_DOC_KIND,
+  PolicyDoc,
   REPO_PROMPT_DOC_KIND,
   RepoPromptDoc,
   SKILLS_DOC_KIND,
@@ -170,6 +172,8 @@ import {
   policyExtension,
   readOnlyStagePolicy,
   type ApprovalAsker,
+  type AutonomyRules,
+  type RepoPolicy,
   type SessionPolicy,
 } from "./policy";
 import {
@@ -382,6 +386,13 @@ export type OpenSessionOptions = {
    * can reach by forgetting an argument.
    */
   readonly policy?: SessionPolicy;
+  /**
+   * Where the repository's half of `policy` came from and what it declared (S-factory-config-as-code,
+   * `PolicyDoc`): committed in the open's one commit beside the rules `policy` resolved, so the log
+   * says what the run was allowed to do. Absent: nothing is recorded — a caller that is not the
+   * control plane, which has no repository policy to tell.
+   */
+  readonly policyRecord?: PolicyRecordInput;
   /**
    * How a gated call asks a person (D15, LOB-52). The recorder is the control plane's approvals
    * service, so it is handed in here rather than imported. A session with no asker still gates: a
@@ -781,6 +792,11 @@ const openSessionIn = (
           : recordedRepo !== undefined
             ? null
             : undefined,
+        // The rules the hooks above were built from, which are the column's narrowing of `policy`
+        // only where the hooks narrow writes: the record says what the run may run and reach.
+        options.policyRecord === undefined
+          ? undefined
+          : policyRecordOf(options.policyRecord, policy.rules),
       );
 
       // Last, once the harness is fully set up (LOB-25): a run a dead process left in the log carries
@@ -882,6 +898,8 @@ export const writePagePrompt = (
    * did, so the record never names sections the prompt no longer carries; absent leaves it alone.
    */
   repoPrompt?: RepoPromptRecord | null,
+  /** The policy the run meets (S-factory-config-as-code, `PolicyDoc`); absent leaves it alone. */
+  policyRecord?: PolicyRecord,
 ): Effect.Effect<void, SessionError> =>
   attempt("write page prompt", () =>
     conversation.commit(
@@ -942,6 +960,32 @@ export const writePagePrompt = (
                       shadowed: [...repoPrompt.skills.shadowed],
                     };
                   }),
+            policyRecord === undefined
+              ? Promise.resolve()
+              : tx.doc(PolicyDoc, conversation.id).then((doc) => {
+                  doc.source =
+                    policyRecord.source === null
+                      ? null
+                      : { ...policyRecord.source };
+                  doc.repo = {
+                    approvalRequired: [...policyRecord.repo.approvalRequired],
+                    denied: [...policyRecord.repo.denied],
+                    allowedHosts:
+                      policyRecord.repo.allowedHosts === null
+                        ? null
+                        : [...policyRecord.repo.allowedHosts],
+                  };
+                  doc.effective = {
+                    approvalRequired: [
+                      ...policyRecord.effective.approvalRequired,
+                    ],
+                    denied: [...policyRecord.effective.denied],
+                    allowedHosts: [...policyRecord.effective.allowedHosts],
+                    pushRefPrefixes: [
+                      ...policyRecord.effective.pushRefPrefixes,
+                    ],
+                  };
+                }),
           ]).then(() => undefined),
         ),
       BACKGROUND_CONTEXT,
@@ -999,6 +1043,103 @@ export const readSkillPins = (
       }
     }
     return pins;
+  });
+
+/** Where a repository's policy was read (`PolicyDoc.source`). */
+export type RepoPolicySource = {
+  /** The ref the base was read at: the session's base, or the fetched tip it was cut from. */
+  readonly ref: string;
+  /** The commit `ref` named when it was read. */
+  readonly commit: string;
+  /** The config's path in that commit: `.factory/config`, under a subdirectory checkout's prefix. */
+  readonly path: string;
+  /** Whether the commit holds a config at all: `false` is a repository that declares nothing. */
+  readonly found: boolean;
+};
+
+/** What the control plane tells an open about the repository's policy (`policyRecord`). */
+export type PolicyRecordInput = {
+  /** `null`: no repository, or a base that did not resolve, so nothing was read. */
+  readonly source: RepoPolicySource | null;
+  readonly repo: RepoPolicy;
+};
+
+/** The policy a run meets, as the log records it (`PolicyDoc`). */
+export type PolicyRecord = {
+  readonly source: RepoPolicySource | null;
+  readonly repo: {
+    readonly approvalRequired: readonly string[];
+    readonly denied: readonly string[];
+    /** `null`: the repository does not narrow the deployment's allowlist. */
+    readonly allowedHosts: readonly string[] | null;
+  };
+  readonly effective: {
+    readonly approvalRequired: readonly string[];
+    readonly denied: readonly string[];
+    readonly allowedHosts: readonly string[];
+    readonly pushRefPrefixes: readonly string[];
+  };
+};
+
+/** The record of an open: the repository's half as given, the effective half from the rules. */
+export const policyRecordOf = (
+  input: PolicyRecordInput,
+  rules: AutonomyRules,
+): PolicyRecord => ({
+  source: input.source,
+  repo: {
+    approvalRequired: input.repo.approvalRequired,
+    denied: input.repo.denied,
+    allowedHosts: input.repo.allowedHosts ?? null,
+  },
+  effective: {
+    approvalRequired: rules.approvalRequired,
+    denied: rules.denied,
+    allowedHosts: rules.allowedHosts,
+    pushRefPrefixes: rules.pushRefPrefixes,
+  },
+});
+
+const Strings = Schema.Array(Schema.String);
+
+/** The record's shape, as a reader of the log checks it (`readPolicyRecord`). */
+const PolicyRecordSchema = Schema.Struct({
+  source: Schema.NullOr(
+    Schema.Struct({
+      ref: Schema.String,
+      commit: Schema.String,
+      path: Schema.String,
+      found: Schema.Boolean,
+    }),
+  ),
+  repo: Schema.Struct({
+    approvalRequired: Strings,
+    denied: Strings,
+    allowedHosts: Schema.NullOr(Strings),
+  }),
+  effective: Schema.Struct({
+    approvalRequired: Strings,
+    denied: Strings,
+    allowedHosts: Strings,
+    pushRefPrefixes: Strings,
+  }),
+});
+
+/**
+ * The policy a session's last open recorded (S-factory-config-as-code), read without owning the
+ * log: what the control plane pins the repository's half from on a reopen, and what a reader checks
+ * to learn what a run was allowed. `undefined` for a log no open recorded one in — a log older than
+ * the record, or one only a caller other than the control plane opened — and for a value that is not
+ * the record's shape, which is never trusted half-read.
+ */
+export const readPolicyRecord = (
+  storage: Storage,
+): Effect.Effect<PolicyRecord | undefined, SessionError> =>
+  Effect.map(readDocument(storage, POLICY_DOC_KIND), (value) => {
+    if (value === undefined) return undefined;
+    return Option.getOrUndefined(
+      Schema.decodeUnknownOption(PolicyRecordSchema)(value),
+    );
   });
 
 /**
