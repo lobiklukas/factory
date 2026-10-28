@@ -13,7 +13,9 @@ already exports to: `apps/api` and `apps/cli` send OTLP logs and traces when `MO
 - OTLP traces: `POST /v1/traces`
 - Query API: `GET /api/*` — spec at `GET /openapi.json`
 - Services: `factory-api` (apps/api), `factory-cli` (apps/cli)
-- No metrics: the exporters in this repo cover logs and traces only.
+- No metrics: motel ingests logs and traces only. `apps/api` exports metrics over OTLP to
+  `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, a different receiver (`docs/metrics.md`); motel is never
+  where a metric is read.
 
 ## Workflow
 

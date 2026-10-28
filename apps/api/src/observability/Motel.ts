@@ -14,7 +14,8 @@ import {
  * `bun run motel` — that server is the reader for what this layer writes.
  *
  * Logs and traces only: those are the two signals motel ingests, so adding metrics
- * would just mean a POST to a path that answers 404 and a retry loop with it.
+ * would just mean a POST to a path that answers 404 and a retry loop with it. Metrics have
+ * their own exporter and endpoint (`./OtlpMetrics.ts`).
  */
 const MotelConfig = Config.all({
   baseUrl: Config.option(Config.String("MOTEL_URL")),

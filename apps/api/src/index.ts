@@ -74,6 +74,7 @@ import {
 } from "./ModelBackend";
 import { DevToolsLive } from "./observability/DevTools";
 import { MotelLive } from "./observability/Motel";
+import { OtlpMetricsLive } from "./observability/OtlpMetrics";
 
 /**
  * Cap on an HTTP request body, in bytes (LOB-21). The largest legitimate request here is an RPC
@@ -489,6 +490,7 @@ const ServerLayers = Layer.mergeAll(
   BunHttpServer.layerConfig(ServerConfig),
   DevToolsLive,
   MotelLive,
+  OtlpMetricsLive,
 );
 
 const HttpLive = Effect.gen(function* () {
