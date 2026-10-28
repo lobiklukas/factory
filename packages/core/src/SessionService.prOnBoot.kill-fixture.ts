@@ -26,7 +26,15 @@ import {
 } from "@repo/domain/Task";
 import { createFauxModelAccess } from "@repo/harness";
 import { DatabaseLive } from "@repo/storage-postgres";
-import { Console, Context, Effect, Layer, Option, Redacted } from "effect";
+import {
+  Console,
+  Context,
+  Deferred,
+  Effect,
+  Layer,
+  Option,
+  Redacted,
+} from "effect";
 import { HttpClient } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
@@ -35,16 +43,13 @@ import { TaskService, TaskServiceLive } from "./TaskService";
 
 const [root = "", repo = "", checkout = ""] = process.argv.slice(2);
 
-/** Resolved by the forge's first request: the step is inside its GitHub call. */
-let asked: () => void = () => {};
-const inTheCall = new Promise<void>((resolve) => {
-  asked = resolve;
-});
+/** Completed by the forge's first request: the step is inside its GitHub call. */
+const inTheCall = Deferred.makeUnsafe<void, never>();
 
 const forge = Context.make(
   HttpClient.HttpClient,
   HttpClient.make(() =>
-    Effect.sync(() => asked()).pipe(Effect.andThen(Effect.never)),
+    Deferred.succeed(inTheCall, undefined).pipe(Effect.andThen(Effect.never)),
   ),
 ).pipe(
   Context.add(
@@ -93,7 +98,7 @@ const program = Effect.gen(function* () {
     taskColumn: "building",
   });
   yield* sessions.send({ sessionId: created.id, content: "build it" });
-  yield* Effect.promise(() => inTheCall);
+  yield* Deferred.await(inTheCall);
   const worktree = (yield* sessions.get(created.id)).workspace.path;
   yield* Console.log(`READY ${created.id} ${card.id} ${worktree}`);
   return yield* Effect.never;

@@ -63,7 +63,8 @@ const fakeForge = HttpClient.make((request, url) =>
         ? new TextDecoder().decode(request.body.body)
         : "{}";
     const sent = JSON.parse(body) as Record<string, unknown>;
-    forge.push({ head: String(sent["head"] ?? "") });
+    const head = sent["head"];
+    forge.push({ head: typeof head === "string" ? head : "" });
     nextNumber += 1;
     const [, , owner, repo] = url.pathname.split("/");
     return HttpClientResponse.fromWeb(
