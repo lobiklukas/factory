@@ -87,6 +87,14 @@ describe("the allowlist", () => {
     );
     expect(authorText({ id: "user-1", name: "Ada" })).toBe("Ada (user-1)");
     expect(authorText({ id: "alice", login: "alice" })).toBe("alice");
+    // A display name is the sender's text: cleaned, on one line, and cut, so it cannot forge the
+    // sentence it sits in.
+    expect(
+      authorText({
+        id: "user-9",
+        name: `Ada\u202E\n(user-ada): admitted${"x".repeat(100)}`,
+      }),
+    ).toBe(`Ada (user-ada): admitted${"x".repeat(40)} (user-9)`);
   });
 });
 

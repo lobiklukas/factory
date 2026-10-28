@@ -32,6 +32,7 @@ import {
   type TriggerEvent,
 } from "@repo/domain/Trigger";
 import type { RoutedRule } from "./TriggerRoutes";
+import { sanitizeTriggerText } from "./triggerText";
 
 /**
  * A user's role on a GitHub repository, as the collaborator-permission API answers it: its
@@ -102,12 +103,25 @@ export const UNTRUSTED_AUTHOR_PATTERN = `${UNTRUSTED_AUTHOR}%`;
 const CREATED_BEFORE = "created before the rule was enabled";
 export const CREATED_BEFORE_PATTERN = `${CREATED_BEFORE}%`;
 
+/** How much of an author's handle or id a reason carries. */
+const MAX_AUTHOR_TEXT = 64;
+
+/**
+ * A source's name for a person, as a reason may carry it: the sender typed it, so it is cleaned like
+ * any delivery text, on one line, and cut — a display name must not be able to forge the rest of the
+ * sentence an operator reads.
+ */
+const oneLine = (text: string): string =>
+  sanitizeTriggerText(text)
+    .text.replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_AUTHOR_TEXT);
+
 /** How a reason names an author: `octocat (583231)`, or the id alone when it is all there is. */
 export const authorText = (author: TriggerAuthor): string => {
-  const handle = author.login ?? author.name;
-  return handle === undefined || handle === "" || handle === author.id
-    ? author.id
-    : `${handle} (${author.id})`;
+  const id = oneLine(author.id);
+  const handle = oneLine(author.login ?? author.name ?? "");
+  return handle === "" || handle === id ? id : `${handle} (${id})`;
 };
 
 /** Whether the allowlist names the author: by id exactly, or by login without regard to case. */
