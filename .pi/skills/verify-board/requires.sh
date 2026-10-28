@@ -41,7 +41,10 @@
 #   7. head C passes   a second push reverts the regression; its reviewer passes
 #   8. back to B, to C a force-push back to head B replays B's run and opens none: C's pass is the
 #                      newest run, yet the move is refused on B's fail (review_heads); back at C, the
-#                      same move goes through to `done`
+#                      same move is held on `human_merge` while the PR is open (C20)
+#   9. the merge read  the PR is merged on the GitHub fake and no webhook tells the API: the move's
+#                      read of the PR's state finds the merge, records it, and the same move goes
+#                      through to `done` — the fallback a box with no webhook has
 #
 # Each review run's change is `change.sh` beside the fixture, rewritten before the run starts, so
 # FAUX_COMMAND stays one fixed `bash <run dir>/change.sh`. Since C19 every run after the first
@@ -500,10 +503,24 @@ check "after a force-push back to head B, B's fail refuses review → done again
   "$([ "$rc" != "0" ] && grep -qF "#${PR_URL##*/} at ${HEAD_B:0:12} failed correctness" "$EVIDENCE_DIR/requires-refused-back.txt" && echo 0 || echo 1)" \
   "exit=$rc"
 review_head c-again synchronize "$HEAD_C" replay
+rc="$(cli requires-unmerged.txt board move --task "$TASK_ID" --to done --expect-revision "$REVISION")"
+check "back at head C, whose reviewer passed, review → done is held on human_merge while the PR is open" \
+  "$([ "$rc" != "0" ] && grep -qF "error: requirement_unmet: the move review → done needs \"human_merge\" (a human merge (B5's merge gate)), which is not met: no merge of the card's PR $PR_URL is on record" "$EVIDENCE_DIR/requires-unmerged.txt" && echo 0 || echo 1)" \
+  "exit=$rc $(head -1 "$EVIDENCE_DIR/requires-unmerged.txt" | cut -c1-140)"
+
+# --- 9. the merge, with no webhook: the move reads the PR's state (C20) ------------------------------
+# The person merges the PR in GitHub — the fake's merge endpoint — and nothing delivers the event: the
+# move into done asks the forge for the PR's state, records the merge on the card's runs, and passes.
+MERGED="$(curl -s -o "$EVIDENCE_DIR/requires-forge-merge.json" -w '%{http_code}' -X PUT "http://127.0.0.1:$GITHUB_PORT/repos/$REPO_SLUG/pulls/${PR_URL##*/}/merge")"
+check "the PR is merged on the GitHub fake, as a person's merge in GitHub" \
+  "$([ "$MERGED" = "200" ] && echo 0 || echo 1)" "PUT .../merge answered ${MERGED:-nothing}"
 rc="$(cli requires-done.txt board move --task "$TASK_ID" --to done --expect-revision "$REVISION")"
-check "back at head C, whose reviewer passed, the same review → done goes through" \
+check "once the PR merged, the same review → done goes through on the PR state the move read" \
   "$([ "$rc" = "0" ] && grep -q "moved $TASK_ID to done (revision $((REVISION + 1)))" "$EVIDENCE_DIR/requires-done.txt" && echo 0 || echo 1)" \
   "exit=$rc"
+STATE_READS="$(LEDGER="$LEDGER" PR="${PR_URL##*/}" bun -e 'const l = JSON.parse(require("node:fs").readFileSync(process.env.LEDGER, "utf8")); console.log(l.requests.filter((r) => r.method === "GET" && r.path.endsWith(`/pulls/${process.env.PR}`)).length)')"
+check "and the merge was learned by reading the PR's state from the forge, not from a delivery" \
+  "$([ "${STATE_READS:-0}" -ge 1 ] && echo 0 || echo 1)" "GET .../pulls/${PR_URL##*/}: ${STATE_READS:-0}"
 
 stop_api
 cp "$LOG" "$EVIDENCE_DIR/requires-api.log"

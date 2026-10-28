@@ -147,6 +147,21 @@ describe("blockedLabel", () => {
       ),
     ).toBe("blocked · setup failed");
   });
+
+  it("names a card whose PR closed without being merged (C20)", () => {
+    expect(
+      blockedLabel(
+        card("a", "review", {
+          blocked: {
+            reason: "pr_closed",
+            column: "review",
+            note: "pull request #7 (https://github.com/o/r/pull/7) was closed without being merged",
+            since: AT,
+          },
+        }),
+      ),
+    ).toBe("blocked · PR closed");
+  });
 });
 
 /** The default pipeline's columns and kinds (B4), as the seeded definition declares them. */

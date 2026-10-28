@@ -1,9 +1,13 @@
 // The loopback GitHub fake the PR step is driven against (LOB-179).
 //
-// Exactly two routes, because the PR client calls exactly two: `POST /repos/:owner/:repo/pulls`
-// creates a pull request, and `GET /repos/:owner/:repo/pulls?head=&base=` answers the one that
-// already exists for a head and base. Everything else is a 404 on purpose — a fake that answers
-// more than the client calls would hide a wrong URL instead of failing on it.
+// The routes the factory's PR clients call: `POST /repos/:owner/:repo/pulls` creates a pull request,
+// `GET /repos/:owner/:repo/pulls?head=&base=` answers the one that already exists for a head and base,
+// and `GET /repos/:owner/:repo/pulls/:number` answers one PR's state (C20: the PR-state read when a
+// card is opened). Two more are GitHub's own merge and close (`PUT .../pulls/:number/merge`,
+// `PATCH .../pulls/:number` with `{"state":"closed"}`), which nothing in the factory calls: a drive
+// calls them, as a person's click in GitHub would, so the state read has something to find.
+// Everything else is a 404 on purpose — a fake that answers more than the clients call would hide a
+// wrong URL instead of failing on it.
 //
 // The ledger is a **file**, not memory, and that is the whole point: the process being proved is
 // killed between its request and its acknowledgement, so the record of what the client asked for
@@ -38,6 +42,10 @@ type Ledger = {
     readonly base: string;
     /** The head's sha on the git side when the PR was opened, under `GITHUB_FAKE_GIT_ROOT`. */
     readonly headSha?: string;
+    /** `closed` once a drive merged or closed it; absent is open. */
+    readonly state?: "open" | "closed";
+    /** When a drive merged it (`PUT .../merge`); absent while it is unmerged. */
+    readonly mergedAt?: string;
   }>;
 };
 
@@ -118,12 +126,103 @@ const json = (status: number, body: unknown): Response =>
   });
 
 const pullsRoute = /^\/repos\/([^/]+)\/([^/]+)\/pulls$/;
+const pullRoute = /^\/repos\/([^/]+)\/([^/]+)\/pulls\/(\d+)(\/merge)?$/;
+
+/** One PR's state as GitHub's REST API answers it: `state`, `merged`, `merged_at`, the merge commit. */
+const stateOf = (
+  owner: string,
+  repo: string,
+  pull: Ledger["pulls"][number],
+) => ({
+  ...answer(owner, repo, pull),
+  state: pull.state ?? "open",
+  merged: pull.mergedAt !== undefined,
+  merged_at: pull.mergedAt ?? null,
+  merge_commit_sha:
+    pull.mergedAt === undefined
+      ? null
+      : `${"c0".repeat(19)}${pull.number.toString(16).padStart(2, "0")}`,
+});
+
+/**
+ * `GET`, `PUT .../merge` and `PATCH` on one PR (module comment). A merge or a close is recorded in
+ * the ledger, so a later state read — the factory's — answers it.
+ */
+const onePull = async (
+  request: Request,
+  owner: string,
+  repo: string,
+  number: number,
+  merge: boolean,
+): Promise<Response> => {
+  const ledger = read();
+  const body =
+    request.method === "PATCH"
+      ? ((await request.json().catch(() => undefined)) as
+          | { state?: string }
+          | undefined)
+      : undefined;
+  write({
+    ...ledger,
+    requests: [
+      ...ledger.requests,
+      {
+        method: request.method,
+        path: new URL(request.url).pathname,
+        ...(body === undefined ? {} : { body }),
+      },
+    ],
+  });
+  // Looked up by the repository the URL names as well as the number: a PR opened under another
+  // `owner/repo` is a 404, as GitHub answers it, so a read built with the wrong slug fails here.
+  const page = `https://github.com/${owner}/${repo}/pull/${number}`;
+  const pull = read().pulls.find((candidate) => candidate.url === page);
+  if (pull === undefined) return json(404, { message: "Not Found" });
+  const update = (next: Ledger["pulls"][number]) => {
+    write({
+      ...read(),
+      pulls: read().pulls.map((candidate) =>
+        candidate.url === page ? next : candidate,
+      ),
+    });
+    return next;
+  };
+  if (merge && request.method === "PUT") {
+    if (pull.state === "closed")
+      return json(405, { message: "Pull Request is not mergeable" });
+    const merged = update({
+      ...pull,
+      state: "closed",
+      mergedAt: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    });
+    return json(200, {
+      merged: true,
+      sha: stateOf(owner, repo, merged).merge_commit_sha,
+    });
+  }
+  if (!merge && request.method === "PATCH") {
+    if (body?.state !== "closed")
+      return json(422, { message: "only state: closed is faked" });
+    return json(
+      200,
+      stateOf(owner, repo, update({ ...pull, state: "closed" })),
+    );
+  }
+  if (!merge && request.method === "GET")
+    return json(200, stateOf(owner, repo, pull));
+  return new Response("method not allowed", { status: 405 });
+};
 
 const server = Bun.serve({
   port,
   hostname: "127.0.0.1",
   fetch: async (request) => {
     const url = new URL(request.url);
+    const single = pullRoute.exec(url.pathname);
+    if (single !== null) {
+      const [, owner = "", repo = "", number = "0", merge] = single;
+      return onePull(request, owner, repo, Number(number), merge !== undefined);
+    }
     const route = pullsRoute.exec(url.pathname);
     if (route === null) {
       write({

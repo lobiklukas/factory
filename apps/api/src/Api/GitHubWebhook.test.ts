@@ -43,8 +43,11 @@ import {
   rebuildIndexes,
   SessionService,
   SessionServiceLive,
+  TaskService,
+  TaskServiceLive,
 } from "@repo/core";
 import { BranchName, RepoSlug, type SessionId } from "@repo/domain/Session";
+import { DEFAULT_DEFINITION_ID, DefinitionId } from "@repo/domain/Task";
 import { createFauxModelAccess, readSessionLog } from "@repo/harness";
 import {
   DatabaseLive,
@@ -766,5 +769,95 @@ describe("POST /webhooks/github records the merge on the session's log (LOB-44)"
       revert: { by: revert, at: "2026-10-23T11:00:00Z" },
     });
     expect(await mergeRow(odd.id)).toEqual(row);
+  }, 120_000);
+});
+
+describe("POST /webhooks/github settles the PR's card (C20)", () => {
+  let boards = 0;
+
+  /**
+   * A card in `review` on a board of its own (one board per repository, so a fresh repository over
+   * the same checkout), with one run that opened PR `number`.
+   */
+  const cardWithPr = (number: number) =>
+    inService(
+      Effect.gen(function* () {
+        const tasks = yield* TaskService;
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        boards += 1;
+        const cardRepo = RepoSlug.make(`acme/gh-card-${run}-${boards}`);
+        yield* sessions.registerRepo({ repo: cardRepo, localPath: checkout });
+        const board = yield* tasks.createBoard({
+          repo: cardRepo,
+          definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
+          definitionVersion: 1,
+        });
+        const card = yield* tasks.create({
+          boardId: board.id,
+          title: `card ${number}`,
+          actor: "person:lukas",
+        });
+        yield* sql`UPDATE tasks SET "column" = 'review', revision = 2 WHERE id = ${card.id}`;
+        const created = yield* sessions.create({
+          repo: cardRepo,
+          baseRef: "main",
+          taskId: card.id,
+          taskColumn: "building",
+        });
+        const url = `https://github.com/${cardRepo}/pull/${number}`;
+        yield* sql`UPDATE sessions SET pr_url = ${url} WHERE id = ${created.id}`;
+        return { taskId: card.id, url };
+      }).pipe(Effect.provide(TaskServiceLive)),
+    );
+
+  const cardOf = (taskId: string) =>
+    inService(
+      Effect.flatMap(TaskService, (tasks) => tasks.get(taskId)).pipe(
+        Effect.provide(TaskServiceLive),
+      ),
+    );
+
+  /** Mutation: leave the settle out of the route — the core suite passes and the card stays in review. */
+  it("moves a merged PR's card to done once across a redelivery, and blocks an unmerged close's", async () => {
+    const merged = await cardWithPr(61);
+    const response = await deliver(merge(61, merged.url));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      event: "merged",
+      cards: { done: 1, blocked: 0 },
+    });
+    expect(await cardOf(merged.taskId)).toMatchObject({
+      column: "done",
+      revision: 3,
+    });
+    const again = await deliver(merge(61, merged.url));
+    expect(again.status).toBe(200);
+    expect(await again.json()).not.toHaveProperty("cards");
+    expect(await cardOf(merged.taskId)).toMatchObject({
+      column: "done",
+      revision: 3,
+    });
+
+    const closed = await cardWithPr(62);
+    const answer = await deliver({
+      action: "closed",
+      pull_request: { number: 62, html_url: closed.url, merged: false },
+    });
+    expect(await answer.json()).toMatchObject({
+      cards: { done: 0, blocked: 1 },
+    });
+    expect(await cardOf(closed.taskId)).toMatchObject({
+      column: "review",
+      blocked: { reason: "pr_closed" },
+    });
+
+    // An unsigned merge settles nothing.
+    const unsigned = await cardWithPr(63);
+    expect(
+      (await deliver(merge(63, unsigned.url), () => "sha256=00")).status,
+    ).toBe(401);
+    expect(await cardOf(unsigned.taskId)).toMatchObject({ column: "review" });
   }, 120_000);
 });

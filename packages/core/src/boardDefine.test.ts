@@ -347,8 +347,8 @@ describe("authoredDefinitionFaults (D4)", () => {
   });
 
   /**
-   * Nothing reads `human_move` or `human_merge`: a move is a person's only when its transition names a
-   * `gate`. Mutation: accept the key anywhere — `todo`, whose moves name no gate, would show a gate
+   * A move is a person's only when its transition names a `gate` (`human_merge` is also checked
+   * against the card's PR's merge since C20, which says nothing of who moves). Mutation: accept the key anywhere — `todo`, whose moves name no gate, would show a gate
    * nothing holds a card to.
    */
   it("refuses a human-gate key on a column none of whose moves names a gate", () => {

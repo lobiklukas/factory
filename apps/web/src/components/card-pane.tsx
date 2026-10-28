@@ -367,12 +367,14 @@ const BLOCK_FROM: Readonly<Record<TaskBlocked["reason"], string>> = {
   capability: "missing a capability",
   transient: "a transient failure",
   setup_failed: "its worktree setup failing",
+  pr_closed: "its PR closed without being merged",
 };
 
 /**
  * What a blocked card is waiting on, in the words its block was given: for a run parked
  * `setup_failed` (S-env-setup) that is the step that failed, its exit code and its output's last
- * lines, which is what a person needs to fix the repo or the machine. A `needs_input` block's note
+ * lines, which is what a person needs to fix the repo or the machine, and for `pr_closed` (C20) the PR
+ * that closed unmerged. A `needs_input` block's note
  * is the question, which the thread below already shows, so it is not repeated.
  */
 const BlockNote = ({ task }: { readonly task: Task }) => {

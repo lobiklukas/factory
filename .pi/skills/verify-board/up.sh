@@ -179,6 +179,8 @@ if [ "$BOARD_GITHUB" = "fake" ]; then
     exit 1
   fi
   GITHUB_ENV=(GITHUB_API_URL="http://127.0.0.1:$GITHUB_PORT" GITHUB_TOKEN="verify-board-fake-token")
+  # The drive merges the PR on the fake (C20, `merge.ts`), so it needs to know where the fake is.
+  echo "$GITHUB_PORT" > "$RUN_DIR/github-port"
 else
   # Port 9 (discard) on loopback: nothing listens, so even a step that got past the missing
   # credential could not reach a real forge.

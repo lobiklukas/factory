@@ -113,7 +113,7 @@ precedent ("an index, not a projection").
 | `canceled`   | terminal | —           | —                                                                                                                          |
 
 `blocked` is a **card state**, not a column: a typed reason (`dependency | needs_input | capability |
-transient | setup_failed`) plus the column it blocked from, so a blocked card stays visible in its own
+transient | setup_failed | pr_closed`) plus the column it blocked from, so a blocked card stays visible in its own
 lane and there is no "return to where it was" ambiguity. A person parks and frees a card from the card pane or `factory board block` / `unblock`, and fixes its
 title or priority with `updateTask` (`factory board update`; C11), a revision-checked write that records
 a `retitled` / `priorityChanged` event per changed field. `setup_failed` is written by a run, not a
@@ -129,6 +129,23 @@ human gate can only be made by a person — recorded as such. `requires[]` is ch
 refusal names the failing requirement. In the MVP the two human gates are the plan approval
 (`planning → building`) and the merge (`review → done`); Mastra's third gate, acceptance of the task
 itself, is the recorded move that starts the first run.
+
+Built (C20): the merge gate reads the merge. `human_merge` is a checked requirement on a move into
+`done`: a person's move is refused naming it until a run of the card recorded GitHub's merge of the
+card's PR (`factory.merge`, LOB-44) — so a card cannot reach `done` while its PR is open or was closed
+unmerged. A card no run opened a PR for has no merge to wait on and meets it (a box with no forge,
+work that needed no PR): the actor gate holds that move alone, as before. The merge itself completes the card: a signed `pull_request` closed delivery
+(`POST /webhooks/github`) moves the card whose current PR it names — the newest PR a run of the card
+recorded — to `done`, from whichever column it is in and without its exit requirements (the work is on
+the base already), recorded by the actor `merge:<PR page>`, and its runs' workspaces are released; an
+unmerged close blocks it `pr_closed`, the note naming the PR. Both happen once however often GitHub
+redelivers (`TaskService.settlePullRequest`, under the card's row lock), and a close blocks the card
+once per PR, so a person who unblocks it carries on without the PR-state read blocking it again. A box GitHub cannot deliver to
+learns the same by asking: opening the card (`getTaskExit`, the card pane's checklist and `factory board
+show`) reads the PR's state (`GET …/pulls/{n}`, each answer kept 30 s, a failure 2 min, and a
+read that takes over 5 s given up on) and settles the card the way the
+delivery would, and a move into `done` reads it afresh and records a merge it finds, so the person's
+move goes through (`packages/core/src/cardPullRequest.ts`).
 
 ## B6 — Columns bind roles and skills; skills live in the factory
 
@@ -384,7 +401,7 @@ that run's newest turn ended on its own (`runTurnOf`): a run still working or pa
 failed or aborted model answer or one cut off at the output limit, one interrupted (C8) or one its
 budget stopped has not completed, and a card with no run started there has completed nothing. Since
 D10 `plan_doc` (`planning`) is checked the same way as `spec_doc`, by a `planned` event: `planning →
-building` with no plan is refused naming it. The `human_*` labels stay unchecked. The same verdicts feed `getTaskExit`,
+building` with no plan is refused naming it. The `human_move` label stays unchecked (`human_merge` is checked since C20, above). The same verdicts feed `getTaskExit`,
 which the card pane reads to list "Leaves <column> when" — each key `met`, `unmet` with the refusal's
 own reason, or `not checked` — and to say, before a click, why a move would be refused; the move stays
 clickable, because the server's answer is the decision. `factory board show` prints the same list

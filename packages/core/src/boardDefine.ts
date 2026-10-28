@@ -26,9 +26,10 @@
  *   release its cards' worktrees and its runs would count against caps forever, and a working `done`
  *   would tear a live card's worktrees down on arrival. Lifted when those readers read `kind`;
  * - **known requirement keys** (`KNOWN_REQUIREMENTS`), each declared once per column, and the human
- *   gate keys (`HUMAN_GATE_REQUIREMENTS`) only on a column with a gated move out: nothing reads
- *   `human_move` or `human_merge` — a move is a person's only when its transition names a `gate` — so
- *   one on a column with no gate is a gate the board would show and never hold a card to;
+ *   gate keys (`HUMAN_GATE_REQUIREMENTS`) only on a column with a gated move out: a move is a
+ *   person's only when its transition names a `gate` — `human_merge` is also checked, against the
+ *   card's PR's merge, on a move into `done` (C20), but that is no gate on who moves — so one on a
+ *   column with no gate is a gate the board would show and never hold a card to;
  * - **known skills**: every name a column binds is one the skill library holds (D7's `SkillService`),
  *   so a run never fails to start on `MissingSkill`;
  * - **known roles**, when the deployment's role table (`ROLE_MODELS`, B6) has any rows: a role

@@ -91,9 +91,12 @@ import {
   DefinitionSummary,
   gatedColumns,
   gatedExit,
+  HUMAN_MERGE_REQUIREMENT,
   initialColumnOf,
+  isTerminalColumn,
   isWebLink,
   LIST_BOARDS_LIMIT,
+  MERGED_COLUMN,
   MAX_TASK_BODY_CHARS,
   MAX_TASK_REF_CHARS,
   MAX_TASK_TITLE_CHARS,
@@ -120,6 +123,7 @@ import type {
 } from "@repo/domain/Task";
 import { SessionId } from "@repo/domain/Session";
 import {
+  readRecordedMerge,
   readRecordedPullRequest,
   readRunTurn,
   readRecordedReview,
@@ -475,6 +479,30 @@ export type DeclareSpecInput = {
   readonly specId?: string;
 };
 
+/**
+ * What GitHub reported about the card's PR (C20): it merged, or it was closed without being merged.
+ * No expected revision, for the ask's reason: the writer is the forge's event, not a person who read
+ * the card, and it lands on whatever revision the card is at.
+ */
+export type SettlePullRequestInput = {
+  readonly taskId: string;
+  readonly outcome: "merged" | "closed";
+  /** The PR by its page (`html_url`), which the actor and the block's note name. */
+  readonly pr: { readonly number: number; readonly url: string };
+};
+
+/** What `settlePullRequest` did: the card as it is now, and whether this call changed it. */
+export type SettledPullRequest = {
+  readonly task: Task;
+  readonly changed: boolean;
+};
+
+/** The actor a merge's move records (C20): the merge itself, naming the PR by its page. */
+export const mergeActor = (prUrl: string): Actor => `merge:${prUrl}`;
+
+/** The actor an unmerged close's block records (C20), naming the PR by its page. */
+export const closeActor = (prUrl: string): Actor => `pr-closed:${prUrl}`;
+
 /** A planning run's plan, as its `plan` tool posts it on the card (D10); `DeclareSpecInput`'s shape. */
 export type DeclarePlanInput = {
   readonly taskId: string;
@@ -589,6 +617,21 @@ export type TaskServiceShape = {
   readonly ask: (input: AskTaskInput) => Effect.Effect<Task, TaskError>;
   /** A run's own block of its card (`ParkRunInput`): a card already blocked keeps its block. */
   readonly parkRun: (input: ParkRunInput) => Effect.Effect<Task, TaskError>;
+  /**
+   * Settle the card on what GitHub reported about its PR (C20), exactly once however often it is
+   * reported. A merge moves the card to `done` from whichever column it is in, recorded as a `moved`
+   * event by `mergeActor`, and lifts any block it holds (an `unblocked` event first): the work is on
+   * the base, so the merge is the completion the merge gate stands for, not a move the card's exit
+   * requirements could refuse. An unmerged close blocks the card `pr_closed`, its note naming the PR,
+   * once per PR: a close of a PR that already blocked the card once (its `blocked` event by
+   * `closeActor`) leaves it as it is, so a person's unblock stands against the PR-state read that
+   * reports the same close on every read. A card already finished (`done`, `canceled`), a close on a
+   * card already blocked, and a merge on a card whose pinned definition declares no `done` column
+   * change nothing (`changed: false`).
+   */
+  readonly settlePullRequest: (
+    input: SettlePullRequestInput,
+  ) => Effect.Effect<SettledPullRequest, TaskError>;
   /** A comment; from a person on a card blocked `needs_input`, the answer that lifts the block. */
   readonly comment: (input: CommentTaskInput) => Effect.Effect<Task, TaskError>;
   /** The card's thread, oldest first: every `commented` event, verbatim. */
@@ -2196,10 +2239,24 @@ export const TaskServiceLive = Layer.effect(
                       ),
                     )
                   : undefined;
+              // GitHub's merge of the PR this run recorded, for `human_merge` (C20).
+              const merge = keys.has(HUMAN_MERGE_REQUIREMENT)
+                ? yield* readRecordedMerge(storage).pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new TaskStorageError({
+                          message: `task ${taskId}: run ${sessionId}'s merge record does not read: ${cause.message}`,
+                        }),
+                    ),
+                  )
+                : undefined;
               return {
                 sessionId,
                 column: startedIn,
                 calls,
+                ...(merge === undefined || merge.mergedAt === ""
+                  ? {}
+                  : { mergedPr: merge.url }),
                 ...(pr === undefined
                   ? {}
                   : {
@@ -2670,6 +2727,97 @@ export const TaskServiceLive = Layer.effect(
               revision: row.revision,
             });
             return yield* toTask(rows[0] as TaskRow);
+          }),
+        ),
+      );
+
+    const settlePullRequest = (
+      input: SettlePullRequestInput,
+    ): Effect.Effect<SettledPullRequest, TaskError> =>
+      withStorage(
+        sql.withTransaction(
+          Effect.gen(function* () {
+            const found = yield* lockTask(input.taskId);
+            if (Option.isNone(found)) {
+              return yield* new TaskNotFound({
+                taskId: input.taskId,
+                message: `no task ${input.taskId}`,
+              });
+            }
+            const row = found.value;
+            const unchanged = Effect.map(toTask(row), (task) => ({
+              task,
+              changed: false,
+            }));
+            // Under the lock, so a redelivery that waited on the first reads the card it left.
+            if (isTerminalColumn(row.column)) return yield* unchanged;
+            const taskId = TaskId.make(input.taskId);
+            if (input.outcome === "closed") {
+              if (row.blockedReason !== null) return yield* unchanged;
+              // One block per PR, not per report: the PR-state read reports the close on every read
+              // of the card, and a person who unblocked the card has answered it.
+              const reported = yield* sql<{ readonly one: number }>`
+                SELECT 1 AS one FROM task_events
+                WHERE task_id = ${input.taskId} AND kind = 'blocked'
+                  AND actor = ${closeActor(input.pr.url)}
+                LIMIT 1
+              `;
+              if (reported.length > 0) return yield* unchanged;
+              const rows = yield* sql<TaskRow>`
+                UPDATE tasks
+                SET blocked_reason = 'pr_closed', blocked_column = ${row.column},
+                    blocked_note = ${`pull request #${input.pr.number} (${input.pr.url}) was closed without being merged: reopen and merge it in GitHub, which moves the card to done, or unblock the card to go on (its next run pushes to the same PR's branch, which stays closed until someone reopens it)`},
+                    blocked_since = now(), revision = revision + 1, updated_at = now()
+                WHERE id = ${input.taskId}
+                RETURNING ${sql.literal(TASK_COLUMNS)}
+              `;
+              yield* appendEvent({
+                _tag: "blocked",
+                taskId,
+                reason: "pr_closed",
+                column: row.column,
+                actor: closeActor(input.pr.url),
+                revision: row.revision,
+              });
+              return { task: yield* toTask(rows[0] as TaskRow), changed: true };
+            }
+            const pinned = yield* pinnedColumn(input.taskId);
+            if (
+              pinned === undefined ||
+              !pinned.definition.columns.some(
+                (column) => column.name === MERGED_COLUMN,
+              )
+            )
+              return yield* unchanged;
+            const actor = mergeActor(input.pr.url);
+            // A block lifts with the merge: a finished card waits on nothing.
+            const blocked = row.blockedReason !== null;
+            if (blocked) {
+              yield* appendEvent({
+                _tag: "unblocked",
+                taskId,
+                actor,
+                revision: row.revision,
+              });
+            }
+            const moveRevision = blocked ? row.revision + 1 : row.revision;
+            const rows = yield* sql<TaskRow>`
+              UPDATE tasks
+              SET "column" = ${MERGED_COLUMN}, blocked_reason = NULL, blocked_column = NULL,
+                  blocked_note = NULL, blocked_since = NULL,
+                  revision = ${moveRevision + 1}, updated_at = now()
+              WHERE id = ${input.taskId}
+              RETURNING ${sql.literal(TASK_COLUMNS)}
+            `;
+            yield* appendEvent({
+              _tag: "moved",
+              taskId,
+              from: row.column,
+              to: MERGED_COLUMN,
+              actor,
+              revision: moveRevision,
+            });
+            return { task: yield* toTask(rows[0] as TaskRow), changed: true };
           }),
         ),
       );
@@ -3451,6 +3599,7 @@ export const TaskServiceLive = Layer.effect(
       update,
       ask,
       parkRun,
+      settlePullRequest,
       comment,
       comments,
       declareSpec,

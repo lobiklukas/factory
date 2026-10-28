@@ -287,6 +287,14 @@ export const PLAN_DOC_REQUIREMENT = "plan_doc";
  */
 export const RUN_COMPLETED_REQUIREMENT = "run_completed";
 
+/**
+ * The requirement a column declares when leaving it for `done` takes the card's PR merged (B5's merge
+ * gate, C20): a run of the card recorded GitHub's merge of the card's PR (`factory.merge`, LOB-44). The
+ * default pipeline's `review` declares it from version 1. A merge moves the card to `done` by itself
+ * (`TaskService.settlePullRequest`); a person's move into `done` is held to it.
+ */
+export const HUMAN_MERGE_REQUIREMENT = "human_merge";
+
 /** The columns the default pipeline's table lets a card in `from` move to, in pipeline order. */
 export const declaredTransitions = (from: string): ReadonlyArray<string> =>
   DECLARED_TRANSITIONS[from] ?? [];
@@ -863,6 +871,8 @@ export type TaskPriority = typeof TaskPriority.Type;
  * B7 adds that a block carries the question a run ended with, recorded as a comment on the task.
  * `setup_failed` is a run parked before its first turn because its worktree's declared `install` or
  * `build` failed (S-env-setup): the note names the step, its exit code and its output's last lines.
+ * `pr_closed` is the card's PR closed without being merged (C20), as GitHub's `pull_request` delivery
+ * or the PR-state read reports it: the note names the PR.
  */
 export const BlockReason = Schema.Literals([
   "dependency",
@@ -870,6 +880,7 @@ export const BlockReason = Schema.Literals([
   "capability",
   "transient",
   "setup_failed",
+  "pr_closed",
 ]);
 export type BlockReason = typeof BlockReason.Type;
 
@@ -977,6 +988,12 @@ export type TaskPlan = typeof TaskPlan.Type;
 export const ABANDON_COLUMN = "canceled";
 
 /**
+ * The column a card's PR's merge completes it into (C20): a merge moves the card there
+ * (`TaskService.settlePullRequest`), and `human_merge` is checked on a move into it only.
+ */
+export const MERGED_COLUMN = "done";
+
+/**
  * Where one of a column's exit requirements stands for a card (D9): `met` or `unmet` for a key the
  * factory checks (`./requirements` in core), with `reason` saying what is missing when it is not,
  * and `unchecked` for a key it declares but nothing checks yet.
@@ -1016,7 +1033,9 @@ export type GetTaskExitInput = typeof GetTaskExitInput.Type;
 
 /**
  * The requirements a move to `to` would be refused on, from a card's exit view: the unmet ones, none
- * for a move into `ABANDON_COLUMN`. What a move control says before it is clicked.
+ * for a move into `ABANDON_COLUMN`, and `human_merge` only on a move into `MERGED_COLUMN` (C20: the
+ * server checks it there only, `exitRequirements` in core). What a move control says before it is
+ * clicked.
  */
 export const unmetFor = (
   exit: TaskExit,
@@ -1024,7 +1043,11 @@ export const unmetFor = (
 ): ReadonlyArray<ExitRequirementView> =>
   to === ABANDON_COLUMN
     ? []
-    : exit.requirements.filter((requirement) => requirement.status === "unmet");
+    : exit.requirements.filter(
+        (requirement) =>
+          requirement.status === "unmet" &&
+          (requirement.key !== HUMAN_MERGE_REQUIREMENT || to === MERGED_COLUMN),
+      );
 
 /** The spec a card holds, or `null` when no run on it has declared one (LOB-238). */
 export const GetTaskSpecInput = Schema.Struct({ taskId: TaskId });

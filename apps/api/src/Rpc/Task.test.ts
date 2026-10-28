@@ -297,7 +297,7 @@ const DEFAULT_V3: ReadonlyArray<ColumnConfig> = [
       {
         key: "human_merge",
         description: "a human merge (B5's merge gate)",
-        checked: false,
+        checked: true,
       },
     ],
     exits: [{ to: "done", humanGate: "merge" }, { to: "canceled" }],

@@ -9,7 +9,10 @@
  *   `Reverts owner/repo#N` PR is recorded on the PR it names), and (LOB-36) starts the reviewer run
  *   its head asks for: `opened`, `reopened`, `ready_for_review` and `synchronize` on a PR the factory
  *   opened from a card (`@repo/core`'s `handlePullRequestReviewWebhook`). The answer carries both, the
- *   review under `review`; a failed mirror's status wins, then a failed review's.
+ *   review under `review`; a failed mirror's status wins, then a failed review's. A signed close also
+ *   settles the card whose PR it is (C20, `@repo/core`'s `settleCardsOfDelivery`): a merge moves it
+ *   to `done`, an unmerged close blocks it `pr_closed`, once however often GitHub redelivers it, and
+ *   whatever the mirror answered; the answer counts them under `cards`.
  * - `push` (LOB-234) is the docs trigger's: a push to the repository's default branch starts one docs
  *   run on `factory/doc-<push>` (`@repo/core`'s `handleDocsPushWebhook`), a redelivery is a replay,
  *   and a push to any other branch is `400` and starts nothing.
@@ -48,7 +51,7 @@
  *
  * Any other event is answered `202` and ignored.
  */
-import { Effect, Stream } from "effect";
+import { Effect, Layer, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import {
   GITHUB_EVENT_HEADER,
@@ -64,6 +67,8 @@ import {
   planFreshnessConfigOf,
   recordMergedDelivery,
   releaseMergedDelivery,
+  settleCardsOfDelivery,
+  TaskServiceLive,
   TriggerService,
   type GitHubWebhookAnswer,
 } from "@repo/core";
@@ -217,6 +222,7 @@ const GitHubWebhookRoute = HttpRouter.add(
     // The plan is read again after a merge (LOB-45), gated as the release is: on the signed delivery
     // alone, not on the mirror. Off by default; a redelivery runs no second pass.
     let planFreshness: unknown = undefined;
+    let cards: unknown = undefined;
     if (event === "pull_request") {
       const released = yield* releaseMergedDelivery({ secret, raw, signature });
       if (released > 0) {
@@ -246,15 +252,24 @@ const GitHubWebhookRoute = HttpRouter.add(
           `github: recorded a merge on ${recorded.merged} session(s) and a revert on ${recorded.reverted}`,
         );
       }
+      // The card follows its PR (C20): after the merge is recorded, so the card that reaches `done`
+      // carries the merge `human_merge` reads. Gated on the signature like the rest, not the mirror.
+      const settled = yield* settleCardsOfDelivery({ secret, raw, signature });
+      if (settled.done > 0 || settled.blocked > 0) {
+        yield* Effect.logInfo(
+          `github: a pull_request close moved ${settled.done} card(s) to done and blocked ${settled.blocked}`,
+        );
+        cards = settled;
+      }
     }
     // Only a signed `pull_request` the mirror read reaches the review: every refusal before it (no
     // secret, a bad signature, another event, a payload naming no PR) is the mirror's answer alone.
+    const extra = {
+      ...(planFreshness === undefined ? {} : { planFreshness }),
+      ...(cards === undefined ? {} : { cards }),
+    };
     if (event !== "pull_request" || mirrored.status !== 200) {
-      return respond(
-        planFreshness === undefined
-          ? mirrored
-          : { ...mirrored, body: { ...mirrored.body, planFreshness } },
-      );
+      return respond({ ...mirrored, body: { ...mirrored.body, ...extra } });
     }
     // A head the registered checkout lacks (a push nobody made here) is fetched with the worker's
     // read credential before the reviewer's worktree is cut at it.
@@ -268,7 +283,7 @@ const GitHubWebhookRoute = HttpRouter.add(
       body: {
         ...mirrored.body,
         review: reviewed.body,
-        ...(planFreshness === undefined ? {} : { planFreshness }),
+        ...extra,
       },
       status:
         reviewed.status === 200 || reviewed.status === 400
@@ -280,9 +295,9 @@ const GitHubWebhookRoute = HttpRouter.add(
 );
 
 /**
- * The route, with the shared trigger seam provided to every request: the issue events are
- * delivered to it, and the other two events do not ask for it.
+ * The route, with the shared trigger seam provided to every request — the issue events are
+ * delivered to it — and the task service a `pull_request` close settles its card through (C20).
  */
 export const GitHubWebhookLive = GitHubWebhookRoute.pipe(
-  HttpRouter.provideRequest(TriggerSeamLive),
+  HttpRouter.provideRequest(Layer.mergeAll(TriggerSeamLive, TaskServiceLive)),
 );

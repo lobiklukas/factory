@@ -45,7 +45,7 @@ review  working
   skills    review
   requires  verified (checked): a passing verification of every surface the card's change touched
             review_verdict (checked): a review verdict
-            human_merge (unchecked): a human merge (B5's merge gate)
+            human_merge (checked): a human merge (B5's merge gate)
   exits     done [human gate: merge], canceled
   asks      —
   writes    its worktree

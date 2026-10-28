@@ -52,6 +52,7 @@ const BLOCK_WORDS: Readonly<Record<BlockReason, string>> = {
   capability: "missing a capability",
   transient: "transient failure",
   setup_failed: "setup failed",
+  pr_closed: "PR closed",
 };
 
 /**

@@ -135,8 +135,13 @@ be a path in no package that nothing verifies.
 
 ## Evidence
 
-`.verify/evidence/latest/board/` (last run: `.verify/evidence/c19/requires-board/`, 68/68, C19,
-2026-10-28; before it `.verify/evidence/lob-241/board/`, 56/56, LOB-241): `requires-observed.json`
+`.verify/evidence/latest/board/` (last run: `.verify/evidence/c20r2/board/`, 75/75, C20's review round
+with the fake reading one PR by `owner/repo` and number, 2026-10-28; before it
+`.verify/evidence/c20/board/`, 75/75, C20, 2026-10-28,
+`REQUIRES_PORT=9502`, `REQUIRES_GITHUB_PORT=9504` — `requires-unmerged.txt`, the move held on
+`human_merge` with the PR open, `requires-forge-merge.json`, the merge on the fake, and
+`requires-done.txt`, the move through on the state it read, 8 `GET …/pulls/1` in the ledger; before
+it `.verify/evidence/c19/requires-board/`, 68/68, C19, 2026-10-28; before it `.verify/evidence/lob-241/board/`, 56/56, LOB-241): `requires-observed.json`
 (every check, and the three heads), `requires-unreviewed.txt`, `requires-refused-review.txt`,
 `requires-refused-back.txt`, `review-requires-{a,b,c,b-again,c-again}.json` (each delivery, its
 reviewer session and the review its log records; a replay's answer only),
@@ -162,7 +167,9 @@ been told of (no `synchronize` yet): the newest review run is then the previous 
 is judged as the newest — `requirements.ts` names that window. A branch nothing
 can measure (a repository with no registered checkout) and a newer run without a PR after an older
 one with one are refusals pinned in `TaskService.test.ts`, not driven here. The human gates (`human_move`, `human_merge`) are B5's actor check, proven
-in `packages/core`'s `TaskService` cases. A change made _after_ the latest `verify` call is not seen;
+in `packages/core`'s `TaskService` cases; `human_merge` is also checked against the card's PR's merge
+since C20, which step 9 drives with no webhook: the PR merged on the fake, the move's read of its state.
+An unmerged close blocking the card is `cardPullRequest.test.ts`'s and `GitHubWebhook.test.ts`'s. A change made _after_ the latest `verify` call is not seen;
 that is LOB-79's coverage check, on the PR. Ordering calls across interleaved runs by when they were
 recorded, and refusing on a newest call that left no record, are pinned in `requirements.test.ts`,
 not driven here.

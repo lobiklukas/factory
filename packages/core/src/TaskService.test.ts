@@ -10,15 +10,28 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { Effect, Layer, ManagedRuntime, Option, Redacted } from "effect";
+import {
+  Effect,
+  Layer,
+  ManagedRuntime,
+  Option,
+  Redacted,
+  Schema,
+} from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import { DatabaseLive } from "@repo/storage-postgres";
-import { BranchName, RepoSlug, type SessionId } from "@repo/domain/Session";
+import {
+  BranchName,
+  RepoSlug,
+  type SessionId,
+  SessionId as SessionIdSchema,
+} from "@repo/domain/Session";
 import {
   declaredTransitions,
   DEFAULT_DEFINITION_ID,
+  HUMAN_MERGE_REQUIREMENT,
   DefinitionId,
   humanGate,
   LIST_BOARDS_LIMIT,
@@ -2756,6 +2769,40 @@ describe("TaskService — exit requirements", () => {
   };
 
   /**
+   * GitHub's merge of `url` recorded on run `sessionId`'s log (`factory.merge`, LOB-44), as the signed
+   * `pull_request` delivery or the PR-state read records it (C20): what `human_merge` reads.
+   */
+  const recordMergeOn = async (sessionId: string, url: string) => {
+    const sessions = ManagedRuntime.make(
+      SessionServiceLive({
+        model: createFauxModelAccess().access,
+        sessionRoot,
+      }).pipe(
+        Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+      ),
+    );
+    try {
+      await sessions.runPromise(
+        Effect.gen(function* () {
+          const service = yield* SessionService;
+          const id = yield* Schema.decodeEffect(SessionIdSchema)(sessionId);
+          yield* service.recordMerge({
+            sessionId: id,
+            event: {
+              _tag: "merged",
+              url,
+              number: Number(url.split("/").at(-1)),
+              mergedAt: "2026-10-28T12:00:00Z",
+            },
+          });
+        }).pipe(Effect.orDie),
+      );
+    } finally {
+      await sessions.dispose();
+    }
+  };
+
+  /**
    * A head for a review run to be opened at: a commit on its own branch of `repoRoot` that adds
    * `path`, so `git diff main...<head>` — what the reviewer measures its findings against — names it.
    */
@@ -2952,6 +2999,17 @@ describe("TaskService — exit requirements", () => {
 
   const PASSING = 'echo "fixture: all checks passed"\n';
 
+  /**
+   * The refusal a person's review → done meets once every key review declares before `human_merge` is
+   * met (C20): the card's PR has no merge on record, so the move waits on the merge itself.
+   */
+  const HELD_AT_MERGE = {
+    _tag: "RequirementUnmet",
+    column: "review",
+    to: "done",
+    requirement: HUMAN_MERGE_REQUIREMENT,
+  };
+
   it("seeds version 3 of the default pipeline with verified first in review's requires", async () => {
     const boardId = await newBoard(3);
     const board = await withService((s) => s.getBoard(boardId));
@@ -3096,6 +3154,7 @@ describe("TaskService — exit requirements", () => {
       requirement: REVIEW_VERDICT_REQUIREMENT,
     });
     await approve(task.id, repoRoot);
+    // No run of the card opened a PR, so `human_merge` has no merge to wait on (C20): the move goes.
     const done = await withService((s) =>
       s.move({
         taskId: task.id,
@@ -3175,6 +3234,55 @@ describe("TaskService — exit requirements", () => {
       }),
     );
     expect(done.column).toBe("done");
+  }, 120_000);
+
+  // --- human_merge (C20): the card's PR merged ------------------------------------------------------
+
+  /**
+   * Mutation: leave `human_merge` unchecked — the first move goes through with the PR open.
+   * Mutation: read no merge — the last move is refused although the PR merged. (A replaced PR's merge
+   * is `requirements.test.ts`'s case.)
+   */
+  it("refuses review → done while the card's PR is open, naming human_merge and the PR, until its merge is recorded", async () => {
+    const task = await inReview(1);
+    const repoRoot = fixtureRepo({});
+    const PR = "https://github.com/factory-test/requires/pull/7";
+    const prRun = await recordRun({
+      taskId: task.id,
+      repoRoot,
+      command: commit("apps/web/src/page.ts"),
+      openPr: true,
+    });
+    await approve(task.id, repoRoot);
+    const events = await eventCount(task.id);
+    const open = await refusal(merge(task));
+    expect(open).toMatchObject({ ...HELD_AT_MERGE, taskId: task.id });
+    expect(open.message).toBe(
+      `the move review → done needs "human_merge" (a human merge (B5's merge gate)), which is not met: no merge of the card's PR ${PR} is on record: it is open, or was closed without being merged. Merge it in GitHub — its signed pull_request delivery to POST /webhooks/github, or the PR-state read when the card is opened, records the merge and moves the card to done`,
+    );
+    expect(await eventCount(task.id)).toBe(events);
+    // A run is still refused at the gate before the merge is read (B5).
+    const run = await refusal((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "done",
+        actor: RUN,
+      }),
+    );
+    expect(run._tag).toBe("HumanGateRequired");
+    // The card pane's checklist says the same (D9).
+    const exit = await withService((s) => s.exit(task.id));
+    expect(
+      exit.requirements.find((r) => r.key === HUMAN_MERGE_REQUIREMENT),
+    ).toMatchObject({ status: "unmet" });
+    // The merge of the card's PR: the same move goes through.
+    await recordMergeOn(prRun, PR);
+    const done = await withService(merge(task));
+    expect(done).toMatchObject({
+      column: "done",
+      revision: task.revision + 1,
+    });
   }, 120_000);
 
   // --- review_verdict (LOB-241): the newest review run's verdict on its own head -----------------
@@ -4393,5 +4501,243 @@ describe("TaskService — a definition's own transitions, gates and initial colu
         { _tag: "gate", gate: "sign-off", to: "done", sessionId: doingRun },
       ],
     ]);
+  });
+});
+
+/**
+ * The card follows its PR (C20): `settlePullRequest` is what GitHub's `pull_request` close — a signed
+ * delivery or the PR-state read — settles a card through, so each case drives it directly, and the
+ * delivery's own path is `cardPullRequest.test.ts`'s.
+ */
+describe("TaskService — a card settled by its PR (C20)", () => {
+  const PR = { number: 7, url: "https://github.com/factory-test/c20/pull/7" };
+
+  /** A card walked by a person from intake into review, as the merge finds one. */
+  const cardInReview = () =>
+    newBoard()
+      .then((boardId) =>
+        withService((s) =>
+          Effect.gen(function* () {
+            let task = yield* s.create({ boardId, title: "c20", actor: LUKAS });
+            for (const to of ["specifying", "planning", "building"]) {
+              if (to === "planning") task = yield* specified(s, task);
+              if (to === "building") task = yield* planned(s, task);
+              task = yield* s.move({
+                taskId: task.id,
+                expectedRevision: task.revision,
+                to,
+                actor: LUKAS,
+              });
+            }
+            return task;
+          }),
+        ),
+      )
+      .then((task) => seatInReview(task.id));
+
+  /** The card's events after `revision`, oldest first, as kind, actor and revision. */
+  const eventsAfter = (taskId: string, revision: number) =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        return yield* sql<{ kind: string; actor: string; revision: number }>`
+          SELECT kind, actor, revision FROM task_events
+          WHERE task_id = ${taskId} AND revision >= ${revision}
+          ORDER BY id
+        `;
+      }),
+    );
+
+  /**
+   * Mutation: check the card's exit requirements on the merge — the card has no review run, so
+   * `review_verdict` would refuse it. Mutation: skip the terminal check — the second call moves the
+   * card done → done and appends a second `moved`.
+   */
+  it("moves a merged card to done exactly once, recorded by the merge, and changes nothing on a repeat", async () => {
+    const task = await cardInReview();
+    const first = await withService((s) =>
+      s.settlePullRequest({ taskId: task.id, outcome: "merged", pr: PR }),
+    );
+    expect(first.changed).toBe(true);
+    expect(first.task).toMatchObject({
+      column: "done",
+      revision: task.revision + 1,
+    });
+    expect(first.task.blocked).toBeUndefined();
+    const again = await withService((s) =>
+      s.settlePullRequest({ taskId: task.id, outcome: "merged", pr: PR }),
+    );
+    expect(again).toMatchObject({
+      changed: false,
+      task: { column: "done", revision: task.revision + 1 },
+    });
+    expect(await eventsAfter(task.id, task.revision)).toEqual([
+      { kind: "moved", actor: `merge:${PR.url}`, revision: task.revision },
+    ]);
+  });
+
+  /** Mutation: let both of two concurrent merges move — the row lock is what makes it once. */
+  it("moves the card once when two deliveries of the merge land at the same time", async () => {
+    const task = await cardInReview();
+    const [a, b] = await Promise.all([
+      withService((s) =>
+        s.settlePullRequest({ taskId: task.id, outcome: "merged", pr: PR }),
+      ),
+      withService((s) =>
+        s.settlePullRequest({ taskId: task.id, outcome: "merged", pr: PR }),
+      ),
+    ]);
+    expect([a.changed, b.changed].filter(Boolean)).toEqual([true]);
+    expect(
+      (await eventsAfter(task.id, task.revision)).map((event) => event.kind),
+    ).toEqual(["moved"]);
+  });
+
+  /** Mutation: leave the block on the merged card — it would sit in done, blocked on a closed PR. */
+  it("lifts a block when the PR merges: an unblocked event, then the move, at consecutive revisions", async () => {
+    const task = await cardInReview();
+    const closed = await withService((s) =>
+      s.settlePullRequest({ taskId: task.id, outcome: "closed", pr: PR }),
+    );
+    const merged = await withService((s) =>
+      s.settlePullRequest({ taskId: task.id, outcome: "merged", pr: PR }),
+    );
+    expect(merged.task).toMatchObject({
+      column: "done",
+      revision: closed.task.revision + 2,
+    });
+    expect(merged.task.blocked).toBeUndefined();
+    expect(await eventsAfter(task.id, closed.task.revision)).toEqual([
+      {
+        kind: "unblocked",
+        actor: `merge:${PR.url}`,
+        revision: closed.task.revision,
+      },
+      {
+        kind: "moved",
+        actor: `merge:${PR.url}`,
+        revision: closed.task.revision + 1,
+      },
+    ]);
+  });
+
+  /**
+   * Mutation: block with another reason, or no note — the card would not say its PR closed.
+   * Mutation: block an already blocked card again — the repeat appends a second `blocked`.
+   */
+  it("blocks a card whose PR closed unmerged pr_closed, naming the PR, once", async () => {
+    const task = await cardInReview();
+    const closed = await withService((s) =>
+      s.settlePullRequest({ taskId: task.id, outcome: "closed", pr: PR }),
+    );
+    expect(closed.changed).toBe(true);
+    expect(closed.task).toMatchObject({
+      column: "review",
+      revision: task.revision + 1,
+      blocked: { reason: "pr_closed", column: "review" },
+    });
+    expect(closed.task.blocked?.note).toContain(
+      `pull request #7 (${PR.url}) was closed without being merged`,
+    );
+    const again = await withService((s) =>
+      s.settlePullRequest({ taskId: task.id, outcome: "closed", pr: PR }),
+    );
+    expect(again.changed).toBe(false);
+    expect(await eventsAfter(task.id, task.revision)).toEqual([
+      {
+        kind: "blocked",
+        actor: `pr-closed:${PR.url}`,
+        revision: task.revision,
+      },
+    ]);
+    // A person lifts it as any block, at the revision the close left.
+    const unblocked = await withService((s) =>
+      s.unblock({
+        taskId: task.id,
+        expectedRevision: closed.task.revision,
+        actor: LUKAS,
+      }),
+    );
+    expect(unblocked.blocked).toBeUndefined();
+  });
+
+  /**
+   * Mutation: block again on a close the card was already blocked by — the PR-state read reports the
+   * close on every read of the card, so a person's unblock would never stand.
+   */
+  it("blocks once per PR: after a person's unblock the same close changes nothing, another PR's blocks", async () => {
+    const task = await cardInReview();
+    const closed = await withService((s) =>
+      s.settlePullRequest({ taskId: task.id, outcome: "closed", pr: PR }),
+    );
+    const unblocked = await withService((s) =>
+      s.unblock({
+        taskId: task.id,
+        expectedRevision: closed.task.revision,
+        actor: LUKAS,
+      }),
+    );
+    const again = await withService((s) =>
+      s.settlePullRequest({ taskId: task.id, outcome: "closed", pr: PR }),
+    );
+    expect(again).toMatchObject({
+      changed: false,
+      task: { revision: unblocked.revision },
+    });
+    expect(again.task.blocked).toBeUndefined();
+    const other = { number: 8, url: "https://github.com/o/r/pull/8" };
+    const next = await withService((s) =>
+      s.settlePullRequest({ taskId: task.id, outcome: "closed", pr: other }),
+    );
+    expect(next.changed).toBe(true);
+    expect(next.task.blocked?.note).toContain(`pull request #8 (${other.url})`);
+  });
+
+  /** Mutation: settle a finished card — a canceled card would be moved to done by a late merge. */
+  it("changes nothing on a finished card, and a close keeps a block the card already holds", async () => {
+    const canceled = await cardInReview().then((task) =>
+      withService((s) =>
+        s.move({
+          taskId: task.id,
+          expectedRevision: task.revision,
+          to: "canceled",
+          actor: LUKAS,
+        }),
+      ),
+    );
+    for (const outcome of ["merged", "closed"] as const) {
+      const settled = await withService((s) =>
+        s.settlePullRequest({ taskId: canceled.id, outcome, pr: PR }),
+      );
+      expect(settled).toMatchObject({
+        changed: false,
+        task: { column: "canceled", revision: canceled.revision },
+      });
+    }
+    const parked = await cardInReview().then((task) =>
+      withService((s) =>
+        s.block({
+          taskId: task.id,
+          expectedRevision: task.revision,
+          reason: "dependency",
+          actor: LUKAS,
+        }),
+      ),
+    );
+    const closed = await withService((s) =>
+      s.settlePullRequest({ taskId: parked.id, outcome: "closed", pr: PR }),
+    );
+    expect(closed).toMatchObject({
+      changed: false,
+      task: { revision: parked.revision, blocked: { reason: "dependency" } },
+    });
+    const missing = await refusal((s) =>
+      s.settlePullRequest({
+        taskId: "tsk_0000000000000000000000000z",
+        outcome: "merged",
+        pr: PR,
+      }),
+    );
+    expect(missing._tag).toBe("TaskNotFound");
   });
 });
