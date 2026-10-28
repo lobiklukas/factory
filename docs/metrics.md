@@ -9,11 +9,11 @@ Metrics leave the process over OTLP/HTTP (JSON) to any OpenTelemetry-compatible 
 OpenTelemetry Collector's `otlp` receiver, or a backend's OTLP intake. Off unless the endpoint is
 set; the variable names are OpenTelemetry's own.
 
-| Variable                              | Meaning                                                                                                                               | Default          |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
-| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | The full URL metrics are posted to, used as given (a collector's is `http://host:4318/v1/metrics`). A malformed URL refuses the boot. | unset: no export |
-| `OTEL_METRIC_EXPORT_INTERVAL`         | Milliseconds between exports; a positive integer. The last export is made on shutdown.                                                | `60000`          |
-| `OTEL_SERVICE_NAME`                   | The resource's `service.name`.                                                                                                        | `factory-api`    |
+| Variable                              | Meaning                                                                                                                                                                                                                                                              | Default          |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | The full URL metrics are posted to, used as given (a collector's is `http://host:4318/v1/metrics`). A malformed URL, or one whose scheme is not `http:` or `https:` (a scheme-less `localhost:4318/v1/metrics` parses with protocol `localhost:`), refuses the boot. | unset: no export |
+| `OTEL_METRIC_EXPORT_INTERVAL`         | Milliseconds between exports; a positive integer. The last export is made on shutdown.                                                                                                                                                                               | `60000`          |
+| `OTEL_SERVICE_NAME`                   | The resource's `service.name`.                                                                                                                                                                                                                                       | `factory-api`    |
 
 Temporality is **cumulative**: every export carries totals since the process started. A restart
 starts the totals again, which a collector reads as a counter reset.

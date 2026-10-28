@@ -26,9 +26,26 @@ import { OtlpMetrics, OtlpSerialization } from "effect/observability";
  * Temporality is cumulative: every export carries totals since the process started, which is what
  * a Prometheus-backed collector expects and what survives a lost export.
  */
+/**
+ * An `http:` or `https:` URL. WHATWG parsing alone lets the likeliest mistake through: a value with
+ * no scheme (`localhost:4318/v1/metrics`, `collector:4318`) parses, with `localhost:` or
+ * `collector:` as its protocol, and would build an exporter whose every POST fails.
+ */
+const HttpUrl = Schema.URL.check(
+  Schema.makeFilter(
+    (url) =>
+      url.protocol === "http:" ||
+      url.protocol === "https:" ||
+      `expected an http: or https: URL, got protocol ${JSON.stringify(url.protocol)} (is the scheme missing?)`,
+  ),
+);
+
 export const OtlpMetricsConfig = Config.all({
-  // A URL, so a malformed one refuses the boot rather than failing every export quietly.
-  endpoint: Config.option(Config.URL("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")),
+  // An http(s) URL, so a malformed or scheme-less one refuses the boot rather than failing every
+  // export quietly.
+  endpoint: Config.option(
+    Config.schema(HttpUrl, "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"),
+  ),
   // Positive, because the exporter clamps a zero or negative interval to zero: a busy loop.
   exportIntervalMs: Config.schema(
     Schema.Int.check(Schema.isGreaterThan(0)),

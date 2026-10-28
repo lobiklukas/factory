@@ -33,6 +33,7 @@ import {
   ManagedRuntime,
   Redacted,
 } from "effect";
+import { FetchHttpClient } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { OtlpMetricsLive } from "./OtlpMetrics";
@@ -280,22 +281,77 @@ describe("OtlpMetricsLive against an in-process OTLP/HTTP receiver", () => {
     }
   }, 60_000);
 
-  /** Mutation: read the endpoint as a plain string — a malformed one builds, and fails every export. */
-  it("refuses a malformed endpoint or a non-positive interval at build, rather than exporting nowhere", async () => {
+  /**
+   * Mutation: read the endpoint as a plain string, or with `Config.URL` alone — a malformed or
+   * scheme-less one builds, and fails every export.
+   */
+  it("refuses a malformed or scheme-less endpoint or a non-positive interval at build, rather than exporting nowhere", async () => {
     const build = (env: Record<string, string>) =>
       Effect.runPromiseExit(Effect.scoped(Layer.build(exporterWith(env))));
     const malformed = await build({
       OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "not a url",
     });
+    // WHATWG parses both, with `localhost:` and `collector:` as the protocol.
+    const schemeless = await build({
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "localhost:4318/v1/metrics",
+    });
+    const hostPort = await build({
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "collector:4318",
+    });
     const zero = await build({
       OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: endpoint,
       OTEL_METRIC_EXPORT_INTERVAL: "0",
     });
-    const unset = await build({});
     expect(Exit.isFailure(malformed)).toBe(true);
+    expect(Exit.isFailure(schemeless)).toBe(true);
+    expect(Exit.isFailure(hostPort)).toBe(true);
     expect(Exit.isFailure(zero)).toBe(true);
-    // Unset is off, not an error: a run with no collector builds the layer and sends nothing.
-    expect(Exit.isSuccess(unset)).toBe(true);
+  });
+
+  /**
+   * Every fetch the layer makes goes through a recording `Fetch` that answers `200 {}` itself, so a
+   * request is seen wherever it was addressed — including a default endpoint the test never named.
+   * The set case is the control: the same recorder sees the shutdown export.
+   *
+   * Mutation: default the endpoint (say to `http://localhost:4318/v1/metrics`) instead of returning
+   * `Layer.empty` when it is unset — the unset build fetches at shutdown.
+   */
+  it("builds no exporter when the endpoint is unset: nothing is fetched, anywhere", async () => {
+    const fetchesOf = async (env: Record<string, string>) => {
+      const fetched: string[] = [];
+      const recorder = ((input: Parameters<typeof globalThis.fetch>[0]) => {
+        fetched.push(input instanceof Request ? input.url : String(input));
+        return Promise.resolve(
+          new Response("{}", {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }) as typeof globalThis.fetch;
+      const exit = await Effect.runPromiseExit(
+        Effect.scoped(
+          Layer.build(
+            exporterWith(env).pipe(
+              Layer.provide(Layer.succeed(FetchHttpClient.Fetch, recorder)),
+            ),
+          ),
+        ),
+      );
+      return { exit, fetched };
+    };
+
+    const set = await fetchesOf({
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT:
+        "http://collector.invalid:4318/v1/metrics",
+      OTEL_METRIC_EXPORT_INTERVAL: "3600000",
+    });
+    expect(Exit.isSuccess(set.exit)).toBe(true);
+    expect(set.fetched).toContain("http://collector.invalid:4318/v1/metrics");
+
+    // Unset is off, not an error: the layer builds, and closing it fetches nothing.
+    const unset = await fetchesOf({});
+    expect(Exit.isSuccess(unset.exit)).toBe(true);
+    expect(unset.fetched).toEqual([]);
     expect(received).toEqual([]);
   });
 });
