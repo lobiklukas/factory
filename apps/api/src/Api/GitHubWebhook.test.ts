@@ -116,6 +116,9 @@ const failingSync = LinearIssueSync.of({
   started: () => Effect.void,
   pullRequestOpened: () => Effect.void,
   failed: () => Effect.void,
+  // The webhook never creates issues (LOB-202's children are the session layer's).
+  createChild: () => Effect.die("the webhook does not create issues"),
+  blocks: () => Effect.die("the webhook does not relate issues"),
   merged: (input) =>
     Effect.suspend(() => {
       mirrored.push(input.issueId);

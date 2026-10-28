@@ -39,11 +39,23 @@ import { SessionId } from "@repo/domain/Ids";
 export const MAX_PROPOSALS = 20;
 
 /**
+ * The tracker issue a proposal became (LOB-202): the id the tracker's API addresses it by, and the
+ * identifier a person reads (`ENG-43`). Written only by `approveProposals`, once the tracker has
+ * answered; a proposal without one has not been created.
+ */
+export const CreatedIssue = Schema.Struct({
+  id: Schema.String,
+  identifier: Schema.String,
+});
+export type CreatedIssue = typeof CreatedIssue.Type;
+
+/**
  * One proposed child issue, as it is stored and read back.
  *
  * `blockedBy` holds indices into the same proposal list: the proposals do not exist anywhere yet, so
- * an index is the only name one has for another. Part 2 (LOB-202) maps them to the tracker's ids
- * when it creates the issues.
+ * an index is the only name one has for another. `approveProposals` (LOB-202) maps them to the
+ * tracker's ids once both ends are created, and `created` is where a created proposal says so — it
+ * is what makes approving the same proposal twice send nothing the second time.
  */
 export const ProposedIssue = Schema.Struct({
   title: Schema.String,
@@ -51,6 +63,7 @@ export const ProposedIssue = Schema.Struct({
   change: Schema.String,
   acceptance: Schema.Array(Schema.String),
   blockedBy: Schema.Array(Schema.Int),
+  created: Schema.optional(CreatedIssue),
 });
 export type ProposedIssue = typeof ProposedIssue.Type;
 
@@ -71,6 +84,8 @@ const ProposalInput = Schema.Struct({
   change: Schema.String,
   acceptance: Schema.Array(Schema.String),
   blockedBy: Schema.optional(Schema.Array(Schema.Int)),
+  /** Only a stored document carries this; `validate` below drops it from a writer's answer. */
+  created: Schema.optional(CreatedIssue),
 });
 
 const ProposalsInput = Schema.Struct({
@@ -129,9 +144,14 @@ export class ProposalsRefused extends Schema.TaggedError<ProposalsRefused>()(
 const titleKey = (title: string): string =>
   title.trim().replaceAll(/\s+/g, " ").toLowerCase();
 
-/** The input with its text trimmed and its edges deduplicated, in the order they were named. */
+/**
+ * The input with its text trimmed and its edges deduplicated, in the order they were named.
+ * `created` is kept only when the caller is reading a stored document: a model's answer is a fresh
+ * draft, and nothing a model writes may say a tracker issue exists.
+ */
 const normalized = (
   input: typeof ProposalsInput.Type,
+  keepCreated: boolean,
 ): readonly ProposedIssue[] =>
   input.proposals.map((proposal) => ({
     title: proposal.title.trim(),
@@ -139,6 +159,9 @@ const normalized = (
     change: proposal.change.trim(),
     acceptance: proposal.acceptance.map((line) => line.trim()),
     blockedBy: [...new Set(proposal.blockedBy ?? [])],
+    ...(keepCreated && proposal.created !== undefined
+      ? { created: proposal.created }
+      : {}),
   }));
 
 /**
@@ -263,13 +286,9 @@ const refusal = (faults: readonly ProposalFault[]): ProposalsRefused =>
 
 const decodeShape = Schema.decodeUnknownResult(ProposalsInput);
 
-/**
- * The rules, as a pure function: the normalized `ProposedIssues` when every rule holds, every fault
- * when one does not. No effect runs here, so the snapshot's read (`projectProposedIssues`) and the
- * writer's (`decodeProposedIssues`) share one judgement without either running a runtime.
- */
-export const validateProposedIssues = (
+const validate = (
   input: unknown,
+  keepCreated: boolean,
 ): Result.Result<ProposedIssues, readonly ProposalFault[]> => {
   const shape = decodeShape(input, { errors: "all" });
   if (Result.isFailure(shape)) {
@@ -281,12 +300,23 @@ export const validateProposedIssues = (
       },
     ]);
   }
-  const proposals = normalized(shape.success);
+  const proposals = normalized(shape.success, keepCreated);
   const faults = proposalFaults(proposals);
   return faults.length === 0
     ? Result.succeed({ proposals })
     : Result.fail(faults);
 };
+
+/**
+ * The rules, as a pure function: the normalized `ProposedIssues` when every rule holds, every fault
+ * when one does not. No effect runs here, so the snapshot's read (`projectProposedIssues`) and the
+ * writer's (`decodeProposedIssues`) share one judgement without either running a runtime. A
+ * `created` on an input proposal is dropped: this judges a draft.
+ */
+export const validateProposedIssues = (
+  input: unknown,
+): Result.Result<ProposedIssues, readonly ProposalFault[]> =>
+  validate(input, false);
 
 /**
  * Validate an untrusted value as a proposal set: the normalized `ProposedIssues` when every rule
@@ -305,11 +335,11 @@ export const decodeProposedIssues = (
 /**
  * A stored document read as a proposal set, or `undefined` when it is not one — its seed (no
  * proposals) included, so a session that never decomposed reads as none rather than as an empty set.
+ * Unlike a draft, it keeps each proposal's `created`.
  */
 export const projectProposedIssues = (
   value: unknown,
-): ProposedIssues | undefined =>
-  Result.getOrUndefined(validateProposedIssues(value));
+): ProposedIssues | undefined => Result.getOrUndefined(validate(value, true));
 
 /** Propose child issues from a session's spec (LOB-201). */
 export const ProposeDecompositionInput = Schema.Struct({
@@ -323,3 +353,59 @@ export type ProposeDecompositionInput = typeof ProposeDecompositionInput.Type;
  */
 export const ProposeDecompositionResult = ProposedIssues;
 export type ProposeDecompositionResult = ProposedIssues;
+
+/**
+ * Approve a subset of a session's proposals (LOB-202, part 2 of LOB-43): the indices into
+ * `factory.proposedIssues` a person accepted. Only those become tracker issues; the rest are left as
+ * they were, and a later call may approve them.
+ */
+export const ApproveProposalsInput = Schema.Struct({
+  sessionId: SessionId,
+  approved: Schema.Array(Schema.Int),
+});
+export type ApproveProposalsInput = typeof ApproveProposalsInput.Type;
+
+/**
+ * What one approval did. `proposals` is the document as it now stands, each created proposal
+ * carrying its `created`; `created` names the indices this call created (an approval that finds
+ * every approved proposal already created answers `[]`), and `related` counts the
+ * `blockedBy` edges this call sent to the tracker.
+ */
+export const ApproveProposalsResult = Schema.Struct({
+  proposals: Schema.Array(ProposedIssue),
+  created: Schema.Array(Schema.Int),
+  related: Schema.Int,
+});
+export type ApproveProposalsResult = typeof ApproveProposalsResult.Type;
+
+/** Why an approval could not be carried out. */
+export const ApproveProposalsReason = Schema.Literals([
+  /** The session never decomposed its spec: there is nothing to approve. */
+  "no_proposals",
+  /** An approved index no proposal has. */
+  "unknown_proposal",
+  /** This process has no tracker configured (no `LINEAR_API_KEY`). Nothing was sent. */
+  "no_tracker",
+  /** No tracker issue opened this session, so there is no parent and no team to create under. */
+  "no_delegating_issue",
+  /** The tracker refused, failed or went unanswered: a retry creates only what is still missing. */
+  "tracker_failed",
+  /** A decomposition replaced the proposals while the approval was in flight; approve again. */
+  "proposals_changed",
+]);
+export type ApproveProposalsReason = typeof ApproveProposalsReason.Type;
+
+/**
+ * An approval that did not complete. For every reason but `tracker_failed` nothing was sent and the
+ * document is unchanged. For `tracker_failed` and `proposals_changed`, `created` lists the proposals the call had already
+ * created (each recorded in the document before the next request, so a retry does not repeat them);
+ * the rest, and the edges, are what the retry does.
+ */
+export class ApproveProposalsError extends Schema.TaggedError<ApproveProposalsError>()(
+  "ApproveProposalsError",
+  {
+    reason: ApproveProposalsReason,
+    message: Schema.String,
+    created: Schema.Array(Schema.Int),
+  },
+) {}

@@ -17,6 +17,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ConversationId, Tx } from "@earendil-works/pi-durable";
 import { Clock, Effect, Option, Schema } from "effect";
 import {
+  type CreatedIssue,
   decodeProposedIssues,
   type ProposalsRefused,
   type ProposedIssues,
@@ -244,3 +245,39 @@ export const writeProposedIssues = (
     );
     return issues;
   });
+
+/**
+ * Record, inside `tx`, that proposal `index` became the tracker issue `created` (LOB-202). The one
+ * writer of a proposal's `created`: `approveProposals` calls it as soon as the tracker answers and
+ * before it sends the next request, so a crash between two creations loses at most the one whose
+ * answer never arrived, and the tracker's own marker (`LinearSync`) finds that one again.
+ *
+ * Answers `false`, writing nothing, when the document has no such proposal — a re-decomposition
+ * replaced the set while the approval was in flight — so a stale index cannot mark another proposal
+ * created.
+ */
+export const commitCreatedIssue = (
+  tx: Tx,
+  conversationId: ConversationId,
+  index: number,
+  created: CreatedIssue,
+): Promise<boolean> =>
+  tx.doc(ProposedIssuesDoc, conversationId).then((doc) => {
+    const proposal = doc.proposals[index];
+    if (proposal === undefined) return false;
+    proposal.created = { id: created.id, identifier: created.identifier };
+    return true;
+  });
+
+/** Record one created proposal on the session's log; `false` is `commitCreatedIssue`'s stale index. */
+export const recordCreatedIssue = (
+  conversation: Conversation,
+  index: number,
+  created: CreatedIssue,
+): Effect.Effect<boolean, SessionError> =>
+  attempt("record created issue", () =>
+    conversation.commit(
+      (tx) => commitCreatedIssue(tx, conversation.id, index, created),
+      BACKGROUND_CONTEXT,
+    ),
+  );

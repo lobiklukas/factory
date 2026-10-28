@@ -180,3 +180,28 @@ describe("projectProposedIssues", () => {
     ).toBeUndefined();
   });
 });
+
+describe("a proposal's created issue (LOB-202)", () => {
+  const created = { id: "uuid-1", identifier: "ENG-101" };
+
+  it("reads back from a stored document, beside the proposals that have none", () => {
+    const proposals = [proposal("A", { created }), proposal("B")];
+    expect(projectProposedIssues({ proposals })).toEqual({ proposals });
+  });
+
+  it("is not something a model's answer may claim: a draft drops it", () => {
+    // A decomposition's answer is a fresh draft; if it could say `created`, a model could mark a
+    // proposal as already in the tracker and `approveProposals` would never create it.
+    expect(accepted({ proposals: [proposal("A", { created })] })).toEqual([
+      proposal("A"),
+    ]);
+  });
+
+  it("makes a stored set unreadable when it is not an id and an identifier", () => {
+    expect(
+      projectProposedIssues({
+        proposals: [{ ...proposal("A"), created: { id: 7 } }],
+      }),
+    ).toBeUndefined();
+  });
+});

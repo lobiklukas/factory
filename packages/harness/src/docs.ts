@@ -262,6 +262,8 @@ type StoredProposal = {
   change: string;
   acceptance: string[];
   blockedBy: number[];
+  /** Set by `recordCreatedIssue` (LOB-202) once the tracker has created the proposal. */
+  created?: { id: string; identifier: string };
 };
 
 /**

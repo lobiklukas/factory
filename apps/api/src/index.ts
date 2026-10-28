@@ -36,6 +36,7 @@ import { GitHubWebhookLive } from "./Api/GitHubWebhook";
 import {
   LinearIssueSyncLayer,
   LinearSyncLog,
+  ProposalTrackerLive,
   SessionWriteBackLive,
 } from "./Api/LinearSync";
 import { ProbesLive } from "./Api/Probes";
@@ -166,6 +167,13 @@ const ModelConfig = Config.all({
       "FAUX_SPEC",
     ),
   ),
+  /**
+   * The answer the faux model gives a decomposition (LOB-201), verbatim: a `{"proposals": [...]}`
+   * object. Unset, it derives one proposal per criterion and no edges; a verification that proves
+   * `approveProposals` creates the `blockedBy` relations
+   * (`.pi/skills/verify-api/approve-proposals.sh`) scripts edges here.
+   */
+  fauxDecomposition: Config.option(Config.String("FAUX_DECOMPOSITION")),
   /**
    * The `review` calls the faux script makes, in order (LOB-36's `fauxReview`): a JSON array of the
    * tool's arguments, each sent only when the one before it was refused. Unset: the faux never
@@ -475,6 +483,7 @@ const HttpLive = Effect.gen(function* () {
     fauxEveryTurn: model.fauxEveryTurn,
     fauxAsk: Option.getOrUndefined(model.fauxAsk),
     fauxSpec: Option.getOrUndefined(model.fauxSpec),
+    fauxDecomposition: Option.getOrUndefined(model.fauxDecomposition),
     fauxReview: Option.getOrUndefined(model.fauxReview),
     fauxCost: model.fauxCost,
     fauxVerify: model.fauxVerify,
@@ -544,7 +553,9 @@ const HttpLive = Effect.gen(function* () {
       onNone: () => ({}),
       onSome: (budget) => ({ defaultBudget: budget }),
     }),
-  }).pipe(Layer.provide(SessionWriteBackLive));
+  }).pipe(
+    Layer.provide(Layer.mergeAll(SessionWriteBackLive, ProposalTrackerLive)),
+  );
 
   // The database pool is lazy (`PgClient` opens a connection on first query), so this graph builds
   // — and the server binds — even when Postgres is unreachable. Migrations run in the background so

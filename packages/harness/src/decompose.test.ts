@@ -26,6 +26,7 @@ import {
   decompositionProposals,
   MAX_DECOMPOSED_CRITERIA,
   MAX_DECOMPOSED_LINE_CHARS,
+  recordCreatedIssue,
   requestDecomposition,
   writeProposedIssues,
 } from "./decompose";
@@ -326,6 +327,54 @@ describe("the proposed-issues document", () => {
       expect(outcome.read).toEqual(outcome.set);
       expect(outcome.live.proposedIssues).toEqual(outcome.set);
       expect(outcome.folded.proposedIssues).toEqual(outcome.set);
+    } finally {
+      await Effect.runPromise(closeHarness(harness));
+    }
+  });
+});
+
+describe("a proposal's created issue (LOB-202)", () => {
+  it("is recorded on the one proposal it names, read back live and folded, and dropped by a re-decomposition", async () => {
+    const storage = new MemoryStorage();
+    const cwd = mkdtempSync(join(tmpdir(), "factory-decompose-created-"));
+    const { harness, root } = await Effect.runPromise(
+      openSession({ storage, model: createFauxModelAccess().access, cwd }),
+    );
+    try {
+      const created = { id: "uuid-2", identifier: "ENG-102" };
+      const outcome = await Effect.runPromise(
+        Effect.gen(function* () {
+          const set = {
+            proposals: [proposal("A"), proposal("B"), proposal("C")],
+          };
+          yield* writeProposedIssues(root, set);
+          const recorded = yield* recordCreatedIssue(root, 1, created);
+          // An index the document does not have is not written, so it cannot mark another proposal.
+          const stale = yield* recordCreatedIssue(root, 3, created);
+          const after = yield* readProposedIssues(harness, root);
+          const folded = yield* readHistoricalSnapshot(storage, ref(cwd));
+          yield* writeProposedIssues(root, set);
+          return {
+            recorded,
+            stale,
+            after,
+            folded,
+            redecomposed: yield* readProposedIssues(harness, root),
+          };
+        }),
+      );
+      expect(outcome.recorded).toBe(true);
+      expect(outcome.stale).toBe(false);
+      expect(outcome.after?.proposals.map((p) => p.created)).toEqual([
+        undefined,
+        created,
+        undefined,
+      ]);
+      expect(outcome.folded.proposedIssues).toEqual(outcome.after);
+      // A decomposition replaces the draft whole: what it proposes has been created nowhere.
+      expect(
+        outcome.redecomposed?.proposals.every((p) => p.created === undefined),
+      ).toBe(true);
     } finally {
       await Effect.runPromise(closeHarness(harness));
     }
