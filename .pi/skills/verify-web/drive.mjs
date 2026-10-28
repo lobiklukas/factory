@@ -12,6 +12,7 @@
 // Uses the locally installed Chrome (channel: "chrome") instead of a downloaded
 // Playwright browser, so this runs without a browser download.
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1869,8 +1870,9 @@ if ((await sessionLink.count()) > 0) {
 // Feature: the board's lanes (LOB-75). See features/board.md.
 //
 // Lanes come from the definition, cards from the server, and the browser holds nothing between
-// them. Each run seeds its **own** board and one card in `intake` through the real `TaskService`
-// (`.pi/skills/verify-board/seed.ts`), so the drive can be rerun against the same `./up.sh`
+// them. Each run makes its **own** board through the New board form (below) and seeds one card in
+// `intake` onto it through the real `TaskService` (`.pi/skills/verify-board/seed.ts`, given the
+// form's board as `SEED_BOARD_ID`), so the drive can be rerun against the same `./up.sh`
 // instance: the move below changes only this run's card. The oracle for the lane order is
 // `getBoard` asked from this process, so a definition that reorders its columns changes the
 // expectation rather than breaking the check. The lanes themselves never change a card: every move
@@ -1883,10 +1885,46 @@ if ((await sessionLink.count()) > 0) {
 // caught below, because the API then does not hold the board.
 const boardObserved = {};
 let boardSeed = null;
+
+// The board is made the way an operator makes one (C5): the **New board** form on `/boards`, on a
+// repository slug of this run's own and version 1 of the default definition (the version the seed
+// has always pinned, so the card-pane checks below read the same pipeline). Only the card is seeded
+// through `TaskService`, onto the board the form made. A form that did not land on a board leaves
+// `formBoardId` empty, and the seed check below fails with the reason.
+const BOARD_REPO = `verify-web/${randomBytes(6).toString("hex")}`;
+let formBoardId = "";
+try {
+  await page.goto(`${WEB_URL}/boards`, { waitUntil: "domcontentloaded" });
+  await page.locator("[data-new-board]").first().click({ timeout: 20_000 });
+  await page.waitForSelector("[data-board-form]", { timeout: 20_000 });
+  // With repositories registered (the session checks above register some) the repository is a
+  // select with "Another repository…" last; with none it is the slug's own input.
+  const picker = page.locator("select#new-board-repo");
+  if ((await picker.count()) > 0) {
+    await picker.selectOption("");
+    await page.locator("#new-board-repo-text").fill(BOARD_REPO);
+  } else {
+    await page.locator("input#new-board-repo").fill(BOARD_REPO);
+  }
+  await page.locator("#new-board-version").selectOption("1");
+  await page.locator("[data-board-submit]").click();
+  await page.waitForFunction(
+    () => /^\/boards\/brd_[0-9a-z]{26}$/.test(window.location.pathname),
+    null,
+    { timeout: 20_000 },
+  );
+  formBoardId = new URL(page.url()).pathname.split("/").pop() ?? "";
+} catch (error) {
+  boardObserved.formError = String(error).slice(0, 300);
+}
 const seed = spawnSync(
   "bun",
   ["run", path.join(ROOT, ".pi/skills/verify-board/seed.ts")],
-  { encoding: "utf8", timeout: 60_000 },
+  {
+    encoding: "utf8",
+    timeout: 60_000,
+    env: { ...process.env, SEED_BOARD_ID: formBoardId },
+  },
 );
 boardObserved.seed = {
   status: seed.status,
@@ -1913,6 +1951,17 @@ assert(
     : truth.exit === "Success"
       ? JSON.stringify(boardSeed)
       : `seeded ${boardId}, but the API's getBoard says ${String(truth.exit)} — is DATABASE_URL the one ./up.sh started the API with?`,
+);
+
+assert(
+  "the board was made through the New board form",
+  formBoardId.startsWith("brd_") &&
+    boardId === formBoardId &&
+    truth.value?.instance?.repo === BOARD_REPO &&
+    truth.value?.instance?.definitionVersion === 1,
+  formBoardId === ""
+    ? `the form did not land on a board: ${boardObserved.formError ?? "no error"}`
+    : `${formBoardId} for ${BOARD_REPO}, seeded ${boardId}, getBoard repo ${String(truth.value?.instance?.repo)} v${String(truth.value?.instance?.definitionVersion)}`,
 );
 
 const definitionOrder = (truth.value?.definition?.columns ?? []).map(
@@ -1943,6 +1992,8 @@ const BOARD_READS = new Set([
   "listAttention",
   // The shell's faux banner (LOB-272) reads it on every page.
   "getServerInfo",
+  // The New session form's cost estimate (LOB-38) is a read: it spends nothing and opens nothing.
+  "predictCost",
 ]);
 const boardRpcTags = [];
 const recordRpcTags = (request) => {
@@ -2482,11 +2533,13 @@ assert(
   `building ${JSON.stringify(toBuilding ?? null)}; canceled ${JSON.stringify(toCanceled ?? null)}`,
 );
 
-// Run start: `planning` is a working column, so the pane offers a run; the click is
+// Run start: `planning` is a working column, so the pane offers a run; Start run then Send is
 // `createSession` with the card named, and the run is listed on the card and opened beside it.
 let runId = null;
 try {
   await page.locator("aside[data-card-pane] [data-start-run]").click();
+  // Start run opens the prompt field (C6); Send opens the run and sends its text.
+  await page.locator("aside[data-card-pane] [data-start-send]").click();
   await page.waitForFunction(
     () => new URL(window.location.href).searchParams.get("run") !== null,
     null,
@@ -2628,10 +2681,15 @@ await page.screenshot({
 });
 
 // The lanes still hold no control that can change a card, and the only writes the board pages sent
-// are the two moves the walk clicked (the refused one and the accepted one) and the run start. The
-// tags are the requests' own, so a write wired to any other element would be caught here.
+// are the two moves the walk clicked (the refused one and the accepted one) and the run start —
+// `createSession` then the first message Send puts in the run (C6). The tags are the requests' own, so a write wired to any other element would be caught here.
 page.off("request", recordRpcTags);
-const BOARD_WRITES = new Set(["moveTask", "createSession", "decideApproval"]);
+const BOARD_WRITES = new Set([
+  "moveTask",
+  "createSession",
+  "sendMessage",
+  "decideApproval",
+]);
 const boardWrites = boardRpcTags.filter((tag) => !BOARD_READS.has(tag));
 boardObserved.rpcTags = boardRpcTags;
 assert(
@@ -2641,6 +2699,7 @@ assert(
     boardWrites.every((tag) => BOARD_WRITES.has(tag)) &&
     boardWrites.filter((tag) => tag === "moveTask").length === 2 &&
     boardWrites.filter((tag) => tag === "createSession").length === 1 &&
+    boardWrites.filter((tag) => tag === "sendMessage").length === 1 &&
     boardWrites.filter((tag) => tag === "decideApproval").length === 1,
   `controls ${before.controls}/${afterReload.controls}; writes ${JSON.stringify(boardWrites)}`,
 );
@@ -2957,7 +3016,7 @@ assert(
     : `seed exit ${String(attentionSeed.status)}: ${attentionSeed.stderr ?? ""}`,
 );
 
-/** `createSession` with the card named, as the card pane's Start run and `factory board start` do. */
+/** An idle run on the card (`createSession` with the card named, nothing sent), as `factory board start --idle` opens. */
 const startRunOn = async (taskId, column) => {
   const created = await rpcFromDrive("createSession", {
     title: `attention run ${column}`,

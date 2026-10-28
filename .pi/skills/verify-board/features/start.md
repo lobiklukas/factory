@@ -20,15 +20,29 @@ factory board start --task tsk_0123456789abcdefghjkmnpqrs
 
 `--column` overrides the column the run is recorded in, for a run started out of its lane.
 
-`--prompt` sends the run its first message as soon as it is opened (LOB-73), and prints one more
-line; without it the run opens idle and waits for a message from the dashboard or `factory send`:
+A run is put to work when it opens (C6). With no `--prompt`, the first message is the card's default
+prompt — its title, its body when it has one, and the column's instruction (which column the run works
+in, and the `requires[]` the card must satisfy to leave it) — built by `runPrompt` in `@repo/domain/Task`,
+the function the board page's **Start run** pre-fills its field with, so the same card started from either
+door has the same first message. The command prints one more line:
+
+```sh
+factory board start --task tsk_0123456789abcdefghjkmnpqrs
+# session ses_0123456789abcdefghjkmnpqrs
+# task    tsk_0123456789abcdefghjkmnpqrs in specifying
+# sent    Pin the Postgres major (the card's default prompt)
+```
+
+`--prompt` replaces the default with the words given (LOB-73), and `sent` echoes them:
 
 ```sh
 factory board start --task tsk_0123456789abcdefghjkmnpqrs --prompt "specify this card"
-# session ses_0123456789abcdefghjkmnpqrs
-# task    tsk_0123456789abcdefghjkmnpqrs in specifying
 # sent    specify this card
 ```
+
+`--idle` opens the run and sends nothing: it waits for a message from the dashboard or `factory send`.
+It cannot be combined with `--prompt`. The column's instruction is read from the definition version the
+card pinned; a definition that cannot be read costs the default prompt its instruction line, never the run.
 
 ## How the skill drives it
 
@@ -37,6 +51,15 @@ column the previous move put the card in — the proof that the session is bound
 opened as a scratch session. `--prompt` is driven by the drive's specify phase
 ([specify.md](specify.md)) and by `./ask.sh` ([ask.md](ask.md)): every run in both is started with
 it, and the drives check the `sent …` line and that the run then works.
+
+`./start-prompt.sh` (C6) is the no-`--prompt` proof: two cards with one title and body, one started with
+`factory board start` and one from the board page (**Start run**, which opens a field holding the card's
+default prompt, then **Send**). It reads each run's first `user` (`pi.user`) entry back from `getSession`
+and requires both to hold the card's title, body and the column's instruction, to be byte-identical, and
+both runs to be `busy`; the page must have sent `createSession` as `dashboard` then one `sendMessage`
+carrying exactly the field's text. A third card proves an edited field is sent as typed and that Cancel
+opens no run, and a fourth that `--idle` opens a run with no user entry. `triage.sh` starts its gate
+card's run with `--idle`, because a bare start would leave that run busy.
 
 ## What it does not prove
 

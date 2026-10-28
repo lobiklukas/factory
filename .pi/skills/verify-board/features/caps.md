@@ -6,7 +6,7 @@
 
 B9's caps as board policy the definition carries (docs/board.md B9, LOB-71): how many runs may be in
 flight at once on one board, on one task, in one repository across every board over it, and started
-in one column. A version declares `caps` (`board`, `task`, `repo`; `board_definitions.caps`, migration 0037) and a column its `wipLimit` (inside `columns`). Default version 5 carries B9's numbers — 2 per
+in one column. A version declares `caps` (`board`, `task`, `repo`; `board_definitions.caps`, migration 0038) and a column its `wipLimit` (inside `columns`). Default version 5 carries B9's numbers — 2 per
 board, 1 per task, 2 per repository — and no WIP limit; versions 1–4 cap nothing.
 
 A start (`createSession` with a card, which `factory board start` and the card pane send) is checked

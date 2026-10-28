@@ -20,6 +20,7 @@ export const PROPOSED_ISSUES_DOC_KIND = "factory.proposedIssues";
 export const REVIEW_DOC_KIND = "factory.review";
 export const APPROVALS_DOC_KIND = "factory.approvals";
 export const PLAN_REVISIONS_DOC_KIND = "factory.planRevisions";
+export const SKILLS_DOC_KIND = "factory.skills";
 
 /** What `SpecDoc` holds before anything was written, and what a version-1 value migrates to. */
 const unspecified = () => ({
@@ -177,6 +178,32 @@ export const PagePromptDoc = defineDoc({
     held: 0,
     included: [] as string[],
     dropped: [] as string[],
+  }),
+});
+
+/**
+ * The skill versions a run was given (D7, docs/board.md B2): one `{ name, version }` per skill its
+ * column binds, in the column's order, written by the open that first resolved them.
+ *
+ * This is what makes "in-flight runs keep the version they opened with" hold across a reopen. The
+ * skills table keeps every version (`0037_version_skills.ts`), and the control plane reads this
+ * document before it resolves the run's prompt (`loadRun`'s `pinned`), so a run opened on
+ * `specify@1` is told version 1 again after an operator put version 2 — and a new run is told 2.
+ * Pins only accumulate: a skill pinned once keeps its version for the life of the log, and an open
+ * adds a pin only for a skill the log had not pinned yet.
+ *
+ * `fork: "current"`, so a fork carries its parent's pins and continues on the bodies its transcript
+ * was written under. A log written before this document existed holds the seed (`skills: []`) and
+ * is pinned to the newest versions the first time it is opened.
+ */
+export const SkillPinsDoc = defineDoc({
+  kind: SKILLS_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({
+    skills: [] as Array<{ name: string; version: number }>,
   }),
 });
 

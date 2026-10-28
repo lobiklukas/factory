@@ -639,7 +639,7 @@ const initialColumnField = (
   initialColumn === null ? {} : { initialColumn };
 
 /**
- * `board_definitions.caps` (0037, LOB-71) as `BoardDefinition` carries it: absent, not `null`, for a
+ * `board_definitions.caps` (0038, LOB-71) as `BoardDefinition` carries it: absent, not `null`, for a
  * version written before the column existed, which caps nothing. Read as the driver parses JSONB and
  * decoded with the rest of the definition, so a malformed value is the definition's decode failure.
  */

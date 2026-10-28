@@ -107,6 +107,7 @@ import type {
   StartMissionResult,
 } from "@repo/domain/Mission";
 import type { OpenPullRequestPayload } from "@repo/domain/PullRequest";
+import type { SkillRecord } from "@repo/domain/Skill";
 import type {
   BacktestCostInput,
   CostBacktest,
@@ -131,6 +132,7 @@ import {
   EMPTY_RUN_PROFILE,
   isMissionTask,
   loadRun,
+  type SkillPin,
   MISSION_TASKS,
   missionInFlight,
   NO_ROLE_MODELS,
@@ -173,6 +175,7 @@ import {
   readFollowedSnapshot,
   readPinnedModelKey,
   readRecordedReview,
+  readSkillPins,
   readTranscriptPage,
   readVerifyRecords,
   readCurationUsage,
@@ -1575,9 +1578,15 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       /**
        * What the run's column gives its prompt: the skill records the column names, resolved in the
        * column's order (`@repo/harness`'s `loadRun`). A column that names no skills costs no query.
+       *
+       * Which version of each (D7): the one the run's log pinned when it first opened (`pinned`,
+       * read from its `factory.skills` document), else the newest. The newest of every skill is one
+       * read; a pinned version that is no longer the newest is one more read each, so a run that was
+       * never edited under costs nothing extra.
        */
       const runProfileFor = (
         sessionId: SessionId,
+        pinned: readonly SkillPin[],
       ): Effect.Effect<RunProfile, SessionError> =>
         Effect.gen(function* () {
           const column = yield* runColumnFor(sessionId);
@@ -1592,18 +1601,38 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   skills: [],
                 };
           }
-          const library = yield* skills.list.pipe(
-            Effect.mapError(
-              (cause) =>
-                new SessionErrorClass({
-                  code: "storage",
-                  message: `read skills: ${cause.message}`,
-                }),
+          const readFailed = (cause: { readonly message: string }) =>
+            new SessionErrorClass({
+              code: "storage",
+              message: `read skills: ${cause.message}`,
+            });
+          const newest = yield* skills.list.pipe(Effect.mapError(readFailed));
+          // The pins of this column's skills that the newest rows do not answer. A pinned version the
+          // table no longer holds is left out, and `loadRun` refuses it by name and version.
+          const older = yield* Effect.forEach(
+            pinned.filter(
+              (pin) =>
+                column.skills.includes(pin.name) &&
+                !newest.some(
+                  (skill) =>
+                    skill.name === pin.name && skill.version === pin.version,
+                ),
             ),
+            (pin) =>
+              skills.get(pin.name, pin.version).pipe(
+                Effect.map((skill): readonly SkillRecord[] => [skill]),
+                Effect.catchTag("SkillNotFound", () => Effect.succeed([])),
+                Effect.mapError(readFailed),
+              ),
           );
           return yield* loadRun(
             column,
-            library.map((skill) => ({ name: skill.name, body: skill.body })),
+            [...newest, ...older.flat()].map((skill) => ({
+              name: skill.name,
+              version: skill.version,
+              body: skill.body,
+            })),
+            pinned,
           ).pipe(
             Effect.mapError(
               (cause) =>
@@ -2215,11 +2244,17 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               );
             }
             const storage = yield* openStorage(id, "owner");
-            // The run's prompt comes from its column (B6), read on every owner acquisition: a
-            // resumed session re-reads the skill bodies as they are *now*, so an edit made between
-            // two runs of one session reaches the next run too. Pinning a body to the run that
-            // started under it is B6's "per-run version pinning", which is wave 2.
-            const column = yield* runProfileFor(id);
+            // The run's prompt comes from its column (B6), read on every owner acquisition, at the
+            // versions the log pinned when the run first opened (D7, B2): a skill put since then
+            // reaches the next run, and a reopened one is told what it was told before. The open
+            // pins whatever it resolves that the log had not pinned yet (`@repo/harness`'s
+            // `factory.skills`).
+            const pins = yield* readSkillPins(storage).pipe(
+              Effect.tapError(() => Effect.promise(() => storage.dispose())),
+            );
+            const column = yield* runProfileFor(id, pins).pipe(
+              Effect.tapError(() => Effect.promise(() => storage.dispose())),
+            );
             // A review run (LOB-36) is the read-only reviewing stage, offered the review tool.
             const reviews =
               acquisition.reviewing === true ||

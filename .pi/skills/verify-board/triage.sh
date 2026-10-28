@@ -89,12 +89,13 @@ check "board block --reason needs_input parks the card with no revision named" \
   "$([ "$rc" = "0" ] && has asked-block "blocked $ASKED (revision 2): needs_input in intake" && has asked-block "note    Which Postgres major?" && echo 0 || echo 1)" \
   "exit=$rc"
 
-# The gate card: in planning with an idle run started there (no prompt: the run opens and waits).
+# The gate card: in planning with an idle run started there (--idle: the run opens and waits; a
+# bare `board start` sends the card's prompt since C6, which would leave the run busy).
 run gated-move1 board move --task "${GATED:-tsk_missing}" --to specifying --expect-revision 1 --api "$API_URL"
 run gated-move2 board move --task "${GATED:-tsk_missing}" --to planning --expect-revision 2 --api "$API_URL"
 check "the gate card is moved on to planning" \
   "$([ "$rc" = "0" ] && has gated-move2 "to planning (revision 3)" && echo 0 || echo 1)" "exit=$rc"
-run gated-start board start --task "${GATED:-tsk_missing}" --api "$API_URL"
+run gated-start board start --task "${GATED:-tsk_missing}" --idle --api "$API_URL"
 GATE_SESSION="$(grep -o 'ses_[0-9a-z]\{26\}' "$EVIDENCE_DIR/triage-gated-start.txt" | head -1)"
 check "a run is started in planning and left idle" \
   "$([ "$rc" = "0" ] && [ -n "$GATE_SESSION" ] && echo 0 || echo 1)" "session=${GATE_SESSION:-none}"

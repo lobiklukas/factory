@@ -54,6 +54,7 @@ import {
   TaskRun,
   type BoardInstanceId,
   isWebLink,
+  runPrompt,
 } from "./Task";
 
 /** Whether `schema` refuses `value`, as a value rather than a throw, so a case reads as data. */
@@ -984,5 +985,44 @@ describe("run caps and WIP limits (LOB-71)", () => {
 
   it("is B9's 2 per board, 1 per task, 2 per repo by default", () => {
     expect(DEFAULT_BOARD_CAPS).toEqual({ board: 2, task: 1, repo: 2 });
+  });
+});
+
+describe("runPrompt (C6)", () => {
+  const building = {
+    name: "building",
+    requires: [
+      { key: "non_empty_diff", description: "the run left a change" },
+      { key: "tests_pass", description: "the tests pass" },
+    ],
+  };
+
+  it("is the title, the body verbatim, and the column's instruction, in that order", () => {
+    expect(
+      runPrompt(
+        {
+          title: "Fix the login",
+          body: "Users get a 500.\n\n  - repro: sign in\n",
+        },
+        building,
+      ),
+    ).toBe(
+      "Fix the login\n\n" +
+        "Users get a 500.\n\n  - repro: sign in\n\n" +
+        "Work this card in the building column. It leaves the column only when each of these holds:\n" +
+        "- non_empty_diff: the run left a change\n" +
+        "- tests_pass: the tests pass",
+    );
+  });
+
+  it("leaves out a body the card does not have, or that is only whitespace", () => {
+    const column = { name: "specifying", requires: [] };
+    const bare = runPrompt({ title: "T" }, column);
+    expect(bare).toBe("T\n\nWork this card in the specifying column.");
+    expect(runPrompt({ title: "T", body: " \n\t\n" }, column)).toBe(bare);
+  });
+
+  it("names no column the definition does not have", () => {
+    expect(runPrompt({ title: "T", body: "B" }, undefined)).toBe("T\n\nB");
   });
 });

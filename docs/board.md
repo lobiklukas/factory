@@ -113,12 +113,24 @@ follow that model's window, not today's row. One gap is the faux backend's: its 
 `faux-1` and the `faux/*` ids the current `ROLE_MODELS` names, so dropping a row while a run is open on
 it leaves that run with no model to send to after a restart (a real backend's catalog holds every model,
 so it is not affected). Under faux, keep a row until the runs on it are done.
+
 A run can also be started on a model of its own (LOB-274): `createSession`'s `model`
 (`factory run --model`, the dashboard's New session picker) is resolved against the same catalog —
 an unserved one is `invalid_input` before anything is written — and pinned ahead of the role's row.
 The deployment's model is `DEFAULT_MODEL` when it is set (validated at boot, like a row), else the
 backend's own. So a run's model is: its session's > its column role's row > `DEFAULT_MODEL` > the
 backend's, decided once, when its root is created.
+
+Built (D7): skills are versioned and edited without a migration. The table is keyed by `(name,
+version)` (`0037_version_skills`, which kept every existing row as version 1); `putSkill` adds
+version `newest + 1` and never rewrites a row. `listSkills`, `getSkill(name, version?)` and `putSkill`
+are the `SkillsRpc` group, and `factory skill ls|show|put --file SKILL.md` drives them (`ls` names the
+default definition's columns that bind each skill). A run's version is pinned like its model: the open
+that first resolves its column's skills records `name@version` in the run's log (`factory.skills`), and
+every later open resolves from those pins (`loadRun`'s `pinned`), so a put reaches the next run and a
+reopened run keeps the body it opened with. A pinned version the table no longer holds refuses the open
+by name and version rather than moving the run onto another body.
+
 **The tool policy** is a filter on what a run is _offered_: a read-only role is not given `write`,
 `edit` or `verify` at all (`STAGE_REFUSED_TOOLS`), so a call to one meets Pi Durable's
 `tool_unavailable`. LOB-74's hook refusal still judges every `bash` call, and it is the only line for
@@ -237,7 +249,7 @@ about "what is next", and priority changes are recorded as events. Caps are boar
 2 runs in flight per board, 1 per task, 2 per repo, plus a per-column WIP limit.
 
 Built (LOB-71): the caps are definition data, enforced where a run starts. A version's `caps`
-(`board`, `task`, `repo`; `board_definitions.caps`, migration 0037) and a column's `wipLimit` (in
+(`board`, `task`, `repo`; `board_definitions.caps`, migration 0038) and a column's `wipLimit` (in
 `columns`) are read from the version the card **pins**, so a new version with other caps moves the
 threshold for its cards only; default version 5 carries 2/1/2 and no WIP limit, and versions 1–4 cap
 nothing. `SessionService.create` with a card checks them in the transaction that writes the run's
@@ -316,8 +328,8 @@ customization, decomposition, and board metrics.
    gating. Trigger: the first multi-part body of work, or re-enabling decomposition.
 4. **Failure policy** — B10 in full, plus `maxRuntime` and the breaker. Trigger: the first `faulted`
    run, or the first retry you care about.
-5. **Skills platform** — authoring UI, version pinning per run, repo-skill import. Trigger: the second
-   repository, or the first skill edit without a migration.
+5. **Skills platform** — authoring UI and repo-skill import (version pinning per run and editing
+   without a migration are built, D7). Trigger: the second repository.
 6. **Sync map** — per-column declarative mapping, Jira and GitHub, conflict rules. Trigger: the second
    tracker.
 7. **Identity** — real authentication, per-column move permissions, audit views (LOB-20). Trigger: the
