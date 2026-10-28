@@ -968,7 +968,11 @@ describe("startCard (C6)", () => {
   ) => {
     const calls: Array<string> = [];
     const sent: Array<string> = [];
-    const opened: Array<{ taskColumn: string; actor: string }> = [];
+    const opened: Array<{
+      taskColumn: string;
+      actor: string;
+      budget: number | undefined;
+    }> = [];
     const client = {
       getTask: () => Effect.succeed(over.card ?? card()),
       getBoard: () =>
@@ -989,9 +993,17 @@ describe("startCard (C6)", () => {
           ],
         });
       },
-      createSession: (input: { taskColumn: string; actor: string }) => {
+      createSession: (input: {
+        taskColumn: string;
+        actor: string;
+        budget?: number;
+      }) => {
         calls.push("createSession");
-        opened.push({ taskColumn: input.taskColumn, actor: input.actor });
+        opened.push({
+          taskColumn: input.taskColumn,
+          actor: input.actor,
+          budget: input.budget,
+        });
         return Effect.succeed({ id: SESSION });
       },
       getSession: () =>
@@ -1034,6 +1046,32 @@ describe("startCard (C6)", () => {
     idle: false,
     actor: "cli",
     ...over,
+  });
+
+  /**
+   * C23: `--budget` is the run's spend cap, sent on the `createSession` that opens it and printed,
+   * so the operator sees what the run was held to; without it nothing is sent, so the server's
+   * default cap applies. Mutation: drop the field from the session input, or send it always.
+   */
+  it("opens the run with the budget it was given, and says so", async () => {
+    const s = server();
+    const { lines, run } = startLines(s.client, input({ budget: 2.5 }));
+    await Effect.runPromise(run);
+    expect(s.opened).toEqual([
+      { taskColumn: "building", actor: "cli", budget: 2.5 },
+    ]);
+    expect(lines).toContain("budget  $2.5000");
+    expect(lines.indexOf("budget  $2.5000")).toBeGreaterThan(
+      lines.indexOf(`task    ${TASK} in building`),
+    );
+  });
+
+  it("sends no budget when none was asked for", async () => {
+    const s = server();
+    const { lines, run } = startLines(s.client, input());
+    await Effect.runPromise(run);
+    expect(s.opened[0]?.budget).toBeUndefined();
+    expect(lines.some((line) => line.startsWith("budget"))).toBe(false);
   });
 
   /**

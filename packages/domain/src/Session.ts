@@ -774,6 +774,26 @@ export const InterruptSessionResult = Schema.Struct({
 });
 export type InterruptSessionResult = typeof InterruptSessionResult.Type;
 
+/** Set a session's spend cap (C23): the session, and the ceiling its spend is to be held to. */
+export const SetSessionBudgetInput = Schema.Struct({
+  sessionId: SessionId,
+  budget: SessionBudgetCap,
+});
+export type SetSessionBudgetInput = typeof SetSessionBudgetInput.Type;
+
+/**
+ * What setting a cap came to (C23): the session, its budget as the log now records it (the new cap,
+ * the spend it is measured against, and no stop — setting a cap clears the one the old cap made),
+ * and the server's sentence for it, which says when the spend already reaches the new cap (a run
+ * then stops before its first request, as under any cap that is reached).
+ */
+export const SetSessionBudgetResult = Schema.Struct({
+  session: SessionSummary,
+  budget: SessionBudget,
+  message: Schema.String,
+});
+export type SetSessionBudgetResult = typeof SetSessionBudgetResult.Type;
+
 /**
  * The pull request a reviewer run is opened for (LOB-36): the PR by its number and page, the ref it
  * merges into, and the commit under review. The session's worktree is cut at `head` (its `baseRef`),
