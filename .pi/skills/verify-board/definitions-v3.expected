@@ -1,4 +1,5 @@
 definition  default v3  Default pipeline
+initial     intake
 intake  resting
   role      —
   model     faux/faux-1 (deployment)

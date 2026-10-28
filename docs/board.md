@@ -26,10 +26,17 @@ under, so editing a definition cannot mutate work in flight. Definitions live in
 
 Built (LOB-270): definitions and a board's configuration are readable over RPC (`listDefinitions`,
 `getDefinition`, `getBoardConfig`) and the CLI (`factory board definitions | definition show | list |
-config`). Each column is described with its declared exits and human gates (the code tables
-`TaskService` refuses by), each requirement marked checked or unchecked (`CHECKED_REQUIREMENTS`), and
+config`). Each column is described with its declared exits and human gates (what `TaskService`
+refuses by), each requirement marked checked or unchecked (`CHECKED_REQUIREMENTS`), and
 its role's model as the deployment's `ROLE_MODELS` resolves it (B6) — read-only, joined by
 `describeDefinition` in `packages/core`.
+
+Built (LOB-267): transitions, human gates and the initial column are definition data. A column
+declares `transitions: [{ to, gate? }]` and a definition its `initialColumn`
+(`board_definitions.initial_column`); `TaskService.move`, `create`, the attention view's gate rows and
+the card pane all read the card's pinned version. Default version 4 (`0024_seed_definition_transitions`)
+carries exactly the old code table; versions 1–3, which declare no transitions, still resolve through
+that table (`columnTransitions` in `@repo/domain/Task`) and start a card in their first column.
 
 ## B3 — Cards are rows, not a log
 

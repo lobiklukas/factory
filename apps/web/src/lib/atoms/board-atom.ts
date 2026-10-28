@@ -1,4 +1,5 @@
 import type {
+  BoardDefinition,
   BoardInstanceId,
   CommentTaskInput,
   MoveTaskInput,
@@ -10,6 +11,7 @@ import type { SessionId } from "@repo/domain/Session";
 import { Duration, Effect } from "effect";
 import { Atom } from "effect/reactivity";
 import { runtime } from "../atom";
+import { definitionOfConfig } from "../board-view";
 import { RpcClient } from "../rpc-client";
 import { DASHBOARD_ACTOR } from "../approvals-view";
 import { SESSIONS_KEY } from "./session-list";
@@ -59,6 +61,10 @@ export const boardsAtom = runtime.atom(
  * (B9). A failure of either fails the read, rather than showing lanes with no cards — an empty lane
  * and a lane whose cards failed to load must not look the same.
  *
+ * A card's moves are its pinned definition version's (B2, LOB-267). Every card made on a board pins
+ * the board's version, so this is normally the two calls and nothing else; a card that pinned another
+ * version has that version read too (`getDefinition`), once per version, into `pinned`.
+ *
  * Re-read every `BOARD_POLL` while the board is open, and at once when a move from this page lands
  * (`BOARD_KEY`), so the lanes follow the server rather than this page's last answer (LOB-76).
  */
@@ -71,7 +77,30 @@ export const boardAtom = Atom.family((boardId: BoardInstanceId) =>
           [rpc.client.getBoard({ boardId }), rpc.client.listTasks({ boardId })],
           { concurrency: 2 },
         );
-        return { ...view, tasks };
+        const others = [
+          ...new Set(
+            tasks
+              .map((task) => task.definitionVersion)
+              .filter((version) => version !== view.definition.version),
+          ),
+        ];
+        const read = yield* Effect.forEach(
+          others,
+          (version) =>
+            rpc.client
+              .getDefinition({
+                definitionId: view.instance.definitionId,
+                version,
+              })
+              .pipe(
+                Effect.map(
+                  (config) => [version, definitionOfConfig(config)] as const,
+                ),
+              ),
+          { concurrency: 4 },
+        );
+        const pinned: ReadonlyMap<number, BoardDefinition> = new Map(read);
+        return { ...view, tasks, pinned };
       }),
     )
     .pipe(Atom.withReactivity([BOARD_KEY]), Atom.withRefresh(BOARD_POLL)),

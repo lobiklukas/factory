@@ -108,3 +108,71 @@ describe("describeDefinition (LOB-270)", () => {
     ]);
   });
 });
+
+/**
+ * A definition that declares its own moves (LOB-267): the exits are its columns' `transitions`, not
+ * the default pipeline's table, and the initial column is the one it names.
+ */
+describe("describeDefinition over a definition's own transitions (LOB-267)", () => {
+  /** Not `modelOf`: the case above counts the roles that table was asked for. */
+  const deploymentModel = (): ResolvedModel => ({
+    model: "faux/faux-1",
+    source: "deployment",
+  });
+  const declared: BoardDefinition = {
+    id: DefinitionId.make("todo"),
+    version: 1,
+    name: "Todo",
+    initialColumn: "todo",
+    columns: [
+      {
+        name: "todo",
+        kind: "resting",
+        skills: [],
+        requires: [],
+        transitions: [{ to: "doing" }],
+      },
+      {
+        name: "doing",
+        kind: "working",
+        skills: [],
+        requires: [],
+        transitions: [{ to: "done", gate: "sign-off" }],
+      },
+      // Named like a default column, but this definition declares its moves: none out of here.
+      { name: "review", kind: "working", skills: [], requires: [] },
+      {
+        name: "done",
+        kind: "terminal",
+        skills: [],
+        requires: [],
+        transitions: [],
+      },
+    ],
+  };
+  const described = describeDefinition(declared, deploymentModel);
+
+  /** Mutation: describe exits from the default table — `todo` and `doing` read none, `review` two. */
+  it("lists each column's declared transitions, gates marked, and none where it declares none", () => {
+    expect(described.columns.map((column) => column.exits)).toEqual([
+      [{ to: "doing" }],
+      [{ to: "done", humanGate: "sign-off" }],
+      [],
+      [],
+    ]);
+  });
+
+  /** Mutation: describe the first column, or `intake`, as the initial one — this reads `todo` only by its name. */
+  it("names the initial column the definition declares, and the first column for one that declares none", () => {
+    expect(described.initialColumn).toBe("todo");
+    expect(
+      describeDefinition(
+        { ...declared, initialColumn: "doing" },
+        deploymentModel,
+      ).initialColumn,
+    ).toBe("doing");
+    expect(describeDefinition(definition, deploymentModel).initialColumn).toBe(
+      "planning",
+    );
+  });
+});

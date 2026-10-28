@@ -2674,6 +2674,154 @@ assert(
 );
 observed.board = boardObserved;
 
+// Feature: the card pane under a definition's own transitions (LOB-267). See features/card-pane.md.
+//
+// A board over a definition whose columns are not the default pipeline's — todo → doing → done, a
+// `sign-off` gate on doing → done, `todo` its initial column, and a `review` column that declares no
+// moves — seeded by `seed-definition.ts` (the row as a migration writes one, the board and card
+// through `TaskService`). The pane must offer what *this* definition declares and nothing else: the
+// default pipeline's table, read by column name, would offer `todo` nothing and `review` two moves.
+// The API is asked the same questions from here, so the pane and the service are held to one answer.
+const syntheticObserved = {};
+const syntheticSeed = spawnSync(
+  "bun",
+  ["run", path.join(ROOT, ".pi/skills/verify-web/seed-definition.ts")],
+  { encoding: "utf8", timeout: 60_000 },
+);
+let synthetic = null;
+try {
+  synthetic = JSON.parse((syntheticSeed.stdout ?? "").trim());
+} catch (error) {
+  syntheticObserved.seedError = String(error).slice(0, 200);
+}
+syntheticObserved.seed = {
+  status: syntheticSeed.status,
+  stdout: (syntheticSeed.stdout ?? "").trim().slice(0, 300),
+  stderr: (syntheticSeed.stderr ?? "").trim().slice(0, 300),
+};
+const synBoard =
+  typeof synthetic?.boardId === "string" ? synthetic.boardId : "";
+const synCard = typeof synthetic?.taskId === "string" ? synthetic.taskId : "";
+const synConfig = await rpcFromDrive("getBoardConfig", { boardId: synBoard });
+syntheticObserved.config = synConfig.value?.definition ?? null;
+assert(
+  "a board over a synthetic definition starts its card in the definition's initial column",
+  syntheticSeed.status === 0 &&
+    synthetic?.column === "todo" &&
+    synthetic?.revision === 1 &&
+    synConfig.exit === "Success" &&
+    synConfig.value?.definition?.initialColumn === "todo",
+  syntheticSeed.status !== 0 || synthetic === null
+    ? `seed exit ${String(syntheticSeed.status)}: ${syntheticObserved.seed.stderr || syntheticObserved.seedError}`
+    : `card in ${String(synthetic.column)} r${String(synthetic.revision)}; config ${String(synConfig.exit)} initial ${String(synConfig.value?.definition?.initialColumn)}`,
+);
+
+/** The open pane's moves once it shows the synthetic card at `revision`, or `null` when it does not. */
+const synPaneAt = async (revision) => {
+  const shown = await page
+    .waitForFunction(
+      ({ id, revision }) => {
+        const pane = document.querySelector(`aside[data-card-pane='${id}']`);
+        return (
+          pane !== null &&
+          pane.getAttribute("data-card-pane-revision") === String(revision)
+        );
+      },
+      { id: synCard, revision },
+      { timeout: 15_000 },
+    )
+    .then(
+      () => true,
+      () => false,
+    );
+  return shown ? readPane(page) : null;
+};
+
+await page.goto(`${WEB_URL}/boards/${synBoard}?card=${synCard}`, {
+  waitUntil: "domcontentloaded",
+});
+const synTodo = await synPaneAt(1);
+syntheticObserved.todo = synTodo;
+const synLanes = await page.evaluate(() =>
+  Array.from(document.querySelectorAll("section[data-lane]")).map((lane) =>
+    lane.getAttribute("data-lane"),
+  ),
+);
+syntheticObserved.lanes = synLanes;
+assert(
+  "a card in todo is offered exactly doing, ungated — what its own definition declares",
+  synTodo?.column === "todo" &&
+    JSON.stringify(synLanes) ===
+      JSON.stringify(["todo", "doing", "review", "done"]) &&
+    JSON.stringify(
+      (synTodo?.moves ?? []).map((move) => [move.to, move.gate]),
+    ) === JSON.stringify([["doing", null]]),
+  `lanes ${JSON.stringify(synLanes)}; pane ${String(synTodo?.column)}; moves ${JSON.stringify((synTodo?.moves ?? []).map((move) => [move.to, move.gate]))}`,
+);
+const synSkip = await rpcFromDrive("moveTask", {
+  taskId: synCard,
+  expectedRevision: 1,
+  to: "done",
+  actor: "drive",
+});
+const synAfterSkip = await rpcFromDrive("getTask", { taskId: synCard });
+syntheticObserved.skip = { exit: synSkip, after: synAfterSkip.value };
+assert(
+  "the API refuses todo → done as an undeclared transition, and the card stays",
+  synSkip.exit === "Failure" &&
+    JSON.stringify(synSkip.cause).includes("UndeclaredTransition") &&
+    JSON.stringify(synSkip.cause).includes(
+      'column \\"todo\\" declares no transition to \\"done\\"',
+    ) &&
+    synAfterSkip.value?.column === "todo" &&
+    synAfterSkip.value?.revision === 1,
+  `API ${String(synSkip.exit)} ${JSON.stringify(synSkip.cause).slice(0, 200)}; card ${String(synAfterSkip.value?.column)} r${String(synAfterSkip.value?.revision)}`,
+);
+await page.screenshot({
+  path: path.join(EVIDENCE_DIR, "card-pane-synthetic-todo.png"),
+});
+
+// The click is the person's move along the definition; the pane then offers `doing`'s one exit,
+// marked with its gate, and the API refuses a run that tries to cross it.
+await page
+  .locator(`aside[data-card-pane='${synCard}'] [data-move-to='doing']`)
+  .click()
+  .catch((error) => {
+    syntheticObserved.clickError = String(error).slice(0, 200);
+  });
+const synDoing = await synPaneAt(2);
+syntheticObserved.doing = synDoing;
+assert(
+  "the pane moves the card to doing, then offers done marked with the sign-off gate",
+  synDoing?.column === "doing" &&
+    JSON.stringify(
+      (synDoing?.moves ?? []).map((move) => [move.to, move.gate]),
+    ) === JSON.stringify([["done", "sign-off"]]) &&
+    (synDoing?.moves?.[0]?.label ?? "").endsWith("a person's move"),
+  `pane ${String(synDoing?.column)} r${String(synDoing?.revision)}; moves ${JSON.stringify(synDoing?.moves ?? null)}; ${syntheticObserved.clickError ?? ""}`,
+);
+const synRunGate = await rpcFromDrive("moveTask", {
+  taskId: synCard,
+  expectedRevision: 2,
+  to: "done",
+  actor: "ses_0123456789abcdefghjkmnpqrs",
+});
+const synAfterGate = await rpcFromDrive("getTask", { taskId: synCard });
+syntheticObserved.runGate = { exit: synRunGate, after: synAfterGate.value };
+assert(
+  "the API refuses a run crossing the sign-off gate, and the card stays in doing",
+  synRunGate.exit === "Failure" &&
+    JSON.stringify(synRunGate.cause).includes("HumanGateRequired") &&
+    JSON.stringify(synRunGate.cause).includes("sign-off") &&
+    synAfterGate.value?.column === "doing" &&
+    synAfterGate.value?.revision === 2,
+  `API ${String(synRunGate.exit)} ${JSON.stringify(synRunGate.cause).slice(0, 200)}; card ${String(synAfterGate.value?.column)} r${String(synAfterGate.value?.revision)}`,
+);
+await page.screenshot({
+  path: path.join(EVIDENCE_DIR, "card-pane-synthetic-doing.png"),
+});
+observed.cardPaneSynthetic = syntheticObserved;
+
 // Feature: what needs a person (LOB-77). See features/attention.md.
 //
 // The attention view lists the cards a person has to act on — a run's pending approval, a run's

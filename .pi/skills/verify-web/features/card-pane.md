@@ -7,10 +7,15 @@ transcript, approvals and sandbox as panes (LOB-76, part 2 of LOB-22).
 
 ## Sub-features
 
-- **Declared transitions only.** The pane offers `declaredTransitions(column)` from
-  `@repo/domain/Task` — the table `TaskService` refuses against — so a move the API would refuse as
-  undeclared is never offered. A card in `intake` is offered `specifying` and `canceled`, never
-  `done`. Each move is a `button[data-move-to=<column>]`.
+- **Declared transitions only.** The pane offers `columnTransitions(definition, column)` from
+  `@repo/domain/Task` under the definition version the card pinned — what `TaskService` refuses
+  against — so a move the API would refuse as undeclared is never offered. A card in the default
+  pipeline's `intake` is offered `specifying` and `canceled`, never `done`. Each move is a
+  `button[data-move-to=<column>]`.
+- **A definition's own moves (LOB-267).** A column declares `transitions: [{ to, gate? }]`; a
+  definition with its own column set is offered exactly those, never the default table by name. The
+  board read (`boardAtom`) also fetches, through `getDefinition`, any version a card pinned other than
+  the board's, so a card's moves are always its own version's.
 - **Human gates are marked.** `planning → building` (plan approval) and `review → done` (merge)
   carry `data-human-gate=<gate>`, a person icon, `person · <gate>` beside the column, and an
   accessible name ending `a person's move`. The dashboard's actor is `dashboard`, a person (B5), so
@@ -79,11 +84,20 @@ The block runs after the lane checks, on the card the drive seeded in `intake`. 
     clicked moves, the one run start and the one decision (the thread's `listTaskComments` is a
     read; its `commentTask` is not clicked here);
 13. `?card=<id>&run=<a session id that is not one of its runs>` to render `[data-run-foreign]` and
-    no run tabs.
+    no run tabs;
+14. **a definition's own moves (LOB-267)**: `seed-definition.ts` writes a definition row — todo →
+    doing → done, a `sign-off` gate on doing → done, `todo` its initial column, and a `review` column
+    that declares nothing — and makes a board and a card over it through `TaskService`. The card is
+    in `todo` at r1 and `getBoardConfig` names `todo` as the initial column; the lanes are the
+    definition's four; the pane offers exactly `doing`, ungated; a direct `moveTask` to `done` is
+    `UndeclaredTransition` in the service's words with the card unchanged; a click on `doing` moves
+    it (r2) and the pane then offers `done` alone, marked `sign-off` as a person's move; a direct
+    `moveTask` to `done` as a run's actor (`ses_…`) is `HumanGateRequired` naming `sign-off`, and
+    the card stays in `doing`.
 
 Evidence: `card-pane-intake.png`, `card-pane-stale.png`, `card-pane-run.png`,
-`card-pane-approvals.png`, and
-`observed.cardPane`.
+`card-pane-approvals.png`, `card-pane-synthetic-todo.png`, `card-pane-synthetic-doing.png`,
+`observed.cardPane` and `observed.cardPaneSynthetic`.
 
 ## Gotchas
 

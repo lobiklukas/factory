@@ -72,12 +72,29 @@ export const ColumnRequirement = Schema.Struct({
 export type ColumnRequirement = typeof ColumnRequirement.Type;
 
 /**
+ * One move a column declares (B5, LOB-267): the column a card may go to from it, and the human gate
+ * the move crosses, when it crosses one — the name a refusal and the card pane give it. A move with a
+ * gate is one only a person can make; a run's actor is refused it as `HumanGateRequired`.
+ */
+export const ColumnTransition = Schema.Struct({
+  to: Schema.String,
+  gate: Schema.optional(Schema.String),
+});
+export type ColumnTransition = typeof ColumnTransition.Type;
+
+/**
  * One column of a board definition (B4, B6).
  *
  * `role` resolves to model and tool policy in one place, so changing a model is one edit rather
  * than one per column; it is absent where B4 puts "—". `skills[]` are factory-owned skill names
  * (B6), injected at `openSession` alongside the role's tool policy. `requires[]` is checked on
  * exit, not on entry: a card may always be moved *into* a column, and the gate is what leaves it.
+ *
+ * `transitions[]` are the moves out of the column, in the order the card pane offers them (B5,
+ * LOB-267); anything else is an undeclared transition. Optional because default versions 1–3 were
+ * written before the field existed and a version is never edited in place (B2): a definition none of
+ * whose columns carries it is read through the default pipeline's table (`columnTransitions`), and
+ * one where any column carries it declares its own moves, a column without it declaring none.
  */
 export const BoardColumn = Schema.Struct({
   name: Schema.String,
@@ -85,18 +102,18 @@ export const BoardColumn = Schema.Struct({
   role: Schema.optional(Schema.String),
   skills: Schema.Array(Schema.String),
   requires: Schema.Array(ColumnRequirement),
+  transitions: Schema.optional(Schema.Array(ColumnTransition)),
 });
 export type BoardColumn = typeof BoardColumn.Type;
 
 /**
- * The moves each column of the default definition declares (B4, B5): the forward pipeline, plus
- * `canceled` from any column that is not terminal. A move to anything else is an undeclared
- * transition, and a terminal column declares none.
+ * The default pipeline's moves (B4, B5): the forward pipeline, plus `canceled` from any column that
+ * is not terminal. A terminal column declares none.
  *
- * Here rather than in `packages/core` because two readers must agree on it exactly: `TaskService`
- * refuses what it does not list, and the dashboard's card pane offers only what it lists (LOB-76),
- * so a move the API would refuse is never offered. `BoardColumn` carries no transitions field yet;
- * when a definition declares its own, this table is what it replaces, for both readers at once.
+ * Since LOB-267 a definition declares its moves on its columns (`BoardColumn.transitions`), and this
+ * table is only two things: what a definition version that declares none resolves to — default
+ * versions 1–3, which cards in flight still pin (B2) — and the seed `0024_seed_definition_transitions`
+ * wrote into default version 4. Nothing reads it for a definition that declares its own.
  */
 export const DECLARED_TRANSITIONS: Readonly<
   Record<string, ReadonlyArray<string>>
@@ -110,9 +127,9 @@ export const DECLARED_TRANSITIONS: Readonly<
 
 /**
  * The default definition's terminal columns (B4): a card in one is finished, and its runs' worktrees
- * and branches are torn down when it gets there (LOB-268). Hard-coded beside `DECLARED_TRANSITIONS`
- * for the same reason that table is: `BoardColumn.kind` says it per definition, and this is the
- * default one's answer until a reader of moves resolves the card's definition.
+ * and branches are torn down when it gets there (LOB-268). Hard-coded by name: `BoardColumn.kind`
+ * says it per definition, and moves read the card's definition since LOB-267, but the workspace
+ * release still decides "finished" from the column's name alone, which is the default pipeline's.
  */
 export const TERMINAL_COLUMNS: ReadonlyArray<string> = ["done", "canceled"];
 
@@ -120,11 +137,18 @@ export const TERMINAL_COLUMNS: ReadonlyArray<string> = ["done", "canceled"];
 export const isTerminalColumn = (column: string): boolean =>
   TERMINAL_COLUMNS.includes(column);
 
-/** B5's two human gates, keyed by `from→to`, with the name a refusal (and the card pane) gives them. */
+/**
+ * The default pipeline's two human gates (B5), keyed by `from→to`, with the name a refusal (and the
+ * card pane) gives them. `DECLARED_TRANSITIONS`' companion, read only where that table is: a
+ * definition version that declares no moves of its own, and default version 4's seed.
+ */
 export const HUMAN_GATES: Readonly<Record<string, string>> = {
   "planning→building": "plan approval",
   "review→done": "merge",
 };
+
+/** The column a definition with no `initialColumn` starts a card in, when it declares no columns at all. */
+export const DEFAULT_INITIAL_COLUMN = "intake";
 
 /**
  * The requirement a column declares when leaving it takes a passing verification of the card's
@@ -147,16 +171,125 @@ export const NON_EMPTY_DIFF_REQUIREMENT = "non_empty_diff";
  */
 export const PR_LINK_REQUIREMENT = "pr_link";
 
-/** The columns a card in `from` may move to, in the order the pipeline declares them. */
+/** The columns the default pipeline's table lets a card in `from` move to, in pipeline order. */
 export const declaredTransitions = (from: string): ReadonlyArray<string> =>
   DECLARED_TRANSITIONS[from] ?? [];
 
 export const isDeclaredTransition = (from: string, to: string): boolean =>
   declaredTransitions(from).includes(to);
 
-/** The human gate the move `from → to` crosses, or `undefined` when a run may make it too. */
+/** The human gate the default pipeline's move `from → to` crosses, or `undefined` when a run may make it too. */
 export const humanGate = (from: string, to: string): string | undefined =>
   HUMAN_GATES[`${from}→${to}`];
+
+/** The default pipeline's moves out of `from` as a column declares them: `DECLARED_TRANSITIONS` with `HUMAN_GATES` joined on. */
+export const defaultPipelineTransitions = (
+  from: string,
+): ReadonlyArray<ColumnTransition> =>
+  declaredTransitions(from).map((to) => {
+    const gate = humanGate(from, to);
+    return gate === undefined ? { to } : { to, gate };
+  });
+
+/**
+ * What decides a card's moves and where a new card starts (LOB-267): a definition version's columns
+ * and its initial column. `BoardDefinition` is one; so is anything else that carries the two.
+ */
+export type DefinitionMoves = {
+  readonly columns: ReadonlyArray<BoardColumn>;
+  readonly initialColumn?: string | undefined;
+};
+
+/**
+ * Whether a definition version declares its own moves: any column of it carries `transitions`. One
+ * that does not (default versions 1–3) is read through the default pipeline's table.
+ */
+export const declaresTransitions = (definition: DefinitionMoves): boolean =>
+  definition.columns.some((column) => column.transitions !== undefined);
+
+/**
+ * The moves out of `from` under `definition` (B5, LOB-267), in declaration order: what
+ * `TaskService.move` accepts and the card pane offers, so a move the API would refuse is never
+ * offered. A column the definition does not name declares none.
+ */
+export const columnTransitions = (
+  definition: DefinitionMoves,
+  from: string,
+): ReadonlyArray<ColumnTransition> =>
+  declaresTransitions(definition)
+    ? (definition.columns.find((column) => column.name === from)?.transitions ??
+      [])
+    : defaultPipelineTransitions(from);
+
+/** The declared move `from → to` under `definition`, or `undefined` when it is undeclared. */
+export const transitionOf = (
+  definition: DefinitionMoves,
+  from: string,
+  to: string,
+): ColumnTransition | undefined =>
+  columnTransitions(definition, from).find(
+    (transition) => transition.to === to,
+  );
+
+/**
+ * The column a new card on `definition` starts in (B4, LOB-267): its `initialColumn`, or — for a
+ * version written before the field existed — its first column, which is `intake` in default versions
+ * 1–3.
+ */
+export const initialColumnOf = (definition: DefinitionMoves): string =>
+  definition.initialColumn ??
+  definition.columns[0]?.name ??
+  DEFAULT_INITIAL_COLUMN;
+
+/**
+ * Why `definition` cannot be used as written, one sentence per fault, or `[]` when it can (LOB-267):
+ * a column named twice, an initial column it does not declare, a move to a column it does not
+ * declare, to the column itself, or to one target twice, and a gate with no name. Every move a card
+ * makes is checked against the definition, so these are the faults that would leave a card with a
+ * move no lane shows or a lane it can never leave. Default version 4's seed is held to it; so will
+ * an authored version be.
+ */
+export const definitionProblems = (
+  definition: DefinitionMoves,
+): ReadonlyArray<string> => {
+  const problems: Array<string> = [];
+  const names = new Set<string>();
+  for (const column of definition.columns) {
+    if (names.has(column.name))
+      problems.push(`column "${column.name}" is declared more than once`);
+    names.add(column.name);
+  }
+  if (definition.columns.length === 0)
+    problems.push("the definition declares no columns");
+  if (
+    definition.initialColumn !== undefined &&
+    !names.has(definition.initialColumn)
+  )
+    problems.push(
+      `the initial column "${definition.initialColumn}" is not a column of the definition`,
+    );
+  for (const column of definition.columns) {
+    const targets = new Set<string>();
+    for (const transition of column.transitions ?? []) {
+      if (!names.has(transition.to))
+        problems.push(
+          `column "${column.name}" declares a move to "${transition.to}", which is not a column of the definition`,
+        );
+      if (transition.to === column.name)
+        problems.push(`column "${column.name}" declares a move to itself`);
+      if (targets.has(transition.to))
+        problems.push(
+          `column "${column.name}" declares its move to "${transition.to}" more than once`,
+        );
+      targets.add(transition.to);
+      if (transition.gate !== undefined && transition.gate.trim() === "")
+        problems.push(
+          `column "${column.name}"'s move to "${transition.to}" names a gate with no name`,
+        );
+    }
+  }
+  return problems;
+};
 
 /**
  * A versioned board definition: the column set a board instance binds to (B2).
@@ -169,6 +302,11 @@ export const BoardDefinition = Schema.Struct({
   version: Schema.Int,
   name: Schema.String,
   columns: Schema.Array(BoardColumn),
+  /**
+   * The column a new card starts in (B4, LOB-267). Absent on a version written before the field
+   * existed (default versions 1–3), which starts a card in its first column (`initialColumnOf`).
+   */
+  initialColumn: Schema.optional(Schema.String),
 });
 export type BoardDefinition = typeof BoardDefinition.Type;
 
@@ -263,8 +401,8 @@ export type GetBoardConfigInput = typeof GetBoardConfigInput.Type;
 
 /**
  * One move a column declares (B5), and the human gate it crosses when it crosses one: the move only a
- * person can make. Built from the same table `TaskService` refuses by, so what a reader is told is
- * what a move meets.
+ * person can make. Built by the same `columnTransitions` `TaskService` refuses by, so what a reader is
+ * told is what a move meets.
  */
 export const ColumnExit = Schema.Struct({
   to: Schema.String,
@@ -317,6 +455,8 @@ export const DefinitionConfig = Schema.Struct({
   id: DefinitionId,
   version: Schema.Int,
   name: Schema.String,
+  /** The column a new card starts in, resolved as `createTask` resolves it (`initialColumnOf`, LOB-267). */
+  initialColumn: Schema.String,
   columns: Schema.Array(ColumnConfig),
 });
 export type DefinitionConfig = typeof DefinitionConfig.Type;
@@ -789,24 +929,29 @@ export const ListTaskCommentsInput = Schema.Struct({ taskId: TaskId });
 export type ListTaskCommentsInput = typeof ListTaskCommentsInput.Type;
 
 /**
- * The column a card moves to out of `from` across a human gate, and the gate's name, or `undefined`
- * when every move out of `from` is one a run may make too (B5). In the default pipeline that is
- * `planning → building` (plan approval) and `review → done` (merge).
+ * The column a card moves to out of `from` across a human gate under `definition`, and the gate's
+ * name, or `undefined` when every move out of `from` is one a run may make too (B5). In the default
+ * pipeline that is `planning → building` (plan approval) and `review → done` (merge). The first
+ * gated move in declaration order when a column declares several.
  */
 export const gatedExit = (
+  definition: DefinitionMoves,
   from: string,
 ): { readonly to: string; readonly gate: string } | undefined => {
-  for (const to of declaredTransitions(from)) {
-    const gate = humanGate(from, to);
-    if (gate !== undefined) return { to, gate };
+  for (const transition of columnTransitions(definition, from)) {
+    if (transition.gate !== undefined)
+      return { to: transition.to, gate: transition.gate };
   }
   return undefined;
 };
 
-/** Every column whose declared exits include a human gate, in pipeline order. */
-export const GATED_COLUMNS: ReadonlyArray<string> = Object.keys(
-  DECLARED_TRANSITIONS,
-).filter((column) => gatedExit(column) !== undefined);
+/** Every column of `definition` whose declared exits include a human gate, in declaration order. */
+export const gatedColumns = (
+  definition: DefinitionMoves,
+): ReadonlyArray<string> =>
+  definition.columns
+    .map((column) => column.name)
+    .filter((column) => gatedExit(definition, column) !== undefined);
 
 /**
  * Why a card needs a person (LOB-77): the three things the attention view lists.
