@@ -221,7 +221,7 @@ export const PullRequestStatesLive = Layer.effect(
         (options?.fresh === true
           ? Effect.andThen(Cache.invalidate(cache, url), Cache.get(cache, url))
           : Cache.get(cache, url)
-        ).pipe(Effect.catchTag("PrError", () => Effect.succeed(undefined))),
+        ).pipe(Effect.orElseSucceed(() => undefined)),
     });
   }),
 );

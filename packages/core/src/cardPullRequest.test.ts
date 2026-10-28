@@ -22,14 +22,7 @@ import { RepoSlug, type SessionId } from "@repo/domain/Session";
 import { DEFAULT_DEFINITION_ID, DefinitionId } from "@repo/domain/Task";
 import { createFauxModelAccess, readRecordedMerge } from "@repo/harness";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
-import {
-  Effect,
-  Fiber,
-  Layer,
-  ManagedRuntime,
-  Option,
-  Redacted,
-} from "effect";
+import { Effect, Fiber, Layer, ManagedRuntime, Option, Redacted } from "effect";
 import { TestClock } from "effect/testing";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
@@ -435,9 +428,9 @@ describe("readPullRequestState (C20)", () => {
       number: 12,
     });
     // An older session's `pr_url` is the API resource, which names the same PR.
-    expect(pullRequestOfPage("https://api.github.com/repos/o/r/pulls/7")).toEqual(
-      { repo: "o/r", number: 7 },
-    );
+    expect(
+      pullRequestOfPage("https://api.github.com/repos/o/r/pulls/7"),
+    ).toEqual({ repo: "o/r", number: 7 });
     expect(
       pullRequestOfPage("https://ghe.example/api/v3/repos/o/r/pulls/3"),
     ).toEqual({ repo: "o/r", number: 3 });
