@@ -9,6 +9,12 @@ import { cn } from "cn";
 import { sessionListAtom } from "@/lib/atoms/session-list";
 import { startSessionAtom } from "@/lib/atoms/session-atom";
 import { serverInfoAtom } from "@/lib/atoms/server-info-atom";
+import { costPredictionAtom } from "@/lib/atoms/cost-atom";
+import {
+  predictedBudget,
+  predictionKey,
+  predictionText,
+} from "@/lib/cost-view";
 import {
   modelChoices,
   modelInput,
@@ -51,6 +57,16 @@ export const SessionSidebar = () => {
     AsyncResult.isSuccess(info) ? info.value : undefined,
   );
   const [model, setModel] = useState(SERVER_DEFAULT);
+  // What the session would cost, before it exists (LOB-38): a range from the completed sessions most
+  // like it, on the model picked. Capping at its high is a choice only a range can offer.
+  const prediction = useAtomValue(
+    costPredictionAtom(predictionKey(PROMPT, model)),
+  );
+  const predicted = AsyncResult.isSuccess(prediction)
+    ? prediction.value
+    : undefined;
+  const canCap = predicted?.range !== undefined;
+  const [capped, setCapped] = useState(false);
   return (
     <aside
       className={cn(
@@ -78,6 +94,33 @@ export const SessionSidebar = () => {
             </option>
           ))}
         </select>
+        <p
+          data-cost-prediction={predicted?.basis}
+          data-cost-low={predicted?.range?.low}
+          data-cost-high={predicted?.range?.high}
+          className="font-mono text-[10px] leading-relaxed text-muted-foreground"
+        >
+          {predicted !== undefined
+            ? predictionText(predicted)
+            : AsyncResult.isFailure(prediction)
+              ? "No estimate: the prediction did not load"
+              : "Predicting the cost…"}
+        </p>
+        <label
+          htmlFor="new-session-cap"
+          className="flex items-center gap-2 text-[11px] text-muted-foreground"
+        >
+          <input
+            id="new-session-cap"
+            name="cap"
+            type="checkbox"
+            checked={capped && canCap}
+            disabled={!canCap}
+            onChange={(event) => setCapped(event.currentTarget.checked)}
+            className="size-3"
+          />
+          Cap at predicted high
+        </label>
         <Button
           className="w-full justify-start"
           variant="outline"
@@ -87,7 +130,11 @@ export const SessionSidebar = () => {
             // to move. A refusal says so out loud instead of leaving the user on
             // the list with an error they cannot see: there is no session id to
             // navigate to, and silence is indistinguishable from a dead button.
-            void start({ content: PROMPT, ...modelInput(model) }).then(
+            void start({
+              content: PROMPT,
+              ...modelInput(model),
+              ...predictedBudget(predicted, capped),
+            }).then(
               (session) =>
                 navigate({
                   to: "/sessions/$sessionId",

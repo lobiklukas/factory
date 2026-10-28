@@ -482,6 +482,15 @@ are that module's header.
 _As built (LOB-162)._ Spend is keyed by repo and actor. It is committed as `factory.actor` and
 indexed as `sessions.actor`. `listSpend` groups the list's own `cost_total` by the pair, and the
 dashboard's `/spend` shows it per repo, per actor and per pair.
+_As built (LOB-38)._ The spend history predicts what the next session will cost. `predictCost`
+classifies the prompt's first line into a task shape, then takes the completed sessions most like it.
+The comparables come from the first tier with three sessions: repo+model+shape, then repo+model,
+model+shape, model, shape and all; only the newest fifty count. The answer is their p10 / median /
+p90, read from the same index the list reads, never a fold.
+`factory run` prints the range before it creates a session; `--cap-at-prediction`, or the dashboard's
+**Cap at predicted high**, sets the session's cap to the high. `backtestCost` predicts every completed
+session from the ones created before it, and the median relative error is published on `/spend` and
+by `factory cost backtest`. The rules are in `docs/cost-prediction.md`.
 _As built (LOB-20)._ The actor is the one the control plane authenticated, not the one the caller
 typed. Every RPC group carries one middleware, `ControlPlaneAuth` (`@repo/domain/Auth`), which reads
 `Authorization: Bearer <token>`, looks it up in the deployment's token table and hands the handler a

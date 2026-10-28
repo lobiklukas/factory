@@ -105,6 +105,12 @@ import type {
 } from "@repo/domain/Mission";
 import type { OpenPullRequestPayload } from "@repo/domain/PullRequest";
 import type {
+  BacktestCostInput,
+  CostBacktest,
+  CostPrediction,
+  PredictCostInput,
+} from "@repo/domain/Cost";
+import type {
   AskOptions,
   Conversation,
   Harness,
@@ -229,6 +235,11 @@ import {
 import type { DiffCap, PrError, PullRequestStep } from "./pr";
 import { DEFAULT_DIFF_CAP } from "./pr";
 import { openPullRequest } from "./prStep";
+import {
+  backtestCost,
+  predictCost,
+  type CostHistoryRow,
+} from "./costPrediction";
 import {
   SESSION_WRITE_BACK_BUDGET,
   SessionWriteBack,
@@ -357,6 +368,21 @@ export type SessionServiceShape = {
    * from the same index, in one grouped read — never a fold (R6).
    */
   readonly spend: Effect.Effect<SpendReport, SessionError>;
+  /**
+   * What a run of `input.prompt` would cost (LOB-38): a range from the completed sessions most like
+   * it, read from the index in one query — never a fold (R6). `model` absent is the deployment's
+   * model; a model this process does not serve is `invalid_input`, as `create` refuses it.
+   */
+  readonly predictCost: (
+    input: PredictCostInput,
+  ) => Effect.Effect<CostPrediction, SessionError>;
+  /**
+   * How wrong `predictCost` has been (LOB-38): every completed session — `input.repo`'s only, when
+   * named — predicted from the ones created before it, and scored against what it cost.
+   */
+  readonly backtestCost: (
+    input: BacktestCostInput,
+  ) => Effect.Effect<CostBacktest, SessionError>;
   /**
    * Register or update a repo a session can bind to (docs/features.md §3 A1). A `localPath` that is
    * not absolute or not inside a git work tree is `invalid_input` naming it, and nothing is written
@@ -730,6 +756,23 @@ type ListRow = {
   readonly lastActivityExact: string;
   readonly costTotal: number;
 };
+
+/** One completed session as the cost history reads it (LOB-38). */
+type CostHistoryIndexRow = {
+  readonly id: string;
+  readonly title: string;
+  readonly repo: string | null;
+  readonly model: string | null;
+  readonly costTotal: number;
+  readonly createdAtMs: number;
+};
+
+/**
+ * Most completed sessions a prediction or a backtest reads, newest first (LOB-38). A range uses at
+ * most `COMPARABLE_WINDOW` of them per tier, so older history only matters to a tier this many
+ * sessions never fill.
+ */
+const COST_HISTORY_LIMIT = 2000;
 
 /** One (repo, actor) group of the spend read (LOB-162). */
 type SpendGroupRow = {
@@ -4265,6 +4308,71 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         },
       );
 
+      /**
+       * The completed sessions a cost prediction reads (LOB-38), newest first: idle, with no run and
+       * no mission in flight, and priced — a session that spent nothing says nothing about price, and
+       * one still running has not finished spending. The cost is the list's own `cost_total`, so a
+       * prediction and the spend pane never disagree about what a session cost.
+       */
+      const costHistory = (
+        repo: RepoSlug | undefined,
+      ): Effect.Effect<readonly CostHistoryRow[], SessionError> =>
+        Effect.gen(function* () {
+          const rows = yield* paper(
+            "read cost history",
+            sql<CostHistoryIndexRow>`
+              SELECT
+                s.id,
+                s.title,
+                s.repo,
+                s.model,
+                a.cost_total::double precision AS cost_total,
+                (extract(epoch FROM s.created_at) * 1000)::double precision AS created_at_ms
+              FROM session_activity a
+              JOIN sessions s ON s.id = a.session_id
+              WHERE a.status = 'idle'
+                AND a.cost_total > 0
+                AND s.run_session_root IS NULL
+                AND NOT s.mission_in_flight
+                AND (${repo ?? null}::text IS NULL OR s.repo = ${repo ?? null})
+              ORDER BY s.created_at DESC, s.id DESC
+              LIMIT ${COST_HISTORY_LIMIT}
+            `,
+          );
+          const history: CostHistoryRow[] = [];
+          for (const row of rows) {
+            history.push({
+              id: yield* toSessionId(row.id),
+              title: row.title,
+              repo: row.repo === null ? undefined : yield* toRepoSlug(row.repo),
+              model: row.model ?? undefined,
+              costTotal: row.costTotal,
+              createdAt: row.createdAtMs,
+            });
+          }
+          return history;
+        });
+
+      const predictSessionCost = (
+        input: PredictCostInput,
+      ): Effect.Effect<CostPrediction, SessionError> =>
+        Effect.gen(function* () {
+          // The model a create with this input would run on: the one it names, refused when this
+          // process does not serve it, else the deployment's.
+          const model = (yield* sessionModelFor(input.model)) ?? options.model;
+          const history = yield* costHistory(undefined);
+          return predictCost(history, {
+            prompt: input.prompt,
+            repo: input.repo,
+            model: modelKey(model),
+          });
+        });
+
+      const backtestSessionCost = (
+        input: BacktestCostInput,
+      ): Effect.Effect<CostBacktest, SessionError> =>
+        Effect.map(costHistory(input.repo), backtestCost);
+
       const parseCursor = (
         raw: string,
       ): Effect.Effect<
@@ -4786,6 +4894,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         startMission,
         list,
         spend,
+        predictCost: predictSessionCost,
+        backtestCost: backtestSessionCost,
         registerRepo,
         listRepos,
         getRepo,
