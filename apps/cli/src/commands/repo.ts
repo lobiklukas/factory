@@ -61,6 +61,26 @@ export const remedyFor = (repo: RepoSummary): string =>
 const configLine = (repo: RepoSummary): string =>
   repo.hasFactoryConfig ? ".factory/config found" : "no .factory/config";
 
+/**
+ * The checkout's agent-readiness score as a cell (LOB-29, S-env-setup): `3/4`, or `none` when the
+ * server scored nothing because the repo has no checkout that is a git work tree.
+ */
+export const readinessCell = (repo: RepoSummary): string =>
+  repo.readiness === undefined
+    ? NONE
+    : `${repo.readiness.score}/${repo.readiness.max}`;
+
+/** What `add` and `show` say about readiness: the score, then every failed check's reason. */
+const readinessLine = (repo: RepoSummary): string => {
+  const missing =
+    repo.readiness?.checks
+      .filter((check) => !check.passed)
+      .map((check) => check.reason) ?? [];
+  return missing.length === 0
+    ? readinessCell(repo)
+    : `${readinessCell(repo)} (${missing.join("; ")})`;
+};
+
 /** `factory repo add` and `show`: one labelled line per field, then the remedy when there is one. */
 export const repoLines = (repo: RepoSummary): readonly string[] => [
   `repo        ${repo.repo}`,
@@ -72,6 +92,7 @@ export const repoLines = (repo: RepoSummary): readonly string[] => [
   `base-ref    ${repo.defaultBaseRef}`,
   `url         ${repo.url === "" ? NONE : repo.url}`,
   `config      ${configLine(repo)}`,
+  `readiness   ${readinessLine(repo)}`,
   `registered  ${repo.registeredAt}`,
   `state       ${repoState(repo)}`,
   ...(isReady(repo) ? [] : [`remedy      ${remedyFor(repo)}`]),
@@ -87,6 +108,7 @@ export const REPO_LS_HEADER = [
   "base-ref",
   "registered-at",
   "config",
+  "readiness",
   "url",
   "state",
 ].join(REPO_LS_SEPARATOR);
@@ -103,6 +125,7 @@ export const repoRow = (repo: RepoSummary): string =>
     repo.defaultBaseRef,
     repo.registeredAt,
     repo.hasFactoryConfig ? "yes" : "no",
+    readinessCell(repo),
     repo.url === "" ? NONE : repo.url,
     isReady(repo) ? "ready" : `${repoState(repo)} (${remedyFor(repo)})`,
   ].join(REPO_LS_SEPARATOR);

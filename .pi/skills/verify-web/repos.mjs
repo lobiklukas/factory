@@ -82,6 +82,9 @@ for (const dir of [WIDGETS_DIR, NOPATH_DIR]) {
   );
   if (commit.status !== 0) throw new Error(`git commit: ${commit.stderr}`);
 }
+// One readiness check the widgets checkout passes (LOB-29, S-env-setup): an AGENTS.md, so the page
+// shows `1/4` and names the other three, as the server scored them.
+await writeFile(path.join(WIDGETS_DIR, "AGENTS.md"), "# widgets\n");
 // The server reports the path it was given; macOS's /var is a link to /private/var, so a checkout
 // under a symlinked directory is compared by the path registered, not by its real path.
 const WIDGETS_REAL = await realpath(WIDGETS_DIR);
@@ -341,6 +344,36 @@ try {
       added.text.includes(WIDGETS_URL) &&
       added.text.includes("base main"),
     JSON.stringify(oracle ?? null),
+  );
+  const readiness = await page.$eval(rowSel(WIDGETS), (node) => ({
+    score:
+      node
+        .querySelector("[data-repo-readiness]")
+        ?.getAttribute("data-repo-readiness") ?? null,
+    missing: [...node.querySelectorAll("[data-repo-readiness-missing]")].map(
+      (item) => item.textContent?.trim() ?? "",
+    ),
+  }));
+  observed.readiness = { row: readiness, oracle: oracle?.readiness ?? null };
+  assert(
+    "the row shows the checkout's readiness score and every failed check, as listRepos scored it",
+    oracle?.readiness !== undefined &&
+      readiness.score === `${oracle.readiness.score}/${oracle.readiness.max}` &&
+      readiness.score === "1/4" &&
+      JSON.stringify(readiness.missing) ===
+        JSON.stringify(
+          oracle.readiness.checks
+            .filter((check) => !check.passed)
+            .map((check) => check.reason),
+        ),
+    JSON.stringify(readiness),
+  );
+  assert(
+    "a repo with no checkout is not scored, and the row says none rather than 0",
+    (await page
+      .locator(`${rowSel(NOPATH)} [data-repo-readiness='none']`)
+      .count()) === 1 && (await listed(NOPATH))?.readiness === undefined,
+    "nopath readiness none",
   );
   assert(
     "a landed registration clears the form, says so, and drops the refusal",

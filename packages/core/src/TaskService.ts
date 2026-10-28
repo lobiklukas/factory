@@ -344,6 +344,21 @@ export type AskTaskInput = {
 };
 
 /**
+ * A run parking its own card on something only a person can fix (S-env-setup): a block by the run
+ * itself, with the reason and a note saying what to fix.
+ *
+ * No expected revision, for the ask's reason: the writer is the run working the card, not a person
+ * who read it. A card already blocked keeps the block it has — whatever it waits on was there first,
+ * and replacing it would hide it — and is answered as it is.
+ */
+export type ParkRunInput = {
+  readonly taskId: string;
+  readonly reason: BlockReasonType;
+  readonly note: string;
+  readonly actor: Actor;
+};
+
+/**
  * A specifying run's spec, as its `spec` tool posts it on the card (LOB-238).
  *
  * Like the ask, no expected revision: the writer is the run working the card, not a person who read
@@ -418,6 +433,8 @@ export type TaskServiceShape = {
   readonly unblock: (input: UnblockTaskInput) => Effect.Effect<Task, TaskError>;
   /** A run's question: a `question` comment and a `needs_input` block from the card's column. */
   readonly ask: (input: AskTaskInput) => Effect.Effect<Task, TaskError>;
+  /** A run's own block of its card (`ParkRunInput`): a card already blocked keeps its block. */
+  readonly parkRun: (input: ParkRunInput) => Effect.Effect<Task, TaskError>;
   /** A comment; from a person on a card blocked `needs_input`, the answer that lifts the block. */
   readonly comment: (input: CommentTaskInput) => Effect.Effect<Task, TaskError>;
   /** The card's thread, oldest first: every `commented` event, verbatim. */
@@ -1785,6 +1802,40 @@ export const TaskServiceLive = Layer.effect(
         ),
       );
 
+    const parkRun = (input: ParkRunInput): Effect.Effect<Task, TaskError> =>
+      withStorage(
+        sql.withTransaction(
+          Effect.gen(function* () {
+            const found = yield* lockTask(input.taskId);
+            if (Option.isNone(found)) {
+              return yield* new TaskNotFound({
+                taskId: input.taskId,
+                message: `no task ${input.taskId}`,
+              });
+            }
+            const row = found.value;
+            if (row.blockedReason !== null) return yield* toTask(row);
+            const rows = yield* sql<TaskRow>`
+              UPDATE tasks
+              SET blocked_reason = ${input.reason}, blocked_column = ${row.column},
+                  blocked_note = ${input.note}, blocked_since = now(),
+                  revision = revision + 1, updated_at = now()
+              WHERE id = ${input.taskId}
+              RETURNING ${sql.literal(TASK_COLUMNS)}
+            `;
+            yield* appendEvent({
+              _tag: "blocked",
+              taskId: TaskId.make(input.taskId),
+              reason: input.reason,
+              column: row.column,
+              actor: input.actor,
+              revision: row.revision,
+            });
+            return yield* toTask(rows[0] as TaskRow);
+          }),
+        ),
+      );
+
     const comment = (input: CommentTaskInput): Effect.Effect<Task, TaskError> =>
       withStorage(
         sql.withTransaction(
@@ -2407,6 +2458,7 @@ export const TaskServiceLive = Layer.effect(
       block,
       unblock,
       ask,
+      parkRun,
       comment,
       comments,
       declareSpec,

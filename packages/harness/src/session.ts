@@ -40,6 +40,7 @@ import {
 import { createRegistry } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
+import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import type { BindableSandboxRuntimeShape } from "@repo/sandbox";
 import { Effect, Queue, Schema, Stream } from "effect";
 import type {
@@ -455,6 +456,12 @@ export type OpenSession = {
    */
   readonly releaseEnvironment: Effect.Effect<void>;
   /**
+   * The environment the session's commands run in for a working directory (LOB-244): the one the
+   * harness's tools get, so what the control plane runs on the session's behalf before a turn — the
+   * repo's setup (`./setup`) — runs where the tools would, sandbox and all.
+   */
+  readonly env: (cwd: string) => Promise<ExecutionEnv>;
+  /**
    * The model the root conversation is pinned to, which its requests go to and its compaction
    * thresholds follow: the role's (or the deployment's) when this open created the root, and the
    * one the root was created with on every later open, whatever the role table says now (LOB-207).
@@ -723,6 +730,7 @@ const openSessionIn = (
         root,
         model,
         releaseEnvironment: environment.release,
+        env: environment.env,
         resumed,
       };
     }).pipe(Effect.onError(() => Effect.exit(closeHarness(harness))));

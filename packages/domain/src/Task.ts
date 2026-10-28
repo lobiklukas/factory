@@ -566,12 +566,15 @@ export type TaskPriority = typeof TaskPriority.Type;
  * `blocked` is a **card state, not a column**: a blocked card stays visible in its own lane, so
  * there is no "return to where it was" ambiguity and no `ready` column pretending to be a queue.
  * B7 adds that a block carries the question a run ended with, recorded as a comment on the task.
+ * `setup_failed` is a run parked before its first turn because its worktree's declared `install` or
+ * `build` failed (S-env-setup): the note names the step, its exit code and its output's last lines.
  */
 export const BlockReason = Schema.Literals([
   "dependency",
   "needs_input",
   "capability",
   "transient",
+  "setup_failed",
 ]);
 export type BlockReason = typeof BlockReason.Type;
 

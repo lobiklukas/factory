@@ -15,6 +15,11 @@ add|ls|show` is the CLI's ([verify-cli's repo.md](../../verify-cli/features/repo
   declares commands. When the git work tree the path is inside is not the path itself (a package
   inside a monorepo, or a plain directory under an unrelated repository) a **Repository root** line names
   the repository sessions are cut from (git's resolved path, so a symlinked path can show it too).
+  **Agent readiness** (`[data-repo-readiness=<score>/<max>]`, S-env-setup) is the score the server
+  answers for the checkout (LOB-29's four checks), with each failed check's reason listed
+  (`[data-repo-readiness-missing]`); a repo with no checkout that is a work tree is not scored and
+  says so (`data-repo-readiness="none"`) rather than showing a zero. `readinessView` in
+  `repos-view.ts` is the rule.
 - **Not runnable** is a row with no local checkout, or whose checkout is no longer inside a git work
   tree (moved or deleted since it was registered: the server reads that from the disk each time).
   The row says why (`[data-repo-reason]`) and what to do (`[data-repo-fix]`). The rule is
@@ -53,6 +58,9 @@ default 3441) and its own throwaway git checkouts under `.verify/run/repos/check
    character; the slug stays unregistered and the form keeps what was typed.
 6. **Add.** Slug + the throwaway checkout + base ref + URL: the row appears with no page reload,
    runnable, and equals `listRepos`' row (path, URL, base ref, work tree); the form is cleared.
+   The checkout holds an `AGENTS.md` and nothing else a readiness check looks for, so the row shows
+   `1/4` and the three failed checks' reasons exactly as `listRepos` scored them; the seeded repo,
+   which has no checkout, shows `none` (S-env-setup).
 7. **Fix in place.** The same form naming the flagged repo's slug and a checkout turns it runnable
    without a reload, and keeps the base ref.
 8. **A run.** `createSession` on the registered repo answers a snapshot whose branch is

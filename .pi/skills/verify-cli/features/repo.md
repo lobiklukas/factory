@@ -27,7 +27,8 @@ tmux server of its own. Each command's pane is kept as `repo-*.txt`; the checks 
 
 1. `repo add <slug> --path <checkout> --base-ref main` — exit 0, and the printed block names the
    repo, the path, `work-tree   <the checkout>`, `base-ref    main`, `config      .factory/config
-found` and `state       ready`. The checkout is a fresh `git init` with a `.factory/config`.
+found` and `state       ready`. The checkout is a fresh `git init` with a `.factory/config` and
+   an `AGENTS.md`, so `readiness   1/4 (…)` names the three readiness checks it fails (S-env-setup).
 2. `repo add <slug> --base-ref trunk` — exit 0, `base-ref    trunk`, and the same path.
    Then `repo add <nested> --path <checkout>/packages/nested` (a plain directory inside it) — exit 0,
    `state       ready`, and `work-tree` naming the enclosing checkout, not the path.
@@ -40,11 +41,12 @@ found` and `state       ready`. The checkout is a fresh `git init` with a `.fact
 5. `factory run … --repo <auto>` names a slug nobody registered; `repo show <auto>` then prints
    `path        none`, `url         none`, `state       no clone URL / no local checkout` and
    `remedy      factory repo add <auto> --path <dir>`.
-6. `repo ls` — the header `repo path base-ref registered-at config url state`; the registered
-   repo's row has the checkout as its second field, `trunk` third, an ISO timestamp fourth and `yes`
-   fifth; the auto-registered row has `none` for path and URL and ends in the state with its remedy;
+6. `repo ls` — the header `repo path base-ref registered-at config readiness url state`; the
+   registered repo's row has the checkout as its second field, `trunk` third, an ISO timestamp
+   fourth, `yes` fifth and `1/4` sixth; the auto-registered row has `none` for path, readiness and
+   URL and ends in the state with its remedy;
    the refused slug has no row. The columns are tab-separated (the pane shows the tabs expanded), so
-   the same command piped to a file is checked too: its header is the seven names joined by tabs and
+   the same command piped to a file is checked too: its header is the eight names joined by tabs and
    `awk -F'\t'` reads the checkout as the second field, whatever a path contains.
 7. `repo show <unknown>` — `error: repo_not_found`, non-zero.
 

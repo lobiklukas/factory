@@ -88,6 +88,29 @@ export const sameDirectory = (
   return localPath !== undefined && strip(workTree) === strip(localPath);
 };
 
+/**
+ * The checkout's agent-readiness as the row shows it (LOB-29, S-env-setup): `3/4` and the checks
+ * that failed, each with the server's reason. `null` when the server scored nothing — no checkout,
+ * or one that is not a work tree — which the row says in words rather than as a zero.
+ */
+export const readinessView = (
+  repo: RepoSummary,
+): {
+  readonly score: string;
+  readonly ready: boolean;
+  readonly missing: ReadonlyArray<string>;
+} | null => {
+  const readiness = repo.readiness;
+  if (readiness === undefined) return null;
+  return {
+    score: `${readiness.score}/${readiness.max}`,
+    ready: readiness.score === readiness.max,
+    missing: readiness.checks
+      .filter((check) => !check.passed)
+      .map((check) => check.reason),
+  };
+};
+
 /** How many of `repos` cannot run: the number the page's header and its empty-state rules read. */
 export const notRunnableCount = (repos: ReadonlyArray<RepoSummary>): number =>
   repos.filter((repo) => !runnability(repo).runnable).length;
