@@ -74,7 +74,8 @@ re-stamps the payload is not. Closing that needs a route that takes a delivery h
 **One write-back per source.** The seam has one `TriggerWriteBack`, and the routes share it, so the
 clients sit behind `TriggerWriteBackBySource` (`apps/api/src/Api/TriggerAdapters.ts`): an event is
 answered by the client of the system it came from and by no other, so a GitHub issue can never get a
-Jira comment. The generic and Sentry sources write nothing.
+Jira comment. The generic source writes nothing, and Sentry notes its issue only when
+`SENTRY_API_TOKEN` is set (LOB-83).
 
 **The read-then-post window.** The comment is looked for in Jira's default page of an issue's
 comments (50). A session's comment on an issue with a longer thread than that could be missed and

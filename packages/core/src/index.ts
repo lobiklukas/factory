@@ -20,6 +20,7 @@ export * from "./DocsTrigger";
 export * from "./ReviewTrigger";
 export * from "./Slack";
 export * from "./Sentry";
+export * from "./SentryWriteBack";
 export * from "./git";
 export * from "./RepoMirror";
 export * from "./Linear";
