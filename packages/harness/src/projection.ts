@@ -407,7 +407,17 @@ export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
   const message = entry.model?.[0];
   const toolName =
     message?.role === "toolResult" ? message.toolName : undefined;
-  const isError = message?.role === "toolResult" ? message.isError : undefined;
+  // A tool result says whether the tool failed; an assistant entry is an error when its model
+  // request failed (`stopReason: "error"`), which is what ends a run `model_error` once Pi Durable
+  // stops retrying it — the activity projection records that run as failed (S-notifications).
+  const failedRequest =
+    message?.role === "assistant" && message.stopReason === "error";
+  const isError =
+    message?.role === "toolResult"
+      ? message.isError
+      : failedRequest
+        ? true
+        : undefined;
   // The title, no-change, budget, interrupted and inherited-PR entries carry no model content, so
   // their text comes from their data — which is what makes a no-op PR step or a budget stop a
   // readable line, not an empty entry.
@@ -421,6 +431,13 @@ export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
         : entry.kind === PR_INHERITED_ENTRY_KIND
           ? inheritedPrText(stringAt(asObject(entry.data), "url") ?? "")
           : messageText(message);
+  // A failed request's provider message rides beside the text, not in it: the text is what the
+  // model answered, and the CLI and the transcript read it as that (S-notifications).
+  const error = failedRequest
+    ? message.errorMessage === undefined || message.errorMessage === ""
+      ? "the model request failed"
+      : message.errorMessage
+    : undefined;
   return {
     id: String(entry.id),
     kind: entryKind(entry.kind),
@@ -428,6 +445,7 @@ export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
     toolCalls: toolCallRefs(message),
     ...(toolName === undefined ? {} : { toolName }),
     ...(isError === undefined ? {} : { isError }),
+    ...(error === undefined ? {} : { error }),
   };
 };
 

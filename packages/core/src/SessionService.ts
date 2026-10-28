@@ -88,6 +88,8 @@ import type {
   SpendReport,
   SpendRow,
   SyncRepoInput,
+  TranscriptEntry,
+  TranscriptEntryKind,
   WithdrawMessageInput,
   WithdrawMessageResult,
   WorkspaceRelease,
@@ -936,6 +938,21 @@ type CostHistoryIndexRow = {
 };
 
 /**
+ * The entries after which a run did not end on the failed model request before them
+ * (S-notifications): the conversation went on, or an interrupt, a budget stop, a reset or a
+ * compaction ended or moved past it.
+ */
+const SUPERSEDES_FAILED_REQUEST: ReadonlySet<TranscriptEntryKind> = new Set([
+  "assistant",
+  "toolResult",
+  "user",
+  "interrupted",
+  "budget",
+  "reset",
+  "compaction",
+]);
+
+/**
  * Most completed sessions a prediction or a backtest reads, newest first (LOB-38). A range uses at
  * most `COMPARABLE_WINDOW` of them per tier, so older history only matters to a tier this many
  * sessions never fill.
@@ -1122,6 +1139,16 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * Only the projection writes an entry, and `releaseOwner` drops it with the projection.
        */
       const runStarts = new Map<SessionId, number>();
+      /**
+       * The entry of each owned session's failed model request, while it is the newest thing its run
+       * did (S-notifications): Pi Durable retries a failed request, so an error entry ends the run
+       * only if nothing follows it before the run turns idle. The projection records the run failed
+       * then (`run_failures`), and drops the entry when a later entry shows the run went on.
+       */
+      const failedRequests = new Map<
+        SessionId,
+        { readonly id: string; readonly text: string }
+      >();
       /** Serializes owner acquisition so two callers cannot open the same log twice. */
       const gate = yield* Semaphore.make(1);
       /**
@@ -4460,6 +4487,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         switch (event._tag) {
           case "status":
             return observeRun(sessionId, event.status).pipe(
+              Effect.andThen(observeFailedRun(sessionId, event.status)),
               Effect.andThen(setActivityStatus(sessionId, event.status)),
               Effect.andThen(
                 setRunInFlight(sessionId, event.status === "busy"),
@@ -4468,16 +4496,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           case "usage":
             return setActivityCost(sessionId, costOf(event.usage));
           case "entry":
-            // A budget stop (LOB-163) is also a log line, so an operator reading the process's logs
-            // — or motel — sees which session the cap stopped, not only a client watching it.
-            return event.entry.kind === "budget"
-              ? Effect.logWarning(
-                  `session ${sessionId} stopped by its budget: ${event.entry.text}`,
-                ).pipe(
-                  Effect.andThen(countRefusal("budget")),
-                  Effect.andThen(touchActivity(sessionId)),
-                )
-              : touchActivity(sessionId);
+            return observeFailedRequest(sessionId, event.entry).pipe(
+              Effect.andThen(recordEntryActivity(sessionId, event.entry)),
+            );
           case "snapshot":
             return observeRun(sessionId, event.session.status).pipe(
               Effect.andThen(
@@ -4500,6 +4521,91 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             return touchActivity(sessionId);
         }
       };
+
+      /**
+       * What an entry does to the activity row, beyond the failed-request bookkeeping. A budget stop
+       * (LOB-163) is also a log line, so an operator reading the process's logs — or motel — sees
+       * which session the cap stopped, not only a client watching it. It is a failed run too, which a
+       * person is told about (S-notifications).
+       */
+      const recordEntryActivity = (
+        sessionId: SessionId,
+        entry: TranscriptEntry,
+      ): Effect.Effect<void> =>
+        entry.kind === "budget"
+          ? Effect.logWarning(
+              `session ${sessionId} stopped by its budget: ${entry.text}`,
+            ).pipe(
+              Effect.andThen(countRefusal("budget")),
+              Effect.andThen(
+                recordRunFailure(sessionId, entry.id, "budget", entry.text),
+              ),
+              Effect.andThen(touchActivity(sessionId)),
+            )
+          : touchActivity(sessionId);
+
+      /**
+       * One failed run, indexed for the notifier (`run_failures`, S-notifications): keyed by the entry
+       * that announced the failure, so a projection that sees it again writes nothing twice.
+       * Best-effort like the other activity writes: a row that is missing is a notification not
+       * sent, never a run that fails.
+       */
+      const recordRunFailure = (
+        sessionId: SessionId,
+        entryId: string,
+        reason: "budget" | "model_error",
+        detail: string,
+      ): Effect.Effect<void> =>
+        paper(
+          "record run failure",
+          sql`
+            INSERT INTO run_failures (session_id, entry_id, reason, detail)
+            VALUES (${sessionId}, ${entryId}, ${reason}, ${detail})
+            ON CONFLICT (session_id, entry_id) DO NOTHING
+          `,
+        ).pipe(Effect.ignore);
+
+      /**
+       * Remember a failed model request as the newest thing the run did, or forget it once a later
+       * entry shows the run did not end on it: a retry's answer or a tool round went on, an operator's
+       * interrupt stopped it (C8 — a person who stopped a run is not told it failed), a budget stop
+       * ended it (recorded as that, not twice), or a reset or a compaction moved past it.
+       */
+      const observeFailedRequest = (
+        sessionId: SessionId,
+        entry: TranscriptEntry,
+      ): Effect.Effect<void> =>
+        Effect.sync(() => {
+          if (entry.kind === "assistant" && entry.isError === true) {
+            failedRequests.set(sessionId, {
+              id: entry.id,
+              text: entry.error ?? entry.text,
+            });
+          } else if (SUPERSEDES_FAILED_REQUEST.has(entry.kind)) {
+            failedRequests.delete(sessionId);
+          }
+        });
+
+      /**
+       * A run that turns idle on a failed model request ended on it — Pi Durable settles it
+       * `unanswered`, `model_error` — so it is recorded as a failed run, under that entry's id.
+       */
+      const observeFailedRun = (
+        sessionId: SessionId,
+        status: SessionStatus,
+      ): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          if (status !== "idle") return;
+          const failed = failedRequests.get(sessionId);
+          if (failed === undefined) return;
+          failedRequests.delete(sessionId);
+          yield* recordRunFailure(
+            sessionId,
+            failed.id,
+            "model_error",
+            failed.text === "" ? "the model request failed" : failed.text,
+          );
+        });
 
       /**
        * Time a run from the status the projection reports: the first `busy` starts the clock, and the
@@ -5722,6 +5828,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* FiberMap.remove(projectors, sessionId);
           // A run the release cuts short has no end to measure, so it is not recorded.
           runStarts.delete(sessionId);
+          failedRequests.delete(sessionId);
           yield* shiftSessionsActive(-1);
           yield* closeHarness(owner.harness).pipe(Effect.ignore);
           // Then its sandboxes, which nothing runs in once the harness is closed; never the
