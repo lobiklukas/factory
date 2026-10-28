@@ -71,6 +71,7 @@ import path from "node:path";
 import { SessionRpc, TasksRpc, TriggerRoutesRpc } from "@repo/domain/Rpc";
 import { RepoSlug, SessionId } from "@repo/domain/Session";
 import { DEFAULT_DEFINITION_ID, DefinitionId } from "@repo/domain/Task";
+import { SQL } from "bun";
 import { Effect, Option, Schema } from "effect";
 import { RpcClient } from "effect/rpc";
 import { makeChecker, protocolFor, waitUntil } from "./harness.ts";
@@ -719,6 +720,32 @@ const program = Effect.gen(function* () {
     note: QUESTION,
     actor: parkedBy,
   });
+  // The thread the factory asked in is a row it keeps; the drive parks the card by hand, so it
+  // records that row itself. Another session's message on the issue is not the answer.
+  const db = new SQL(
+    process.env["DATABASE_URL"] ??
+      "postgres://factory:factory@localhost:5442/factory",
+  );
+  yield* Effect.promise(
+    () => db`
+      INSERT INTO linear_agent_sessions (issue_id, agent_session_id)
+      VALUES (${cardIssue.id}, ${`agent-session-${STAMP}`})
+      ON CONFLICT (issue_id) DO UPDATE SET agent_session_id = EXCLUDED.agent_session_id
+    `,
+  );
+  yield* Effect.promise(() => db.close());
+  const otherSession = yield* Effect.promise(() =>
+    deliver(
+      "reply-other-session",
+      agentReply(
+        cardIssue.id,
+        `act-${STAMP}-other`,
+        "chatter in a session Linear opened",
+        `agent-session-${STAMP}-delegated`,
+      ),
+    ),
+  );
+  const stillParked = yield* boards.getTask({ taskId: card.id });
   const reply = agentReply(cardIssue.id, `act-${STAMP}-answer`, ANSWER);
   const answered = yield* Effect.promise(() => deliver("reply-answers", reply));
   const afterAnswer = yield* boards.getTask({ taskId: card.id });
@@ -726,6 +753,9 @@ const program = Effect.gen(function* () {
   assert(
     "a reply in the agent session is recorded verbatim as the card's answer, by trigger:linear, and lifts needs_input",
     parked.blocked?.reason === "needs_input" &&
+      otherSession.body?.["status"] === "skipped" &&
+      String(otherSession.body?.["reason"] ?? "").includes("is not the one") &&
+      stillParked.blocked?.reason === "needs_input" &&
       answered.status === 200 &&
       answered.body?.["status"] === "processed" &&
       answered.body?.["taskId"] === card.id &&

@@ -654,8 +654,8 @@ export type LinearIssueSyncShape = {
   }) => Effect.Effect<readonly string[], LinearSyncError>;
   /**
    * Open the factory agent's session on `issueId` (T5) and answer its id: the thread an elicitation
-   * is posted in. Not idempotent on its own — the caller keeps the id (`linear_agent_sessions`) so
-   * an issue has one.
+   * is posted in. Not idempotent and not retried — a retry after a lost acknowledgement would open
+   * a second one — so the caller keeps the id (`linear_agent_sessions`) so an issue has one.
    */
   readonly openAgentSession: (input: {
     readonly issueId: string;
@@ -663,7 +663,8 @@ export type LinearIssueSyncShape = {
   /**
    * Post one `elicitation` activity into `agentSessionId`: the question as Linear's own typed
    * activity, which Linear shows as a question and answers back as an event (T5). One call is one
-   * activity; the caller is what makes a replayed ask send one.
+   * activity, and it is not retried (a lost acknowledgement may have posted it); the caller's ledger
+   * is what makes a replayed ask send one.
    */
   readonly elicit: (input: {
     readonly issueId: string;
@@ -1199,54 +1200,56 @@ export const LinearIssueSyncLive = (
       const openAgentSession: LinearIssueSyncShape["openAgentSession"] = (
         input,
       ) =>
-        retried(
-          Effect.gen(function* () {
-            const field = yield* mutationField(
-              "agentSessionCreateOnIssue",
-              input.issueId,
-              LINEAR_AGENT_SESSION_CREATE,
-              { input: { issueId: input.issueId } },
-            );
-            const fail = (message: string) =>
-              new LinearSyncError({
-                issueId: input.issueId,
-                operation: "agentSessionCreateOnIssue",
-                message,
-                transient: false,
-              });
-            const created = yield* Schema.decodeUnknownEffect(
-              AgentSessionCreateResult,
-            )(field).pipe(
-              Effect.mapError(() =>
-                fail(
-                  "Linear's answer to agentSessionCreateOnIssue could not be read",
-                ),
-              ),
-            );
-            if (!created.success || !created.agentSession) {
-              return yield* fail(
-                created.success
-                  ? "Linear answered agentSessionCreateOnIssue without the session it made"
-                  : "Linear answered success: false to agentSessionCreateOnIssue",
-              );
-            }
-            return created.agentSession.id;
-          }),
-        );
-
-      const elicit: LinearIssueSyncShape["elicit"] = (input) =>
-        retried(
-          mutate(
-            "agentActivityCreate",
+        // Not `retried`: nothing reads before it writes, so a retry after a lost acknowledgement would
+        // open a second session. The caller's ledger (`linear_agent_sessions`) and the ask's replay
+        // are the recovery.
+        Effect.gen(function* () {
+          const field = yield* mutationField(
+            "agentSessionCreateOnIssue",
             input.issueId,
-            LINEAR_AGENT_ACTIVITY_CREATE,
-            {
-              input: {
-                agentSessionId: input.agentSessionId,
-                content: { type: "elicitation", body: input.question },
-              },
+            LINEAR_AGENT_SESSION_CREATE,
+            { input: { issueId: input.issueId } },
+          );
+          const fail = (message: string) =>
+            new LinearSyncError({
+              issueId: input.issueId,
+              operation: "agentSessionCreateOnIssue",
+              message,
+              transient: false,
+            });
+          const created = yield* Schema.decodeUnknownEffect(
+            AgentSessionCreateResult,
+          )(field).pipe(
+            Effect.mapError(() =>
+              fail(
+                "Linear's answer to agentSessionCreateOnIssue could not be read",
+              ),
+            ),
+          );
+          if (!created.success || !created.agentSession) {
+            return yield* fail(
+              created.success
+                ? "Linear answered agentSessionCreateOnIssue without the session it made"
+                : "Linear answered success: false to agentSessionCreateOnIssue",
+            );
+          }
+          return created.agentSession.id;
+        });
+
+      // Not `retried`: a request that timed out or lost its acknowledgement may have posted the
+      // question, and posting it again is a second elicitation. A failure is the caller's to log; the
+      // ask's replay posts what the ledger (`linear_elicitations`) does not hold.
+      const elicit: LinearIssueSyncShape["elicit"] = (input) =>
+        mutate(
+          "agentActivityCreate",
+          input.issueId,
+          LINEAR_AGENT_ACTIVITY_CREATE,
+          {
+            input: {
+              agentSessionId: input.agentSessionId,
+              content: { type: "elicitation", body: input.question },
             },
-          ),
+          },
         );
 
       /** The parent's children, read once: what a plan-freshness pass is shown. */

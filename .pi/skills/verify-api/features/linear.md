@@ -127,7 +127,10 @@ action `prompted` — a person writing in the thread of the agent session the fa
 `elicitation` in — is a reply, not an issue: its delivery id is `linear:<activity id>:reply`, and
 the seam records the text as the `answer` comment on the card filed from that issue if one is
 blocked `needs_input` (the delivery is `processed`, naming the card), and a recorded skip otherwise.
-Other agent-session events (`created`) are answered `200` and skipped as any other entity. The
+Only the session the factory asked in answers (`linear_agent_sessions`); a message in another
+session on the issue is a recorded skip. Other agent-session events (`created`) are answered `200`
+and skipped as any other entity; the deployment must use the Linear app's token and enable the
+agent-session webhook category (see [linear-writeback.md](linear-writeback.md)). The
 question's half, and the blocker gate (an issue with an open `blockedBy` relation is skipped
 `blocked by <id>` until the blocker is Done), are in [linear-writeback.md](linear-writeback.md).
 `./linear.sh` drives the reply over HTTP (checks 22–24: skipped when no card waits, a reply answers

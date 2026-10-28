@@ -726,6 +726,15 @@ const askRun = Effect.gen(function* () {
   const thread = yield* tasksService.comments(card.id);
   const activities = () => ledger().activities;
   const sessionsOpened = () => ledger().agentSessions;
+  // The card parks first and the question is mirrored to Linear right after (best effort, after the
+  // ask is on the card): wait for the ledger row that says the mirror finished before counting.
+  yield* waitUntil(
+    Effect.map(
+      sql`SELECT 1 FROM linear_elicitations WHERE task_id = ${card.id}`,
+      (rows) => (rows.length > 0 ? true : false),
+    ),
+    "the question to reach Linear",
+  );
   assert(
     "a run's ask on a Linear-sourced card parks it needs_input and posts exactly one elicitation, verbatim, in an agent session on the issue",
     parked.blocked?.reason === "needs_input" &&

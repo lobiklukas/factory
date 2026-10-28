@@ -224,6 +224,37 @@ describe("an elicitation, as the sync posts it", () => {
     ]);
   });
 
+  it("does not post the question twice when Linear applied it and lost the acknowledgement: the post is not retried", async () => {
+    const fake = makeLinear({ loseAckOnce: "agentActivityCreate" });
+    const exit = await withSync(fake, (sync) =>
+      Effect.gen(function* () {
+        const session = yield* sync.openAgentSession({
+          issueId: fake.issue.id,
+        });
+        yield* sync.elicit({
+          issueId: fake.issue.id,
+          agentSessionId: session,
+          question: "Q?",
+        });
+      }),
+    );
+    // The caller sees the failure (and logs it); Linear holds exactly one activity.
+    expect(Exit.isFailure(exit)).toBe(true);
+    expect(fake.activities).toHaveLength(1);
+    expect(
+      fake.seen.filter((s) => s.operation === "agentActivityCreate"),
+    ).toHaveLength(1);
+  });
+
+  it("does not open a second agent session when Linear applied the first and lost the acknowledgement", async () => {
+    const fake = makeLinear({ loseAckOnce: "agentSessionCreateOnIssue" });
+    const exit = await withSync(fake, (sync) =>
+      sync.openAgentSession({ issueId: fake.issue.id }),
+    );
+    expect(Exit.isFailure(exit)).toBe(true);
+    expect(fake.agentSessions).toHaveLength(1);
+  });
+
   it("refuses a session Linear answered success: false to, and an activity it refused", async () => {
     const session = await withSync(
       makeLinear({ unsuccessful: "agentSessionCreateOnIssue" }),
@@ -648,6 +679,35 @@ describe("a Linear-delegated card's questions and blockers, on the board", () =>
           Effect.flatMap(TaskService, (tasks) => tasks.comments(card.id)),
         );
         expect(thread2).toHaveLength(2);
+      });
+    }, 60_000);
+
+    it("does not take another agent session's message on the issue for the answer", async () => {
+      const fake = makeLinear({ identifier: `ENG-${runId}-i` });
+      await harness("other-session", fake, async ({ run, deliver }) => {
+        const card = await run(filed(fake));
+        await run(carry(card, "Which Postgres major?", "call-1"));
+        const trigger = await run(TriggerService);
+        // A session Linear opened on a mention or a delegation: not the thread the question is in.
+        const outcome = await run(
+          trigger.deliver(
+            deliver(
+              prompted({
+                issueId: fake.issue.id,
+                activityId: `act-${runId}-other`,
+                body: "unrelated chatter",
+                agentSessionId: "agent-session-delegated",
+              }),
+            )!,
+          ),
+        );
+        expect(outcome.status).toBe("skipped");
+        expect(outcome.reason).toContain("agent-session-delegated");
+        expect(outcome.reason).toContain("is not the one");
+        const still = await run(
+          Effect.flatMap(TaskService, (tasks) => tasks.get(card.id)),
+        );
+        expect(still.blocked?.reason).toBe("needs_input");
       });
     }, 60_000);
 
