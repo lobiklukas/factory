@@ -183,6 +183,14 @@ export const BUDGET_DOC_KIND = "factory.budget";
  */
 export const BUDGET_STOPPED_ENTRY_KIND = "factory.budget.stopped";
 /**
+ * The entry a model switch is announced with (S-model-provider-breadth, `./fallback`): the model a
+ * run was on answered overloaded or unavailable, and its role's fallback chain moved the session onto
+ * the next model, which its retried request — and every later one — goes to. An entry because the
+ * switch is the one change of a session's pinned model that is not a replay, and a reader of the
+ * transcript has to be able to see which answers came from which model and why.
+ */
+export const MODEL_SWITCH_ENTRY_KIND = "factory.model.switched";
+/**
  * The entry an operator's interrupt is announced with (C8): the run was stopped before it finished.
  * An entry for the reason a budget stop is one: Pi Durable settles the aborted run `unanswered` and
  * writes nothing a reader would see, so without it an interrupted turn reads as one that went quiet.
@@ -412,6 +420,8 @@ const entryKind = (kind: string): TranscriptEntryKind => {
       return "budget";
     case INTERRUPTED_ENTRY_KIND:
       return "interrupted";
+    case MODEL_SWITCH_ENTRY_KIND:
+      return "modelSwitch";
     case PR_INHERITED_ENTRY_KIND:
       return "inherited";
     default:
@@ -488,10 +498,7 @@ const scanLatestRun = (
  * question or approval has not completed either; it is `unfinished`.
  */
 export type RunTurn =
-  | "completed"
-  | "unfinished"
-  | "truncated"
-  | Exclude<RunEnding, "finished">;
+  "completed" | "unfinished" | "truncated" | Exclude<RunEnding, "finished">;
 
 /** The newest run's turn, from the log's entries newest first (`runEndingOf`'s window). */
 export const runTurnOf = (newestFirst: Iterable<EntryRecord>): RunTurn => {
@@ -526,7 +533,7 @@ export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
       : failedRequest
         ? true
         : undefined;
-  // The title, no-change, not-opened, PR-updated, budget, interrupted and inherited-PR entries carry
+  // The title, no-change, not-opened, PR-updated, budget, interrupted, model-switch and inherited-PR entries carry
   // no model content, so their text comes from their data — which is what makes a no-op PR step or
   // a budget stop a readable line, not an empty entry.
   const text =
@@ -536,7 +543,8 @@ export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
           entry.kind === PR_NOT_OPENED_ENTRY_KIND ||
           entry.kind === PR_UPDATED_ENTRY_KIND ||
           entry.kind === BUDGET_STOPPED_ENTRY_KIND ||
-          entry.kind === INTERRUPTED_ENTRY_KIND
+          entry.kind === INTERRUPTED_ENTRY_KIND ||
+          entry.kind === MODEL_SWITCH_ENTRY_KIND
         ? (stringAt(asObject(entry.data), "text") ?? "")
         : entry.kind === PR_INHERITED_ENTRY_KIND
           ? inheritedPrText(stringAt(asObject(entry.data), "url") ?? "")

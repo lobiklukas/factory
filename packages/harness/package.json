@@ -26,6 +26,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./reviewEval": "./src/reviewEval.ts",
-    "./reviewEvalCorpus": "./src/reviewEvalCorpus.ts"
+    "./reviewEvalCorpus": "./src/reviewEvalCorpus.ts",
+    "./openaiCompatibleFake": "./src/openaiCompatibleFake.ts"
   }
 }

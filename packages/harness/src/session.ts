@@ -145,6 +145,7 @@ import {
   type BudgetSeed,
   type BudgetSource,
 } from "./budget";
+import { fallbackExtension, type RoleFallbacks } from "./fallback";
 import {
   verifyCallsIn,
   verifyExtension,
@@ -382,6 +383,13 @@ export type OpenSessionOptions = {
    * to. Absent: the role's model, else `model`.
    */
   readonly sessionModel?: ModelAccess;
+  /**
+   * The deployment's role → fallback chain table (S-model-provider-breadth, `./fallback`), resolved
+   * against `model`'s catalog: a run whose role has a row moves onto the next model of its chain when
+   * its own answers overloaded or unavailable, recorded in the log as a model switch. Absent: no run
+   * falls back.
+   */
+  readonly fallbacks?: RoleFallbacks;
   /** The session's working directory, which must exist. One per session, so sessions share no files. */
   readonly cwd: string;
   /**
@@ -628,6 +636,7 @@ const openSessionIn = (
       options.model,
       options.roles,
       options.rolePolicies,
+      options.fallbacks,
     );
     // The agent is pinned when the root is created, and only then (`harness.root` below writes it
     // into a root that does not exist yet), so a reopened run keeps talking to the model it started
@@ -765,7 +774,16 @@ const openSessionIn = (
     // conversation, which exists only once the harness below is open — and no request can be sent
     // before then, so the hook reads it late rather than taking it here.
     let opened: BudgetSession | undefined;
+    let openedHarness: Harness | undefined;
     registry.install(budgetExtension(() => opened));
+    // The role's fallback chain (S-model-provider-breadth): headed by the role's model, so a session
+    // created on a model of its own, which the chain does not hold, never falls back. A reopened
+    // session that already switched is on a link of the chain, and moves on only past it.
+    if (role.fallbacks.length > 0) {
+      registry.install(
+        fallbackExtension([role.model, ...role.fallbacks], () => openedHarness),
+      );
+    }
     // Every command the session runs, its tools' and the control plane's setup alike, has the values
     // it was given masked in its output before anything sees it (S-agent-secrets).
     const sessionEnv = (cwd: string): Promise<ExecutionEnv> =>
@@ -823,6 +841,7 @@ const openSessionIn = (
         }),
       );
       opened = { root, harness };
+      openedHarness = harness;
 
       // What the section came to, committed beside it: a page the budget dropped is a fact about this
       // open, and a fact about a prompt that is not in the log is not a fact anyone can check later.

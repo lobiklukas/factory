@@ -38,6 +38,10 @@ import { VERIFY_TOOL } from "./verify";
 import { ASK_TOOL, THREAD_SECTION_KEY } from "./ask";
 import { SPEC_TOOL } from "./specify";
 import { PLAN_TOOL } from "./planning";
+import {
+  openAICompatibleProvider,
+  type OpenAICompatibleConfig,
+} from "./openaiCompatible";
 import { REVIEW_TOOL } from "./review";
 
 /** pi-ai's credential lookup, so a caller can read the variables a request would authenticate from. */
@@ -650,6 +654,12 @@ export type ModelAccessOptions = {
    * so it can say which variables are set without touching the process's environment.
    */
   readonly authContext?: AuthContext | undefined;
+  /**
+   * A second provider in the same registry, whichever the backend is (S-model-provider-breadth,
+   * `./openaiCompatible`): an OpenAI-compatible endpoint whose models a role row, `DEFAULT_MODEL` or
+   * a fallback chain names as `openai-compatible/<id>`. Absent: the backend's provider alone.
+   */
+  readonly openaiCompatible?: OpenAICompatibleConfig | undefined;
 };
 
 /** What one faux model's script does differently from the process's (`fauxModelScripts`). */
@@ -752,12 +762,25 @@ export const FAUX_FAIL_MESSAGE =
   "model_error: the faux backend refused this request, as FAUX_FAIL asks";
 
 /**
+ * The error a request `FAUX_FAIL=overloaded` fails ends with (S-model-provider-breadth): worded as
+ * Anthropic words its `529`, so pi-ai's retry pattern matches it and Pi Durable retries the request —
+ * which is what a role's fallback chain (`./fallback`) switches the retry onto another model for.
+ */
+export const FAUX_OVERLOADED_MESSAGE =
+  "529 overloaded_error: the faux backend is overloaded, as FAUX_FAIL asks";
+
+/**
  * When the faux fails a request (F6): once the request's context holds `afterAnswers` answers — the
  * context the model is sent, so a compaction that drops answers can bring it back under the count.
+ * `kind: "overloaded"` fails it as an overloaded provider does (`FAUX_OVERLOADED_MESSAGE`, retried);
+ * absent, as a refusal (`FAUX_FAIL_MESSAGE`, not retried).
  */
-export type FauxFail = { readonly afterAnswers: number };
+export type FauxFail = {
+  readonly afterAnswers: number;
+  readonly kind?: "overloaded" | undefined;
+};
 
-/** `FAUX_FAIL` (or a script's `fail`) is not `model_error` or `model_error:<answers>`. */
+/** `FAUX_FAIL` (or a script's `fail`) is not `model_error[:<answers>]` or `overloaded[:<answers>]`. */
 export class InvalidFauxFail extends Schema.TaggedError<InvalidFauxFail>()(
   "InvalidFauxFail",
   { message: Schema.String },
@@ -766,8 +789,10 @@ export class InvalidFauxFail extends Schema.TaggedError<InvalidFauxFail>()(
 /**
  * Read `FAUX_FAIL` (F6): blank is never; `model_error` fails every step of a turn from the first
  * request; `model_error:<n>` fails once the request's context holds `n` model answers — `model_error:1` is a run
- * whose first step (its `bash` call) runs and whose next request fails. Anything else fails the boot:
- * a drive that meant to fail a run and did not would prove the run it did not mean to.
+ * whose first step (its `bash` call) runs and whose next request fails. `overloaded` and
+ * `overloaded:<n>` fail the same requests as an overloaded provider (a `529`) instead, which Pi
+ * Durable retries (S-model-provider-breadth). Anything else fails the boot: a drive that meant to
+ * fail a run and did not would prove the run it did not mean to.
  */
 export const parseFauxFail = (
   text: string,
@@ -775,12 +800,15 @@ export const parseFauxFail = (
   Effect.gen(function* () {
     const value = text.trim();
     if (value === "") return undefined;
-    const match = /^model_error(?::(\d+))?$/.exec(value);
+    const match = /^(model_error|overloaded)(?::(\d+))?$/.exec(value);
     if (match === null)
       return yield* new InvalidFauxFail({
-        message: `FAUX_FAIL is "${value}", which is neither model_error nor model_error:<answers>`,
+        message: `FAUX_FAIL is "${value}", which is none of model_error, model_error:<answers>, overloaded, overloaded:<answers>`,
       });
-    return { afterAnswers: Number(match[1] ?? "0") };
+    const afterAnswers = Number(match[2] ?? "0");
+    return match[1] === "overloaded"
+      ? { afterAnswers, kind: "overloaded" }
+      : { afterAnswers };
   });
 
 /**
@@ -880,11 +908,15 @@ export const modelAccessFor = (
   const provider = key.slice(0, slash);
   const modelId = key.slice(slash + 1);
   if (access.models.getModel(provider, modelId) === undefined) return undefined;
+  // The flat charge is the faux provider's (`fauxCost`): a model of another provider in the same
+  // registry (`openaiCompatible`) is priced by its catalog alone.
+  const { flatCost, ...rest } = access;
   return {
-    ...access,
+    ...rest,
     provider,
     modelId,
     contextWindow: windowOf(access.models, provider, modelId),
+    ...(flatCost === undefined || provider !== "faux" ? {} : { flatCost }),
   };
 };
 
@@ -937,7 +969,14 @@ export type FauxModelAccess = {
 export const createFauxModelAccess = (
   options: ModelAccessOptions = {},
 ): FauxModelAccess => {
-  const models = createModels();
+  const models = createModels(
+    options.authContext === undefined
+      ? undefined
+      : { authContext: options.authContext },
+  );
+  if (options.openaiCompatible !== undefined) {
+    models.setProvider(openAICompatibleProvider(options.openaiCompatible));
+  }
   const fauxCommand = options.fauxCommand ?? FAUX_COMMAND;
   const window =
     options.contextWindow === undefined
@@ -976,7 +1015,10 @@ export const createFauxModelAccess = (
     )
       return fauxAssistantMessage([], {
         stopReason: "error",
-        errorMessage: FAUX_FAIL_MESSAGE,
+        errorMessage:
+          fail.kind === "overloaded"
+            ? FAUX_OVERLOADED_MESSAGE
+            : FAUX_FAIL_MESSAGE,
       });
     const answer = () =>
       fauxAnswer(
@@ -1024,6 +1066,9 @@ export const createModelAccess = (
       : { authContext: options.authContext },
   );
   models.setProvider(anthropicProvider());
+  if (options.openaiCompatible !== undefined) {
+    models.setProvider(openAICompatibleProvider(options.openaiCompatible));
+  }
   return {
     backend,
     models,

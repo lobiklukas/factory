@@ -19,6 +19,7 @@ import {
   compactionPolicyFor,
   createModelAccess,
   FAUX_FAIL_MESSAGE,
+  FAUX_OVERLOADED_MESSAGE,
   fauxAnswer,
   isFauxTurnStep,
   modelKey,
@@ -496,6 +497,16 @@ describe("the failing faux (F6)", () => {
     expect(summary.stopReason).toBe("stop");
   });
 
+  it("fails a request as an overloaded provider with overloaded, which Pi Durable retries", async () => {
+    const overloaded = createModelAccess("faux", {
+      fauxFail: { afterAnswers: 0, kind: "overloaded" },
+    });
+    const answer = await turn(overloaded, [user]);
+    expect(answer.stopReason).toBe("error");
+    expect(answer.errorMessage).toBe(FAUX_OVERLOADED_MESSAGE);
+    expect(isRetryableAssistantError(answer)).toBe(true);
+  });
+
   it("lets the model answer n times first with model_error:n", async () => {
     const afterOne = createModelAccess("faux", {
       fauxFail: { afterAnswers: 1 },
@@ -524,10 +535,24 @@ describe("the failing faux (F6)", () => {
     expect(read("")).toEqual(Exit.succeed(undefined));
     expect(read(" model_error ")).toEqual(Exit.succeed({ afterAnswers: 0 }));
     expect(read("model_error:2")).toEqual(Exit.succeed({ afterAnswers: 2 }));
-    for (const text of ["yes", "model_error:", "model_error:-1", "budget"]) {
+    // An overloaded provider (S-model-provider-breadth): the same counts, a retried error.
+    expect(read("overloaded")).toEqual(
+      Exit.succeed({ afterAnswers: 0, kind: "overloaded" }),
+    );
+    expect(read("overloaded:1")).toEqual(
+      Exit.succeed({ afterAnswers: 1, kind: "overloaded" }),
+    );
+    for (const text of [
+      "yes",
+      "model_error:",
+      "model_error:-1",
+      "budget",
+      "overloaded:",
+      "overload",
+    ]) {
       const refused = read(text);
       expect(Exit.isFailure(refused)).toBe(true);
-      expect(JSON.stringify(refused)).toContain("neither model_error");
+      expect(JSON.stringify(refused)).toContain("none of model_error");
     }
     const scripts = Effect.runSyncExit(
       parseFauxModelScripts('{"builder": {"fail": "model_error:1"}}', [

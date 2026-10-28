@@ -1,5 +1,7 @@
 export * from "./loader";
 export * from "./models";
+export * from "./openaiCompatible";
+export * from "./fallback";
 export * from "./pages";
 export * from "./repoContext";
 export * from "./policy";
