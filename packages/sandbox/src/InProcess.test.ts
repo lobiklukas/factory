@@ -1,7 +1,8 @@
 /**
  * The in-process runtime (LOB-88): the shared conformance suite, Pi Durable's `ExecutionEnv`
  * suite over its adapter, and what its descriptor says it does not provide, observed from the
- * host.
+ * host. Then a sandbox bound to a directory that already exists (LOB-244), which Pi Durable's suite
+ * holds to the same oracle.
  */
 import {
   chmodSync,
@@ -20,6 +21,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import {
   createEnvConformance,
   createExpectAssertions,
+  registerEnvConformance,
 } from "@earendil-works/pi-durable/testing";
 import { Effect, Exit, Scope } from "effect";
 import { afterAll, describe, expect, it } from "vitest";
@@ -39,6 +41,39 @@ registerSandboxRuntimeConformance(
 
 const scratch = mkdtempSync(join(tmpdir(), "factory-sandbox-test-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+
+/** Run against a fresh in-process runtime with its `bind`, released when the body ends. */
+const withBindable = <A, E>(
+  body: (
+    runtime: Effect.Success<ReturnType<typeof InProcess.make>>,
+  ) => Effect.Effect<A, E, Scope.Scope>,
+  options: InProcess.InProcessOptions = {},
+): Promise<A> =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      return yield* body(yield* InProcess.make(options));
+    }).pipe(Effect.scoped),
+  );
+
+// The environment of a sandbox bound to an existing directory is held to the oracle a created
+// one is: the suite's cases write and list relative to the cwd, so they run in the bound directory.
+registerEnvConformance(
+  { describe, expect, it },
+  "in-process runtime, bound to an existing directory: ExecutionEnv",
+  (use) =>
+    withBindable((runtime) =>
+      Effect.gen(function* () {
+        const directory = mkdtempSync(join(scratch, "bound-conformance-"));
+        const sandbox = yield* Effect.acquireRelease(
+          Effect.orDie(runtime.bind(directory)),
+          (bound) => Effect.ignore(runtime.destroy(bound)),
+        );
+        const env = yield* Effect.orDie(runtime.executionEnv(sandbox));
+        expect(env.cwd).toBe(realpathSync(directory));
+        yield* Effect.promise(() => use(env));
+      }),
+    ),
+);
 
 /** Run against a fresh in-process runtime, released when the body ends. */
 const withRuntime = <A, E>(
@@ -327,5 +362,136 @@ describe.skipIf(asRoot)("a destroy whose cleanup fails", () => {
     expect(existsSync(half.workdir)).toBe(false);
     expect(existsSync(other.workdir)).toBe(false);
     unlockStuck();
+  });
+});
+
+describe("a sandbox bound to an existing directory", () => {
+  it("runs its commands there, reading the files the directory already held", async () => {
+    const directory = mkdtempSync(join(scratch, "bound-"));
+    writeFileSync(join(directory, "marker.txt"), "already here");
+    const { sandbox, pwd, cat, read } = await withBindable((runtime) =>
+      Effect.gen(function* () {
+        const sandbox = yield* runtime.bind(directory);
+        const pwd = yield* runtime.exec(sandbox, "pwd -P");
+        const cat = yield* runtime.exec(sandbox, "cat marker.txt");
+        const env = yield* runtime.executionEnv(sandbox);
+        const read = yield* Effect.promise(() =>
+          env.readTextFile("marker.txt", context),
+        );
+        return { sandbox, pwd, cat, read };
+      }),
+    );
+    expect(sandbox.workdir).toBe(realpathSync(directory));
+    expect(pwd.stdout.trim()).toBe(realpathSync(directory));
+    expect(cat.stdout).toBe("already here");
+    expect(read).toEqual({ ok: true, value: "already here" });
+  });
+
+  it("resolves a relative directory against the server's working directory", async () => {
+    const directory = mkdtempSync(join(scratch, "bound-relative-"));
+    const relative = join(
+      ...Array.from({ length: process.cwd().split("/").length }, () => ".."),
+      directory,
+    );
+    const workdir = await withBindable((runtime) =>
+      runtime.bind(relative).pipe(Effect.map((sandbox) => sandbox.workdir)),
+    );
+    expect(workdir).toBe(realpathSync(directory));
+  });
+
+  it("leaves every file in the directory when destroyed, and when the runtime is released", async () => {
+    const destroyedDir = mkdtempSync(join(scratch, "bound-destroyed-"));
+    const releasedDir = mkdtempSync(join(scratch, "bound-released-"));
+    const { destroyedExec } = await withBindable((runtime) =>
+      Effect.gen(function* () {
+        const destroyed = yield* runtime.bind(destroyedDir);
+        yield* runtime.writeFile(destroyed, "made/inside.txt", "kept");
+        yield* runtime.destroy(destroyed);
+        const destroyedExec = yield* Effect.flip(
+          runtime.exec(destroyed, "true"),
+        );
+        const released = yield* runtime.bind(releasedDir);
+        yield* runtime.writeFile(released, "made/inside.txt", "kept too");
+        return { destroyedExec };
+      }),
+    );
+    // Ended, as any sandbox is: the runtime no longer knows it.
+    expect(destroyedExec._tag).toBe("SandboxNotFound");
+    expect(readdirSync(destroyedDir)).toEqual(["made"]);
+    expect(readdirSync(join(destroyedDir, "made"))).toEqual(["inside.txt"]);
+    expect(readdirSync(join(releasedDir, "made"))).toEqual(["inside.txt"]);
+  });
+
+  it("still removes a created sandbox's workdir beside a bound one (the control for the case above)", async () => {
+    const directory = mkdtempSync(join(scratch, "bound-control-"));
+    const created = await withBindable((runtime) =>
+      Effect.gen(function* () {
+        yield* runtime.bind(directory);
+        return yield* runtime.create;
+      }),
+    );
+    expect(existsSync(created.workdir)).toBe(false);
+    expect(existsSync(directory)).toBe(true);
+  });
+
+  it("refuses a directory that does not exist, and a path that is a file", async () => {
+    const file = join(scratch, "bound-not-a-directory.txt");
+    writeFileSync(file, "x");
+    const { missing, notDirectory } = await withBindable((runtime) =>
+      Effect.gen(function* () {
+        const missing = yield* Effect.flip(
+          runtime.bind(join(scratch, "bound-missing")),
+        );
+        const notDirectory = yield* Effect.flip(runtime.bind(file));
+        return { missing, notDirectory };
+      }),
+    );
+    expect(missing).toMatchObject({
+      _tag: "SandboxFileError",
+      code: "not_found",
+    });
+    expect(notDirectory).toMatchObject({
+      _tag: "SandboxFileError",
+      code: "not_directory",
+    });
+  });
+
+  it("starts its commands with the variables it was bound with, over the runtime's", async () => {
+    const directory = mkdtempSync(join(scratch, "bound-env-"));
+    const result = await withBindable(
+      (runtime) =>
+        Effect.gen(function* () {
+          const sandbox = yield* runtime.bind(directory, {
+            env: { BOUND_ONLY: "bound", SHARED: "bound wins", WITHHELD: "" },
+          });
+          return yield* runtime.exec(
+            sandbox,
+            'printf "%s|%s|%s|[%s]" "$RUNTIME_ONLY" "$BOUND_ONLY" "$SHARED" "$WITHHELD"',
+          );
+        }),
+      {
+        shellEnv: {
+          RUNTIME_ONLY: "runtime",
+          SHARED: "runtime",
+          WITHHELD: "runtime value",
+        },
+      },
+    );
+    expect(result.stdout).toBe("runtime|bound|bound wins|[]");
+  });
+
+  it("makes no temporary root while it only binds", async () => {
+    const roots = () =>
+      readdirSync(tmpdir()).filter((name) =>
+        name.startsWith("factory-sandboxes-"),
+      );
+    const before = new Set(roots());
+    const during = await withBindable((runtime) =>
+      Effect.gen(function* () {
+        yield* runtime.bind(mkdtempSync(join(scratch, "bound-lazy-")));
+        return roots().filter((name) => !before.has(name));
+      }),
+    );
+    expect(during).toEqual([]);
   });
 });
