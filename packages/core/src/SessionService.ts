@@ -160,6 +160,7 @@ import {
   type AutonomyColumn,
   type AutonomyConfig,
   columnAutonomy,
+  columnWriteScope,
   type ApprovalAnswer,
   type MergeEvent,
   type MergeRecord,
@@ -271,6 +272,7 @@ import type { CredentialError, CredentialProvider } from "./credentials";
 import { NO_REVIEWER_IDENTITY, type ReviewPoster } from "./GitHubReview";
 import {
   BoardColumn,
+  REVIEW_VERDICT_REQUIREMENT,
   type ResolvedAutonomy,
   type ResolvedModel,
 } from "@repo/domain/Task";
@@ -1547,6 +1549,40 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             }),
         });
 
+      /**
+       * Whether this process serves the model a session is pinned to (E9): the catalog it was booted
+       * with (`options.model`) holds it. A pin outlives the backend that chose it, so a faux session
+       * is still pinned to `faux/faux-1` after the API restarts on anthropic, and its next request
+       * would fail inside pi-ai with an untyped `Unknown provider`.
+       */
+      const modelServed = (key: string): boolean =>
+        modelAccessFor(options.model, key) !== undefined;
+
+      /** The summary's and the list's `modelAvailable`: absent for a row that names no model. */
+      const modelAvailability = (
+        model: string | null,
+      ): { readonly modelAvailable?: boolean } =>
+        model === null ? {} : { modelAvailable: modelServed(model) };
+
+      /**
+       * Refuse a send to a session pinned to a model this process does not serve (E9): typed, naming
+       * the model, before an owner is acquired, a title is written or a message is submitted — so no
+       * run starts and the log is as it was. The read is the index row's `model`; a row with none has
+       * no root yet (its first open pins the deployment's model, which is served by construction).
+       */
+      const refuseUnservedModel = (
+        sessionId: SessionId,
+        row: SessionRow,
+      ): Effect.Effect<void, SessionError> =>
+        row.model === null || modelServed(row.model)
+          ? Effect.void
+          : Effect.fail(
+              new SessionErrorClass({
+                code: "model_unavailable",
+                message: `session ${sessionId} is pinned to model ${row.model}, which this process does not serve (its ${options.model.backend} backend serves ${modelKey(options.model)} by default), so no run was started. Replay the session onto a model this process serves (replaySession).`,
+              }),
+            );
+
       const summarize = (
         id: SessionId,
         row: SessionRow,
@@ -1573,6 +1609,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             ...(row.prUrl === null ? {} : { prUrl: row.prUrl }),
             ...(forkedFrom === undefined ? {} : { forkedFrom }),
             ...(row.model === null ? {} : { model: row.model }),
+            ...modelAvailability(row.model),
           };
         });
 
@@ -1596,6 +1633,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             ? { forkedFrom }
             : {}),
           ...(model === null ? {} : { model }),
+          serves: modelServed,
         };
       };
 
@@ -1659,9 +1697,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * honest answer for a session with no card, and for a column the pinned version does not
        * declare (a stale run row is not a reason to refuse to open the session).
        */
-      const runColumnFor = (
+      const declaredRunColumnFor = (
         sessionId: SessionId,
-      ): Effect.Effect<RunColumn | undefined, SessionError> =>
+      ): Effect.Effect<BoardColumn | undefined, SessionError> =>
         Effect.gen(function* () {
           const rows = yield* paper(
             "read run column",
@@ -1688,7 +1726,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 }),
             ),
           );
-          const declared = columns.find((column) => column.name === row.column);
+          return columns.find((column) => column.name === row.column);
+        });
+
+      const runColumnFor = (
+        sessionId: SessionId,
+      ): Effect.Effect<RunColumn | undefined, SessionError> =>
+        Effect.gen(function* () {
+          const declared = yield* declaredRunColumnFor(sessionId);
           return declared === undefined
             ? undefined
             : {
@@ -3790,6 +3835,41 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           ).pipe(Effect.ignore);
         });
 
+      /**
+       * Lift the card's `changes_requested` block for a run that addresses the review (C21): one
+       * whose start column writes code. A read-only column's run (LOB-74) writes nothing, and a
+       * review column's — one that requires a review verdict, whatever its role — reviews the PR
+       * rather than answering its review, so neither lifts it: the person starts the building run.
+       * Never fails: the run has started either way, and a block left standing is a card a person
+       * still sees.
+       */
+      const liftReviewBlock = (
+        sessionId: SessionId,
+        taskId: string,
+        actor: string,
+      ): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          const column = yield* declaredRunColumnFor(sessionId);
+          if (column === undefined) return;
+          if (
+            column.requires.some(
+              (requirement) => requirement.key === REVIEW_VERDICT_REQUIREMENT,
+            ) ||
+            columnWriteScope(
+              column,
+              options.rolePolicies ?? DEFAULT_ROLE_POLICIES,
+            ) === "none"
+          )
+            return;
+          yield* tasks.resumeAfterReview({ taskId, actor });
+        }).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning(
+              `session ${sessionId}: the card ${taskId}'s changes_requested block could not be lifted: ${error.message}`,
+            ),
+          ),
+        );
+
       const create = (
         input: CreateSessionInput = {},
       ): Effect.Effect<SessionSummary, SessionError> =>
@@ -3956,6 +4036,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* input.taskId === undefined
             ? opened
             : opened.pipe(Effect.onError(() => endOpenRun(id)));
+          if (input.taskId !== undefined && input.review === undefined) {
+            // A review that requested changes blocked the card (C21); a run that writes code is the
+            // one that addresses it — the review is on the thread it is told — so the card no longer
+            // waits on a person. Only once its owner has opened: a start refused above leaves the
+            // block, and the card in 'Needs a person'. Best effort: the run is already the card's.
+            yield* liftReviewBlock(id, input.taskId, input.actor ?? id);
+          }
           // The session exists and its directory is open: the list can show it without a fold.
           yield* touchActivity(id);
           yield* countSessionCreate("create");
@@ -4160,6 +4247,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         Effect.gen(function* () {
           yield* refuseOversized(input);
           const row = yield* requireSession(input.sessionId);
+          yield* refuseUnservedModel(input.sessionId, row);
           // A released session is refused by the acquisition, from the release it reads under the
           // owners' gate (LOB-268): a check here, on `row`, would miss one that commits in between.
           const owner = yield* acquireOwner(input.sessionId, row, {
@@ -4191,6 +4279,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         Effect.gen(function* () {
           yield* refuseOversized(input);
           const row = yield* requireSession(input.sessionId);
+          yield* refuseUnservedModel(input.sessionId, row);
           const owner = yield* acquireOwner(input.sessionId, row, {
             starts: true,
           });
@@ -4921,7 +5010,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               SELECT s.title, s.repo, s.request_id, s.pr_url,
                      s.pr_merged_at IS NOT NULL AS pr_merged, s.actor, s.forked_from,
                      s.workspace_released_at IS NOT NULL AS released,
-                     (COALESCE(t.blocked_reason IS NOT NULL, false) OR EXISTS (
+                     -- A review's changes_requested block (C21) is a prompt for a person, not a
+                     -- hold: the push it waits for is the one that answers it.
+                     (COALESCE(t.blocked_reason IS NOT NULL
+                        AND t.blocked_reason <> 'changes_requested', false) OR EXISTS (
                        SELECT 1 FROM session_approvals sa
                        WHERE sa.session_id = s.id AND sa.decision IS NULL
                      )) AS waiting,
@@ -5576,6 +5668,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       ): Effect.Effect<CompactSessionResult, SessionError> =>
         Effect.gen(function* () {
           const row = yield* requireSession(input.sessionId);
+          yield* refuseUnservedModel(input.sessionId, row);
           const instructions = input.instructions?.trim();
           const owner = yield* acquireOwner(input.sessionId, row);
           const taskId = yield* compactSession(
@@ -5706,6 +5799,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           }
           const row = yield* requireSession(input.sessionId);
           yield* refuseReleased(row);
+          yield* refuseUnservedModel(input.sessionId, row);
           // The checks are policed against the worktree's path, which needs no worktree: the one the
           // mission runs in is the owner's, cut under the gate.
           const planned = yield* workspaceFor(row, { cut: false });
@@ -7190,6 +7284,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 ${cursor?.at ?? null}::timestamptz IS NULL
                 OR (a.last_activity_at, s.id) < (${cursor?.at ?? null}::timestamptz, ${cursor?.id ?? null}::text)
               )
+              AND (${input.sessionId ?? null}::text IS NULL OR s.id = ${input.sessionId ?? null}::text)
+              AND (
+                ${input.taskId ?? null}::text IS NULL
+                OR EXISTS (
+                  SELECT 1 FROM task_runs tr
+                  WHERE tr.session_id = s.id AND tr.task_id = ${input.taskId ?? null}::text
+                )
+              )
               ORDER BY a.last_activity_at DESC, s.id DESC
               LIMIT ${limit + 1}
             `,
@@ -7228,6 +7330,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 : { baseRef: row.baseRef }),
               ...(forkedFrom === undefined ? {} : { forkedFrom }),
               ...(row.model === null ? {} : { model: row.model }),
+              ...modelAvailability(row.model),
               ...(row.prUrl === null ? {} : { prUrl: row.prUrl }),
             });
           }

@@ -30,7 +30,7 @@
 #   ./pr-settle.sh
 #   PR_SETTLE_PORT=9510 PR_SETTLE_GITHUB_PORT=9511 PR_SETTLE_GIT_PORT=9512 ./pr-settle.sh
 #
-# Env: PR_SETTLE_PORT (API, 9405), PR_SETTLE_GITHUB_PORT (9406), PR_SETTLE_GIT_PORT (9408),
+# Env: PR_SETTLE_PORT (API, 9407), PR_SETTLE_GITHUB_PORT (9409), PR_SETTLE_GIT_PORT (9408),
 # DATABASE_URL, EVIDENCE_DIR. Evidence: .verify/evidence/latest/board/pr-settle.json (every check),
 # pr-settle-github.json and pr-settle-git.json (the fakes' ledgers), pr-settle-*.txt (each CLI
 # call's output), pr-settle-api.log.
@@ -40,8 +40,8 @@ set -uo pipefail
 unset FACTORY_API_TOKEN FACTORY_API_TOKENS VITE_FACTORY_API_TOKEN FACTORY_API_AUTH
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PORT="${PR_SETTLE_PORT:-9405}"
-GH_PORT="${PR_SETTLE_GITHUB_PORT:-9406}"
+PORT="${PR_SETTLE_PORT:-9407}"
+GH_PORT="${PR_SETTLE_GITHUB_PORT:-9409}"
 GIT_PORT="${PR_SETTLE_GIT_PORT:-9408}"
 API_URL="http://127.0.0.1:$PORT"
 RUN_DIR="$ROOT/.verify/run/pr-settle"

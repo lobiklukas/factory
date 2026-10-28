@@ -19,12 +19,18 @@
 //             only on `careful`, write and push scopes — equal to `getDefinition`; and a run started
 //             on a card in `careful` parks on an approval for the same command a run in `building`
 //             runs unasked
+//   author    (F7) a version authored with `defineBoard` as an actor shows that author on its settings
+//             page, equal to `getDefinition`'s; the default pipeline's seeded version shows none
 //   lanes     each lane header's disclosure is closed until pressed, then shows its column's facts,
 //             equal to the same `getDefinition` column; its link opens the settings page
 //   read-only the page holds no form, input or button outside the Upgrade action (D5), which a board
 //             with a newer version is offered and a board on the newest is not; and every RPC it
 //             sends while nobody presses Upgrade is a read
 //   refused   a malformed board id is refused in the page, and a board that does not exist says so
+//   repin     (F9) a board pinned to v2, its settings page open and marked: pressing Upgrade re-pins it,
+//             and the same page — never reloaded — then names the newest version, lists that
+//             version's columns (equal to `getDefinition`), says it is the newest and drops the
+//             newer-version notice
 //
 // Env: WEB_URL, API_URL, EVIDENCE_DIR.
 import { randomBytes } from "node:crypto";
@@ -45,8 +51,10 @@ const NONE = "—";
 const TAG = randomBytes(4).toString("hex");
 const NEWEST_REPO = `verify-board-settings-${TAG}/newest`;
 const PINNED_REPO = `verify-board-settings-${TAG}/pinned`;
+const REPIN_REPO = `verify-board-settings-${TAG}/repin`;
 const AUTONOMY_REPO = `verify-board-settings-${TAG}/autonomy`;
 const AUTONOMY_DEFINITION = `autonomy-${TAG}`;
+const VERSION_AUTHOR = `verify-author-${TAG}`;
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
 // A failure shot from an earlier run must not sit beside this run's passing evidence.
@@ -493,6 +501,8 @@ try {
   const authored = await rpc("defineBoard", {
     id: AUTONOMY_DEFINITION,
     name: "Autonomy per column",
+    // This instance runs with auth off, which keeps a body actor (LOB-20): the version's author (F7).
+    actor: VERSION_AUTHOR,
     initialColumn: "todo",
     columns: [
       {
@@ -584,6 +594,24 @@ try {
         )
       : `shown=${JSON.stringify(autonomyShown)} expected=${JSON.stringify(autonomyExpected)}`,
   );
+  // The version's author (F7): named on the page for a version someone wrote, absent for a seeded one.
+  const authorShown = await page
+    .locator("[data-settings-author]")
+    .allTextContents();
+  assert(
+    "the settings page names the version's author, equal to getDefinition's",
+    autonomyDefinition.author === VERSION_AUTHOR &&
+      same(authorShown, [VERSION_AUTHOR]),
+    `getDefinition=${autonomyDefinition.author} page=${JSON.stringify(authorShown)}`,
+  );
+  await openSettings(newestBoard.id);
+  assert(
+    "a seeded version's settings page names no author, and getDefinition has none",
+    (await page.locator("[data-settings-author]").count()) === 0 &&
+      !("author" in newestDefinition),
+    `page=${await page.locator("[data-settings-author]").count()} getDefinition=${JSON.stringify(newestDefinition.author)}`,
+  );
+  await openSettings(autonomyBoard.id);
   const carefulText = await page
     .locator("[data-settings-column='careful'] [data-column-settings]")
     .textContent();
@@ -785,6 +813,82 @@ try {
   );
   await page.screenshot({
     path: path.join(EVIDENCE_DIR, "board-settings-missing.png"),
+    fullPage: true,
+  });
+
+  // --- repin: a board's settings follow its pin without a reload (F9) ----------------------------
+  const errorsBeforeRepin = consoleErrors.length;
+  const repinBoard = await rpc("createBoard", {
+    repo: REPIN_REPO,
+    definitionId: "default",
+    definitionVersion: 2,
+  });
+  observed.repinBoard = repinBoard.id;
+  await openSettings(repinBoard.id);
+  const before = await readHeader();
+  const beforeColumns = await readColumns("[data-settings-column]");
+  // A marker only this document holds: a reload (or a new navigation) would lose it.
+  await page.evaluate(() => {
+    window.__repinMarker = "same-document";
+  });
+  assert(
+    "before the re-pin the page reads v2, says v3 and the newest exist, and offers Upgrade",
+    before.version === 2 &&
+      before.newer !== null &&
+      before.newer.split(",").includes(String(newestVersion)) &&
+      !before.newest &&
+      same(beforeColumns, pinnedDefinition.columns.map(expectedColumn)),
+    JSON.stringify({ version: before.version, newer: before.newer }),
+  );
+  await page
+    .locator("[data-upgrade-version]")
+    .selectOption(String(newestVersion));
+  await page.locator("[data-upgrade-submit]").click();
+  await page
+    .waitForFunction(
+      (version) =>
+        document
+          .querySelector("[data-settings-version]")
+          ?.getAttribute("data-settings-version") === version &&
+        document.querySelector("[data-newer-versions]") === null &&
+        document.querySelector("[data-newest-version]") !== null,
+      String(newestVersion),
+      { timeout: 15_000 },
+    )
+    .catch(() => {});
+  const after = await readHeader();
+  const afterColumns = await readColumns("[data-settings-column]");
+  const repinned = await rpc("getBoard", { boardId: repinBoard.id });
+  const marker = await page.evaluate(() => window.__repinMarker ?? null);
+  observed.repin = { before, after, pin: repinned.instance.definitionVersion };
+  assert(
+    "the server pins the board to the newest version",
+    repinned.instance.definitionVersion === newestVersion,
+    `v${repinned.instance.definitionVersion}`,
+  );
+  assert(
+    "the same page, with no reload, now names the newest version, says it is the newest and drops the newer-version notice",
+    marker === "same-document" &&
+      after.version === newestVersion &&
+      after.newer === null &&
+      after.newest,
+    JSON.stringify({ marker, version: after.version, newer: after.newer }),
+  );
+  assert(
+    "it lists the newest version's columns, equal to getDefinition, not v2's",
+    same(afterColumns, newestDefinition.columns.map(expectedColumn)) &&
+      !same(afterColumns, beforeColumns),
+    `${afterColumns.length} columns`,
+  );
+  assert(
+    "the re-pin, which writes and re-renders the page from an invalidated atom, logged no console error",
+    consoleErrors.length === errorsBeforeRepin,
+    JSON.stringify(
+      consoleErrors.slice(errorsBeforeRepin, errorsBeforeRepin + 5),
+    ),
+  );
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "board-settings-repinned.png"),
     fullPage: true,
   });
 } catch (error) {

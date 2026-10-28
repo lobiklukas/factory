@@ -26,6 +26,7 @@ import {
   type RepoForm,
 } from "@/lib/repos-view";
 import { EmptyPane } from "@/components/empty-pane";
+import { GuideLink } from "@/components/guide-link";
 import { RepoSecrets } from "@/components/repo-secrets";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -112,7 +113,8 @@ function ReposRoute() {
         ) : last.length === 0 ? (
           <p data-repos-empty className="text-xs text-muted-foreground">
             No repository is registered. Add the one the factory works on above:
-            a session on it then gets a worktree of its own.
+            a session on it then gets a worktree of its own.{" "}
+            <GuideLink step="repo" />
           </p>
         ) : (
           <ul

@@ -11,30 +11,52 @@
 //   pickers   every column's skill picker is a <select> whose options are `listSkills`' names less the
 //             column's, its requires picker a <select> whose options are `getDefinitionVocabulary`'s
 //             keys less the column's, and neither section holds a text field for a skill or a key
-//   refused   a column added and renamed `qa`, with no moves out, saved: the server's refusal is shown
-//             next to qa's moves (`columns[2].transitions`), and `listDefinitions` still holds v1 only
+//   roles     (F4) under this instance's role table (`ROLE_MODELS=builder=…`) the role picker is a
+//             <select> of `getDefinitionVocabulary`'s roles and the column's own, no field takes a
+//             typed role, and the vocabulary says roles are closed; `definition-edit-roles.mjs`
+//             drives the other half, a deployment with no table
+//   refused   a column added and renamed `qa`, with no moves out, and a blank approval gate added to
+//             doing (F2), saved: the server's refusal is shown next to qa's moves
+//             (`columns[2].transitions`) and next to the blank gate
+//             (`columns[1].autonomy.approvalRequired[0]`), and `listDefinitions` still holds v1 only
+//   limits    (F3) doing's WIP limit set to 0, saved: refused beside the WIP field, nothing written;
+//             then the version's task cap set to 0: refused beside that cap's field. The number is
+//             refused by the domain's `RunCap` schema, which the RPC client encodes a body with, so
+//             no request leaves the page; the fault is placed at the path the server would name
 //   saved     qa given a move to done, a skill and `verified` from the pickers, and doing's move to
-//             done pointed at qa: the diff names the column, Save says "v2 created", and over the RPC
-//             (the oracle, never the page) `listDefinitions` holds v1 and v2, v2's columns are the
-//             draft's — with doing's WIP limit and the version's caps kept though the editor has no
-//             control for them — and the board is still pinned to v1
+//             done pointed at qa; doing given a WIP limit of 3, the gate `terraform apply`, write
+//             `docs` and push `none` (F2/F3), and the version a task cap of 1 and a board cap of 4:
+//             the diff names each, Save says "v2 created", and over the RPC (the oracle, never the
+//             page) `listDefinitions` holds v1 and v2, v2's columns are the draft's — todo's
+//             autonomy, untouched, carried over unchanged — and the board is still pinned to v1; a
+//             board made on v2 shows the limit, caps, gate and scopes on its settings page, and
+//             `factory board definition show` prints the limit and the caps
 //   newer     once v2 exists the editor, still on the pin v1, says a save writes v3 from v1 without
 //             v2's changes
 //   again     a second Save of the same draft writes nothing: the page says v2 already holds it
+//   clear     (F3) the WIP limit and a cap cleared: the diff says so, the save writes v3 without them,
+//             and the settings page of a board on v3 shows no WIP limit
 //   typed     doing renamed key by key to `todo_x`, passing `todo`: the diff is the rename alone —
 //             todo's move into doing follows doing, never the real todo it shared a name with
 //   settings  the board's settings page still reads v1 and says v2 exists
 //
-// Env: WEB_URL, API_URL, EVIDENCE_DIR.
+// Env: WEB_URL, API_URL, EVIDENCE_DIR, and CLI_DIR (the apps/cli directory, for `definition show`).
+import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import { chromium } from "@playwright/test";
+
+const run = promisify(execFile);
 
 const WEB_URL = process.env["WEB_URL"] ?? "http://localhost:3475";
 const API_URL = process.env["API_URL"] ?? "http://localhost:9475";
 const EVIDENCE_DIR =
   process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest/definition-edit";
+
+const CLI_DIR = process.env["CLI_DIR"] ?? "apps/cli";
+const GATE = "terraform apply";
 
 const TAG = randomBytes(4).toString("hex");
 const DEFINITION_ID = `edit${TAG}`;
@@ -108,6 +130,73 @@ const optionValues = (locator) =>
     [...select.options].map((option) => option.value).filter((v) => v !== ""),
   );
 
+/**
+ * A second tab for reading a board's settings, so the editor's draft in the first is left as it is.
+ * Returns what the page shows for the facts this drive wrote: the caps line, and for `doing` and
+ * `todo` the WIP limit, the gates with their source, and the write and push scope.
+ */
+const reader = await browser.newPage({
+  viewport: { width: 1600, height: 1000 },
+});
+const openSettings = async (boardId) => {
+  await reader.goto(`${WEB_URL}/boards/${boardId}/settings`, {
+    waitUntil: "domcontentloaded",
+  });
+  await reader.waitForSelector(
+    "[data-settings-column] [data-column-settings]",
+    {
+      timeout: 15_000,
+    },
+  );
+  return reader.evaluate(() => {
+    const text = (node) => node?.textContent?.trim() ?? null;
+    const facts = (name) => {
+      const node = document.querySelector(`[data-column-settings='${name}']`);
+      return {
+        wip: text(node?.querySelector("[data-column-wip]")),
+        gates: [...(node?.querySelectorAll("[data-gate]") ?? [])].map(
+          (item) => ({
+            command: text(item.querySelector("[data-gate-command]")),
+            source: item.getAttribute("data-gate-source"),
+          }),
+        ),
+        write:
+          node
+            ?.querySelector("[data-column-write]")
+            ?.getAttribute("data-column-write") ?? null,
+        push:
+          node
+            ?.querySelector("[data-column-push]")
+            ?.getAttribute("data-column-push") ?? null,
+      };
+    };
+    return {
+      caps: text(document.querySelector("[data-settings-caps]")),
+      doing: facts("doing"),
+      todo: facts("todo"),
+    };
+  });
+};
+
+/** `factory board definition show` against this instance: the text an operator reads. */
+const showWithCli = async (version) => {
+  const { stdout } = await run(
+    "bun",
+    [
+      "run",
+      "src/index.ts",
+      "board",
+      "definition",
+      "show",
+      DEFINITION_ID,
+      "--version",
+      String(version),
+    ],
+    { cwd: CLI_DIR, env: { ...process.env, FACTORY_API_URL: API_URL } },
+  );
+  return stdout;
+};
+
 let exitCode = 0;
 try {
   // --- seed --------------------------------------------------------------------------------------
@@ -131,6 +220,8 @@ try {
         skills: [],
         requires: [],
         transitions: [{ to: "doing" }, { to: "canceled" }],
+        // Authored here and never touched by the drive: v2 must carry it over unchanged (F2).
+        autonomy: { approvalRequired: ["make release"], write: "docs" },
       },
       {
         name: "doing",
@@ -264,6 +355,33 @@ try {
     ),
   );
 
+  // --- roles (F4): a role table is configured, so the picker is closed --------------------------
+  const roleReport = [];
+  let rolesOk = vocabulary.rolesOpen === false;
+  for (const name of order) {
+    const scope = column(name);
+    const select = scope.locator("[data-column-role-select]");
+    const typed = await scope.locator("[data-column-role-input]").count();
+    const offered = await optionValues(select);
+    const own = await select.inputValue();
+    const expectedRoles = [
+      ...new Set([...vocabulary.roles, ...(own === "" ? [] : [own])]),
+    ].sort();
+    rolesOk &&=
+      typed === 0 &&
+      (await select.evaluate((node) => node.tagName)) === "SELECT" &&
+      JSON.stringify(offered) === JSON.stringify(expectedRoles);
+    roleReport.push({ name, offered, typed });
+  }
+  observed.roles = roleReport;
+  assert(
+    "with a role table the role picker is a select of the server's roles and the column's own, and no field takes a typed role",
+    rolesOk,
+    JSON.stringify(
+      roleReport.map((entry) => [entry.name, entry.offered.length]),
+    ),
+  );
+
   // --- refused -----------------------------------------------------------------------------------
   await page.locator("[data-add-column]").click();
   await column("new_column").locator("[data-column-name-input]").fill("qa");
@@ -279,6 +397,7 @@ try {
         "working",
     JSON.stringify(added),
   );
+  await column("doing").locator("[data-add-gate]").click();
   await page.locator("[data-definition-save]").click();
   const inline = column("qa").locator(
     "[data-field-fault='columns[2].transitions']",
@@ -296,12 +415,63 @@ try {
       ),
     `${refusalTag}: ${inlineText}`,
   );
+  const blank = column("doing").locator(
+    "[data-field-fault='columns[1].autonomy.approvalRequired[0]']",
+  );
+  await blank.waitFor({ timeout: 5_000 });
+  const blankText = (await blank.textContent())?.trim() ?? "";
+  assert(
+    "a blank approval gate is refused by the server and shown next to its field",
+    blankText.includes("declares a blank approval gate") &&
+      (await column("doing")
+        .locator("[data-column-gate-input]")
+        .getAttribute("aria-invalid")) === "true",
+    blankText,
+  );
   assert(
     "a refused save writes nothing",
     JSON.stringify(await versionsOf(DEFINITION_ID)) === JSON.stringify([1]),
     JSON.stringify(await versionsOf(DEFINITION_ID)),
   );
   await shot("refused");
+
+  // --- limits (F3): a number the server refuses is shown beside its field -------------------------
+  await column("doing").locator("[data-column-gate-input]").fill(GATE);
+  await column("doing").locator("[data-column-wip-input]").fill("0");
+  await page.locator("[data-definition-save]").click();
+  const wipFault = column("doing").locator(
+    "[data-field-fault='columns[1].wipLimit']",
+  );
+  await wipFault.waitFor({ timeout: 15_000 });
+  const wipText = (await wipFault.textContent())?.trim() ?? "";
+  assert(
+    "a WIP limit of 0 is refused (RunCap) and shown beside the WIP field, with nothing written",
+    wipText.includes("greater than or equal to 1") &&
+      (await column("doing")
+        .locator("[data-column-wip-input]")
+        .getAttribute("aria-invalid")) === "true" &&
+      JSON.stringify(await versionsOf(DEFINITION_ID)) === JSON.stringify([1]),
+    wipText,
+  );
+  await shot("wip-refused");
+  await column("doing").locator("[data-column-wip-input]").fill("3");
+  await page.locator("[data-editor-cap='task']").fill("0");
+  await page.locator("[data-definition-save]").click();
+  const capFault = page.locator("[data-field-fault='caps.task']");
+  await capFault.waitFor({ timeout: 15_000 });
+  const capText = (await capFault.textContent())?.trim() ?? "";
+  assert(
+    "a cap of 0 is refused (RunCap) and shown beside that cap's field, with nothing written",
+    capText.includes("greater than or equal to 1") &&
+      (await page
+        .locator("[data-editor-cap='task']")
+        .getAttribute("aria-invalid")) === "true" &&
+      JSON.stringify(await versionsOf(DEFINITION_ID)) === JSON.stringify([1]),
+    capText,
+  );
+  await shot("cap-refused");
+  await page.locator("[data-editor-cap='task']").fill("1");
+  await page.locator("[data-editor-cap='board']").fill("4");
 
   // --- saved -------------------------------------------------------------------------------------
   const qa = column("qa");
@@ -311,10 +481,31 @@ try {
   await qa.locator("[data-skill-picker]").selectOption(qaSkill);
   await qa.locator("[data-requires-picker]").selectOption("verified");
   await column("doing").locator("[data-move-to]").first().selectOption("qa");
+  await column("doing")
+    .locator("[data-column-write-select]")
+    .selectOption("docs");
+  await column("doing")
+    .locator("[data-column-push-select]")
+    .selectOption("none");
   const diff = await page.$$eval("[data-diff-line]", (nodes) =>
     nodes.map((node) => node.textContent?.trim() ?? ""),
   );
   observed.diff = diff;
+  assert(
+    "the diff names the WIP limit, the gate, both scopes and both caps, and nothing of the untouched todo",
+    [
+      '"doing" wipLimit: 2 → 3',
+      `"doing" approval gate "${GATE}"`,
+      '"doing" write scope: — → docs',
+      '"doing" push scope: — → none',
+      "caps.board: 3 → 4",
+      "caps.task: — → 1",
+    ].every((line) => diff.some((entry) => entry.includes(line))) &&
+      !diff.some(
+        (entry) => entry.includes('"todo"') && !entry.includes("move"),
+      ),
+    JSON.stringify(diff),
+  );
   assert(
     "the diff against v1 names the added column and the move pointed at it",
     diff.some((line) =>
@@ -390,13 +581,74 @@ try {
         ]),
     JSON.stringify(v2.columns.map((entry) => [entry.name, entry.exits])),
   );
+  // A board made on v2 holds v2's columns as stored: the oracle for what the editor wrote.
+  const onV2 = await rpc("createBoard", {
+    repo: `${REPO}-v2`,
+    definitionId: DEFINITION_ID,
+    definitionVersion: 2,
+  });
+  const stored = await rpc("getBoard", { boardId: onV2.id });
+  const storedBy = Object.fromEntries(
+    stored.definition.columns.map((entry) => [entry.name, entry]),
+  );
+  observed.storedV2 = stored.definition;
   assert(
-    "fields the editor has no control for come through: doing's WIP limit and the caps",
-    byName.doing?.wipLimit === 2 &&
-      JSON.stringify(v2.caps) === JSON.stringify({ board: 3 }) &&
-      byName.doing?.role === "builder" &&
-      JSON.stringify(byName.doing?.skills) === JSON.stringify([bound]),
-    JSON.stringify({ wipLimit: byName.doing?.wipLimit, caps: v2.caps }),
+    "v2 holds the edited values: doing's WIP limit, gate and scopes, and the version's caps",
+    storedBy.doing?.wipLimit === 3 &&
+      JSON.stringify(storedBy.doing?.autonomy) ===
+        JSON.stringify({
+          approvalRequired: [GATE],
+          write: "docs",
+          push: "none",
+        }) &&
+      JSON.stringify(stored.definition.caps) ===
+        JSON.stringify({ board: 4, task: 1 }) &&
+      storedBy.doing?.role === "builder" &&
+      JSON.stringify(storedBy.doing?.skills) === JSON.stringify([bound]),
+    JSON.stringify({
+      wipLimit: storedBy.doing?.wipLimit,
+      autonomy: storedBy.doing?.autonomy,
+      caps: stored.definition.caps,
+    }),
+  );
+  assert(
+    "a column left untouched round-trips its autonomy: todo's gate and scope are v1's",
+    JSON.stringify(storedBy.todo?.autonomy) ===
+      JSON.stringify({ approvalRequired: ["make release"], write: "docs" }) &&
+      storedBy.todo?.wipLimit === undefined,
+    JSON.stringify(storedBy.todo?.autonomy),
+  );
+  const shownLimits = await openSettings(onV2.id);
+  observed.settingsV2 = shownLimits;
+  assert(
+    "the settings page of a board on v2 shows the WIP limit, the caps, the gate and the scopes",
+    shownLimits.caps === "board 4 · task 1 runs in flight" &&
+      shownLimits.doing.wip === "at most 3 runs in flight" &&
+      shownLimits.doing.gates.some(
+        (gate) => gate.command === GATE && gate.source === "column",
+      ) &&
+      shownLimits.doing.write === "docs" &&
+      shownLimits.doing.push === "none" &&
+      shownLimits.todo.gates.some(
+        (gate) => gate.command === "make release" && gate.source === "column",
+      ),
+    JSON.stringify(shownLimits),
+  );
+  await shot("settings-v2");
+  const cli = await showWithCli(2);
+  assert(
+    "factory board definition show prints the WIP limit and the caps",
+    cli.includes("caps        board 4 · task 1 runs in flight") &&
+      cli.includes("wip       at most 3 runs in flight"),
+    cli
+      .split("\n")
+      .filter((line) => /caps|wip/.test(line))
+      .join(" | "),
+  );
+  assert(
+    "v2 names the dashboard as its author (F7); v1, written over the RPC with no actor, has none",
+    v2.author === "dashboard" && seeded.definition?.author === undefined,
+    JSON.stringify({ v2: v2.author, v1: seeded.definition?.author }),
   );
   const after = await rpc("getBoard", { boardId: board.id });
   assert(
@@ -442,6 +694,57 @@ try {
   );
   await shot("typed");
 
+  // --- clear (F3): an emptied field removes the limit --------------------------------------------
+  await page.goto(`${WEB_URL}/boards/${board.id}/settings/edit`, {
+    waitUntil: "domcontentloaded",
+  });
+  await page.waitForSelector(`[data-definition-editor='${board.id}']`, {
+    timeout: 15_000,
+  });
+  await column("doing").locator("[data-column-wip-input]").fill("");
+  await page.locator("[data-editor-cap='board']").fill("");
+  const clearedDiff = await page.$$eval("[data-diff-line]", (nodes) =>
+    nodes.map((node) => node.textContent?.trim() ?? ""),
+  );
+  observed.clearedDiff = clearedDiff;
+  assert(
+    "emptying the WIP field and the board cap is a change the diff names",
+    clearedDiff.length === 2 &&
+      clearedDiff.some((line) => line.endsWith("caps.board: 3 → —")) &&
+      clearedDiff.some((line) => line.endsWith('"doing" wipLimit: 2 → —')),
+    JSON.stringify(clearedDiff),
+  );
+  await page.locator("[data-definition-save]").click();
+  const clearedSaved = page.locator("[data-definition-saved='created']");
+  await clearedSaved.waitFor({ timeout: 15_000 });
+  const onV3 = await rpc("createBoard", {
+    repo: `${REPO}-v3`,
+    definitionId: DEFINITION_ID,
+    definitionVersion: 3,
+  });
+  const v3 = await rpc("getBoard", { boardId: onV3.id });
+  const v3Doing = v3.definition.columns.find((entry) => entry.name === "doing");
+  observed.storedV3 = v3.definition;
+  assert(
+    "v3 holds neither the WIP limit nor the caps, and the settings page of a board on it shows none",
+    (await clearedSaved.getAttribute("data-saved-version")) === "3" &&
+      v3Doing !== undefined &&
+      !("wipLimit" in v3Doing) &&
+      !("caps" in v3.definition) &&
+      (await openSettings(onV3.id)).caps === "—" &&
+      (await openSettings(onV3.id)).doing.wip === null,
+    JSON.stringify({ wipLimit: v3Doing?.wipLimit, caps: v3.definition.caps }),
+  );
+  const cliV3 = await showWithCli(3);
+  assert(
+    "factory board definition show prints no caps line and no WIP limit for v3",
+    !/^caps /m.test(cliV3) && !cliV3.includes("wip       at most"),
+    cliV3
+      .split("\n")
+      .filter((line) => /caps|wip/.test(line))
+      .join(" | "),
+  );
+
   // --- settings ----------------------------------------------------------------------------------
   await page.locator("[data-editor-settings-link]").click();
   await page.waitForURL(`${WEB_URL}/boards/${board.id}/settings`, {
@@ -450,11 +753,11 @@ try {
   const newer = page.locator("[data-newer-versions]");
   await newer.waitFor({ timeout: 15_000 });
   assert(
-    "the settings page still reads v1, and says v2 exists",
+    "the settings page still reads v1, and says v2 and v3 exist",
     (await page
       .locator("[data-settings-definition]")
       .getAttribute("data-settings-version")) === "1" &&
-      (await newer.getAttribute("data-newer-versions")) === "2",
+      (await newer.getAttribute("data-newer-versions")) === "2,3",
     (await newer.textContent())?.trim() ?? "",
   );
   await shot("settings");

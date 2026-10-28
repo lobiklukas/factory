@@ -26,6 +26,15 @@ approval is walked from the browser. `TaskService.attention` decides; the page o
   `question` comment asked since the block began (the ask tool's), or the block's note when a person
   blocked it by hand — an answered question from an earlier block never reappears. `li[data-attention-reason=question]`, text `Asked: <question>`. Its link opens the card at `#thread`,
   where the question is answered ([thread.md](thread.md)).
+- **Address a review** (C21) — the card is blocked `changes_requested`: a review of its PR requested
+  changes, delivered by GitHub's signed `pull_request_review` from an owner, member or collaborator.
+  The reason is the block's note, naming the reviewer and the PR; the review itself is on the
+  thread, which is where the row links (`#thread`). `li[data-attention-reason=review]`, text
+  `Changes requested: <note>`. Starting the card's building run (a column that writes code; a review
+  column's run does not) lifts the block, so the row goes. **Not driven in a browser yet:** the row
+  is proven by the unit tests `apps/web/src/lib/attention-view.test.ts` and `board-view.test.ts`, and
+  the block it lists by `../../verify-board/feedback.sh` through `factory board attention`;
+  `drive.mjs` seeds no `changes_requested` card.
 - **Make a person's move** — the card is not blocked, its column's exit crosses a human gate
   (`planning → building` plan approval, `review → done` merge; B5), it has a run started in that
   column, no run of the card is busy (`session_activity`), and no run of the card holds an

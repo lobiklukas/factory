@@ -27,7 +27,7 @@ import {
   boardAtom,
   commentTaskAtom,
   moveTaskAtom,
-  runSessionsAtom,
+  taskRunSessionsAtom,
   startRunAtom,
   taskCommentsAtom,
   taskExitAtom,
@@ -368,6 +368,7 @@ const BLOCK_FROM: Readonly<Record<TaskBlocked["reason"], string>> = {
   transient: "a transient failure",
   setup_failed: "its worktree setup failing",
   pr_closed: "its PR closed without being merged",
+  changes_requested: "a review that requested changes",
 };
 
 /**
@@ -814,7 +815,7 @@ const Runs = ({
   readonly runStarter: RunStarter;
 }) => {
   const runs = useAtomValue(taskRunsAtom(task.id));
-  const runSessions = useAtomValue(runSessionsAtom);
+  const runSessions = useAtomValue(taskRunSessionsAtom(task.id));
   const sessionOf = new Map(
     (Option.getOrUndefined(AsyncResult.value(runSessions))?.sessions ?? []).map(
       (entry) => [entry.id, entry] as const,

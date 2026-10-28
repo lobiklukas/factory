@@ -2,6 +2,15 @@
   "$schema": "https://turborepo.com/schema.json",
   "extends": ["//"],
   "tasks": {
+    "test": {
+      // guide.test.ts reads docs/getting-started.md and .env.example from the repository root, so an
+      // edit to either alone must miss the cache (G1).
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/docs/getting-started.md",
+        "$TURBO_ROOT$/.env.example"
+      ]
+    },
     "dev": {
       // What the CLI's dev task reads when it runs `src/index.ts`: the API it calls
       // (resolveApiUrl in src/api.ts), and the DevTools and Motel exporters in src/observability (LOB-101).

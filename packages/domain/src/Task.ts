@@ -23,6 +23,7 @@ import { Schema } from "effect";
 // consumer in the repo (`packages/core`, `packages/harness`) already imports the subpath.
 import {
   RepoSlug,
+  SessionActor,
   SessionId,
   SessionStatus,
   Timestamp,
@@ -364,6 +365,50 @@ export const initialColumnOf = (
   definition.initialColumn ?? definition.columns[0]?.name;
 
 /**
+ * A version as a card on it behaves, spelled out (D6, F8): every column with the moves
+ * `columnTransitions` gives it, and the initial column `initialColumnOf` resolves. Default versions
+ * 1–3 declare neither (they are read through the default pipeline's table), and an authored version
+ * must declare both, so the editor's draft and `definition show --json` start from what its cards
+ * meet. A version that already declares them comes back as it was.
+ */
+export const materializeDefinition = (
+  definition: BoardDefinition,
+): BoardDefinition => {
+  const initial = initialColumnOf(definition);
+  return {
+    ...definition,
+    ...(initial === undefined ? {} : { initialColumn: initial }),
+    columns: definition.columns.map((column) => ({
+      ...column,
+      transitions: columnTransitions(definition, column.name),
+    })),
+  };
+};
+
+/**
+ * The file `factory board define` accepts for a version (F8): its name, caps, columns and initial
+ * column — nothing the version does not declare, so no `version`, no `author`. A version that
+ * declares its own moves is emitted as stored, a column with none staying without the key, so the file
+ * is the version byte for byte and `define` answers it `unchanged`; only a legacy version (default
+ * 1–3, read through the default pipeline's table) is materialized, its moves spelled out.
+ */
+export const definitionSourceOf = (
+  definition: BoardDefinition,
+): DefinitionSource => {
+  const { id, name, columns, caps } = declaresTransitions(definition)
+    ? definition
+    : materializeDefinition(definition);
+  const initialColumn = initialColumnOf(definition);
+  return {
+    id,
+    name,
+    ...(initialColumn === undefined ? {} : { initialColumn }),
+    ...(caps === undefined ? {} : { caps }),
+    columns,
+  };
+};
+
+/**
  * One reason a definition cannot be used as written (LOB-267, D4): the field at fault, as a path into
  * the definition (`columns[2].transitions[0].to`, `initialColumn`), and the sentence that says why.
  * The path is what an author edits; the sentence names the column, so it reads without the file.
@@ -465,6 +510,12 @@ export const BoardDefinition = Schema.Struct({
    * a version written before the field existed (default versions 1–4): no board, task or repo cap.
    */
   caps: Schema.optional(BoardCaps),
+  /**
+   * The control-plane actor that wrote the version (F7): the credential's actor over `defineBoard`.
+   * Absent on a seeded version and on one written without an attributed caller — not part of what
+   * the version declares, so it is never in a definition file and never compared.
+   */
+  author: Schema.optional(Schema.String),
 });
 export type BoardDefinition = typeof BoardDefinition.Type;
 
@@ -565,6 +616,8 @@ export const DefinitionVersionSummary = Schema.Struct({
   version: Schema.Int,
   name: Schema.String,
   createdAt: Timestamp,
+  /** Who wrote the version (F7); absent for a seeded version. */
+  author: Schema.optional(Schema.String),
 });
 export type DefinitionVersionSummary = typeof DefinitionVersionSummary.Type;
 
@@ -690,6 +743,8 @@ export const DefinitionConfig = Schema.Struct({
   initialColumn: Schema.optional(Schema.String),
   /** The version's run caps (LOB-71), as declared; absent on a version that declares none. */
   caps: Schema.optional(BoardCaps),
+  /** Who wrote the version (F7); absent for a seeded version or one written unattributed. */
+  author: Schema.optional(Schema.String),
   columns: Schema.Array(ColumnConfig),
 });
 export type DefinitionConfig = typeof DefinitionConfig.Type;
@@ -789,6 +844,20 @@ export const UpgradedBoard = Schema.Struct({
 export type UpgradedBoard = typeof UpgradedBoard.Type;
 
 /**
+ * What a definition file declares (D4, F8): `defineBoard`'s payload less the caller's — the flag
+ * `dryRun`, and the `actor` the control plane sets. `factory board define --file` reads exactly this,
+ * and `factory board definition show --json` writes it, so a version round-trips through a file.
+ */
+export const DefinitionSource = Schema.Struct({
+  id: DefinitionId,
+  name: Schema.String,
+  columns: Schema.Array(BoardColumn),
+  initialColumn: Schema.optional(Schema.String),
+  caps: Schema.optional(BoardCaps),
+});
+export type DefinitionSource = typeof DefinitionSource.Type;
+
+/**
  * A new version of a definition, authored (D4): what `defineBoard` and `factory board define --file`
  * take. The shape is `BoardDefinition`'s less the version, which the server assigns (newest + 1, or 1
  * for an id it does not hold) — an author never names one, so no two authors can write the same
@@ -801,12 +870,10 @@ export type UpgradedBoard = typeof UpgradedBoard.Type;
  * nothing.
  */
 export const DefineBoardInput = Schema.Struct({
-  id: DefinitionId,
-  name: Schema.String,
-  columns: Schema.Array(BoardColumn),
-  initialColumn: Schema.optional(Schema.String),
-  caps: Schema.optional(BoardCaps),
+  ...DefinitionSource.fields,
   dryRun: Schema.optional(Schema.Boolean),
+  /** Set by the control plane from the caller's credential (LOB-20), as a card write's actor is. */
+  actor: Schema.optional(SessionActor),
 });
 export type DefineBoardInput = typeof DefineBoardInput.Type;
 
@@ -846,12 +913,21 @@ export type RequirementOption = typeof RequirementOption.Type;
  * What an authored definition version may name besides skills (D6), from the rules `defineBoard`
  * holds a version to: every requirement key the factory knows, and the roles it accepts — the
  * deployment's role table, the roles the harness gives meaning to, and the roles a held definition
- * already declares. The dashboard's editor offers these and nothing typed, so a key or a role it
- * offers is one the server accepts. Skills are `listSkills`'.
+ * already declares. The dashboard's editor offers these and nothing typed — except a role name when
+ * the deployment has no role table (`rolesOpen`), which `defineBoard` then accepts whatever it is —
+ * so a key or a role it offers is one the server accepts. Skills are `listSkills`'.
  */
 export const DefinitionVocabulary = Schema.Struct({
   requirements: Schema.Array(RequirementOption),
   roles: Schema.Array(Schema.String),
+  /**
+   * Whether the deployment has no role table (`ROLE_MODELS` unset, B6): then `defineBoard` accepts
+   * any role name — every role runs on the deployment's model — and the editor lets a person type
+   * one the lists above do not hold. With a table, `roles` is closed: a role outside it is the typo
+   * the server refuses. Optional so a dashboard reading an older server still decodes its answer;
+   * an absent value reads as closed.
+   */
+  rolesOpen: Schema.optional(Schema.Boolean),
 });
 export type DefinitionVocabulary = typeof DefinitionVocabulary.Type;
 
@@ -872,7 +948,10 @@ export type TaskPriority = typeof TaskPriority.Type;
  * `setup_failed` is a run parked before its first turn because its worktree's declared `install` or
  * `build` failed (S-env-setup): the note names the step, its exit code and its output's last lines.
  * `pr_closed` is the card's PR closed without being merged (C20), as GitHub's `pull_request` delivery
- * or the PR-state read reports it: the note names the PR.
+ * or the PR-state read reports it: the note names the PR. `changes_requested` is a review of the
+ * card's PR that requested changes (C21), as GitHub's signed `pull_request_review` delivery reports
+ * it: the review is a comment on the card's thread, which the next run on the card reads, and the
+ * note names the reviewer and the PR. The next run started on the card lifts it.
  */
 export const BlockReason = Schema.Literals([
   "dependency",
@@ -881,6 +960,7 @@ export const BlockReason = Schema.Literals([
   "transient",
   "setup_failed",
   "pr_closed",
+  "changes_requested",
 ]);
 export type BlockReason = typeof BlockReason.Type;
 
@@ -1196,6 +1276,12 @@ export const TaskEvent = Schema.TaggedUnion({
      * finds the question it already recorded instead of asking twice (LOB-73).
      */
     askId: Schema.optional(Schema.String),
+    /**
+     * The outside item the comment carries (C21) — `github:review:<id>`, `github:review_comment:<id>`,
+     * `github:check_run:<suite>:<id>`, `github:check_suite:<id>` — so a redelivery of the same
+     * review, comment or check finds the comment it already recorded instead of adding a second.
+     */
+    sourceId: Schema.optional(Schema.String),
   },
   /**
    * A specifying run declared the card's spec (LOB-238). `actor` is the run's session id; `specId`
@@ -1714,7 +1800,7 @@ export const gatedColumns = (
     .filter((column) => gatedExit(definition, column) !== undefined);
 
 /**
- * Why a card needs a person (LOB-77): the three things the attention view lists.
+ * Why a card needs a person (LOB-77): the four things the attention view lists.
  *
  * - `approval` — a run of the card asked to make a gated call and waits on a decision (D11). Listed
  *   whatever the card's column or block, because nothing but a person settles it.
@@ -1729,6 +1815,10 @@ export const gatedColumns = (
  *   leaves `plan_doc`): the gate's move would be refused naming them, so what the person must do
  *   first is get them written. Absent when the card holds them. The log-judged keys are not judged
  *   here; the card's exit checklist (`getTaskExit`) shows those.
+ * - `review` — the card is blocked `changes_requested` (C21): a review of its PR requested changes,
+ *   and the review is on the card's thread. What the person does is start the next run on the card,
+ *   which reads the review and lifts the block. `review` is the block's note: who requested the
+ *   changes, on which PR, and the start of what they wrote.
  *
  * A card blocked for any other reason — a dependency, a capability, a transient failure — is waiting
  * on that, not on a person, so it is never a `gate`; it is listed only for an approval its run holds.
@@ -1743,6 +1833,10 @@ export const AttentionReason = Schema.TaggedUnion({
   },
   question: {
     question: Schema.optional(Schema.String),
+    since: Timestamp,
+  },
+  review: {
+    review: Schema.optional(Schema.String),
     since: Timestamp,
   },
   gate: {
@@ -1774,7 +1868,8 @@ export type AttentionItem = typeof AttentionItem.Type;
 
 /**
  * What needs a person, on one board or on every board (LOB-77). The answer is ordered approvals
- * first (oldest request first, a card-less session's among them), then questions (oldest block first), then gates (least recently
+ * first (oldest request first, a card-less session's among them), then questions (oldest block first), then reviews
+ * (oldest block first), then gates (least recently
  * changed card first). An unknown board is `BoardNotFound`, not an empty list: "nothing needs you"
  * must not be what a board that does not exist says.
  */

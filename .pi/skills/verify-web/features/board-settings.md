@@ -17,7 +17,8 @@ board-configuration umbrella).
   requirement states, exits, gates and models are the ones a move and a run meet. Read once per
   opening, not polled: a version is never edited in place (docs/board.md B2).
 - The header names the definition (`[data-settings-definition]`, `[data-settings-version]`), the
-  column a new card starts in and the version's run caps.
+  column a new card starts in and the version's run caps, and, for a version someone wrote, who
+  authored it (`[data-settings-author]`, F7; a seeded version shows none).
 - `listDefinitions` (`definitionsAtom`, the New board form's read) says whether a newer version
   exists: `[data-newer-versions="3,4,5"]` and "Newer versions of default exist: v3, v4 and v5. This
   board stays pinned to v2; a board created now pins v5.", or `[data-newest-version]` on the newest.
@@ -92,7 +93,12 @@ publish`, which the script boots the API with) and its own, `building` with the 
    started on a card in `careful` (the faux run calls `sleep 0 && echo faux-ok`) to park idle on one
    approval for `sleep`, its command not run, while the same call in `building` runs unasked.
 
-Evidence goes to `.verify/evidence/latest/board-settings/`: `board-settings-newest.png`,
+10. (F9) a board pinned to v2 with its settings page open and marked: pressing **Upgrade** re-pins it,
+    and the same document (the marker survives, so no reload) names the newest version, lists that
+    version's columns equal to `getDefinition`, says it is the newest and drops the newer-version
+    notice. `boardConfigAtom` re-reads on `BOARD_PIN_KEY`, which the upgrade invalidates.
+
+Evidence goes to `.verify/evidence/latest/board-settings/`: `board-settings-repinned.png`, `board-settings-newest.png`,
 `board-settings-pinned.png`, `board-settings-lanes.png` (every disclosure open),
 `board-settings-missing.png`, `board-settings-autonomy.png` (the gated column),
 `board-settings-autonomy-page.png`, `observed.json` (every oracle, what the page showed, both
@@ -103,5 +109,6 @@ except a settings disclosure's, and its write check still fails on any write the
 
 ## Last run
 
-2026-10-28 from the `agent/C22` worktree, API `:9520` / web `:3520`: **28/28** passed (C22 added the
+2026-10-28 from `agent/F2-F3-F4-F9`, API `:9562` / web `:3562`: **33/33** passed (F9 added the re-pin
+checks and a console-error check after them). Before it: 2026-10-28 from the `agent/C22` worktree, API `:9520` / web `:3520`: **28/28** passed (C22 added the
 five autonomy checks). Before it: 2026-10-28 from `agent/D3`, API `:9540` / web `:3540`, 23/23.

@@ -20,6 +20,11 @@
 //   GITHUB_FAKE_LEDGER     ledger file path, required
 //   GITHUB_FAKE_HANG_FIRST "1" holds the first create request open, never answering it — the
 //                          window a killed process leaves behind
+//   GITHUB_FAKE_REFUSE     a JSON array of `{ "title": "<substring>", "status": 422, "body": {...} }`
+//                          (C7b): a create whose PR title contains the substring is answered with
+//                          that status and body, and records no PR. How a drive makes one forge
+//                          refusal that repeats (a 422 naming an existing PR) and one that passes
+//                          (a 502) from the same fake. The first matching rule answers
 //   GITHUB_FAKE_GIT_ROOT   a directory of bare repositories (`<root>/<owner>/<repo>.git`), the
 //                          git side of the same forge (C17). When set, a create whose head that
 //                          repository does not hold is refused `422` as GitHub refuses it, and a PR
@@ -53,6 +58,16 @@ const port = Number(process.env["GITHUB_FAKE_PORT"] ?? "9411");
 const ledgerPath = process.env["GITHUB_FAKE_LEDGER"];
 const hangFirst = process.env["GITHUB_FAKE_HANG_FIRST"] === "1";
 const gitRoot = process.env["GITHUB_FAKE_GIT_ROOT"];
+
+/** The scripted refusals (`GITHUB_FAKE_REFUSE`): a create naming `title` is answered `status`/`body`. */
+const refusals: ReadonlyArray<{
+  readonly title: string;
+  readonly status: number;
+  readonly body: unknown;
+}> = (() => {
+  const raw = process.env["GITHUB_FAKE_REFUSE"];
+  return raw === undefined || raw === "" ? [] : JSON.parse(raw);
+})();
 
 /** The sha the forge's git side holds for `branch`, or `undefined` when it holds no such branch. */
 const headOnForge = (
@@ -259,7 +274,11 @@ const server = Bun.serve({
     }
 
     if (request.method === "POST") {
-      const body = parsed as { head?: string; base?: string };
+      const body = parsed as { head?: string; base?: string; title?: string };
+      const scripted = refusals.find((rule) =>
+        (body.title ?? "").includes(rule.title),
+      );
+      if (scripted !== undefined) return json(scripted.status, scripted.body);
       const head = body.head ?? "";
       const base = body.base ?? "";
       const recorded = read().pulls.find(

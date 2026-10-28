@@ -186,6 +186,14 @@ const BoardSettings = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
               {definition.id} v{definition.version}
             </span>
           </dd>
+          {definition.author === undefined ? null : (
+            <>
+              <dt className="text-muted-foreground">Authored by</dt>
+              <dd data-settings-author className="font-mono">
+                {definition.author}
+              </dd>
+            </>
+          )}
           <dt className="text-muted-foreground">New cards start in</dt>
           <dd data-settings-initial className="font-mono">
             {definition.initialColumn ?? NONE}

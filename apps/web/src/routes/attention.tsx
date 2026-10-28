@@ -14,6 +14,7 @@ import {
 } from "@/lib/attention-view";
 import { EmptyPane } from "@/components/empty-pane";
 import { EmptyLink } from "@/components/empty-link";
+import { GuideLink } from "@/components/guide-link";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -142,7 +143,12 @@ function AttentionRoute() {
                 ? "No card or session waits on an approval, an answer to a run's question, or a move only a person can make. A card blocked on a dependency is waiting on that, not on you."
                 : "No card on this board waits on an approval, an answer to a run's question, or a move only a person can make. A card blocked on a dependency is waiting on that, not on you."
             }
-            action={<EmptyLink to="/boards">Open the boards</EmptyLink>}
+            action={
+              <>
+                <EmptyLink to="/boards">Open the boards</EmptyLink>
+                <GuideLink step="run" />
+              </>
+            }
             visible
           />
         </div>
@@ -186,7 +192,9 @@ const rowKey = (item: AttentionItem): string =>
 /** The row's subject for `data-attention`: the card's id, or the session's when no card owns it. */
 const rowSubject = (item: AttentionItem): string =>
   item.task?.id ??
-  (item.reason._tag === "question" ? "session" : item.reason.sessionId);
+  (item.reason._tag === "question" || item.reason._tag === "review"
+    ? "session"
+    : item.reason.sessionId);
 
 const ROW_CLASS =
   "flex min-w-0 flex-1 flex-col gap-1 border border-border bg-card px-3 py-2 hover:border-ring/50 focus-visible:outline-1 focus-visible:outline-ring";

@@ -24,6 +24,10 @@
  * issue gets one comment from the real `GitHubWriteBack` — posted to a loopback GitHub this file
  * serves, because the write-back is wired in the route's own layer and must be proven wired.
  *
+ * A PR's reviews and checks (C21) reach the card whose PR it is through the same route: a signed
+ * `changes_requested` review blocks the card once however often it is delivered, and a failing
+ * `check_run` is a note on its thread.
+ *
  * The session service is the real one on Postgres, in a database this file creates on the server
  * `DATABASE_URL` names and drops in `afterAll`, as `../Rpc/Session.test.ts` does.
  */
@@ -332,6 +336,7 @@ const deliver = (
   body: unknown,
   sign: (raw: string) => string = (raw) =>
     `sha256=${createHmac("sha256", SECRET).update(raw).digest("hex")}`,
+  event = "pull_request",
 ) => {
   const raw = JSON.stringify(body);
   return handler(
@@ -339,7 +344,7 @@ const deliver = (
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-github-event": "pull_request",
+        "x-github-event": event,
         "x-hub-signature-256": sign(raw),
       },
       body: raw,
@@ -860,4 +865,93 @@ describe("POST /webhooks/github settles the PR's card (C20)", () => {
     ).toBe(401);
     expect(await cardOf(unsigned.taskId)).toMatchObject({ column: "review" });
   }, 120_000);
+
+  describe("POST /webhooks/github brings a PR's reviews and checks to its card (C21)", () => {
+    const sign = (raw: string) =>
+      `sha256=${createHmac("sha256", SECRET).update(raw).digest("hex")}`;
+
+    const commentsOf = (taskId: string) =>
+      inService(
+        Effect.flatMap(TaskService, (tasks) => tasks.comments(taskId)).pipe(
+          Effect.provide(TaskServiceLive),
+        ),
+      );
+
+    /**
+     * Mutation: leave the feedback events out of the route — each delivery falls through to the
+     * `pull_request` mirror, answered `202` with nothing written.
+     */
+    it("blocks the card on a signed changes_requested review, once, and puts a failing check on its thread", async () => {
+      const reviewed = await cardWithPr(71);
+      const review = {
+        action: "submitted",
+        review: {
+          id: 7101,
+          user: { login: "alice" },
+          author_association: "COLLABORATOR",
+          body: "Split the migration out.",
+          state: "changes_requested",
+          html_url: `${reviewed.url}#pullrequestreview-7101`,
+        },
+        pull_request: { number: 71, html_url: reviewed.url },
+      };
+      const first = await deliver(review, sign, "pull_request_review");
+      expect(first.status).toBe(200);
+      expect(await first.json()).toEqual({
+        ok: true,
+        event: "changes_requested",
+        feedback: { recorded: 1, blocked: 1, failed: 0 },
+      });
+      const again = await deliver(review, sign, "pull_request_review");
+      expect(await again.json()).toMatchObject({
+        feedback: { recorded: 0, blocked: 0 },
+      });
+      expect(await cardOf(reviewed.taskId)).toMatchObject({
+        column: "review",
+        blocked: { reason: "changes_requested" },
+      });
+      const comments = await commentsOf(reviewed.taskId);
+      expect(comments).toHaveLength(1);
+      expect(comments[0]?.body).toContain("\nSplit the migration out.");
+
+      const page = reviewed.url.replace(/\/pull\/71$/, "");
+      const check = await deliver(
+        {
+          action: "completed",
+          check_run: {
+            id: 7102,
+            name: "gate",
+            head_sha: "a".repeat(40),
+            conclusion: "failure",
+            html_url: `${page}/runs/7102`,
+            check_suite: { id: 7103 },
+            pull_requests: [{ number: 71, head: { sha: "a".repeat(40) } }],
+          },
+          repository: { html_url: page },
+        },
+        sign,
+        "check_run",
+      );
+      expect(await check.json()).toMatchObject({
+        event: "check_failed",
+        feedback: { recorded: 1, blocked: 0 },
+      });
+      expect((await commentsOf(reviewed.taskId))[1]?.body).toContain(
+        'Check "gate" failed (failure)',
+      );
+
+      // An unsigned review writes nothing.
+      const unsigned = await cardWithPr(72);
+      expect(
+        (
+          await deliver(
+            { ...review, pull_request: { number: 72, html_url: unsigned.url } },
+            () => "sha256=00",
+            "pull_request_review",
+          )
+        ).status,
+      ).toBe(401);
+      expect((await cardOf(unsigned.taskId)).blocked).toBeUndefined();
+    }, 120_000);
+  });
 });

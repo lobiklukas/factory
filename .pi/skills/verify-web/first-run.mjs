@@ -8,7 +8,8 @@
 //              on an earlier one named rather than linked
 //   states     /attention, /approvals, /sandboxes, /spend and /sessions each name a press in the UI
 //              (`[data-empty-action]` or the sidebar's New session), and none says to type
-//              `factory board create` (or any `factory <command>`)
+//              `factory board create` (or any `factory <command>`); each also links the step of
+//              the getting-started guide it is about (`[data-guide-link]`, G1)
 //   repo       the first step's link opens `/repos`; registering a throwaway checkout there ticks
 //              step 1 (and only it) on `/boards`, equal to `listRepos`
 //   board      the second step's link opens the New board form; creating a board on the registered
@@ -164,6 +165,17 @@ const goBoards = async () => {
   await page.waitForFunction(() => window.location.pathname === "/boards");
 };
 const bodyText = () => page.evaluate(() => document.body.innerText);
+// The getting-started guide's links on the page (G1): which step, what it says, where it goes.
+const guideLinks = () =>
+  page.$$eval("[data-guide-link]", (nodes) =>
+    nodes.map((node) => ({
+      step: node.getAttribute("data-guide-link"),
+      text: node.textContent?.trim() ?? "",
+      href: node.getAttribute("href") ?? "",
+    })),
+  );
+const GUIDE_STEP_TEXT = /^Getting started, step (\d): /;
+const GUIDE_PATH = "/docs/getting-started.md#";
 
 let exitCode = 0;
 try {
@@ -212,6 +224,26 @@ try {
     !CLI_INSTRUCTION.test(await bodyText()),
     "no `factory <command>` in the page text",
   );
+  const guides0 = await guideLinks();
+  observed.emptyGuideLinks = guides0;
+  assert(
+    "the empty boards page links the guide's board step, and each checklist step its own (step 3 to 6)",
+    guides0.some(
+      (link) =>
+        link.step === "board" &&
+        link.text.startsWith("Getting started, step 4:"),
+    ) &&
+      ["repo", "board", "card", "run"].every((step, index) =>
+        guides0
+          .filter((link) => link.step === step)
+          .some(
+            (link) =>
+              GUIDE_STEP_TEXT.exec(link.text)?.[1] === String(index + 3) &&
+              link.href.includes(GUIDE_PATH),
+          ),
+      ),
+    JSON.stringify(guides0.map((link) => `${link.step}: ${link.text}`)),
+  );
 
   // --- states ----------------------------------------------------------------------------------
   const states = {};
@@ -249,6 +281,7 @@ try {
       newSession:
         (await page.getByRole("button", { name: /new session/i }).count()) > 0,
       cli: CLI_INSTRUCTION.exec(await bodyText())?.[0] ?? null,
+      guides: await guideLinks(),
     };
   }
   observed.states = states;
@@ -275,6 +308,23 @@ try {
     JSON.stringify(states["/sessions"]),
   );
   assert(
+    "each empty pane links the step of the guide it is about, in words that name the step",
+    Object.entries(states).every(
+      ([, state]) =>
+        state.guides.length === 1 &&
+        GUIDE_STEP_TEXT.test(state.guides[0].text) &&
+        state.guides[0].href.includes(GUIDE_PATH),
+    ),
+    JSON.stringify(
+      Object.fromEntries(
+        Object.entries(states).map(([route, state]) => [
+          route,
+          state.guides.map((link) => link.text),
+        ]),
+      ),
+    ),
+  );
+  assert(
     "no empty state gives a command to type",
     Object.values(states).every((state) => state.cli === null),
     JSON.stringify(
@@ -287,6 +337,18 @@ try {
   await checklist();
   await page.locator("[data-first-run-action='repo']").click();
   await page.waitForFunction(() => window.location.pathname === "/repos");
+  await page.waitForSelector("[data-repos-empty]", { timeout: 20_000 });
+  const reposGuide = (await guideLinks()).filter(
+    (link) => link.step === "repo",
+  );
+  observed.reposEmptyGuide = reposGuide;
+  assert(
+    "the empty repositories page links the guide's register-a-repository step",
+    reposGuide.length === 1 &&
+      reposGuide[0].text.startsWith("Getting started, step 3: register") &&
+      reposGuide[0].href.endsWith("#3-register-a-repository"),
+    JSON.stringify(reposGuide),
+  );
   await page.locator("[data-repo-form] input[name='repo']").fill(REPO);
   await page.locator("[data-repo-form] input[name='localPath']").fill(CHECKOUT);
   await page

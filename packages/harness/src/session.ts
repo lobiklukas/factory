@@ -1833,11 +1833,13 @@ export const readPlan = (
  * answer leaves no state behind (no `factory.pr`, no `pr_url` row), so the log's transcript is the
  * only place a person can see that the run ran and published nothing.
  *
- * The sentence names documentation because an unchanged branch is the *docs* run's ordinary result
- * (LOB-37: docs that need no edit). The guard itself is about the diff, not about the skill: any
- * run whose branch is even with its base has no PR to open, and GitHub would refuse one anyway.
+ * The sentence names no skill: an unchanged branch is a docs run's ordinary result (LOB-37: docs
+ * that need no edit), but the guard is about the diff, so any run whose branch is even with its base
+ * has no PR to open, and GitHub would refuse one anyway. Its first wording said "no documentation
+ * change"; logs written then keep that text (the projection reads the stored `text`, not this
+ * helper), and the entry kind is unchanged so they still render.
  */
-export const NoDocumentationChangeEntry = defineEntry<{
+export const NoChangeEntry = defineEntry<{
   readonly text: string;
   /**
    * The commit the branch was measured at (F16): what a boot's settle sweep compares with the
@@ -1848,25 +1850,25 @@ export const NoDocumentationChangeEntry = defineEntry<{
 }>(NO_CHANGE_ENTRY_KIND);
 
 /** The line this entry carries: what a no-op run says it did. */
-export const noDocumentationChange = (base: string): string =>
-  `no documentation change: the branch has nothing to publish against ${base}`;
+export const noChangeText = (base: string): string =>
+  `no change: the branch has nothing to publish against ${base}`;
 
 /**
  * Announce that the run published nothing. Nothing else is written: there is no PR to record, so a
  * retry of this step re-measures the branch rather than reading this entry.
  */
-export const writeNoDocumentationChange = (
+export const writeNoChange = (
   conversation: Conversation,
   base: string,
   commit?: string,
 ): Effect.Effect<EntryId, SessionError> =>
-  attempt("write no documentation change", () =>
+  attempt("write no change", () =>
     conversation
       .commit(
         (tx) =>
-          tx.appendEntry(NoDocumentationChangeEntry, conversation.id, {
+          tx.appendEntry(NoChangeEntry, conversation.id, {
             data: {
-              text: noDocumentationChange(base),
+              text: noChangeText(base),
               ...(commit === undefined ? {} : { commit }),
             },
           }),
@@ -1882,7 +1884,7 @@ export const writeNoDocumentationChange = (
  */
 export const PullRequestNotOpenedEntry = defineEntry<{
   readonly text: string;
-  /** The branch's tip when the step decided (F16), as `NoDocumentationChangeEntry`'s `commit`. */
+  /** The branch's tip when the step decided (F16), as `NoChangeEntry`'s `commit`. */
   readonly commit?: string;
 }>(PR_NOT_OPENED_ENTRY_KIND);
 
@@ -3376,7 +3378,22 @@ export type SessionRef = {
    * row's. Absent, a fold reads it from the log's `pi.agent` instead.
    */
   readonly model?: string;
+  /**
+   * Whether this process serves a `provider/modelId` (E9): the control plane's catalog lookup. With
+   * it, the summary says `modelAvailable` for the model the session is pinned to; without it the
+   * field is absent, because a reader that knows no catalog cannot say.
+   */
+  readonly serves?: (model: string) => boolean;
 };
+
+/** The summary's `modelAvailable` for a pinned model, absent when the answer is not known (E9). */
+const modelAvailability = (
+  ref: SessionRef,
+  model: string | undefined,
+): { readonly modelAvailable?: boolean } =>
+  model === undefined || ref.serves === undefined
+    ? {}
+    : { modelAvailable: ref.serves(model) };
 
 const pendingOf = (
   sessionId: SessionId,
@@ -3420,6 +3437,7 @@ const snapshotOf = (
       ...(ref.prUrl === undefined ? {} : { prUrl: ref.prUrl }),
       ...(ref.forkedFrom === undefined ? {} : { forkedFrom: ref.forkedFrom }),
       ...(ref.model === undefined ? {} : { model: ref.model }),
+      ...modelAvailability(ref, ref.model),
     },
     workspace: ref.workspace,
     entries: projection.entries,
@@ -4006,6 +4024,7 @@ export const readFoldedSnapshot = (
         ...(ref.prUrl === undefined ? {} : { prUrl: ref.prUrl }),
         ...(ref.forkedFrom === undefined ? {} : { forkedFrom: ref.forkedFrom }),
         ...(model === undefined ? {} : { model }),
+        ...modelAvailability(ref, model),
       },
       workspace: ref.workspace,
       entries: log.entries,

@@ -30,7 +30,7 @@ import { readRecordedPullRequest } from "@repo/harness";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
 import { protocolFor } from "../verify-api/harness.ts";
 
-const API_URL = process.env["API_URL"] ?? "http://localhost:9405";
+const API_URL = process.env["API_URL"] ?? "http://localhost:9407";
 const MODE = process.env["MODE"] ?? "";
 const REPO = process.env["REPO"] ?? "";
 const SESSION = (process.env["SESSION_ID"] ?? "") as SessionId;

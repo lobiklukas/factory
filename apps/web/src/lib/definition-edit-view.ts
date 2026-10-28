@@ -1,25 +1,33 @@
 import type {
+  BoardCaps,
   BoardColumn,
   BoardDefinition,
+  ColumnAutonomy,
   ColumnKind,
+  ColumnPushScope,
   ColumnRequirement,
   ColumnTransition,
+  ColumnWriteScope,
   DefineBoardInput,
   DefinitionFault,
+  DefinitionVocabulary,
   RequirementOption,
 } from "@repo/domain/Task";
-import { columnTransitions, initialColumnOf } from "@repo/domain/Task";
+import { RunCap, materializeDefinition } from "@repo/domain/Task";
+import { Result, Schema } from "effect";
+import { DASHBOARD_ACTOR } from "./approvals-view";
 import { NONE } from "./board-settings-view";
 
 /**
  * The definition editor (D6): `/boards/$boardId/settings/edit` turns the board's pinned version into
- * a draft, the person changes columns, kinds, roles, skills, requirements, moves and gates, and Save
- * sends the draft to `defineBoard` as a new version. The pinned version is never edited (B2): the
+ * a draft, the person changes columns, kinds, roles, skills, requirements, moves and gates, each
+ * column's autonomy and WIP limit and the version's run caps, and Save sends the draft to
+ * `defineBoard` as a new version. The pinned version is never edited (B2): the
  * server writes newest + 1, and the board stays on its pin until it is upgraded.
  *
  * What the draft holds is the version's own columns, every field each carried kept, so a field this
- * editor has no control for — a WIP limit, the caps, a field a later change adds to the schema —
- * goes back to the server as it came rather than being dropped. A column the person adds starts
+ * editor has no control for — a field a later change adds to the schema — goes back to the server as
+ * it came rather than being dropped. A column the person adds starts
  * with the fields the schema requires and nothing else.
  *
  * Pure, so the rules a person depends on — a rename carries the moves that point at the column, a
@@ -47,13 +55,15 @@ export type DraftColumn = {
 
 /**
  * What the editor holds: the version's name, where a new card starts (`""` for none) and the key of
- * that column (`undefined` for none, or a name no column holds), and its columns.
+ * that column (`undefined` for none, or a name no column holds), its columns, and the version's run
+ * caps (`undefined` for a version that declares none).
  */
 export type DefinitionDraft = {
   readonly name: string;
   readonly initialColumn: string;
   readonly initialKey: string | undefined;
   readonly columns: ReadonlyArray<DraftColumn>;
+  readonly caps: BoardCaps | undefined;
 };
 
 /**
@@ -62,17 +72,6 @@ export type DefinitionDraft = {
  * (they are read through the default pipeline's table), and an authored version must declare both,
  * so a draft of one starts from what its cards meet — and the diff does not call that a change.
  */
-export const materialize = (definition: BoardDefinition): BoardDefinition => {
-  const initial = initialColumnOf(definition);
-  return {
-    ...definition,
-    ...(initial === undefined ? {} : { initialColumn: initial }),
-    columns: definition.columns.map((column) => ({
-      ...column,
-      transitions: columnTransitions(definition, column.name),
-    })),
-  };
-};
 
 /** The key of the first column of the draft named `name`, or `undefined` when none is. */
 const keyNamed = (
@@ -86,7 +85,7 @@ const keyNamed = (
 
 /** The draft a pinned version opens as: its own columns, keyed in order, moves and initial spelled out. */
 export const draftOf = (definition: BoardDefinition): DefinitionDraft => {
-  const base = materialize(definition);
+  const base = materializeDefinition(definition);
   const keyed = base.columns.map((column, index) => ({
     key: `c${index}`,
     origin: column.name,
@@ -98,6 +97,7 @@ export const draftOf = (definition: BoardDefinition): DefinitionDraft => {
     initialColumn,
     initialKey:
       initialColumn === "" ? undefined : keyNamed(keyed, initialColumn),
+    caps: base.caps,
     columns: keyed.map((entry) => ({
       ...entry,
       targets: (entry.column.transitions ?? []).map((move) =>
@@ -110,20 +110,42 @@ export const draftOf = (definition: BoardDefinition): DefinitionDraft => {
 /**
  * The `defineBoard` payload a draft means, under the pinned version's id: every field the pinned
  * version carries but its version number (the server assigns one), with the draft's name, initial
- * column and columns over them. No initial column is sent absent, so the server's refusal names it.
+ * column, columns and caps over them. No initial column is sent absent, so the server's refusal names it.
  */
+/**
+ * A column with its role trimmed, or with none when only whitespace is left: the harness looks a
+ * role's policy up by exact name, so a stray space typed into the open-role field (F4) would save a
+ * role that no policy names and silently drop the one the author meant.
+ */
+const trimmedRole = (column: BoardColumn): BoardColumn => {
+  if (column.role === undefined) return column;
+  const role = column.role.trim();
+  if (role === column.role) return column;
+  const { role: _role, ...rest } = column;
+  return role === "" ? rest : { ...rest, role };
+};
+
 export const defineInputOf = (
   pinned: BoardDefinition,
   draft: DefinitionDraft,
 ): DefineBoardInput => {
-  const { version: _version, initialColumn: _initial, ...kept } = pinned;
+  const {
+    version: _version,
+    initialColumn: _initial,
+    caps: _caps,
+    author: _author,
+    ...kept
+  } = pinned;
   return {
     ...kept,
+    // Who wrote the version (F7), as a dashboard card write's actor is; a credential overrides it.
+    actor: DASHBOARD_ACTOR,
     name: draft.name,
-    columns: draft.columns.map((entry) => entry.column),
+    columns: draft.columns.map((entry) => trimmedRole(entry.column)),
     ...(draft.initialColumn === ""
       ? {}
       : { initialColumn: draft.initialColumn }),
+    ...(draft.caps === undefined ? {} : { caps: draft.caps }),
   };
 };
 
@@ -309,6 +331,129 @@ export const setRole = (
 ): DefinitionDraft =>
   replaceColumn(draft, key, ({ role: _role, ...column }) =>
     role === undefined ? column : { ...column, role },
+  );
+
+/** The one cap kinds `BoardCaps` defines, in the order the page lists them. */
+export const CAP_KINDS = ["board", "task", "repo"] as const;
+export type CapKind = (typeof CAP_KINDS)[number];
+
+/**
+ * A number field's text as a limit: empty is no limit (`undefined`), anything else the number it
+ * reads as — whatever it is, so a `0`, a negative or a fraction goes into the draft as typed and Save
+ * refuses it beside its field (`limitFaults`, with the `RunCap` schema the server decodes with)
+ * rather than this page guessing what a limit may be. Text that is no number at all
+ * (a browser's number field answers `""` for one) is no limit.
+ */
+export const parseLimit = (text: string): number | undefined => {
+  if (text.trim() === "") return undefined;
+  const value = Number(text);
+  return Number.isFinite(value) ? value : undefined;
+};
+
+/** Sets a column's WIP limit, or takes it away (`undefined`: no limit). */
+export const setWipLimit = (
+  draft: DefinitionDraft,
+  key: string,
+  limit: number | undefined,
+): DefinitionDraft =>
+  replaceColumn(draft, key, ({ wipLimit: _limit, ...column }) =>
+    limit === undefined ? column : { ...column, wipLimit: limit },
+  );
+
+/**
+ * Sets one of the version's run caps, or takes it away. With no cap left the version has none: `caps`
+ * is absent, not `{}`, as a version written before caps existed holds it.
+ */
+export const setCap = (
+  draft: DefinitionDraft,
+  kind: CapKind,
+  limit: number | undefined,
+): DefinitionDraft => {
+  const { [kind]: _was, ...others } = draft.caps ?? {};
+  const caps: BoardCaps =
+    limit === undefined ? others : { ...others, [kind]: limit };
+  return { ...draft, caps: Object.keys(caps).length === 0 ? undefined : caps };
+};
+
+/**
+ * A column's autonomy after a change (C22): with no gate, scope or push left it is absent, so a
+ * column put back to the deployment's policy is the column of a version written before the field
+ * existed. Anything else in it (a field a later change adds) is kept as it came.
+ */
+const withAutonomy = (
+  column: BoardColumn,
+  change: (autonomy: ColumnAutonomy) => ColumnAutonomy,
+): BoardColumn => {
+  const { autonomy: _was, ...rest } = column;
+  const next = change(column.autonomy ?? {});
+  return Object.keys(next).length === 0 ? rest : { ...rest, autonomy: next };
+};
+
+/** Sets where a column's runs may write, or takes it away (`undefined`: the deployment's policy). */
+export const setWriteScope = (
+  draft: DefinitionDraft,
+  key: string,
+  write: ColumnWriteScope | undefined,
+): DefinitionDraft =>
+  replaceColumn(draft, key, (column) =>
+    withAutonomy(column, ({ write: _write, ...rest }) =>
+      write === undefined ? rest : { ...rest, write },
+    ),
+  );
+
+/** Sets which refs a column's runs may push, or takes it away (`undefined`: the deployment's policy). */
+export const setPushScope = (
+  draft: DefinitionDraft,
+  key: string,
+  push: ColumnPushScope | undefined,
+): DefinitionDraft =>
+  replaceColumn(draft, key, (column) =>
+    withAutonomy(column, ({ push: _push, ...rest }) =>
+      push === undefined ? rest : { ...rest, push },
+    ),
+  );
+
+/** The approval gates a column declares: command prefixes a run asks a person before running. */
+export const gatesOf = (column: BoardColumn): ReadonlyArray<string> =>
+  column.autonomy?.approvalRequired ?? [];
+
+const withGates = (
+  column: BoardColumn,
+  change: (gates: ReadonlyArray<string>) => ReadonlyArray<string>,
+): BoardColumn =>
+  withAutonomy(column, ({ approvalRequired, ...rest }) => {
+    const gates = change(approvalRequired ?? []);
+    return gates.length === 0 ? rest : { ...rest, approvalRequired: gates };
+  });
+
+/**
+ * Adds an approval gate, blank: the person types it next to the row. A blank one is the server's to
+ * refuse (it would be a gate the author believes in and nothing holds), shown by its field.
+ */
+export const addGate = (draft: DefinitionDraft, key: string): DefinitionDraft =>
+  replaceColumn(draft, key, (column) =>
+    withGates(column, (gates) => [...gates, ""]),
+  );
+
+export const setGate = (
+  draft: DefinitionDraft,
+  key: string,
+  index: number,
+  gate: string,
+): DefinitionDraft =>
+  replaceColumn(draft, key, (column) =>
+    withGates(column, (gates) =>
+      gates.map((was, at) => (at === index ? gate : was)),
+    ),
+  );
+
+export const removeGate = (
+  draft: DefinitionDraft,
+  key: string,
+  index: number,
+): DefinitionDraft =>
+  replaceColumn(draft, key, (column) =>
+    withGates(column, (gates) => gates.filter((_gate, at) => at !== index)),
   );
 
 export const addSkill = (
@@ -510,14 +655,25 @@ export const requirementOptions = (
       !column.requires.some((requirement) => requirement.key === option.key),
   );
 
-/** The roles a column may name: the vocabulary's, and the column's own whatever it is, sorted. */
+/**
+ * The roles a column may name: the vocabulary's and the column's own whatever it is, sorted, and
+ * whether a role may also be typed (F4). A typed name is offered only when the deployment has no role
+ * table (`rolesOpen`) — `defineBoard` then accepts any role — and never beside a table, where a role
+ * outside the list is the typo the server refuses.
+ */
 export const roleOptions = (
-  roles: ReadonlyArray<string>,
+  vocabulary: Pick<DefinitionVocabulary, "roles" | "rolesOpen">,
   column: BoardColumn,
-): ReadonlyArray<string> =>
-  [
-    ...new Set(column.role === undefined ? roles : [...roles, column.role]),
-  ].toSorted();
+): { readonly names: ReadonlyArray<string>; readonly typed: boolean } => ({
+  names: [
+    ...new Set(
+      column.role === undefined
+        ? vocabulary.roles
+        : [...vocabulary.roles, column.role],
+    ),
+  ].toSorted(),
+  typed: vocabulary.rolesOpen === true,
+});
 
 /** One line of the diff: added (`+`), removed (`-`) or changed (`~`), and what. */
 export type DiffLine = {
@@ -583,6 +739,8 @@ const COLUMN_FIELDS: ReadonlySet<string> = new Set([
   "skills",
   "requires",
   "transitions",
+  "wipLimit",
+  "autonomy",
 ]);
 
 /**
@@ -591,6 +749,48 @@ const COLUMN_FIELDS: ReadonlySet<string> = new Set([
  * so two moves are the same move only when they point at the same column, whatever it is named now.
  */
 type DiffMove = { readonly id: string; readonly move: ColumnTransition };
+
+/** The changes to a column's autonomy: its gates one by one, its write and push scope. */
+const autonomyDiff = (
+  at: string,
+  before: ColumnAutonomy | undefined,
+  after: ColumnAutonomy | undefined,
+): Array<DiffLine> => {
+  const lines: Array<DiffLine> = [];
+  const was = before?.approvalRequired ?? [];
+  const now = after?.approvalRequired ?? [];
+  for (const gate of was)
+    if (!now.includes(gate))
+      lines.push({ sign: "-", text: `${at} approval gate ${shown(gate)}` });
+  for (const gate of now)
+    if (!was.includes(gate))
+      lines.push({ sign: "+", text: `${at} approval gate ${shown(gate)}` });
+  if (before?.write !== after?.write)
+    lines.push({
+      sign: "~",
+      text: `${at} write scope: ${before?.write ?? NONE} → ${after?.write ?? NONE}`,
+    });
+  if (before?.push !== after?.push)
+    lines.push({
+      sign: "~",
+      text: `${at} push scope: ${before?.push ?? NONE} → ${after?.push ?? NONE}`,
+    });
+  // A field of the autonomy a later change adds: compared as declared, as a column's own are.
+  const known = new Set(["approvalRequired", "write", "push"]);
+  const others = [
+    ...new Set([...Object.keys(before ?? {}), ...Object.keys(after ?? {})]),
+  ].filter((field) => !known.has(field));
+  for (const field of others.toSorted()) {
+    const a = (before as Record<string, unknown> | undefined)?.[field];
+    const b = (after as Record<string, unknown> | undefined)?.[field];
+    if (!sameValue(a, b))
+      lines.push({
+        sign: "~",
+        text: `${at} autonomy ${field}: ${shown(a)} → ${shown(b)}`,
+      });
+  }
+  return lines;
+};
 
 /** The changes inside one column the draft kept, its base and draft moves given by target identity. */
 const columnDiff = (
@@ -664,7 +864,13 @@ const columnDiff = (
       text: `${at} moves reordered: ${wasMoves.map(({ id }) => now(id)).join(", ")} → ${keptMoves.map(({ move }) => move.to).join(", ")}`,
     });
   }
-  // Every other field — a WIP limit, a field this editor has no control for — compared as declared.
+  if (before.wipLimit !== after.wipLimit)
+    lines.push({
+      sign: "~",
+      text: `${at} wipLimit: ${shown(before.wipLimit)} → ${shown(after.wipLimit)}`,
+    });
+  lines.push(...autonomyDiff(at, before.autonomy, after.autonomy));
+  // Every other field — a field this editor has no control for — compared as declared.
   const others = [
     ...new Set([...Object.keys(before), ...Object.keys(after)]),
   ].filter((field) => !COLUMN_FIELDS.has(field));
@@ -693,13 +899,22 @@ export const definitionDiff = (
   pinned: BoardDefinition,
   draft: DefinitionDraft,
 ): ReadonlyArray<DiffLine> => {
-  const base = materialize(pinned);
+  const base = materializeDefinition(pinned);
   const lines: Array<DiffLine> = [];
   if (base.name !== draft.name)
     lines.push({
       sign: "~",
       text: `name: ${shown(base.name)} → ${shown(draft.name)}`,
     });
+  for (const kind of CAP_KINDS) {
+    const was = base.caps?.[kind];
+    const now = draft.caps?.[kind];
+    if (was !== now)
+      lines.push({
+        sign: "~",
+        text: `caps.${kind}: ${shown(was)} → ${shown(now)}`,
+      });
+  }
   // A column's identity: the draft key of what it became, `removed:` for a base column the draft
   // dropped, and `name:` for a name no column holds (a move a version read without checks points at).
   const fromBase = new Map(
@@ -803,17 +1018,28 @@ export type PlacedFaults = {
 
 const COLUMN_FAULT = /^columns\[(\d+)\](?:\.(.+))?$/;
 const ROW_FAULT = /^(transitions|requires|skills)\[(\d+)\]/;
+const GATE_FAULT = /^autonomy\.approvalRequired\[(\d+)\]$/;
+const AUTONOMY_FIELDS: ReadonlySet<string> = new Set([
+  "autonomy.write",
+  "autonomy.push",
+  "autonomy.approvalRequired",
+]);
+const CAP_SLOTS: ReadonlySet<string> = new Set([
+  "caps",
+  ...CAP_KINDS.map((kind) => `caps.${kind}`),
+]);
 
 /**
  * Places the server's faults next to the field each names. A fault's path is into the version as it
  * was sent, so its column index is read against the keys the draft held then (`sent`): a column the
  * person moved since keeps its fault, and one they removed has its fault shown above the editor.
  *
- * - `name`, `initialColumn` and `columns` are the definition's fields;
- * - `columns[i].name` / `.kind` / `.role` / `.transitions` / `.requires` / `.skills` are the column's;
- * - a row — `transitions[j].to`, `requires[j].key`, `skills[j]` — is its row while the column still
- *   has one at `j`, else the list it was in;
- * - anything else of a column (a WIP limit, a field this editor has no control for) is the column's.
+ * - `name`, `initialColumn`, `columns` and `caps` / `caps.<kind>` are the definition's fields;
+ * - `columns[i].name` / `.kind` / `.role` / `.transitions` / `.requires` / `.skills` / `.wipLimit` /
+ *   `.autonomy.write` / `.autonomy.push` / `.autonomy.approvalRequired` are the column's;
+ * - a row — `transitions[j].to`, `requires[j].key`, `skills[j]`, `autonomy.approvalRequired[j]` — is
+ *   its row while the column still has one at `j`, else the list it was in;
+ * - anything else of a column (a field this editor has no control for) is the column's.
  */
 export const placeFaults = (
   faults: ReadonlyArray<DefinitionFault>,
@@ -828,7 +1054,8 @@ export const placeFaults = (
     if (
       fault.field === "name" ||
       fault.field === "initialColumn" ||
-      fault.field === "columns"
+      fault.field === "columns" ||
+      CAP_SLOTS.has(fault.field)
     ) {
       put(fault.field, fault);
       continue;
@@ -848,8 +1075,22 @@ export const placeFaults = (
       put(columnSlot(entry.key), fault);
       continue;
     }
-    if (COLUMN_FIELDS.has(path)) {
+    if (COLUMN_FIELDS.has(path) || AUTONOMY_FIELDS.has(path)) {
       put(columnSlot(entry.key, path), fault);
+      continue;
+    }
+    const gate = GATE_FAULT.exec(path);
+    if (gate !== null) {
+      const index = Number(gate[1]);
+      put(
+        columnSlot(
+          entry.key,
+          index < gatesOf(entry.column).length
+            ? path
+            : "autonomy.approvalRequired",
+        ),
+        fault,
+      );
       continue;
     }
     const row = ROW_FAULT.exec(path);
@@ -878,6 +1119,36 @@ export type DefineRefusal = {
   readonly tag: string;
   readonly message: string;
   readonly faults: ReadonlyArray<DefinitionFault>;
+};
+
+/**
+ * The limits of the draft that `RunCap` — the domain schema the server decodes a `defineBoard` body
+ * with — refuses: a WIP limit or a cap that is not a whole number of at least one. The RPC client
+ * encodes a payload with that same schema before it sends one, so such a body never leaves the page;
+ * rather than a stack of schema text, each one is a fault at the path the server would name
+ * (`columns[1].wipLimit`, `caps.task`), in the schema's own words, shown beside its field like any
+ * other fault. Nothing else is judged here: what a version may declare is the server's call.
+ */
+export const limitFaults = (
+  draft: DefinitionDraft,
+): ReadonlyArray<DefinitionFault> => {
+  const refusal = (value: number | undefined): string | undefined => {
+    if (value === undefined) return undefined;
+    const decoded = Schema.decodeResult(RunCap)(value);
+    return Result.isFailure(decoded) ? decoded.failure.message : undefined;
+  };
+  return [
+    ...draft.columns.flatMap((entry, index) => {
+      const message = refusal(entry.column.wipLimit);
+      return message === undefined
+        ? []
+        : [{ field: `columns[${index}].wipLimit`, message }];
+    }),
+    ...CAP_KINDS.flatMap((kind) => {
+      const message = refusal(draft.caps?.[kind]);
+      return message === undefined ? [] : [{ field: `caps.${kind}`, message }];
+    }),
+  ];
 };
 
 /**

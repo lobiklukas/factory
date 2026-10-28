@@ -74,7 +74,8 @@ export type SettledRun = {
   /**
    * Whether the run ended parked rather than done: an approval it asked for is undecided (D11), or
    * its card is blocked (a run's question parks it `needs_input`, B7). Such a run stopped to wait on
-   * a person, so its branch is not the change it set out to make.
+   * a person, so its branch is not the change it set out to make. A card blocked
+   * `changes_requested` by a review of its PR (C21) is not waiting: the push is what answers it.
    */
   readonly waiting: boolean;
   /**

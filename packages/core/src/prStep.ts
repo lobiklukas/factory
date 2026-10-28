@@ -106,7 +106,7 @@ import {
   prEvidenceOf,
   readConversationVerifyCalls,
   readPullRequestDoc,
-  writeNoDocumentationChange,
+  writeNoChange,
   writePullRequestDoc,
   writePullRequestUpdate,
   type InjectedSecrets,
@@ -294,7 +294,7 @@ export const openPullRequest = (
       Option.isSome(measured) &&
       measured.value.files === 0
     ) {
-      yield* writeNoDocumentationChange(input.conversation, input.base, commit);
+      yield* writeNoChange(input.conversation, input.base, commit);
       return { outcome: "no-change" };
     }
     // Nothing is written on this path — no document, no row — so a session refused here has the
