@@ -253,6 +253,8 @@ const shot = (name) =>
 /** **Start run** in the pane, then one message typed into the run's own composer. */
 const startAndMessage = async (message, previous) => {
   await page.locator("aside[data-card-pane] [data-start-run]").click();
+  // Start run opens the prompt field (C6); Send opens the run and sends its text.
+  await page.locator("aside[data-card-pane] [data-start-send]").click();
   const started = await waitFor(
     (before) => {
       const run = new URLSearchParams(window.location.search).get("run");

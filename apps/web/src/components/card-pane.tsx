@@ -58,6 +58,7 @@ import {
 } from "@/lib/thread-view";
 import { DASHBOARD_ACTOR } from "@/lib/approvals-view";
 import { specLists } from "@/lib/spec-view";
+import { startPrompt, startSendable } from "@/lib/run-start-view";
 import { RunApprovals } from "@/components/approvals";
 import { SessionPane } from "@/components/session-pane";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -514,6 +515,10 @@ const Thread = ({
  * A run is one Pi Durable session (B1), so the list is `task_runs` and each row opens that session
  * as the run pane below. The start is offered only from a working column (B4); elsewhere the button
  * is disabled and says why, rather than vanishing.
+ *
+ * Start run opens a prompt field holding the card's default prompt (C6: its title, its body and the
+ * column's instruction, the text `factory board start` sends with no `--prompt`), and Send opens the
+ * run and sends the field's text as its first message, so the run is working when the pane shows it.
  */
 const Runs = ({
   boardId,
@@ -530,9 +535,39 @@ const Runs = ({
   const start = useAtomSet(startRunAtom, { mode: "promiseExit" });
   const navigate = useNavigate();
   const [starting, setStarting] = useState(false);
+  // The prompt field: `null` while closed, the text as typed while open. It opens with the card as
+  // it is now, so a card edited meanwhile is read again by closing and reopening it.
+  const [draft, setDraft] = useState<string | null>(null);
   const allowed = runStart(task, definition);
+  const ready = startSendable(draft ?? "");
   // The last answer stays on screen through a failed refresh; only a first read that fails says so.
   const listed = Option.getOrUndefined(AsyncResult.value(runs));
+
+  const send = () => {
+    if (draft === null || !ready.ok || starting) return;
+    setStarting(true);
+    void start({ task, prompt: draft })
+      .then((exit) => {
+        if (Exit.isSuccess(exit)) {
+          setDraft(null);
+          if (exit.value.sendFailure !== undefined) {
+            toast.warning("The run opened, but its first message was refused", {
+              description: exit.value.sendFailure,
+            });
+          }
+          void navigate({
+            to: "/boards/$boardId",
+            params: { boardId },
+            search: { card: task.id, run: exit.value.session.id },
+          });
+          return;
+        }
+        toast.error("No run was started", {
+          description: Cause.pretty(exit.cause),
+        });
+      })
+      .finally(() => setStarting(false));
+  };
 
   return (
     <section aria-label="Runs" className="flex flex-col gap-2">
@@ -545,41 +580,86 @@ const Runs = ({
           size="sm"
           variant="outline"
           data-start-run
-          disabled={!allowed.allowed || starting}
+          disabled={!allowed.allowed || starting || draft !== null}
           aria-busy={starting}
+          aria-expanded={draft !== null}
           title={
             allowed.allowed
               ? `Start a run from ${allowed.column}`
               : allowed.reason
           }
           aria-describedby={allowed.allowed ? undefined : "run-start-blocked"}
-          onClick={() => {
-            setStarting(true);
-            void start(task)
-              .then((exit) => {
-                if (Exit.isSuccess(exit)) {
-                  void navigate({
-                    to: "/boards/$boardId",
-                    params: { boardId },
-                    search: { card: task.id, run: exit.value.id },
-                  });
-                  return;
-                }
-                toast.error("No run was started", {
-                  description: Cause.pretty(exit.cause),
-                });
-              })
-              .finally(() => setStarting(false));
-          }}
+          onClick={() => setDraft(startPrompt(task, definition))}
         >
-          {starting ? (
-            <Spinner className="size-3.5" />
-          ) : (
-            <PlayIcon className="size-3.5" strokeWidth={1.75} />
-          )}
+          <PlayIcon className="size-3.5" strokeWidth={1.75} />
           Start run
         </Button>
       </div>
+      {draft === null ? null : (
+        <form
+          aria-label="Start a run"
+          data-start-form
+          className="flex flex-col gap-1.5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            send();
+          }}
+        >
+          <Textarea
+            value={draft}
+            autoFocus
+            data-start-prompt
+            aria-label="The run's first message"
+            aria-describedby="run-start-hint"
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                send();
+              }
+            }}
+            className="max-h-64 font-mono"
+          />
+          <div className="flex items-start gap-2">
+            <p
+              id="run-start-hint"
+              className="flex-1 text-[11px] text-muted-foreground"
+            >
+              The card's title, its body and this column's instruction. Send
+              opens the run and sends this as its first message.
+              {ready.ok ? null : (
+                <span className="block text-destructive" data-start-unsendable>
+                  {ready.reason}.
+                </span>
+              )}
+            </p>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              data-start-cancel
+              disabled={starting}
+              onClick={() => setDraft(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              size="sm"
+              data-start-send
+              disabled={!ready.ok || starting}
+              aria-busy={starting}
+            >
+              {starting ? (
+                <Spinner className="size-3.5" />
+              ) : (
+                <PlayIcon className="size-3.5" strokeWidth={1.75} />
+              )}
+              Send
+            </Button>
+          </div>
+        </form>
+      )}
       {allowed.allowed ? null : (
         <p id="run-start-blocked" className="text-[11px] text-muted-foreground">
           {allowed.reason}.
