@@ -10,7 +10,8 @@ answer the `bash` tool produced.
 - `SessionPane` attaches with `getSession` then `watchSession`, and folds events into one view
 - The header shows the session id, the run state, and the read path (`LIVE STREAM` or
   `HISTORICAL FOLD`)
-- The transcript renders `user`, `system`, `toolResult` (collapsed, in a disclosure), and `assistant`
+- The transcript renders `user`, `toolResult` (collapsed, in a disclosure), and `assistant`; the title
+  and a text-less `system` entry have no row (LOB-273, `transcript.md`)
 - The pane ends with `faux-ok (re: ...)`, text that exists only because the agent really ran `bash`
 - The session appears in the sidebar, recorded from what the stream reported
 
