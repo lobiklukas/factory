@@ -318,6 +318,7 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | What the server runs     | passing | [server-info.md](server-info.md)             |
 | Metrics to a collector   | passing | [metrics.md](metrics.md)                     |
 | Control-plane identity   | passing | [identity.md](identity.md)                   |
+| Outcome metrics          | passing | [outcomes.md](outcomes.md)                   |
 | Cost prediction          | passing | [cost.md](cost.md)                           |
 
 The model-backend checks (LOB-258) were run from the `agent/LOB-258` worktree on 2026-10-28
@@ -343,6 +344,13 @@ with its unit, read from a loopback OTLP/HTTP receiver — and the boot log nami
 evidence `.verify/evidence/lob-69/api/`. With the endpoint left out of the boot, the receiver is sent
 nothing and the set check fails (`.verify/evidence/lob-69/mutation-no-endpoint/`). See
 [metrics.md](metrics.md).
+
+The outcome checks (LOB-44) were run from the `agent/LOB-44` worktree on 2026-10-28
+(`API_PORT=9540`, the worktree's own database on 5442): `./outcomes.sh` **11/11** (10 driver checks —
+the merge and its redelivery, the revert, the log's `factory.merge`, and the CLI's report: window,
+delegation lead time, the revert, adoption and cost — and the API log naming the record), evidence
+`.verify/evidence/lob-44/`. With the route's merge record removed, the drive times out waiting for
+the merge (`.verify/evidence/lob-44/mutation-no-record/`). See [outcomes.md](outcomes.md).
 
 The identity checks (LOB-20) were run from the `agent/LOB-20` worktree on 2026-10-28
 (`API_PORT=9520`, the worktree's own database on 5442): `./identity.sh` **15/15** plus the shell's

@@ -151,6 +151,13 @@ in a table of its own because it is read on every owner acquisition beside the r
 this table is ever dropped as a repair, the releases are to be re-derived from the cards in a terminal
 column, the merged PRs and the absent `factory/<id>` branches first.
 
+_As built (LOB-44): a second exception._ `task_runs.finished_at` is written when a card's run goes
+idle (the run's end, for the outcome metrics' `card.factory_share`) and is in no log. A rebuild over
+existing rows keeps it; a row `rebuildIndexes` re-creates gets `started_at` from its session's first
+commit and no `finished_at`, so its factory time reads as ending at the session's last activity —
+which a later commit (an approval, the merge record) stretches. The share is then an upper bound for
+those runs. Recording a run's end in the log is the fix if the share is ever load-bearing.
+
 ### D8 — Read model: live when running, historical when not
 
 If the sandbox is live, the UI attaches to the harness (`viewState()`, `watch()`) and streams.
