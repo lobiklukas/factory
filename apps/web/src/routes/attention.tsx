@@ -10,6 +10,7 @@ import {
   attentionGroups,
   attentionLink,
   attentionReasonText,
+  attentionTitle,
 } from "@/lib/attention-view";
 import { EmptyPane } from "@/components/empty-pane";
 import { Badge } from "@/components/ui/badge";
@@ -34,7 +35,8 @@ export const Route = createFileRoute("/attention")({
 /**
  * What needs a person (LOB-77, part 3 of LOB-22): one list, grouped by what the person has to do —
  * decide a run's approval, answer a run's question, make the move a human gate keeps for a person —
- * with each row a link to the card that needs them.
+ * with each row a link to the card that needs them — or, for an approval of a session no card owns
+ * (LOB-271), to the session.
  *
  * The rows are `listAttention`, the server's answer, and nothing else: no card, run or approval is
  * walked from the browser, so a card the server would not list cannot appear here and a reload is a
@@ -136,7 +138,7 @@ function AttentionRoute() {
             title="Nothing needs a person"
             detail={
               board === undefined
-                ? "No card on any board waits on an approval, an answer to a run's question, or a move only a person can make. A card blocked on a dependency is waiting on that, not on you."
+                ? "No card or session waits on an approval, an answer to a run's question, or a move only a person can make. A card blocked on a dependency is waiting on that, not on you."
                 : "No card on this board waits on an approval, an answer to a run's question, or a move only a person can make. A card blocked on a dependency is waiting on that, not on you."
             }
             visible
@@ -176,8 +178,16 @@ function AttentionRoute() {
 
 const rowKey = (item: AttentionItem): string =>
   item.reason._tag === "approval"
-    ? `${item.task.id}:${item.reason.sessionId}:${item.reason.requestId}`
-    : `${item.task.id}:${item.reason._tag}`;
+    ? `${item.task?.id ?? "session"}:${item.reason.sessionId}:${item.reason.requestId}`
+    : `${item.task?.id ?? "session"}:${item.reason._tag}`;
+
+/** The row's subject for `data-attention`: the card's id, or the session's when no card owns it. */
+const rowSubject = (item: AttentionItem): string =>
+  item.task?.id ??
+  (item.reason._tag === "question" ? "session" : item.reason.sessionId);
+
+const ROW_CLASS =
+  "flex min-w-0 flex-1 flex-col gap-1 border border-border bg-card px-3 py-2 hover:border-ring/50 focus-visible:outline-1 focus-visible:outline-ring";
 
 /**
  * One thing a person has to do: the card, why it is here, and a link that opens it in its board's
@@ -193,47 +203,77 @@ const AttentionRow = ({
   readonly showRepo: boolean;
 }) => {
   const link = attentionLink(item);
+  const { task } = item;
+  const content = (
+    <>
+      <span className="flex min-w-0 items-baseline gap-2">
+        <span className="truncate text-xs font-medium">
+          {attentionTitle(item)}
+        </span>
+        {task?.priority === "urgent" ? (
+          <Badge
+            variant="outline"
+            className="font-mono text-[10px] tracking-wide uppercase"
+          >
+            urgent
+          </Badge>
+        ) : null}
+      </span>
+      <span
+        data-attention-text
+        className="text-[11px] leading-snug break-words text-foreground/80"
+      >
+        {attentionReasonText(item)}
+      </span>
+      <span className="flex min-w-0 gap-2 font-mono text-[10px] text-muted-foreground">
+        {showRepo && item.repo !== undefined ? (
+          <span className="truncate">{item.repo}</span>
+        ) : null}
+        {task === undefined ? (
+          <span className="shrink-0">no card</span>
+        ) : (
+          <>
+            <span className="shrink-0">{task.column}</span>
+            <span className="truncate" title={task.id}>
+              {task.id}
+            </span>
+          </>
+        )}
+      </span>
+    </>
+  );
   return (
     <li
-      data-attention={item.task.id}
+      data-attention={rowSubject(item)}
       data-attention-reason={item.reason._tag}
+      {...(task === undefined ? { "data-attention-session": "" } : {})}
       className="flex"
     >
-      <Link
-        to="/boards/$boardId"
-        params={{ boardId: link.boardId }}
-        search={link.search}
-        {...(link.hash === undefined ? {} : { hash: link.hash })}
-        aria-label={`Open card ${item.task.title}`}
-        className="flex min-w-0 flex-1 flex-col gap-1 border border-border bg-card px-3 py-2 hover:border-ring/50 focus-visible:outline-1 focus-visible:outline-ring"
-      >
-        <span className="flex min-w-0 items-baseline gap-2">
-          <span className="truncate text-xs font-medium">
-            {item.task.title}
-          </span>
-          {item.task.priority === "urgent" ? (
-            <Badge
-              variant="outline"
-              className="font-mono text-[10px] tracking-wide uppercase"
-            >
-              urgent
-            </Badge>
-          ) : null}
-        </span>
-        <span
-          data-attention-text
-          className="text-[11px] leading-snug break-words text-foreground/80"
+      {link.kind === "card" ? (
+        <Link
+          to="/boards/$boardId"
+          params={{ boardId: link.boardId }}
+          search={link.search}
+          {...(link.hash === undefined ? {} : { hash: link.hash })}
+          aria-label={`Open card ${attentionTitle(item)}`}
+          className={ROW_CLASS}
         >
-          {attentionReasonText(item)}
-        </span>
-        <span className="flex min-w-0 gap-2 font-mono text-[10px] text-muted-foreground">
-          {showRepo ? <span className="truncate">{item.repo}</span> : null}
-          <span className="shrink-0">{item.task.column}</span>
-          <span className="truncate" title={item.task.id}>
-            {item.task.id}
-          </span>
-        </span>
-      </Link>
+          {content}
+        </Link>
+      ) : link.kind === "session" ? (
+        <Link
+          to="/sessions/$sessionId"
+          params={{ sessionId: link.sessionId }}
+          aria-label={`Open session ${attentionTitle(item)}`}
+          className={ROW_CLASS}
+        >
+          {content}
+        </Link>
+      ) : (
+        <Link to="/sessions" aria-label={`Open sessions`} className={ROW_CLASS}>
+          {content}
+        </Link>
+      )}
     </li>
   );
 };
