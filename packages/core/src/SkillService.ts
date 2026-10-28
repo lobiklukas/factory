@@ -25,6 +25,7 @@ import {
   SkillNotFound,
   SkillRecord,
   SkillStorageError,
+  SkillVersionSummary,
   type PutSkillInput,
   type SkillSummary,
 } from "@repo/domain/Skill";
@@ -44,6 +45,16 @@ export type SkillServiceShape = {
    * again, so a version put since the last read is the one it answers.
    */
   readonly list: Effect.Effect<ReadonlyArray<SkillRecord>, SkillStorageError>;
+  /**
+   * Every version of one skill, newest first, without the bodies (D8): who put each and when. A name
+   * the table does not hold is `SkillNotFound`, so an empty history is never an answer.
+   */
+  readonly versions: (
+    name: string,
+  ) => Effect.Effect<
+    ReadonlyArray<SkillVersionSummary>,
+    SkillNotFound | SkillStorageError
+  >;
   /**
    * Add a version: `newest + 1`, or 1 for a name the table does not hold. Never an update — no row
    * a run may have opened on is touched. A blank body is `InvalidSkill`, and nothing is written.
@@ -129,6 +140,9 @@ export const SkillServiceLive = Layer.effect(
     const decodeAttachments = Schema.decodeUnknownEffect(AttachmentsJson);
     const encodeAttachments = Schema.encodeEffect(AttachmentsJson);
     const decodeSkill = Schema.decodeUnknownEffect(SkillRecord);
+    const decodeVersions = Schema.decodeUnknownEffect(
+      Schema.Array(SkillVersionSummary),
+    );
 
     /** Turns a driver failure into a storage failure. */
     const withStorage = <A>(
@@ -208,6 +222,40 @@ export const SkillServiceLive = Layer.effect(
       return yield* Effect.forEach(rows, toSkill);
     });
 
+    const versions = Effect.fn("SkillService.versions")(function* (
+      name: string,
+    ) {
+      const rows = yield* withStorage(
+        sql<{
+          readonly name: string;
+          readonly version: number;
+          readonly description: string;
+          readonly createdAt: Date | string;
+          readonly author: string;
+        }>`
+          SELECT s.name, s.version, s.description, s.created_at, s.author FROM skills s
+          WHERE s.name = ${name}
+          ORDER BY s.version DESC
+        `,
+      );
+      if (rows.length === 0) {
+        return yield* new SkillNotFound({
+          name,
+          message: `no skill named "${name}"`,
+        });
+      }
+      return yield* decodeVersions(
+        rows.map((row) => ({ ...row, createdAt: iso(row.createdAt) })),
+      ).pipe(
+        Effect.mapError(
+          (cause) =>
+            new SkillStorageError({
+              message: `the skills table holds an invalid version of ${name}: ${String(cause)}`,
+            }),
+        ),
+      );
+    });
+
     const put = Effect.fn("SkillService.put")(function* (input: PutSkillInput) {
       if (input.body.trim().length === 0) {
         return yield* new InvalidSkill({
@@ -261,6 +309,6 @@ export const SkillServiceLive = Layer.effect(
       });
     });
 
-    return SkillService.of({ get, list, put });
+    return SkillService.of({ get, list, versions, put });
   }),
 );

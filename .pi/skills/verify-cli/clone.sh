@@ -214,7 +214,7 @@ check "at the base ref, with the repo's files" \
     [ "$(cat "$WORKTREE/README.md" 2>/dev/null)" = "seed from the forge" ] && echo 0 || echo 1)" \
   "README.md at $FIRST_SHA"
 check "and no warning that it has no checkout" \
-  "$(grep -q '^warning' "$EVIDENCE_DIR/clone-run.txt" && echo 1 || echo 0)" "no warning line"
+  "$(grep -q '^warning ' "$EVIDENCE_DIR/clone-run.txt" && echo 1 || echo 0)" "no warning line"
 
 # --- each session fetches the base ref: a moved forge is what the next session starts from ---------
 printf 'moved on\n' > "$WORK/MOVED.md"
@@ -235,9 +235,9 @@ check "repo show reads it as ready, with its cache" \
   "$([ "$(exit_code "$W" show)" = "0" ] && has clone-show.txt "state       ready" &&
     has clone-show.txt "cache       $MIRROR" && echo 0 || echo 1)" \
   "exit=$(exit_code "$W" show)"
-drive doctor clone-doctor.txt "$FACTORY doctor $REPO --api $API_URL"
+drive doctor clone-doctor.txt "$FACTORY doctor $REPO --allow-faux --api $API_URL"
 check "factory doctor says it is ok, exit 0" \
-  "$([ "$(exit_code "$W" doctor)" = "0" ] && has clone-doctor.txt "ok    $REPO  cloned into $MIRROR" && echo 0 || echo 1)" \
+  "$([ "$(exit_code "$W" doctor)" = "0" ] && has clone-doctor.txt "ok repo $REPO: cloned into $MIRROR" && echo 0 || echo 1)" \
   "exit=$(exit_code "$W" doctor)"
 
 # --- a clone that fails: a typed error naming the repo and the reason -------------------------------
@@ -256,11 +256,11 @@ check "the row stays registered, not cloned, with the sync as its remedy" \
   "$([ "$(exit_code "$W" ghostshow)" = "0" ] && has clone-ghost-show.txt "state       not cloned yet" &&
     has clone-ghost-show.txt "remedy      factory repo sync $GHOST" && echo 0 || echo 1)" \
   "exit=$(exit_code "$W" ghostshow)"
-drive ghostdoctor clone-ghost-doctor.txt "$FACTORY doctor $GHOST --api $API_URL"
+drive ghostdoctor clone-ghost-doctor.txt "$FACTORY doctor $GHOST --allow-faux --api $API_URL"
 check "factory doctor reports the same failure, naming the repo and the reason, non-zero" \
   "$([ -n "$(exit_code "$W" ghostdoctor)" ] && [ "$(exit_code "$W" ghostdoctor)" != "0" ] &&
-    grep -q "^FAIL  $GHOST  repo_clone_failed (" "$EVIDENCE_DIR/clone-ghost-doctor.txt" &&
-    grep -q "^      remedy: " "$EVIDENCE_DIR/clone-ghost-doctor.txt" && echo 0 || echo 1)" \
+    grep -q "^fail repo $GHOST: repo_clone_failed (" "$EVIDENCE_DIR/clone-ghost-doctor.txt" &&
+    grep -q " -- fix: " "$EVIDENCE_DIR/clone-ghost-doctor.txt" && echo 0 || echo 1)" \
   "exit=$(exit_code "$W" ghostdoctor)"
 drive ghostsync clone-ghost-sync.txt "$FACTORY repo sync $GHOST --api $API_URL"
 check "factory repo sync fails the same typed way" \

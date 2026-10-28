@@ -45,6 +45,10 @@ export type ServerFactsShape = {
   readonly reviewer: "github-app" | "token" | "none";
   /** The sandbox runtime sessions' commands run through. */
   readonly sandbox: string;
+  /** How many rules `TRIGGER_RULES` mapped at boot (`factory doctor`, E8). */
+  readonly triggerRules: number;
+  /** The absolute paths of the env files the process loaded; paths only (`factory doctor`, E8). */
+  readonly envFiles: ReadonlyArray<string>;
 };
 
 /** The boot's resolved configuration, provided beside the RPC handlers that read it. */

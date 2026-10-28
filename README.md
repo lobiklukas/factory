@@ -89,6 +89,20 @@ bun run dev
   faux provider and sessions still run offline with scripted answers (`model backend: faux`).
   Other credential modes work too; see [Model credentials](#model-credentials).
 
+Then, in a second terminal once `bun run dev` says it is listening, ask the machine whether it can
+turn a task into a PR:
+
+```sh
+bun apps/cli/src/index.ts doctor            # or `factory doctor` with the built bin on your PATH
+```
+
+`factory doctor` prints one `ok|warn|fail <check>: <detail> -- fix: <what to do>` line per
+prerequisite: the API and its database, the model backend and which credential it uses, each
+registered repo's checkout, base ref, `.factory/config` and GitHub credential, which webhook routes are
+armed, and the env files the API loaded. It never prints a credential. It exits 1 on a `fail`, and on
+the scripted faux backend (a `warn`) unless you pass `--allow-faux`; `--live` also sends one minimal
+request to the model, which is the only check that spends.
+
 **Docker caveat, because it bites on this machine.** Docker Desktop and Colima can both be running,
 each with its own `factory-postgres-1`, and only one publishes host port 5442. Ask the port which
 one answers rather than assuming a Docker context, and create or inspect databases over TCP on it

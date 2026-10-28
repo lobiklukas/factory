@@ -594,18 +594,15 @@ const HttpLive = Effect.gen(function* () {
   // refuses the boot here rather than answering every delivery `skipped`.
   const triggerRules = yield* logTriggerBootFromProcess;
 
-  yield* Effect.logInfo(
-    describeLoadedEnvFiles(
-      yield* loadedEnvFiles({
-        execArgv: process.execArgv,
-        cwd: process.cwd(),
-        // Bun picks its autoloaded files from NODE_ENV, so the boot line reads the same variable.
-        nodeEnv: Option.getOrUndefined(
-          yield* Config.option(Config.String("NODE_ENV")),
-        ),
-      }).pipe(Effect.provide(BunServices.layer)),
+  const envFiles = yield* loadedEnvFiles({
+    execArgv: process.execArgv,
+    cwd: process.cwd(),
+    // Bun picks its autoloaded files from NODE_ENV, so the boot line reads the same variable.
+    nodeEnv: Option.getOrUndefined(
+      yield* Config.option(Config.String("NODE_ENV")),
     ),
-  );
+  }).pipe(Effect.provide(BunServices.layer));
+  yield* Effect.logInfo(describeLoadedEnvFiles(envFiles));
   // After the env-file line, so a refused boot still says which files it read. Forced anthropic with
   // no credential fails here, before anything is served (LOB-258).
   const backendChoice = yield* selectModelBackend({ forced: model.backend });
@@ -765,6 +762,8 @@ const HttpLive = Effect.gen(function* () {
     linearStates: linearConfig?.states,
     reviewer: reviewerIdentity,
     sandbox: Option.getOrElse(sandboxChoice, () => DEFAULT_SANDBOX_RUNTIME),
+    triggerRules: triggerRules.length,
+    envFiles,
   });
 
   // Sessions own one log, one working directory, and (locally) the harness that drives them. The PR

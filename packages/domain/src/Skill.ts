@@ -65,6 +65,21 @@ export const SkillSummary = Schema.Struct({
 });
 export type SkillSummary = typeof SkillSummary.Type;
 
+/**
+ * One version of a skill as its history lists it (D8): who put it, when, and what it described
+ * itself as — everything `SkillRecord` holds except the body, so a skill with many versions is one
+ * small read. A version's body is `getSkill` with that version.
+ */
+export const SkillVersionSummary = Schema.Struct({
+  name: Schema.String,
+  version: SkillVersion,
+  description: Schema.String,
+  createdAt: Timestamp,
+  /** The control-plane actor that put it (LOB-20); empty for a seed or an unattributed put. */
+  author: Schema.String,
+});
+export type SkillVersionSummary = typeof SkillVersionSummary.Type;
+
 export const ListSkillsInput = Schema.Struct({});
 export type ListSkillsInput = typeof ListSkillsInput.Type;
 
@@ -74,6 +89,12 @@ export const GetSkillInput = Schema.Struct({
   version: Schema.optional(SkillVersion),
 });
 export type GetSkillInput = typeof GetSkillInput.Type;
+
+/** Every version of one skill, newest first: its history. A name the factory lacks is `SkillNotFound`. */
+export const ListSkillVersionsInput = Schema.Struct({
+  name: Schema.String,
+});
+export type ListSkillVersionsInput = typeof ListSkillVersionsInput.Type;
 
 /**
  * A new version of a skill: written as `newest + 1`, or as version 1 for a name the factory does not
@@ -118,3 +139,62 @@ export const SkillErrorSchema = Schema.Union([
   InvalidSkill,
   SkillStorageError,
 ]);
+
+/** The parts of a `SKILL.md` a put needs: its frontmatter's `name` and `description`, and the body. */
+export type SkillDocument = {
+  readonly name?: string;
+  readonly description?: string;
+  readonly body: string;
+};
+
+/**
+ * Read a `SKILL.md` the way `.pi/skills/<name>/SKILL.md` is written: an optional `---` frontmatter
+ * block, then the markdown body. Of the frontmatter only `name` and `description` are read — plain,
+ * quoted, or a `|` / `>` block scalar — and every other key is ignored, because nothing else is a
+ * field of a factory skill. The frontmatter is not part of the body, as the loader never injects it
+ * (`@repo/harness`'s `RunSkill`). A file with no frontmatter is all body.
+ *
+ * Shared by the two readers of a `SKILL.md`: `factory skill put`, and the control plane listing a
+ * repository's own skills into a run's prompt (`@repo/core`'s `repoContext`).
+ *
+ * Not a YAML parser: the subset the repo's own skills use, so a put of one of them round-trips.
+ */
+export const parseSkillDocument = (text: string): SkillDocument => {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  if (lines[0]?.trim() !== "---") return { body: text };
+  const close = lines.findIndex(
+    (line, index) => index > 0 && line.trim() === "---",
+  );
+  if (close < 0) return { body: text };
+  const fields = new Map<string, string>();
+  for (let index = 1; index < close; index += 1) {
+    const match = /^([A-Za-z_][\w-]*):\s*(.*)$/.exec(lines[index] ?? "");
+    if (match === null) continue;
+    const key = match[1] ?? "";
+    const raw = (match[2] ?? "").trim();
+    if (/^[|>][+-]?$/.test(raw)) {
+      // A block scalar: the indented lines after the key, joined as `|` keeps them or `>` folds them.
+      const block: string[] = [];
+      while (index + 1 < close) {
+        const next = lines[index + 1] ?? "";
+        if (next.trim() !== "" && !/^\s/.test(next)) break;
+        block.push(next.trim());
+        index += 1;
+      }
+      fields.set(key, block.join(raw.startsWith("|") ? "\n" : " ").trim());
+      continue;
+    }
+    const quoted = /^(["'])(.*)\1$/.exec(raw);
+    fields.set(key, quoted === null ? raw : (quoted[2] ?? ""));
+  }
+  const name = fields.get("name");
+  const description = fields.get("description");
+  return {
+    ...(name === undefined || name === "" ? {} : { name }),
+    ...(description === undefined ? {} : { description }),
+    body: lines
+      .slice(close + 1)
+      .join("\n")
+      .replace(/^\n+/, ""),
+  };
+};

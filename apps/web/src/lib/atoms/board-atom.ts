@@ -1,12 +1,15 @@
 import type {
   BoardDefinition,
   BoardInstanceId,
+  BlockTaskInput,
   CommentTaskInput,
   CreateBoardInput,
   CreateTaskInput,
   MoveTaskInput,
   Task,
   TaskId,
+  UnblockTaskInput,
+  UpdateTaskInput,
 } from "@repo/domain/Task";
 import type { DecideApprovalInput } from "@repo/domain/Approval";
 import type { SessionId } from "@repo/domain/Session";
@@ -154,6 +157,38 @@ export const moveTaskAtom = runtime.fn(
     Effect.gen(function* () {
       const rpc = yield* RpcClient;
       return yield* rpc.client.moveTask(input);
+    }),
+  { reactivityKeys: [BOARD_KEY] },
+);
+
+/**
+ * The card pane's state writes (C11), each at the revision the pane rendered, as a move is (LOB-76):
+ * block a card, lift its block, and fix its title or priority. The answer is the server's card or its
+ * typed refusal; the lanes show the change when the board read that `BOARD_KEY` re-runs says so.
+ */
+export const blockTaskAtom = runtime.fn(
+  (input: BlockTaskInput) =>
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.blockTask(input);
+    }),
+  { reactivityKeys: [BOARD_KEY] },
+);
+
+export const unblockTaskAtom = runtime.fn(
+  (input: UnblockTaskInput) =>
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.unblockTask(input);
+    }),
+  { reactivityKeys: [BOARD_KEY] },
+);
+
+export const updateTaskAtom = runtime.fn(
+  (input: UpdateTaskInput) =>
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.updateTask(input);
     }),
   { reactivityKeys: [BOARD_KEY] },
 );

@@ -1,6 +1,7 @@
 export * from "./loader";
 export * from "./models";
 export * from "./pages";
+export * from "./repoContext";
 export * from "./policy";
 export * from "./projection";
 export * from "./session";

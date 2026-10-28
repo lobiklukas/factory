@@ -59,6 +59,7 @@ import {
   TaskStorageError,
   UndeclaredTransition,
   UnblockTaskInput,
+  UpdateTaskInput,
 } from "@repo/domain/Task";
 import {
   CurateSessionInput,
@@ -74,14 +75,23 @@ import {
 } from "@repo/domain/Cost";
 import { StartMissionInput, StartMissionResult } from "@repo/domain/Mission";
 import { OutcomeReport, OutcomesInput } from "@repo/domain/Outcomes";
-import { GetServerInfoInput, ServerInfo } from "@repo/domain/Server";
+import {
+  CheckDeploymentInput,
+  DeploymentChecks,
+  GetServerInfoInput,
+  ModelPing,
+  PingModelInput,
+  ServerInfo,
+} from "@repo/domain/Server";
 import {
   GetSkillInput,
   ListSkillsInput,
+  ListSkillVersionsInput,
   PutSkillInput,
   SkillErrorSchema,
   SkillRecord,
   SkillSummary,
+  SkillVersionSummary,
 } from "@repo/domain/Skill";
 import {
   AddTriggerRouteInput,
@@ -493,6 +503,12 @@ export class TasksRpc extends RpcGroup.make(
     success: Task,
     error: TaskErrorSchema,
   }),
+  // A card's title and priority, revision-checked (C11): one revision, one event per changed field.
+  Rpc.make("updateTask", {
+    payload: UpdateTaskInput,
+    success: Task,
+    error: TaskErrorSchema,
+  }),
   // The thread on a card (B7, LOB-73): a comment, and — from a person, on a card blocked
   // `needs_input` — the answer that lifts the block. The question half is the run's own `ask` tool,
   // which writes in-process; there is no RPC for a client to ask on a run's behalf.
@@ -578,6 +594,24 @@ export class ServerRpc extends RpcGroup.make(
 ).middleware(ControlPlaneAuth) {}
 
 /**
+ * What `factory doctor` asks beyond `getServerInfo` (E8): the checks only the control plane can run
+ * (each registered repo's forge credential and base ref, the trigger rules and env files the boot
+ * read), and, only when `--live` asks, one minimal request to the default model, which is the one
+ * thing here that spends. Neither carries a credential's value. `checkDeployment` answers while
+ * Postgres is down, with the registry's read failure as `reposError`.
+ */
+export class DoctorRpc extends RpcGroup.make(
+  Rpc.make("checkDeployment", {
+    payload: CheckDeploymentInput,
+    success: DeploymentChecks,
+  }),
+  Rpc.make("pingModel", {
+    payload: PingModelInput,
+    success: ModelPing,
+  }),
+).middleware(ControlPlaneAuth) {}
+
+/**
  * The factory's skills (D7): the prompt text a column binds (docs/board.md B6), read and edited
  * without a migration. A put is a new version, never an update, and a run keeps the version its log
  * pinned when it opened (B2), so an edit reaches the next run and no run in flight. Its own group:
@@ -594,6 +628,13 @@ export class SkillsRpc extends RpcGroup.make(
   Rpc.make("getSkill", {
     payload: GetSkillInput,
     success: SkillRecord,
+    error: SkillErrorSchema,
+  }),
+  // Every version of one skill, newest first, without the bodies (D8): the dashboard's history. An
+  // unknown name is `SkillNotFound`.
+  Rpc.make("listSkillVersions", {
+    payload: ListSkillVersionsInput,
+    success: Schema.Array(SkillVersionSummary),
     error: SkillErrorSchema,
   }),
   // Version newest + 1 (1 for a new name), attributed to the caller's credential. A blank body is
@@ -613,4 +654,5 @@ export const RpcApi = SessionRpc.merge(ApprovalsRpc)
   .merge(TasksRpc)
   .merge(TriggerRoutesRpc)
   .merge(ServerRpc)
+  .merge(DoctorRpc)
   .merge(SkillsRpc);
