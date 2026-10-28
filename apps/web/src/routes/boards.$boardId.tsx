@@ -13,6 +13,7 @@ import { BoardLanesView } from "@/components/board-lanes";
 import { CardPane } from "@/components/card-pane";
 import { CheckoutWarning } from "@/components/checkout-warning";
 import { EmptyPane } from "@/components/empty-pane";
+import { GettingStarted } from "@/components/getting-started";
 import { NewCardDialog } from "@/components/new-card";
 import { buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -211,6 +212,10 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
           }}
         />
         <CheckoutWarning warning={last.warning} />
+        {/* A board with no card is the next step of the checklist (C9); it leaves once a card exists. */}
+        {tasks.length === 0 ? (
+          <GettingStarted className="mx-4 mt-3 max-w-xl" boardId={boardId} />
+        ) : null}
         <BoardLanesView
           boardId={boardId}
           board={boardLanes(definition, tasks)}
