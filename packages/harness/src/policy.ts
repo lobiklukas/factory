@@ -161,6 +161,19 @@ const ownBranchRef = (rules: AutonomyRules): string | undefined =>
       ? undefined
       : `${SESSION_BRANCH_NAMESPACE}${rules.sessionId}`;
 
+/**
+ * The ref a refusal tells the session to push instead: its own (`ownBranchRef`) when the rules name
+ * one the prefixes allow, so a run bound to a card's branch is pointed at that branch and not at its
+ * own id's, which it may not push (F15); D11's placeholder otherwise.
+ */
+const pushHint = (rules: AutonomyRules): string => {
+  const own = ownBranchRef(rules);
+  return own !== undefined &&
+    rules.pushRefPrefixes.some((prefix) => own.startsWith(prefix))
+    ? own
+    : `${SESSION_BRANCH_NAMESPACE}<session-id>`;
+};
+
 /** Resolve a deployment's configuration for one session's worktree. */
 export const autonomyRules = (
   config: AutonomyConfig,
@@ -616,7 +629,7 @@ const decidePush = (
 
   if (flags.some((flag) => isFlag(flag, "--mirror"))) {
     return block(
-      "git push --mirror is refused: it pushes every ref, including ones this session does not own. Push refs/heads/factory/<session-id> instead.",
+      `git push --mirror is refused: it pushes every ref, including ones this session does not own. Push ${pushHint(rules)} instead.`,
     );
   }
   const force = flags.find((flag) =>
@@ -624,7 +637,7 @@ const decidePush = (
   );
   if (force !== undefined) {
     return block(
-      `git push ${force} is refused: rewriting history on a shared ref cannot be undone. Push an ordinary commit on refs/heads/factory/<session-id> instead.`,
+      `git push ${force} is refused: rewriting history on a shared ref cannot be undone. Push an ordinary commit on ${pushHint(rules)} instead.`,
     );
   }
   if (flags.some((flag) => isFlag(flag, "--delete") || isFlag(flag, "-d"))) {
@@ -639,7 +652,7 @@ const decidePush = (
   }
   if (flags.some((flag) => isFlag(flag, "--all"))) {
     return block(
-      "git push --all is refused: it pushes every branch, including ones this session does not own. Name the ref: git push origin refs/heads/factory/<session-id>.",
+      `git push --all is refused: it pushes every branch, including ones this session does not own. Name the ref: git push origin ${pushHint(rules)}.`,
     );
   }
 
@@ -669,13 +682,13 @@ const decidePush = (
   const refspecs = positional.slice(1);
   if (refspecs.length === 0) {
     return block(
-      "git push with no ref is refused: it pushes whatever the current branch tracks, which may be main. Name the ref: git push origin refs/heads/factory/<session-id>.",
+      `git push with no ref is refused: it pushes whatever the current branch tracks, which may be main. Name the ref: git push origin ${pushHint(rules)}.`,
     );
   }
   for (const refspec of refspecs) {
     if (refspec.startsWith("+")) {
       return block(
-        `git push ${refspec} is refused: a leading + forces the update. Push an ordinary commit on refs/heads/factory/<session-id> instead.`,
+        `git push ${refspec} is refused: a leading + forces the update. Push an ordinary commit on ${pushHint(rules)} instead.`,
       );
     }
     const { source, destination } = refspecSides(refspec);
@@ -696,7 +709,7 @@ const decidePush = (
     }
     if (!rules.pushRefPrefixes.some((prefix) => ref.startsWith(prefix))) {
       return block(
-        `pushing ${ref} is refused: this session may only push ${rules.pushRefPrefixes.join(", ")}. Push refs/heads/factory/<session-id> instead.`,
+        `pushing ${ref} is refused: this session may only push ${rules.pushRefPrefixes.join(", ")}. Push ${pushHint(rules)} instead.`,
       );
     }
     const own = ownBranchRef(rules);
@@ -731,7 +744,7 @@ const decideGit = (
         verb === "rename"
       ) {
         return block(
-          `git remote ${verb} is refused: changing remotes is always blocked (D11). The session's remote is fixed; push refs/heads/factory/<session-id> to it instead.`,
+          `git remote ${verb} is refused: changing remotes is always blocked (D11). The session's remote is fixed; push ${pushHint(rules)} to it instead.`,
         );
       }
       return ALLOW;
@@ -750,7 +763,7 @@ const decideGit = (
           key.endsWith(".insteadof"))
       ) {
         return block(
-          `git config ${key} is refused: it changes where a remote points, which is always blocked (D11). The session's remote is fixed; push refs/heads/factory/<session-id> to it instead.`,
+          `git config ${key} is refused: it changes where a remote points, which is always blocked (D11). The session's remote is fixed; push ${pushHint(rules)} to it instead.`,
         );
       }
       return ALLOW;

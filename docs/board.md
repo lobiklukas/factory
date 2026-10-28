@@ -446,8 +446,9 @@ pushed as an open is — so its commits reach the PR — but GitHub is asked for
 recorded in its log, and the answer is `already-open`. A PR closed without merging is recorded on its
 sessions (`sessions.pr_closed_at`, F12, from the signed delivery or the PR-state read) and is not
 adopted: the next run opens a fresh PR from the card's branch. The card's PR steps are serialized per
-card by a Postgres advisory lock as well as in-process (F13), so two API processes stepping the same
-card's PR open one PR and the second adopts it. The agent's own `git push` may publish the branch its
+card by a presence lease (`leases`, kind `card_pr`) as well as in-process (F13), so two API processes
+stepping the same card's PR open one PR and the second adopts it; the lease holds no connection while
+the step pushes and calls GitHub. The agent's own `git push` may publish the branch its
 worktree is bound to — the card's — and no other `refs/heads/factory/*` (F15). A workspace release keeps a branch another unreleased session
 is bound to, so discarding one run never deletes the branch the others work on.
 

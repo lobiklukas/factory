@@ -32,6 +32,7 @@ import {
 import { createFauxModelAccess } from "@repo/harness";
 import { DatabaseLive } from "@repo/storage-postgres";
 import {
+  ConfigProvider,
   Context,
   Effect,
   Layer,
@@ -205,12 +206,46 @@ const processOver = (root: string) =>
     ),
   );
 
+/**
+ * A process whose pool has three connections (`DATABASE_MAX_CONNECTIONS`), fewer than the cards the
+ * pool case steps at once: what a card's PR gate holds while its step runs is what that case counts.
+ */
+const POOL_SIZE = 3;
+const narrowRoot = mkdtempSync(join(tmpdir(), "factory-f13-narrow-"));
+const narrow = ManagedRuntime.make(
+  TaskServiceLive.pipe(
+    Layer.provideMerge(
+      SessionServiceLive({
+        model: createFauxModelAccess({ fauxCommand: COMMAND }).access,
+        sessionRoot: narrowRoot,
+        repoRemote,
+      }),
+    ),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        DatabaseLive.pipe(
+          Layer.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnvRecord({
+                ...process.env,
+                DATABASE_MAX_CONNECTIONS: String(POOL_SIZE),
+              }),
+            ),
+          ),
+        ),
+        BunServices.layer,
+      ),
+    ),
+  ),
+);
+
 const first = processOver(sessionRoot);
 const secondRoot = aliasOf(sessionRoot);
 const second = processOver(secondRoot);
 
 afterAll(async () => {
   rmSync(hold, { force: true });
+  await narrow.dispose();
   await second.dispose();
   await first.dispose();
 });
@@ -232,8 +267,8 @@ const waitUntil = <A, E, R>(
 let boards = 0;
 
 /** A card in `building` on a board of its own, pinned to default version 4, which declares no caps. */
-const cardInBuilding = (title: string) =>
-  first.runPromise(
+const cardInBuilding = (title: string, runtime: typeof first = first) =>
+  runtime.runPromise(
     Effect.gen(function* () {
       const service = yield* SessionService;
       const tasks = yield* TaskService;
@@ -262,8 +297,8 @@ const cardInBuilding = (title: string) =>
     }),
   );
 
-const worktreeOf = (repo: string, sessionId: string) =>
-  join(sessionRoot, ...repo.split("/"), sessionId);
+const worktreeOf = (repo: string, sessionId: string, root = sessionRoot) =>
+  join(root, ...repo.split("/"), sessionId);
 
 describe("a card's branch and PR across two API processes (F13)", () => {
   /**
@@ -416,5 +451,77 @@ describe("a card's branch and PR across two API processes (F13)", () => {
       "opened",
     ]);
     expect(rows.map((row) => row.prUrl)).toEqual([pr?.html_url, pr?.html_url]);
+  }, 240_000);
+  /**
+   * Mutation this catches: hold a Postgres connection for the card's PR step — an advisory lock in a
+   * transaction open around it, as F13 first did. Three cards' steps then hold the pool's three
+   * connections while each one's own statements (the log's commit of the PR, the `pr_url`) wait for
+   * a fourth, and no step ever ends. The lease holds none while the step pushes and calls GitHub.
+   */
+  it("steps more cards' PRs at once than the process's pool has connections", async () => {
+    const cards = await Promise.all(
+      Array.from({ length: POOL_SIZE + 1 }, (_, index) =>
+        cardInBuilding(`pool card ${index}`, narrow),
+      ),
+    );
+    const runs: Array<{ readonly id: SessionId; readonly branch: string }> =
+      [];
+    for (const card of cards) {
+      const run = await narrow.runPromise(
+        Effect.flatMap(SessionService, (service) =>
+          service.create({ taskId: card.taskId, taskColumn: "building" }),
+        ),
+      );
+      const tree = worktreeOf(card.repo, run.id, narrowRoot);
+      writeFileSync(join(tree, "pool.txt"), `${card.taskId}\n`);
+      git(tree, "add", "pool.txt");
+      git(tree, "commit", "-q", "-m", "f13 pool");
+      runs.push({ id: run.id, branch: `factory/${run.id}` });
+    }
+
+    const before = posts.length;
+    const answers = await narrow.runPromise(
+      Effect.flatMap(SessionService, (service) =>
+        Effect.forEach(
+          runs,
+          (run) =>
+            service
+              .openPullRequest({ sessionId: run.id, title: "pool" })
+              .pipe(Effect.provideContext(forgeContext)),
+          { concurrency: "unbounded" },
+        ),
+      ).pipe(
+        Effect.timeoutOrElse({
+          duration: "60 seconds",
+          orElse: () =>
+            Effect.die(
+              new Error(
+                "the cards' PR steps never ended: the pool ran out of connections",
+              ),
+            ),
+        }),
+      ),
+    );
+    const leases = await narrow.runPromise(
+      Effect.flatMap(
+        SqlClient,
+        (sql) => sql<{ key: string }>`
+          SELECT key FROM leases
+          WHERE kind = 'card_pr' AND key IN ${sql.in(cards.map((card) => card.taskId))}
+        `,
+      ),
+    );
+
+    expect(answers.map((answer) => answer.outcome)).toEqual(
+      runs.map(() => "opened"),
+    );
+    expect(
+      posts
+        .slice(before)
+        .map((post) => post.head)
+        .sort(),
+    ).toEqual(runs.map((run) => run.branch).sort());
+    // Every step gave its card's lease back when it ended.
+    expect(leases).toEqual([]);
   }, 240_000);
 });

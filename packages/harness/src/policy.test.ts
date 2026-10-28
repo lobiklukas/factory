@@ -426,6 +426,36 @@ describe("a session bound to a branch pushes that branch only (F15)", () => {
     }
   });
 
+  /**
+   * Mutation: leave a refusal's hint at `factory/<session-id>` — a bound run that follows it pushes
+   * its own id's branch, which the namespace rule then refuses.
+   */
+  it("points every other refusal at the bound branch", () => {
+    for (const command of [
+      "git push --mirror origin",
+      "git push --force origin HEAD:refs/heads/factory/ses_1",
+      "git push --all origin",
+      "git push origin",
+      "git push origin +HEAD:refs/heads/factory/ses_1",
+      "git push origin HEAD:refs/heads/main",
+      "git remote add other https://example.com/x.git",
+      "git config remote.origin.url https://example.com/x.git",
+    ]) {
+      const decision = decideToolCall(bound, bash(command));
+      expect(decision._tag).toBe("block");
+      if (decision._tag !== "block") throw new Error("unreachable");
+      expect(decision.reason).toContain("refs/heads/factory/ses_1");
+      expect(decision.reason).not.toContain("<session-id>");
+    }
+    // A scratch session's hint is its own id's branch; rules naming no session keep D11's placeholder.
+    const scratch = autonomyRules(DEFAULT_AUTONOMY, "/work/ses_5", "ses_5");
+    const refusal = decideToolCall(scratch, bash("git push origin"));
+    expect(refusal).toMatchObject({ _tag: "block" });
+    expect(refusal._tag === "block" ? refusal.reason : "").toContain(
+      "git push origin refs/heads/factory/ses_5",
+    );
+  });
+
   /** A reviewer's branch is its own too: before F15 its own id was the only one it could push. */
   it("allows a bound branch that names no session", () => {
     const reviewer = autonomyRules(

@@ -970,6 +970,12 @@ export type SessionServiceOptions = {
 export const DEFAULT_FOLLOW_POLL_MS = 2_000;
 
 /**
+ * The longest wait between two attempts on a card's PR lease another process holds (F13): the
+ * wait starts at 50ms and doubles to this, so a loser hears of the holder's release within a second.
+ */
+const CARD_PR_LEASE_POLL_MAX_MS = 1_000;
+
+/**
  * Whether a clone URL carries a credential: a password anywhere, or a username on http(s), where it
  * is the token's place (`https://<token>@host/...`). `ssh://git@host/...` is the ordinary form of an
  * ssh URL — its username is the login, not a secret — and is registered as given.
@@ -1432,19 +1438,24 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        */
       const withCardPrInProcess = keyedGate<string>();
       /**
-       * The same across processes (F13): under the in-process gate — so one fiber per card per
-       * process waits on the database, holding one connection — the step takes a transaction-scoped
-       * advisory lock on the card (`pg_advisory_xact_lock`, as `TaskService.file` and the run caps
-       * do). Two API processes on one database stepping the same card's PR then step one after the
-       * other: the second reads the PR the first recorded (`cardPullRequestFor`) and adopts it,
-       * answering `already-open`, rather than asking GitHub for a second open of the same head.
+       * The same across processes (F13): under the in-process gate, the step holds the card's PR
+       * lease (`./Presence`, kind `card_pr`, keyed by task) — the table every process already claims
+       * its sessions in. Two API processes on one database stepping the same card's PR then step one
+       * after the other: the second reads the PR the first recorded (`cardPullRequestFor`) and adopts
+       * it, answering `already-open`, rather than asking GitHub for a second open of the same head.
        *
-       * Only the lock is in the transaction. The step runs in the context it was called in, which
-       * holds none of the lock's connection, so its own statements — the `pr_url` it records, the reads before it —
-       * go to the pool and commit as they always did, and nothing it writes waits on the lock's
-       * commit; its push and its GitHub call hold no row. The lock goes when the step ends (the
-       * transaction commits, however the step ended, or rolls back on an interruption) or with the connection,
-       * when the process holding it dies.
+       * A lease rather than a Postgres lock held open for the step: an advisory lock lives on one
+       * connection, which the step's push and GitHub call would pin from the pool for minutes — so a
+       * handful of cards stepping at once would hold every connection while their own statements, and
+       * the log's writes, waited for one — and a transaction open around the step hands its
+       * connection to everything the step runs and forks. The lease holds nothing while the step
+       * runs: each claim, renewal and release is one short statement, the step runs in the context
+       * it was called in, and a process waiting for another's lease polls it rather than holding a
+       * connection. The holder renews it every third of the TTL until the step ends, and releases it
+       * then, however the step ended; a process that dies stops renewing, and its lease lapses after
+       * the TTL. A claim lost while the step runs — a renewal held up past the TTL — is logged and
+       * the step carries on: the worst it costs is the second open GitHub refuses for the head, which
+       * `createPullRequest` adopts (LOB-179), as before F13.
        */
       const withCardPrGate = <A, E, R>(
         taskId: string,
@@ -1452,30 +1463,66 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       ): Effect.Effect<A, E | SessionError, R> =>
         withCardPrInProcess(
           taskId,
-          Effect.gen(function* () {
-            // The context the step was called in, which holds no transaction of the lock's.
-            const outside = yield* Effect.context<R>();
-            // The step's own exit is the transaction's value, so a failure of the lock alone is the
-            // `storage` error here, and the step's failures come out as they went in.
-            const stepped = yield* sql
-              .withTransaction(
-                Effect.andThen(
-                  sql`SELECT pg_advisory_xact_lock(hashtext(${`card_pr:${taskId}`}))`,
-                  Effect.exit(Effect.provideContext(step, outside)),
+          Effect.acquireUseRelease(
+            claimCardPr(taskId),
+            (fence) =>
+              Effect.gen(function* () {
+                const renewing = yield* Effect.forkChild(
+                  renewCardPr(taskId, fence),
+                );
+                return yield* step.pipe(
+                  Effect.ensuring(Fiber.interrupt(renewing)),
+                );
+              }),
+            (fence) =>
+              presence.release("card_pr", taskId, fence).pipe(
+                Effect.catch((error) =>
+                  Effect.logWarning(
+                    `task ${taskId}: its PR lease was not released and lapses in ${presence.ttlMs}ms: ${String(error)}`,
+                  ),
                 ),
-              )
-              .pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new SessionErrorClass({
-                      code: "storage",
-                      message: `take task ${taskId}'s PR lock: ${cause.message}`,
-                    }),
-                ),
-              );
-            return yield* stepped;
-          }),
+              ),
+          ),
         );
+      /**
+       * Take the card's PR lease, waiting while another process holds it. Each attempt is one
+       * statement, run uninterruptibly so a claim taken is always handed to the release; the wait
+       * between attempts is interruptible, so a caller that gives up while another process steps
+       * the card stops waiting and holds nothing.
+       */
+      const claimCardPr = (
+        taskId: string,
+      ): Effect.Effect<number, SessionError> =>
+        Effect.gen(function* () {
+          for (let attempt = 0; ; attempt += 1) {
+            const claim = yield* paper(
+              `take task ${taskId}'s PR lease`,
+              presence.acquire("card_pr", taskId),
+            );
+            if (claim._tag === "Held") return claim.fence;
+            yield* Effect.interruptible(
+              Effect.sleep(
+                Math.min(CARD_PR_LEASE_POLL_MAX_MS, 50 * 2 ** Math.min(attempt, 5)),
+              ),
+            );
+          }
+        });
+      /** Keep the card's PR lease while its step runs: renewed every third of the TTL until interrupted. */
+      const renewCardPr = (taskId: string, fence: number) =>
+        Effect.gen(function* () {
+          for (;;) {
+            yield* Effect.sleep(Math.max(1, Math.trunc(presence.ttlMs / 3)));
+            const renewed = yield* presence
+              .renew("card_pr", [{ key: taskId, fence }])
+              .pipe(Effect.option);
+            if (Option.isSome(renewed) && !renewed.value.has(taskId)) {
+              yield* Effect.logWarning(
+                `task ${taskId}: its PR lease lapsed while its PR step ran; another process may step the card's PR too`,
+              );
+              return;
+            }
+          }
+        });
       /**
        * Serializes the approvals of one session, for the reason `withPrGate` serializes PR opens: two
        * overlapping calls would each read a proposal as not yet created and each create it. Keyed by
