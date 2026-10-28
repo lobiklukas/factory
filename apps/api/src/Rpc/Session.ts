@@ -50,6 +50,8 @@ const SessionRpcHandlers = SessionRpc.toLayer(
       curateSession: (input) => sessions.curate(input),
       // Proposals only (LOB-201): nothing is created in a tracker and no session is started.
       proposeDecomposition: (input) => sessions.proposeDecomposition(input),
+      // Creates the approved proposals in the tracker (LOB-202), behind the session layer's port.
+      approveProposals: (input) => sessions.approveProposals(input),
       registerRepo: (input) => sessions.registerRepo(input),
       listRepos: () => sessions.listRepos,
       getRepo: (input) => sessions.getRepo(input),

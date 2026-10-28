@@ -1,8 +1,11 @@
 // The loopback Linear GraphQL API the write-back is driven against (LOB-15).
 //
-// One route, because Linear's API is one: `POST /graphql`. It answers exactly the four operations
-// the sync sends — the issue read (`query FactoryIssue`), `commentCreate`, `issueUpdate` and
-// `attachmentCreate` — and anything else is a GraphQL error, so a client that started asking for
+// One route, because Linear's API is one: `POST /graphql`. It answers exactly the operations the
+// sync sends — the issue read (`query FactoryIssue`), `commentCreate`, `issueUpdate` and
+// `attachmentCreate` (LOB-15), and the four a session's approved proposals need (LOB-202): the
+// parent read that carries the team and the children (`query FactoryParent`), `issueCreate`, the
+// blocker's relations (`query FactoryRelations`) and `issueRelationCreate` — and anything else is a
+// GraphQL error, so a client that started asking for
 // more would fail here instead of being answered by a fake that guessed. Any other path is a 404.
 //
 // Issues are created on first read, in `Todo`, in a team with Linear's default workflow states, so
@@ -41,6 +44,23 @@ type Ledger = {
   readonly issues: Record<string, Issue>;
   /** The issues whose comment landed and was answered 500: the window the retry has to close. */
   readonly lostAcks: string[];
+  /** The issues `issueCreate` made (LOB-202), each under the parent it was given. */
+  readonly children: Child[];
+  /** The `issueRelationCreate`s that landed, in order. */
+  readonly relations: Array<{
+    readonly issueId: string;
+    readonly relatedIssueId: string;
+    readonly type: string;
+  }>;
+};
+
+type Child = {
+  readonly id: string;
+  readonly identifier: string;
+  readonly teamId: string;
+  readonly parentId: string;
+  readonly title: string;
+  readonly description: string;
 };
 
 const port = Number(process.env["LINEAR_FAKE_PORT"] ?? "9416");
@@ -69,7 +89,13 @@ const STATES: readonly State[] = (
   type: typeOf[name] ?? "started",
 }));
 
-const empty: Ledger = { requests: [], issues: {}, lostAcks: [] };
+const empty: Ledger = {
+  requests: [],
+  issues: {},
+  lostAcks: [],
+  children: [],
+  relations: [],
+};
 
 const read = (): Ledger => {
   try {
@@ -97,13 +123,21 @@ const json = (status: number, body: unknown): Response =>
 const operationOf = (query: string): string | undefined =>
   query.startsWith("query FactoryIssue")
     ? "issue"
-    : query.includes("commentCreate(")
-      ? "commentCreate"
-      : query.includes("issueUpdate(")
-        ? "issueUpdate"
-        : query.includes("attachmentCreate(")
-          ? "attachmentCreate"
-          : undefined;
+    : query.startsWith("query FactoryParent")
+      ? "issueChildren"
+      : query.startsWith("query FactoryRelations")
+        ? "issueRelations"
+        : query.includes("commentCreate(")
+          ? "commentCreate"
+          : query.includes("issueUpdate(")
+            ? "issueUpdate"
+            : query.includes("attachmentCreate(")
+              ? "attachmentCreate"
+              : query.includes("issueRelationCreate(")
+                ? "issueRelationCreate"
+                : query.includes("issueCreate(")
+                  ? "issueCreate"
+                  : undefined;
 
 /** The issue a variable names — by UUID or identifier — created on first sight. */
 const issueFor = (ledger: Ledger, key: string): Issue => {
@@ -166,6 +200,83 @@ const server = Bun.serve({
           },
         });
       }
+      case "issueChildren": {
+        const issue = issueFor(ledger, String(variables["id"]));
+        write(ledger);
+        return json(200, {
+          data: {
+            issue: {
+              id: issue.id,
+              identifier: issue.identifier,
+              team: { id: `team-${issue.identifier}` },
+              children: {
+                nodes: ledger.children
+                  .filter((child) => child.parentId === issue.id)
+                  .map(({ id, identifier, description }) => ({
+                    id,
+                    identifier,
+                    description,
+                  })),
+              },
+            },
+          },
+        });
+      }
+      case "issueCreate": {
+        const made: Child = {
+          id: `uuid-child-${ledger.children.length + 1}`,
+          identifier: `${String(input["parentId"]).replace(/^uuid-/, "")}-C${ledger.children.length + 1}`,
+          teamId: String(input["teamId"]),
+          parentId: String(input["parentId"]),
+          title: String(input["title"]),
+          description: String(input["description"] ?? ""),
+        };
+        ledger.children.push(made);
+        write(ledger);
+        return json(200, {
+          data: {
+            issueCreate: {
+              success: true,
+              issue: { id: made.id, identifier: made.identifier },
+            },
+          },
+        });
+      }
+      case "issueRelations": {
+        const key = String(variables["id"]);
+        const known =
+          Object.values(ledger.issues).find((issue) => issue.id === key) ??
+          ledger.children.find((child) => child.id === key);
+        write(ledger);
+        return json(200, {
+          data: {
+            issue:
+              known === undefined
+                ? null
+                : {
+                    id: known.id,
+                    identifier: known.identifier,
+                    relations: {
+                      nodes: ledger.relations
+                        .filter((relation) => relation.issueId === known.id)
+                        .map((relation) => ({
+                          type: relation.type,
+                          relatedIssue: { id: relation.relatedIssueId },
+                        })),
+                    },
+                  },
+          },
+        });
+      }
+      case "issueRelationCreate": {
+        ledger.relations.push({
+          issueId: String(input["issueId"]),
+          relatedIssueId: String(input["relatedIssueId"]),
+          type: String(input["type"]),
+        });
+        write(ledger);
+        return json(200, { data: { issueRelationCreate: { success: true } } });
+      }
       case "commentCreate": {
         const issue = issueFor(ledger, String(input["issueId"]));
         issue.comments.push(String(input["body"]));
@@ -206,7 +317,7 @@ const server = Bun.serve({
           errors: [
             {
               message:
-                "this fake answers only the write-back's four operations",
+                "this fake answers only the operations the write-back and the proposal approval send",
             },
           ],
         });

@@ -23,5 +23,6 @@ export * from "./Sentry";
 export * from "./git";
 export * from "./Linear";
 export * from "./LinearSync";
+export * from "./ProposalTracker";
 export * from "./SessionWriteBack";
 export * from "./WorkspaceRelease";

@@ -196,6 +196,12 @@ The decomposition checks (LOB-201) were run from the `agent/LOB-201` worktree on
 faux with `FAUX_SPEC`, API on `DECOMPOSE_PORT=9521`): `./decompose.sh` **11/11** (8 driver checks,
 3 shell checks), evidence `.verify/evidence/lob-201/api/`. See [decompose.md](decompose.md).
 
+The approval checks (LOB-202) were run from the `agent/LOB-202` worktree on 2026-10-28
+(`DATABASE_URL` the worktree's own `factory_agent_lob_202` on 5442, a scratch database minted on it,
+faux with `FAUX_SPEC` and `FAUX_DECOMPOSITION`, the API on `APPROVE_PORT=9681` and the loopback Linear
+on `APPROVE_LINEAR_PORT=9682`): `./approve-proposals.sh` **11/11** (8 driver checks, 3 shell checks),
+evidence `.verify/evidence/lob-202/api/`. See [approve-proposals.md](approve-proposals.md).
+
 The replay checks (LOB-215) were added to `bun drive.ts` and run from the `agent/LOB-215` worktree
 on 2026-10-27 (API on `:9550`, faux with `faux/faux-2` published by `up.sh`, the worktree's own
 database on 5442): **58/58** (52 before, 6 replay checks), evidence `.verify/evidence/lob-215/`,
@@ -220,44 +226,45 @@ branch and worktree on disk while no process ran), evidence `.verify/evidence/lo
 old teardown put back into the owner's release, seven checks fail — the branch is gone after the
 shutdown, and the restarted read cuts a fresh one at the base. See [lifecycle.md](lifecycle.md).
 
-| Feature                  | Status  | File                                       |
-| ------------------------ | ------- | ------------------------------------------ |
-| Create a session         | passing | [create.md](create.md)                     |
-| Repo binding             | passing | [repo-binding.md](repo-binding.md)         |
-| Session list             | passing | [session-list.md](session-list.md)         |
-| Watch a live session     | passing | [live-stream.md](live-stream.md)           |
-| Reset a session          | passing | [reset.md](reset.md)                       |
-| Compact on demand        | passing | [compact.md](compact.md)                   |
-| Fold a released session  | passing | [fold.md](fold.md)                         |
-| A long session's history | passing | [history.md](history.md)                   |
-| Fork a session           | passing | [fork.md](fork.md)                         |
-| Replay a session         | passing | [replay.md](replay.md)                     |
-| Request limits           | passing | [limits.md](limits.md)                     |
-| Probes and readiness     | passing | [probes.md](probes.md)                     |
-| Shutdown and recovery    | passing | [lifecycle.md](lifecycle.md)               |
-| Errors over the wire     | passing | [errors.md](errors.md)                     |
-| One PR across a kill     | passing | [pr-once.md](pr-once.md)                   |
-| Inbound triggers         | passing | [trigger.md](trigger.md)                   |
-| Jira adapter             | passing | [jira.md](jira.md)                         |
-| GitHub issues adapter    | passing | [github.md](github.md)                     |
-| Slack adapter            | passing | [slack.md](slack.md)                       |
-| Linear adapter           | passing | [linear.md](linear.md)                     |
-| Sentry receiver          | passing | [sentry.md](sentry.md)                     |
-| Linear write-back        | passing | [linear-writeback.md](linear-writeback.md) |
-| Approvals                | passing | [approvals.md](approvals.md)               |
-| Curate a session's pages | passing | [curate.md](curate.md)                     |
-| A mission                | passing | [mission.md](mission.md)                   |
-| A docs run               | passing | [docs-run.md](docs-run.md)                 |
-| A docs run on a trigger  | passing | [docs-trigger.md](docs-trigger.md)         |
-| The `verify` tool        | passing | [verify-tool.md](verify-tool.md)           |
-| PR evidence block        | passing | [pr-evidence.md](pr-evidence.md)           |
-| The spec document        | passing | [spec.md](spec.md)                         |
-| A budget cap             | passing | [budget.md](budget.md)                     |
-| The PR step over RPC     | passing | [pr-rpc.md](pr-rpc.md)                     |
-| The pages surface        | passing | [pages.md](pages.md)                       |
-| Propose child issues     | passing | [decompose.md](decompose.md)               |
-| The model backend        | passing | [model-backend.md](model-backend.md)       |
-| What the server runs     | passing | [server-info.md](server-info.md)           |
+| Feature                  | Status  | File                                         |
+| ------------------------ | ------- | -------------------------------------------- |
+| Create a session         | passing | [create.md](create.md)                       |
+| Repo binding             | passing | [repo-binding.md](repo-binding.md)           |
+| Session list             | passing | [session-list.md](session-list.md)           |
+| Watch a live session     | passing | [live-stream.md](live-stream.md)             |
+| Reset a session          | passing | [reset.md](reset.md)                         |
+| Compact on demand        | passing | [compact.md](compact.md)                     |
+| Fold a released session  | passing | [fold.md](fold.md)                           |
+| A long session's history | passing | [history.md](history.md)                     |
+| Fork a session           | passing | [fork.md](fork.md)                           |
+| Replay a session         | passing | [replay.md](replay.md)                       |
+| Request limits           | passing | [limits.md](limits.md)                       |
+| Probes and readiness     | passing | [probes.md](probes.md)                       |
+| Shutdown and recovery    | passing | [lifecycle.md](lifecycle.md)                 |
+| Errors over the wire     | passing | [errors.md](errors.md)                       |
+| One PR across a kill     | passing | [pr-once.md](pr-once.md)                     |
+| Inbound triggers         | passing | [trigger.md](trigger.md)                     |
+| Jira adapter             | passing | [jira.md](jira.md)                           |
+| GitHub issues adapter    | passing | [github.md](github.md)                       |
+| Slack adapter            | passing | [slack.md](slack.md)                         |
+| Linear adapter           | passing | [linear.md](linear.md)                       |
+| Sentry receiver          | passing | [sentry.md](sentry.md)                       |
+| Linear write-back        | passing | [linear-writeback.md](linear-writeback.md)   |
+| Approvals                | passing | [approvals.md](approvals.md)                 |
+| Curate a session's pages | passing | [curate.md](curate.md)                       |
+| A mission                | passing | [mission.md](mission.md)                     |
+| A docs run               | passing | [docs-run.md](docs-run.md)                   |
+| A docs run on a trigger  | passing | [docs-trigger.md](docs-trigger.md)           |
+| The `verify` tool        | passing | [verify-tool.md](verify-tool.md)             |
+| PR evidence block        | passing | [pr-evidence.md](pr-evidence.md)             |
+| The spec document        | passing | [spec.md](spec.md)                           |
+| A budget cap             | passing | [budget.md](budget.md)                       |
+| The PR step over RPC     | passing | [pr-rpc.md](pr-rpc.md)                       |
+| The pages surface        | passing | [pages.md](pages.md)                         |
+| Propose child issues     | passing | [decompose.md](decompose.md)                 |
+| Approve proposals        | passing | [approve-proposals.md](approve-proposals.md) |
+| The model backend        | passing | [model-backend.md](model-backend.md)         |
+| What the server runs     | passing | [server-info.md](server-info.md)             |
 
 The model-backend checks (LOB-258) were run from the `agent/LOB-258` worktree on 2026-10-28
 (`BACKEND_BOOT_PORT=9542`, the worktree's own database on 5442, no repo-root `.env`):
