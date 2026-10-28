@@ -899,3 +899,77 @@ describe("the definition vocabulary over RPC (D6)", () => {
     expect(defined.outcome).toBe("created");
   });
 });
+
+describe("upgrading a board over RPC (D5)", () => {
+  /**
+   * `upgradeBoard` over the wire: the pin moves and the answer names it, a stale expected version is
+   * the typed `StaleBoardVersion`, and a refused migration arrives as `CardMigrationRefused` with each
+   * card it names. Mutation: drop either error from the RPC's error schema — the client decodes a
+   * defect, not the tag.
+   */
+  it("moves the pin, and answers a stale version and a refused migration as typed refusals", async () => {
+    const outcome = await call((client) =>
+      Effect.gen(function* () {
+        const board = yield* client.createBoard({
+          repo: RepoSlug.make(`acme/rpc-board-upgrade-${run}`),
+          definitionId: DEFAULT,
+          definitionVersion: 2,
+        });
+        const old = yield* client.createTask({
+          boardId: board.id,
+          title: "made on v2",
+          actor: "person:lukas",
+        });
+        const upgraded = yield* client.upgradeBoard({
+          boardId: board.id,
+          toVersion: 3,
+          expectedVersion: 2,
+          actor: "person:lukas",
+        });
+        const stale = yield* failureOf(
+          client.upgradeBoard({
+            boardId: board.id,
+            toVersion: 3,
+            expectedVersion: 2,
+            migrateCards: { intake: "intake" },
+            actor: "person:lukas",
+          }),
+        );
+        const refused = yield* failureOf(
+          client.upgradeBoard({
+            boardId: board.id,
+            toVersion: 3,
+            expectedVersion: 3,
+            migrateCards: { review: "review" },
+            actor: "person:lukas",
+          }),
+        );
+        const fresh = yield* client.createTask({
+          boardId: board.id,
+          title: "made on v3",
+          actor: "person:lukas",
+        });
+        return { old, upgraded, stale, refused, fresh };
+      }),
+    );
+    expect(outcome.upgraded).toMatchObject({
+      instance: { definitionVersion: 3 },
+      fromVersion: 2,
+      repinned: [],
+      unmigrated: 1,
+    });
+    expect(outcome.stale).toMatchObject({
+      _tag: "StaleBoardVersion",
+      expected: 2,
+      actual: 3,
+    });
+    expect(outcome.refused).toMatchObject({
+      _tag: "CardMigrationRefused",
+      cards: [
+        { taskId: outcome.old.id, column: "intake", reason: "unmapped_column" },
+      ],
+    });
+    expect(outcome.old.definitionVersion).toBe(2);
+    expect(outcome.fresh.definitionVersion).toBe(3);
+  });
+});

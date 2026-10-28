@@ -14,6 +14,7 @@ import {
   DefinitionId,
   MAX_TASK_BODY_CHARS,
   MAX_TASK_REF_CHARS,
+  pinnedVersionsNotice,
   runPrompt,
   TaskId,
   TaskPriority,
@@ -34,6 +35,7 @@ import { reportFailure, reportFailures } from "../errors";
 import { NO_PR } from "./ls";
 import { BoardClient } from "../rpc";
 import { boardConfigCommands } from "./boardConfig";
+import { boardUpgradeCommands } from "./boardUpgrade";
 
 /**
  * `factory board` — the board over the same RPC client the dashboard uses (D9).
@@ -241,6 +243,10 @@ const lsCommand = Command.make(
       for (const line of warningLines(view.warning, "warning  ")) {
         yield* Console.log(line);
       }
+      // A board upgraded without migrating its cards (D5): its lanes are the new version's, and the
+      // cards still on an older one move by that one's moves.
+      const mixed = pinnedVersionsNotice(view.definition.version, cards);
+      if (mixed !== null) yield* Console.log(`pinned   ${mixed}`);
       for (const column of view.definition.columns) {
         const lane = cards.filter((card) => card.column === column.name);
         yield* Console.log(
@@ -617,6 +623,9 @@ const showCommand = Command.make(
       yield* Console.log(`board     ${card.boardId}`);
       yield* Console.log(`column    ${card.column}`);
       yield* Console.log(`revision  ${card.revision}`);
+      // The version whose moves and exits the card meets (B2): the board's, unless the board was
+      // upgraded after the card was made and the card was not migrated with it (D5).
+      yield* Console.log(`pinned    v${card.definitionVersion}`);
       yield* Console.log(`priority  ${card.priority}`);
       yield* Console.log(`repo      ${card.repo ?? "-"}`);
       yield* Console.log(
@@ -1528,7 +1537,7 @@ const runsCommand = Command.make(
 
 export const boardCommand = Command.make("board").pipe(
   Command.withDescription(
-    "Create a board, read its configuration, add cards, then read and move them: lanes, one card, a move, a comment, a run, a block, what needs a person",
+    "Create a board, read its configuration, upgrade it to a newer definition version, add cards, then read and move them: lanes, one card, a move, a comment, a run, a block, what needs a person",
   ),
   Command.withSubcommands([
     createCommand,
@@ -1540,6 +1549,8 @@ export const boardCommand = Command.make("board").pipe(
     startCommand,
     // Read-only: which boards and definitions exist, and what each does (LOB-270).
     ...boardConfigCommands,
+    // The one write that moves a board's pin, and its cards' with it when asked (D5).
+    ...boardUpgradeCommands,
     blockCommand,
     unblockCommand,
     updateCommand,

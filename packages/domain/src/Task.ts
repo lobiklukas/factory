@@ -508,6 +508,37 @@ export const LIST_BOARDS_LIMIT = 100;
 /** The definition the default pipeline ships under (0007, versioned by 0010 and 0018). */
 export const DEFAULT_DEFINITION_ID = "default";
 
+/** How many of a board's cards pin each definition version (D5), oldest version first. */
+export const cardsByVersion = (
+  tasks: ReadonlyArray<{ readonly definitionVersion: number }>,
+): ReadonlyArray<{ readonly version: number; readonly cards: number }> => {
+  const counts = new Map<number, number>();
+  for (const task of tasks)
+    counts.set(task.definitionVersion, (counts.get(task.definitionVersion) ?? 0) + 1);
+  return [...counts.entries()]
+    .toSorted(([a], [b]) => a - b)
+    .map(([version, cards]) => ({ version, cards }));
+};
+
+/**
+ * What a board says when its cards pin more than one version (D5) — after an upgrade that migrated
+ * none of them, say — or `null` when they all pin one: each version and how many cards pin it, the
+ * board's own marked, because a card moves by the version it pins, not the board's. One sentence for
+ * `factory board ls` and the board page alike.
+ */
+export const pinnedVersionsNotice = (
+  boardVersion: number,
+  tasks: ReadonlyArray<{ readonly definitionVersion: number }>,
+): string | null => {
+  const versions = cardsByVersion(tasks);
+  if (versions.length < 2) return null;
+  const counts = versions.map(
+    ({ version, cards }) =>
+      `${cards} on v${version}${version === boardVersion ? " (the board's)" : ""}`,
+  );
+  return `This board's cards pin more than one version: ${counts.join(", ")}. Each card moves by the version it pins.`;
+};
+
 /**
  * One version of a definition as the list names it (LOB-270): enough to pick one for `createBoard`
  * without reading every version's columns.
