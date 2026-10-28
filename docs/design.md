@@ -158,6 +158,15 @@ commit and no `finished_at`, so its factory time reads as ending at the session'
 which a later commit (an approval, the merge record) stretches. The share is then an upper bound for
 those runs. Recording a run's end in the log is the fix if the share is ever load-bearing.
 
+_As built (S-notifications): a third exception._ `run_failures` (migration 0039) is derived — a
+budget stop and a failed model request are both entries in the log — but `rebuildIndexes` does not
+refold it: the activity projection writes a row as it watches a run end, keyed by the entry that
+announced it, and a row that is missing is a notification not sent, never a wrong one. A rebuild
+leaves the table alone; refolding it from the `factory.budget.stopped` entries and the `stopReason: "error"`
+assistant entries a run ended on is the fix if a dropped table must page again.
+`notification_deliveries` is not derived at all: it is the notifier's outbox and its memory of who
+was told what, control-plane state that is in no log, so dropping it re-sends every open event once.
+
 ### D8 — Read model: live when running, historical when not
 
 If the sandbox is live, the UI attaches to the harness (`viewState()`, `watch()`) and streams.

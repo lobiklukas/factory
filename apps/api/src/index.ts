@@ -70,6 +70,7 @@ import {
   TriggerAdaptersLog,
 } from "./Api/TriggerAdapters";
 import { ProbesLive } from "./Api/Probes";
+import { NotifierDaemon } from "./Notifications";
 import { SessionRpcLive } from "./Rpc/Session";
 import {
   ApiAuthConfig,
@@ -858,6 +859,8 @@ const HttpLive = Effect.gen(function* () {
     LinearSyncLog,
     TriggerAdaptersLog,
     TriggerCheckoutLog(triggerRules),
+    // Tells a person when a run needs them (S-notifications); off, it logs one line and forks nothing.
+    NotifierDaemon(allowedOrigins[0] ?? "http://localhost:3000"),
     PullRequestStepDeps,
     ServerFactsLive,
     controlPlaneAuthLayer(apiTokens),

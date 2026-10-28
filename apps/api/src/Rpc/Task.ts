@@ -2,7 +2,9 @@ import {
   describeDefinition,
   releaseFinishedCard,
   SessionService,
+  SkillService,
   TaskService,
+  TaskStorageError,
 } from "@repo/core";
 import { TasksRpc } from "@repo/domain/Rpc";
 import { Effect } from "effect";
@@ -14,6 +16,18 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
     // The role → model table is the session layer's (B6): the one `openSession` resolves a run's
     // model from, so a definition is described with the model a run in each column would get.
     const sessions = yield* SessionService;
+    // An authored version's skills are held to the library a run resolves them from (D7), read
+    // afresh for every define, so a skill put a moment ago is one a column may bind.
+    const skills = yield* SkillService;
+    const skillNames = skills.list.pipe(
+      Effect.map((records) => new Set(records.map((record) => record.name))),
+      Effect.mapError(
+        (cause) =>
+          new TaskStorageError({
+            message: `read the skill library: ${cause.message}`,
+          }),
+      ),
+    );
     return TasksRpc.of({
       getBoard: (input) => tasks.getBoard(input.boardId),
       listBoards: () => tasks.listBoards,
@@ -27,6 +41,18 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
               describeDefinition(definition, sessions.roleModel),
             ),
           ),
+      // The rules are core's (`./boardDefine`); the library they check against is the skill table
+      // and the session layer's role table, the two a run in the version's columns would resolve.
+      defineBoard: (input) =>
+        skillNames.pipe(
+          Effect.flatMap((names) =>
+            tasks.defineBoard(input, { skills: names, roles: sessions.roles }),
+          ),
+          Effect.map(({ outcome, definition }) => ({
+            outcome,
+            definition: describeDefinition(definition, sessions.roleModel),
+          })),
+        ),
       // One read: `getBoard`'s join of the instance and its pinned version, so the two cannot disagree.
       getBoardConfig: (input) =>
         tasks.getBoard(input.boardId).pipe(

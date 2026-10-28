@@ -121,6 +121,16 @@ export type FollowResult = {
   readonly answer: string | undefined;
 };
 
+/**
+ * Whether an entry is the run's answer so far: an assistant entry with text. A failed model
+ * request's entry is not, even when it carried partial text — a run that failed has no answer, and
+ * `factory run` says so rather than printing the fragment (S-notifications).
+ */
+export const isAnswer = (entry: TranscriptEntry): boolean =>
+  entry.kind === "assistant" &&
+  entry.isError !== true &&
+  entry.text.trim() !== "";
+
 const printEntry = (
   state: Ref.Ref<FollowResult>,
   entry: TranscriptEntry,
@@ -133,7 +143,7 @@ const printEntry = (
     if (entry.text.trim() !== "") {
       yield* Console.log(formatEntry(entry, { ids }));
     }
-    if (entry.kind === "assistant" && entry.text.trim() !== "") {
+    if (isAnswer(entry)) {
       yield* Ref.update(state, (current) => ({
         ...current,
         answer: entry.text,

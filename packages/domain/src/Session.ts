@@ -208,7 +208,9 @@ export type ToolCallRef = typeof ToolCallRef.Type;
 
 /**
  * One transcript entry, projected from a Pi Durable `EntryRecord` (`packages/harness` maps the
- * kinds). `text` is the model-facing text, flattened; `toolName` is set on tool results.
+ * kinds). `text` is the model-facing text, flattened; `toolName` is set on tool results. `isError` is
+ * a tool result's own flag, and on an assistant entry it marks a model request that failed; `error` is
+ * then the provider's message for it, kept out of `text` so the failure is never read as an answer.
  * `inherited` is a line a fork copied from the session it was forked from that is history, not
  * its own (LOB-211): the parent's PR, which the fork does not have.
  */
@@ -234,6 +236,7 @@ export const TranscriptEntry = Schema.Struct({
   toolCalls: Schema.Array(ToolCallRef),
   toolName: Schema.optional(Schema.String),
   isError: Schema.optional(Schema.Boolean),
+  error: Schema.optional(Schema.String),
 });
 export type TranscriptEntry = typeof TranscriptEntry.Type;
 
