@@ -3,7 +3,11 @@
 One file per user-facing feature of the board's CLI surface. Each answers: what it is, how a user
 reaches it, how the skill drives it, and what observable end state proves it works.
 
-Status reflects the last verified runs: the planning run's plan (D10, 2026-10-28, `agent/D10`), API
+Status reflects the last verified runs: a PR's review and checks reaching its card (C21, 2026-10-28,
+`agent/C21`), API on `:9500`, the GitHub fake on `:9501`: `./feedback.sh` exit 0 (**23** PASS) — the
+signed `changes_requested` review blocked the card once, the failing check was one note, `board
+attention` listed a `review` row, and the next run was told the review verbatim, its start lifting the
+block so its settle pushed to the card's PR ([feedback.md](feedback.md)). Before it, the planning run's plan (D10, 2026-10-28, `agent/D10`), API
 on `:9550`, web on `:3550`, the GitHub fake on `:9553`: `./drive.sh` exit 0 (**169** PASS) with the
 planner run's refusal-then-plan, `plan.ts` and `plan-pane.mjs` folded in ([plan.md](plan.md));
 `./requires.sh` exit 0 (**75** PASS, `:9551`) with `planning → building` refused naming `plan_doc`;
@@ -85,6 +89,7 @@ Evidence: `.verify/evidence/latest/board/`.
 | the planning run's plan (D10)           | passing | [plan.md](plan.md)               |
 | the ask on the task                     | passing | [ask.md](ask.md)                 |
 | `requires[]` on exit                    | passing | [requires.md](requires.md)       |
+| a PR's review and checks (C21)          | passing | [feedback.md](feedback.md)       |
 | CLI ⇄ browser, one board                | passing | [equivalence.md](equivalence.md) |
 | a card made in the browser ⇄ the CLI    | passing | [equivalence.md](equivalence.md) |
 | definitions and board config            | passing | [definitions.md](definitions.md) |

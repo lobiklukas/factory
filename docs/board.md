@@ -113,7 +113,7 @@ precedent ("an index, not a projection").
 | `canceled`   | terminal | —           | —                                                                                                                          |
 
 `blocked` is a **card state**, not a column: a typed reason (`dependency | needs_input | capability |
-transient | setup_failed | pr_closed`) plus the column it blocked from, so a blocked card stays visible in its own
+transient | setup_failed | pr_closed | changes_requested`) plus the column it blocked from, so a blocked card stays visible in its own
 lane and there is no "return to where it was" ambiguity. A person parks and frees a card from the card pane or `factory board block` / `unblock`, and fixes its
 title or priority with `updateTask` (`factory board update`; C11), a revision-checked write that records
 a `retitled` / `priorityChanged` event per changed field. `setup_failed` is written by a run, not a
@@ -363,6 +363,22 @@ first run that starts on the card afterwards, however it was started, and `--sta
 anything is written on a card that is not blocked `needs_input` or when `--actor` is a run (its
 comment would be a note); a comment that lands but leaves the card blocked fails with
 `start_not_started`.
+
+Built (C21): a PR's review and checks are input for the next run. `POST /webhooks/github` reads
+`pull_request_review`, `pull_request_review_comment`, `check_run`, `check_suite` and `workflow_run`,
+and each lands one `commented` note on the thread of the card whose current PR it names (C20's
+lookup), keyed by the item it carries (`commented.sourceId`), so a redelivery writes nothing twice
+(`packages/core/src/pullRequestFeedback.ts`). A review that requests changes is the reviewer's words
+verbatim and blocks the card `changes_requested`, its note naming the reviewer and the PR, so the
+attention view lists it (**Address a review**); a review that approves or comments with words and a
+comment on a line of the change are notes; a failing check (`failure`, `timed_out`,
+`action_required`, `startup_failure`) on the PR's head commit is a note naming the check, once across
+the check run, its suite and its workflow run, and does not block — CI is red on every intermediate
+push of a run that is still working. The factory's own reviewer's comment (LOB-36, marked) is not
+echoed. Since every run on the card is told the thread, the next run reads the review with nothing
+pasted into its prompt, and starting that run (any run on the card but a reviewer's) lifts the
+`changes_requested` block, because a card still blocked when its run settles holds the run's PR push
+(C18) — the push that answers the review.
 
 Built (T5): for a card filed from a Linear issue, the same ask also posts the question to Linear as
 one `elicitation` activity (`AskWriteBack`, `LinearAskWriteBack`; deduped by the ask id in
