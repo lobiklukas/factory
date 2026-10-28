@@ -290,6 +290,7 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | Reset a session          | passing | [reset.md](reset.md)                         |
 | Compact on demand        | passing | [compact.md](compact.md)                     |
 | Fold a released session  | passing | [fold.md](fold.md)                           |
+| Cross-process streaming  | passing | [fold.md](fold.md) (`follow.sh`)             |
 | A long session's history | passing | [history.md](history.md)                     |
 | Fork a session           | passing | [fork.md](fork.md)                           |
 | Replay a session         | passing | [replay.md](replay.md)                       |

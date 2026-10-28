@@ -39,6 +39,8 @@ import type { CheckRecord } from "./harness.ts";
 
 const API_URL = process.env["API_URL"] ?? "http://localhost:9416";
 const MODE = process.env["MODE"] ?? "arm";
+/** The signal ./approval-restart.sh killed the first process with: what decides the read's mode. */
+const SIGNAL = process.env["KILL_SIGNAL"] ?? "KILL";
 const STATE =
   process.env["APPROVAL_STATE"] ?? ".verify/run/approval-restart/state.json";
 const EVIDENCE_DIR =
@@ -249,13 +251,17 @@ const verify = Effect.gen(function* () {
   observed.sessionId = sessionId;
   observed.requestId = requestId;
 
-  // 1. The fold: no process owns the session, so this is the log read back.
+  // 1. The log read back. A SIGTERM's shutdown gave the session's presence lease back, so nobody
+  // owns it and the read is a fold. A SIGKILL left the dead process's lease standing until its TTL
+  // (LOB-18) — nothing can tell a dead holder from a slow one — so the read follows the log as a
+  // session owned elsewhere: `live`, from the same log, idle on its parked approval.
   const folded = yield* client.getSession({ sessionId });
   observed.transcript = transcriptOf(folded);
+  const expectedMode = SIGNAL === "TERM" ? "historical" : "live";
   assert(
-    "the killed session folds from its log",
-    folded.session.mode === "historical" && folded.session.status === "idle",
-    `mode=${folded.session.mode} status=${folded.session.status}`,
+    "the killed session is read from its log",
+    folded.session.mode === expectedMode && folded.session.status === "idle",
+    `mode=${folded.session.mode} (expected ${expectedMode} after SIG${SIGNAL}) status=${folded.session.status}`,
   );
   assert(
     "the approval is still pending in the fold",

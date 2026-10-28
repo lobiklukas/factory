@@ -10882,10 +10882,18 @@ describe("a run across a kill", () => {
       const outcome = await after.runtime.runPromise(
         Effect.gen(function* () {
           const sessions = yield* SessionService;
-          // A client that reconnects before the boot has resumed anything reads the fold: the run,
-          // where the kill left it.
+          // A client that reconnects before the boot has resumed anything reads the run from its log,
+          // where the kill left it. Live, not historical: the dead process's presence lease stands
+          // until its TTL (LOB-18), and nothing here can tell a dead holder from a slow one.
           const folded = yield* sessions.get(doomed.sessionId);
           const resumed = yield* sessions.resumeRuns;
+          // The boot took that lease back rather than waiting out its TTL: the same home (this host
+          // and session root) is the process it replaces, and the claim changed hands under the next
+          // fence.
+          const sql = yield* SqlClient;
+          const claim = yield* sql<{ readonly fence: string | number }>`
+            SELECT fence FROM leases WHERE kind = 'session' AND key = ${doomed.sessionId}
+          `;
           yield* settledLive(sessions, doomed.sessionId);
           const reconnected = yield* sessions.get(doomed.sessionId);
           // The same request again — a client that never heard back retries it — finds the run.
@@ -10917,6 +10925,7 @@ describe("a run across a kill", () => {
             last,
             settled,
             again,
+            claim: claim[0],
           };
         }),
       );
@@ -10926,7 +10935,9 @@ describe("a run across a kill", () => {
       expect(signal).toBe("SIGKILL");
       expect(left).toEqual({ runSessionRoot: killRoot, status: "busy" });
       expect(before).toBe("open");
-      expect(outcome.folded.session.mode).toBe("historical");
+      expect(outcome.folded.session.mode).toBe("live");
+      expect(outcome.folded.session.status).toBe("busy");
+      expect(Number(outcome.claim?.fence)).toBe(2);
 
       // The boot reopened it, unasked, and the run carried on to its answer.
       expect(outcome.resumed).toEqual([doomed.sessionId]);

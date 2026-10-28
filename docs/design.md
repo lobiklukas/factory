@@ -180,6 +180,13 @@ projection diffs whole views rather than forwarding operations, so a subscriber 
 still converges. `notify`-driven catch-up — the third branch, for a session owned elsewhere — waits
 on D12.
 
+_As built (LOB-18)._ The third branch exists. A session another process owns — a live presence lease
+held by another holder (D12) — reads as `live` and streams from its log: the fold's snapshot with what
+the log says is running (`pi.live`, `pi.inbox`, the spend, the live task records), then events diffed
+from each read, in a live stream's order. The stream ends once the session is no longer owned
+elsewhere, as a fold's ends after its snapshot, so a client that reattaches is told which path it is
+on. Work on such a session is refused as `owned_elsewhere`; it is taken where the session is owned.
+
 ### D9 — Surfaces: CLI first, web dashboard second
 
 Both are clients of the same HTTP + WebSocket API. The CLI comes first because it is what we
@@ -231,6 +238,25 @@ lease and a heartbeat), then the bus itself — an `AFTER INSERT` trigger on `co
 `pg_notify`, carrying a _cursor_ (`log_id`, `seq`) rather than an event, because `NOTIFY` payloads
 cap at 8000 bytes and D7 makes the log truth. A subscriber reads the log from the cursor, so the
 notification is a hint and the log stays authoritative.
+
+_As built (LOB-18)._ Both pieces exist. **Presence** is one `leases` table keyed `(kind, key)` —
+`session` today, the dispatcher's `card` claims in wave 2 (B12) — with a holder (one process, minted
+at boot), a home (its host and absolute session root), a fence that rises on every acquisition,
+and an `expires_at` its holder renews every third of the TTL (30 s by default). Every owner claims its
+session under the owners' gate before it opens the log and gives the claim back after the harness is
+closed; a renewal that finds the claim gone (it lapsed and another process took it) releases the
+owner. Time is the database's `now()`, so two machines agree on what has lapsed. A claim whose holder
+shares this process's home — host and session root, where the worktrees are — is taken back at once
+rather than waited out: it is the process this one replaced after a crash. That needs a home that
+survives the restart (a stable hostname); a pod that comes back under a new one waits out the TTL,
+and its boot resumes are refused rather than retried (a follow-up on LOB-18).
+The **bus** is migration 0035's trigger notifying `factory_commits` with `{log_id, seq}`, one
+`LISTEN` per process started by the first follower (`SessionBus`, `packages/core`: one consumer does
+not earn `packages/bus`). A follower reads on every hint and on a poll (2 s) that also asks whether the
+session is still owned elsewhere, so a lost hint costs a delay, never an event. There is no
+in-process `SessionBus` Layer: one process's owners already stream in-process (D8's first branch), so
+the bus is only ever needed between processes. The root scoping and `MISSION_RESUME=false` of LOB-231
+and LOB-25 stay: they scope _which_ rows a boot sweeps, the lease decides whether it may take them.
 
 _As built (LOB-231)._ A booting API now takes owners nobody asked for: `resumeMissions` reopens and
 resumes every session whose row says a mission is in flight (`sessions.mission_in_flight`), because a

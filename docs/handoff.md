@@ -105,9 +105,8 @@ passes ten.
   `probe` against a real repository are an operator's run with real tokens. The daily read-back
   (`.github/workflows/rulesets.yml`) is inert until the owner adds the `RULESETS_ADMIN_TOKEN`
   secret, so until then a ruleset deleted in GitHub's settings fails nothing on its own.
-- **Cross-process fan-out (D12).** Live streaming is in-process: the replica that owns a session
-  streams it. A session owned by another process reads as `historical`, which is the honest answer
-  while nothing can say who owns it (see task 7).
+- **Cross-process fan-out on a cluster (D12).** Two processes over one database stream one session
+  live (LOB-18, `follow.sh`); a sandbox renewing the lease instead of a replica is M4.
 - Reader mode under a concurrent writer's load, and replay cost on a long log (see "Storage
   notes" below). A historical read opens the log from its checkpoint and projects the newest 200
   entries (LOB-243); restoring the checkpoint still costs the log's bytes, once per read.
@@ -202,7 +201,8 @@ the user first (server-minted id = `log_id` plus a mutable title; the API hosts 
 in-process behind a seam; a "message" is a thin Pi Durable submission and the wire carries our own
 session-event schema). Two deviations from the plan, both recorded in the design:
 
-- **`SessionBus` was not built** — it has no consumer while ownership is in-process (task 7).
+- **`SessionBus` was not built** — it has no consumer while ownership is in-process (task 7; since
+  built by LOB-18, in `packages/core`).
 - **`packages/core` and `packages/harness` took the work** the plan spread across
   `packages/storage-projection` and `packages/bus`. The fold already lives in `PostgresStorage`
   (`MemoryStorage`), so a projection package would have wrapped it for no gain.
@@ -247,7 +247,14 @@ Cheap, and they are the only claims in this repo that nothing currently checks.
 
 _Done when:_ both are asserted in a suite or a drive run, or explicitly withdrawn in the design.
 
-### 7. Presence and `SessionBus` — makes D12 true
+### 7. ~~Presence and `SessionBus` — makes D12 true~~
+
+_Done (LOB-18)._ A `leases` table (migration 0034) holds each owner's presence lease, renewed every
+third of its TTL; migration 0035's `AFTER INSERT` trigger on `commits` notifies `factory_commits`
+with a cursor; `packages/core/src/Presence.ts` and `SessionBus.ts` are the two pieces (in `core`, not
+a `packages/bus`: the bus has one consumer, `SessionService`), and `events` follows a session another
+process owns until that ownership ends. `follow.sh` drives two API processes over one database;
+`features/fold.md` holds the contract. The original task, for the record:
 
 A second replica cannot stream a session another replica owns, because nothing can say who owns
 what. Two pieces, in this order, and the first is the one that matters:
@@ -483,7 +490,7 @@ the worktree's files.
 
 | Package                       | Status                                                       |
 | ----------------------------- | ------------------------------------------------------------ |
-| `packages/bus`                | Not built; needs presence first — task 7.                    |
+| `packages/bus`                | Not built as a package; LOB-18 put it in `packages/core`.    |
 | `packages/storage-projection` | Not built; the fold lives in `PostgresStorage` — task 8.     |
 | `packages/sandbox-kubernetes` | M4.                                                          |
 | `infra`                       | M3 (Docker) and M7 (GKE); nothing is provisioned until then. |
