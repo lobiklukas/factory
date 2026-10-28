@@ -58,7 +58,7 @@ type Harness = {
   readonly deliver: (delivery: TriggerDelivery) => Promise<TriggerOutcome>;
   readonly deliverExit: (
     delivery: TriggerDelivery,
-  ) => Promise<Exit.Exit<TriggerOutcome, TriggerError>>;
+  ) => Promise<Exit.Exit<TriggerOutcome, { readonly _tag: string }>>;
   /** The seam's routed rule set *now*, which the adapters key against, as the routes do. */
   readonly rules: () => Promise<ReadonlyArray<TriggerRule>>;
   readonly addRoute: (
