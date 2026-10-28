@@ -26,6 +26,7 @@ import {
   type RepoForm,
 } from "@/lib/repos-view";
 import { EmptyPane } from "@/components/empty-pane";
+import { RepoSecrets } from "@/components/repo-secrets";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -398,6 +399,7 @@ const RepoRow = ({ repo }: { readonly repo: RepoSummary }) => {
           </span>
         </p>
       )}
+      <RepoSecrets repo={repo.repo} />
     </li>
   );
 };
