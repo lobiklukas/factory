@@ -142,6 +142,21 @@ const runAndStep = (taskId: string, prompt: string) =>
     };
   });
 
+/** The person's close in GitHub: the fake's `PATCH .../pulls/:number`, recorded for its reads. */
+const closeOnForge = async (number: number) => {
+  const response = await fetch(`${GH_FAKE_URL}/repos/${REPO}/pulls/${number}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ state: "closed" }),
+  });
+  return {
+    status: response.status,
+    body: (await response.json().catch(() => null)) as {
+      state?: string;
+    } | null,
+  };
+};
+
 const sign = (raw: string) =>
   `sha256=${createHmac("sha256", SECRET).update(raw).digest("hex")}`;
 
@@ -175,18 +190,7 @@ const drive = Effect.gen(function* () {
   if (firstPr === undefined) return;
 
   // 2. Closed in GitHub, and GitHub's signed delivery of the close.
-  const closed = yield* Effect.promise(() =>
-    fetch(`${GH_FAKE_URL}/repos/${REPO}/pulls/${firstPr.number}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ state: "closed" }),
-    }).then(async (response) => ({
-      status: response.status,
-      body: (await response.json().catch(() => null)) as {
-        state?: string;
-      } | null,
-    })),
-  );
+  const closed = yield* Effect.promise(() => closeOnForge(firstPr.number));
   observed.closedOnForge = closed;
   check(
     "the person's close in GitHub is recorded on the fake",

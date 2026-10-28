@@ -1467,7 +1467,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   Effect.fail(
                     new SessionErrorClass({
                       code: "storage",
-                      message: `take task ${taskId}'s PR lock: ${String(cause)}`,
+                      message: `take task ${taskId}'s PR lock: ${cause.message}`,
                     }),
                   ),
                 ),
