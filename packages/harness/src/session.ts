@@ -203,6 +203,7 @@ import {
   ACTOR_DOC_KIND,
   TASK_DOC_KIND,
   SPEC_DOC_KIND,
+  PLAN_DOC_KIND,
   CRITERIA_DOC_KIND,
   PR_DOC_KIND,
   MERGE_DOC_KIND,
@@ -2765,6 +2766,8 @@ export type SessionLog = {
    * validator `writeSpec` applies, so a value the stage would refuse never folds back as a spec.
    */
   readonly spec?: Spec;
+  /** The plan committed to the log (D10), when the session planned one: `factory.plan`, read as `projectPlan`. */
+  readonly plan?: Plan;
   /**
    * The legacy `factory.criteria` string, when a log holds one. Nothing writes it; `spec.acceptance`
    * is the source of truth for acceptance criteria (see `CriteriaDoc`).
@@ -2936,6 +2939,7 @@ export const readSessionLog = (
     const binding = yield* readDocument(storage, SESSION_DOC_KIND);
     const taskDoc = yield* readDocument(storage, TASK_DOC_KIND);
     const specDoc = yield* readDocument(storage, SPEC_DOC_KIND);
+    const planDoc = yield* readDocument(storage, PLAN_DOC_KIND);
     const criteriaDoc = yield* readDocument(storage, CRITERIA_DOC_KIND);
     const pr = yield* readRecordedPullRequest(storage);
     const merge = yield* readRecordedMerge(storage);
@@ -2948,6 +2952,7 @@ export const readSessionLog = (
     const replayDoc = projectReplayDoc(replayValue);
     const taskId = bindingString(taskDoc, "taskId");
     const spec = projectSpec(specDoc);
+    const plan = projectPlan(planDoc);
     const criteria = bindingString(criteriaDoc, "criteria");
     const forkedFrom = bindingString(forkDoc, "parent");
     const forkedAt = bindingString(forkDoc, "at");
@@ -2968,6 +2973,7 @@ export const readSessionLog = (
       ...(pr === undefined ? {} : { pr }),
       ...(merge === undefined ? {} : { merge }),
       ...(spec === undefined ? {} : { spec }),
+      ...(plan === undefined ? {} : { plan }),
       ...(criteria === "" ? {} : { criteria }),
       ...(forkedFrom === "" ? {} : { forkedFrom }),
       ...(forkedFrom === "" || forkedAt === "" ? {} : { forkedAt }),

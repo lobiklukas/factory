@@ -6,10 +6,13 @@
 import type { JsonValue } from "@earendil-works/chord";
 import type { TaskId } from "@earendil-works/pi-durable";
 import { defineDoc, defineDocFamily } from "@earendil-works/pi-durable";
-import { MERGE_DOC_KIND, REPLAY_DOC_KIND } from "./projection";
+import {
+  MERGE_DOC_KIND,
+  PLAN_DOC_KIND,
+  REPLAY_DOC_KIND,
+} from "./projection";
 
 export const SPEC_DOC_KIND = "factory.spec";
-export const PLAN_DOC_KIND = "factory.plan";
 export const CRITERIA_DOC_KIND = "factory.criteria";
 export const PR_DOC_KIND = "factory.pr";
 export const RETRY_DOC_KIND = "factory.retry";

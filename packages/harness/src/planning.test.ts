@@ -118,7 +118,7 @@ const runOnce = (options: {
       const log = yield* readSessionLog(storage);
       const offered = yield* readOfferedTools(storage);
       yield* closeHarness(harness);
-      return { plan, offered, entries: log.entries };
+      return { plan, stored: log.plan, offered, entries: log.entries };
     }),
   );
 
@@ -178,6 +178,8 @@ describe("the plan tool", () => {
 
     expect(ran.offered).toContain(PLAN_TOOL);
     expect(ran.plan).toEqual(PLAN);
+    // The read-only fold finds the same plan: what a reader of the log (a drive, a rebuild) reads.
+    expect(ran.stored).toEqual(PLAN);
     expect(posts).toHaveLength(1);
     expect(posts[0]?.plan).toEqual(PLAN);
     const results = planResults(ran.entries);
@@ -223,6 +225,7 @@ describe("the plan tool", () => {
     ]);
     expect(posts).toHaveLength(0);
     expect(ran.plan).toBeUndefined();
+    expect(ran.stored).toBeUndefined();
   });
 
   it("reports a post the card refused as the tool's error, with the plan in the log", async () => {
