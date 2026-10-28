@@ -4,7 +4,7 @@
 run of the card recorded (`cardPullRequestFor` in `packages/core/src/SessionService.ts`). When that PR
 was closed on GitHub without merging, pushing onto it lands the work where nobody will review it, so
 the close is recorded on the PR's sessions — `closedAt` on `factory.merge`, indexed in
-`sessions.pr_closed_at` (migration 0049) and refolded by `rebuildIndexes` — and a closed PR is not
+`sessions.pr_closed_at` (migration 0050) and refolded by `rebuildIndexes` — and a closed PR is not
 adopted: the next run opens a fresh PR from the card's branch. The close is recorded from GitHub's
 signed `pull_request` closed delivery (`recordMergedDelivery`, which `POST /webhooks/github` runs) and,
 on a box no webhook reaches, from the PR-state read when the card is opened
