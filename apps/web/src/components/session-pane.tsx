@@ -3,12 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { useAtom, useAtomRefresh, useAtomSet } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
 import { Cause } from "effect";
-import {
-  GitForkIcon,
-  GitPullRequestIcon,
-  Loader2Icon,
-  SquareIcon,
-} from "lucide-react";
+import { GitForkIcon, GitPullRequestIcon, Loader2Icon } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "cn";
 import type { SessionId } from "@repo/domain/Session";
@@ -26,6 +21,7 @@ import {
 import {
   compactSessionAtom,
   forkSessionAtom,
+  interruptSessionAtom,
   readSessionHistoryAtom,
   sendMessageAtom,
   sessionAtom,
@@ -38,9 +34,11 @@ import { sessionModel } from "@/lib/server-info-view";
 import { SessionsBackLink } from "@/components/sessions-back-link";
 import { CheckoutWarning } from "@/components/checkout-warning";
 import { CompactButton } from "@/components/compact-button";
+import { InterruptButton } from "@/components/interrupt-button";
 import { TaskPanel } from "@/components/task-panel";
 import { TranscriptRow } from "@/components/transcript-entry";
 import { visibleEntries } from "@/lib/transcript-view";
+import { interruptNotice } from "@/lib/interrupt-view";
 import {
   currentHistory,
   nextBefore,
@@ -76,6 +74,7 @@ const StatusChip = ({ view }: { readonly view: SessionView }) => (
   <div className="flex items-center gap-2">
     <Badge
       variant="outline"
+      data-session-status={view.summary.status}
       className={cn(
         "gap-1.5 font-mono text-[10px] tracking-wide uppercase",
         view.summary.status === "busy" && "border-ring/40 text-ring",
@@ -168,6 +167,7 @@ export const SessionPane = ({
   const fork = useAtomSet(forkSessionAtom, { mode: "promise" });
   const compact = useAtomSet(compactSessionAtom, { mode: "promise" });
   const withdraw = useAtomSet(withdrawMessageAtom, { mode: "promise" });
+  const interrupt = useAtomSet(interruptSessionAtom, { mode: "promise" });
   const readHistory = useAtomSet(readSessionHistoryAtom, { mode: "promise" });
   /** Earlier transcript read on request (LOB-243), above what the view carries. */
   const [history, setHistory] = useState<EarlierHistory | null>(null);
@@ -176,6 +176,7 @@ export const SessionPane = ({
   const navigate = useNavigate();
   const [draft, setDraft] = useState("");
   const [forking, setForking] = useState(false);
+  const [interrupting, setInterrupting] = useState(false);
   const [compacting, setCompacting] = useState(false);
   const [compactionWindow, setCompactionWindow] =
     useState<CompactionWindow | null>(null);
@@ -738,14 +739,30 @@ export const SessionPane = ({
               }}
             />
             {view?.summary.status === "busy" ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                aria-label="Interrupt this run"
-              >
-                <SquareIcon className="size-4" strokeWidth={1.75} />
-              </Button>
+              <InterruptButton
+                calling={interrupting}
+                onPress={() => {
+                  setInterrupting(true);
+                  void interrupt(sessionId)
+                    .then((answer) => {
+                      const notice = interruptNotice(answer);
+                      if (notice !== null) {
+                        toast.info(notice.title, {
+                          description: notice.description,
+                        });
+                      }
+                    })
+                    .catch((cause: unknown) => {
+                      toast.error("The run was not interrupted", {
+                        description:
+                          cause instanceof Error
+                            ? cause.message
+                            : String(cause),
+                      });
+                    })
+                    .finally(() => setInterrupting(false));
+                }}
+              />
             ) : null}
             <Button type="submit" disabled={draft.trim().length === 0}>
               Send

@@ -77,8 +77,9 @@ const clip = (text: string, limit: number): string =>
 
 /**
  * One transcript entry as the curator reads it, or `undefined` for the entries that are not the
- * work: a system prompt section, a reset marker, a title, a budget stop, a line a fork inherited and
- * the control plane's own entries are what the session was told or how it was labelled, not what it taught.
+ * work: a system prompt section, a reset marker, a title, a budget stop, an interrupt, a line a fork
+ * inherited and the control plane's own entries are what the session was told or how it was
+ * labelled, not what it taught.
  */
 const renderEntry = (entry: TranscriptEntry): string | undefined => {
   const text = clip(entry.text, ENTRY_CHARS);
@@ -100,6 +101,8 @@ const renderEntry = (entry: TranscriptEntry): string | undefined => {
     case "title":
       return undefined;
     case "budget":
+      return undefined;
+    case "interrupted":
       return undefined;
     case "inherited":
       return undefined;

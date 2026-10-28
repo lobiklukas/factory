@@ -187,6 +187,7 @@ import {
   PR_OPENED_ENTRY_KIND,
   PR_INHERITED_ENTRY_KIND,
   NO_CHANGE_ENTRY_KIND,
+  INTERRUPTED_ENTRY_KIND,
   PAGE_ENTRY_KIND,
   type PageLogRecord,
   TITLE_ENTRY_KIND,
@@ -1626,6 +1627,61 @@ export const interrupt = (
   conversation: Conversation,
 ): Effect.Effect<void, SessionError> =>
   attempt("interrupt", () => conversation.abort(BACKGROUND_CONTEXT));
+
+/**
+ * An operator's interrupt, announced in the transcript (C8). It carries no model content, so the
+ * agent never sees it: a later message starts a run whose context is the turns before it.
+ */
+export const InterruptedEntry = defineEntry<{
+  readonly text: string;
+}>(INTERRUPTED_ENTRY_KIND);
+
+/** The line an interrupted turn ends with, in the transcript and in a terminal. */
+export const INTERRUPTED_TEXT =
+  "interrupted: the run was stopped before it finished";
+
+/**
+ * What an interrupt came to (C8): `interrupted` when there was a run to stop, `not_running` when the
+ * root had no run and no unsettled submission, so nothing was aborted and nothing was written.
+ */
+export type StopOutcome = "interrupted" | "not_running";
+
+/**
+ * Stop the root's run, and say so in the transcript (C8).
+ *
+ * Work is a run in flight (`pi.live`'s `run`) or a root submission still queued or placed — the
+ * latter is what a log a dead process left behind holds before anything continued it (LOB-25), and
+ * aborting withdraws it. With neither, the abort is skipped: an interrupt of an idle session is an
+ * answer, not a write. Otherwise the entry is committed first and the abort settles the run
+ * `unanswered` after it, as a budget stop records itself before its abort (`./budget`): a client
+ * following the run stops reading when the session goes idle, so an entry written after the abort
+ * would reach a watcher that `factory run` had already let go of.
+ */
+export const stopRun = (
+  harness: Harness,
+  root: Conversation,
+): Effect.Effect<StopOutcome, SessionError> =>
+  Effect.gen(function* () {
+    const running = yield* isBusy(harness, root);
+    const inspection = yield* attempt("inspect pending work", () =>
+      harness.inspect(BACKGROUND_CONTEXT),
+    );
+    const pending = inspection.submissions.some(
+      (record) => record.conversationId === root.id,
+    );
+    if (!running && !pending) return "not_running";
+    yield* attempt("write interrupted", () =>
+      root.commit(
+        (tx) =>
+          tx.appendEntry(InterruptedEntry, root.id, {
+            data: { text: INTERRUPTED_TEXT },
+          }),
+        BACKGROUND_CONTEXT,
+      ),
+    );
+    yield* interrupt(root);
+    return "interrupted";
+  });
 
 /** Submissions read per storage page while looking one up by its wire id. */
 const SUBMISSION_PAGE = 100;

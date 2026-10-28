@@ -11,6 +11,7 @@ import { costCommand } from "./commands/cost";
 import { discardCommand } from "./commands/discard";
 import { doctorCommand } from "./commands/doctor";
 import { historyCommand } from "./commands/history";
+import { interruptCommand } from "./commands/interrupt";
 import { lsCommand } from "./commands/ls";
 import { outcomesCommand } from "./commands/outcomes";
 import { prCommand } from "./commands/pr";
@@ -35,6 +36,7 @@ const root = Command.make("factory").pipe(
     lsCommand,
     sendCommand,
     withdrawCommand,
+    interruptCommand,
     discardCommand,
     prCommand,
     boardCommand,

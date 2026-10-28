@@ -473,6 +473,39 @@ describe("createSession's model over RPC (LOB-274)", () => {
   }, 120_000);
 });
 
+describe("interruptSession over RPC (C8)", () => {
+  it("answers not_running for an idle session, and carries an unknown one back as not_found", async () => {
+    const outcome = await call((client) =>
+      Effect.gen(function* () {
+        const created = yield* client.createSession({
+          title: "nothing to interrupt",
+        });
+        const idle = yield* client.interruptSession({ sessionId: created.id });
+        const missing = yield* failureOf(
+          client.interruptSession({
+            sessionId: "ses_00000000000000000000000000" as SessionId,
+          }),
+        );
+        return { created, idle, missing };
+      }),
+    );
+
+    expect(outcome.idle.outcome).toBe("not_running");
+    expect(outcome.idle.session).toMatchObject({
+      id: outcome.created.id,
+      status: "idle",
+    });
+    // The sentence the dashboard's toast shows: the server's words, decoded off the wire.
+    expect(outcome.idle.message).toBe(
+      `session ${outcome.created.id} is not running: there was no run to interrupt`,
+    );
+    expect(outcome.missing).toMatchObject({
+      _tag: "SessionError",
+      code: "not_found",
+    });
+  }, 120_000);
+});
+
 describe("proposeDecomposition over RPC (LOB-201)", () => {
   it("carries a session without a spec, and a refused proposal set, across the wire with their own tags", async () => {
     const outcome = await callApi((client) =>

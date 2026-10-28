@@ -60,6 +60,7 @@ import type {
   CreateSessionInput,
   ForkSessionInput,
   GetRepoInput,
+  InterruptSessionResult,
   ListReposOutput,
   ListSessionsInput,
   ListSessionsOutput,
@@ -165,6 +166,7 @@ import {
   recordMergeEvent,
   readRecordedMerge,
   interrupt as interruptConversation,
+  stopRun,
   isBusy,
   liveSessionEvents,
   openSession,
@@ -347,9 +349,13 @@ export type SessionServiceShape = {
   readonly send: (
     input: SendMessageInput,
   ) => Effect.Effect<SendMessageResult, SessionError>;
+  /**
+   * Stop the session's run (C8). The answer says what happened: a session with no run to stop is
+   * `not_running`, an outcome rather than a failure, and the call changed nothing.
+   */
   readonly interrupt: (
     sessionId: SessionId,
-  ) => Effect.Effect<SessionSummary, SessionError>;
+  ) => Effect.Effect<InterruptSessionResult, SessionError>;
   /**
    * Withdraw a queued message before a run places it (LOB-166). The answer says what happened: a
    * message a run already took, or one already over, is an outcome rather than a failure.
@@ -2851,16 +2857,24 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
 
       const interrupt = (
         sessionId: SessionId,
-      ): Effect.Effect<SessionSummary, SessionError> =>
+      ): Effect.Effect<InterruptSessionResult, SessionError> =>
         Effect.gen(function* () {
           const row = yield* requireSession(sessionId);
           // Steering wakes the session first (D8): acquiring the owner is what waking means here.
           // Paused (LOB-25): a run a dead process left behind is stopped, not first continued.
           const owner = yield* acquireOwner(sessionId, row, { resume: false });
-          yield* interruptConversation(owner.root);
+          const outcome = yield* stopRun(owner.harness, owner.root);
           yield* continueRemaining(sessionId, owner);
           yield* touchActivity(sessionId);
-          return yield* describe(sessionId, row);
+          const session = yield* describe(sessionId, row);
+          return {
+            session,
+            outcome,
+            message:
+              outcome === "interrupted"
+                ? `session ${sessionId} was interrupted: its run stopped, and the session is ${session.status}`
+                : `session ${sessionId} is not running: there was no run to interrupt`,
+          };
         });
 
       const withdraw = (

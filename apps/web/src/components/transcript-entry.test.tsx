@@ -41,4 +41,13 @@ describe("TranscriptRow", () => {
   it("still renders a reset as its marker", () => {
     expect(render(entry("reset", ""))).toContain("reset");
   });
+
+  it("renders an interrupt as a status marker with its line, not as the agent's prose (C8)", () => {
+    const line = "interrupted: the run was stopped before it finished";
+    const markup = render(entry("interrupted", line));
+    expect(markup).toContain('data-entry-kind="interrupted"');
+    expect(markup).toContain('role="status"');
+    expect(markup).toContain(line);
+    expect(markup).not.toBe(render(entry("assistant", line)));
+  });
 });

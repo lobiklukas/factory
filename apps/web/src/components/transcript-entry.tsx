@@ -4,6 +4,7 @@ import {
   ChevronRightIcon,
   CircleStopIcon,
   GitPullRequestIcon,
+  SquareIcon,
   TerminalIcon,
 } from "lucide-react";
 import { cn } from "cn";
@@ -124,6 +125,25 @@ export const TranscriptRow = ({
       <Marker variant="border" className="text-destructive" role="status">
         <MarkerIcon>
           <CircleStopIcon strokeWidth={1.75} />
+        </MarkerIcon>
+        <MarkerContent>{entry.text}</MarkerContent>
+      </Marker>
+    );
+  }
+
+  // An interrupt (C8) ends the turn it stopped: the control plane's line, in the
+  // shape of the Interrupt button that made it, so the turn above it reads as cut
+  // short by the operator rather than as an answer that never came.
+  if (entry.kind === "interrupted") {
+    return (
+      <Marker
+        variant="border"
+        className="text-muted-foreground"
+        role="status"
+        data-entry-kind="interrupted"
+      >
+        <MarkerIcon>
+          <SquareIcon strokeWidth={1.75} />
         </MarkerIcon>
         <MarkerContent>{entry.text}</MarkerContent>
       </Marker>
