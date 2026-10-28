@@ -164,6 +164,7 @@ export const rebuildIndexes: Effect.Effect<
     taskId: string;
     sessionId: string;
     column: string;
+    startedAt: string;
   }[] = [];
   const pages: {
     sessionId: string;
@@ -253,6 +254,8 @@ export const rebuildIndexes: Effect.Effect<
         taskId: sessionLog.task.taskId,
         sessionId: log.logId,
         column: sessionLog.task.column,
+        // A run is its session (B1), created when the run starts: its first commit is the start.
+        startedAt: log.createdAt,
       });
     }
   }
@@ -395,11 +398,15 @@ export const rebuildIndexes: Effect.Effect<
     `;
   }
 
-  // Fold `factory.task` documents into `task_runs`, so a rebuild recovers run→task links.
+  // Fold `factory.task` documents into `task_runs`, so a rebuild recovers run→task links. A row the
+  // rebuild re-creates starts at its session's first commit rather than at the rebuild; its
+  // `finished_at` is no fact any log holds (LOB-44, docs/design.md D7), so it stays NULL, and the
+  // outcome metrics' factory time reads such a run as ending at its session's last activity —
+  // refolded from the log above.
   for (const run of taskRuns) {
     yield* sql`
-      INSERT INTO task_runs (id, task_id, session_id, "column")
-      VALUES (${run.id}, ${run.taskId}, ${run.sessionId}, ${run.column})
+      INSERT INTO task_runs (id, task_id, session_id, "column", started_at)
+      VALUES (${run.id}, ${run.taskId}, ${run.sessionId}, ${run.column}, ${run.startedAt}::timestamptz)
       ON CONFLICT (session_id) DO NOTHING
     `;
   }

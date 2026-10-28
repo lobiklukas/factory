@@ -202,6 +202,9 @@ const SESSIONS: ReadonlyArray<SessionFixture> = [
     requestId: `trigger:review-acme-widgets-7-${run}`,
     cost: 0.2,
   },
+  // A card-mode Linear rule's card (LOB-254), G: its one run g4 at 305h has no trigger key of its own
+  // — it counts under linear, the source that filed the card — and opened PR 40, merged at 335h.
+  { name: "g4", createdAt: 305, prUrl: pr(40), mergedAt: 335, cost: 0.1 },
   // Outside: merged before the window, created after it, and another repo's session in it.
   { name: "x", createdAt: -300, prUrl: pr(20), mergedAt: -250, cost: 3 },
   { name: "c4", createdAt: 800, actor: "dave", cost: 7 },
@@ -223,6 +226,9 @@ type CardFixture = {
   readonly moves: ReadonlyArray<readonly [number, string]>;
   /** The card's runs: the session, its start, and its finish (absent: not written). */
   readonly runs: ReadonlyArray<readonly [string, number, number | undefined]>;
+  /** Who filed it (its `created` event's actor; a person when absent), and its external ref. */
+  readonly filedBy?: string;
+  readonly externalRef?: string;
 };
 
 const PIPELINE = [
@@ -283,6 +289,17 @@ const CARDS: ReadonlyArray<CardFixture> = [
       [100, "done"],
     ],
     runs: [],
+  },
+  // G: filed at 300h by a card-mode Linear rule for ISS-4, and moved from intake straight to done at
+  // 340h. Lead 40h, but no cycle: it never moved before done. Its run g4 305–315h is 10h of factory
+  // time; and ISS-4's delegation runs from the card's filing (300h) to PR 40's merge (335h), 35h.
+  {
+    name: "G",
+    createdAt: 300,
+    moves: [[340, "done"]],
+    runs: [["g4", 305, 315]],
+    filedBy: "trigger:linear",
+    externalRef: `linear:ISS-4-${run}`,
   },
   // D: done before the window. E: canceled in it, not delivered. F: done after it.
   {
@@ -375,17 +392,19 @@ const seed = Effect.gen(function* () {
   for (const card of CARDS) {
     const taskId = `tsk_${randomId()}`;
     yield* sql`
-      INSERT INTO tasks (id, board_id, title, "column", definition_version, revision, created_at, updated_at)
+      INSERT INTO tasks (id, board_id, title, "column", definition_version, revision, external_ref, created_at, updated_at)
       VALUES (
         ${taskId}, ${boardId}, ${`card ${card.name}`}, ${card.moves.at(-1)?.[1] ?? "intake"},
-        1, ${card.moves.length + 1}, ${at(card.createdAt)}::timestamptz, ${at(card.createdAt)}::timestamptz
+        1, ${card.moves.length + 1}, ${card.externalRef ?? null},
+        ${at(card.createdAt)}::timestamptz, ${at(card.createdAt)}::timestamptz
       )
     `;
+    const filedBy = card.filedBy ?? "person:lukas";
     yield* sql`
       INSERT INTO task_events (task_id, kind, actor, revision, payload, created_at)
       VALUES (
-        ${taskId}, 'created', 'person:lukas', 1,
-        ${JSON.stringify({ taskId, boardId, title: `card ${card.name}`, column: "intake", actor: "person:lukas", revision: 1 })}::jsonb,
+        ${taskId}, 'created', ${filedBy}, 1,
+        ${JSON.stringify({ taskId, boardId, title: `card ${card.name}`, column: "intake", actor: filedBy, revision: 1 })}::jsonb,
         ${at(card.createdAt)}::timestamptz
       )
     `;
@@ -429,7 +448,7 @@ const seed = Effect.gen(function* () {
   }
 });
 
-/** The ids of the 17 sessions created in the window in this repo, for the reconciliation below. */
+/** The ids of the 18 sessions created in the window in this repo, for the reconciliation below. */
 const inWindow = SESSIONS.filter(
   (session) =>
     session.repo === undefined &&
@@ -530,38 +549,46 @@ describe("readOutcomes over the seeded fixture (LOB-44)", () => {
   });
 
   it("reports lead time per card and per delegated issue, and the factory's share of it", () => {
-    // Cards A (24h), B (40h) and C (200h) first reached done in the window; D before it, F after it,
-    // and E was canceled.
-    expectValue("lead_time", "card.median", hours(40), 3);
-    expectValue("lead_time", "card.mean", hours((24 + 40 + 200) / 3), 3);
-    // Run time inside each lead time: A 4–9h (5h, the overlap counted once), B 20–30h (10h), C none.
+    // Cards A (24h), B (40h), C (200h) and G (40h) first reached done in the window; D before it, F
+    // after it, and E was canceled.
+    expectValue("lead_time", "card.median", hours(40), 4);
+    expectValue("lead_time", "card.mean", hours((24 + 40 + 200 + 40) / 4), 4);
+    // Run time inside each lead time: A 4–9h (5h, the overlap counted once), B 20–30h (10h), C none,
+    // G 305–315h (10h).
     expectValue(
       "lead_time",
       "card.factory_share",
-      (5 + 10 + 0) / (24 + 40 + 200),
-      3,
+      (5 + 10 + 0 + 10) / (24 + 40 + 200 + 40),
+      4,
     );
-    // ISS-0 55h, ISS-1 12h, ISS-2 22h (through its re-run); ISS-3 merged after the window.
-    expectValue("lead_time", "delegation.median", hours(22), 3);
-    expectValue("lead_time", "delegation.mean", hours((55 + 12 + 22) / 3), 3);
+    // ISS-0 55h, ISS-1 12h, ISS-2 22h (through its re-run), ISS-4 35h (a card-mode delegation, from
+    // the card's filing); ISS-3 merged after the window.
+    expectValue("lead_time", "delegation.median", hours((22 + 35) / 2), 4);
+    expectValue(
+      "lead_time",
+      "delegation.mean",
+      hours((55 + 12 + 22 + 35) / 4),
+      4,
+    );
   });
 
   it("reports cycle time from the first move out of intake to done", () => {
-    // A 3h → 25h (22h), B 12h → 50h (38h), C -90h → 100h (190h).
+    // A 3h → 25h (22h), B 12h → 50h (38h), C -90h → 100h (190h). G went from intake straight to
+    // done, so it has no cycle: not a cycle of 0, and not in the denominator.
     expectValue("cycle_time", "card.median", hours(38), 3);
     expectValue("cycle_time", "card.mean", hours((22 + 38 + 190) / 3), 3);
   });
 
   it("reports defect pressure over the factory's merges in the window", () => {
-    // Merged in the window: PR 1 (a2, 20h), PR 10 (l0, 5h), PR 2 (l1, 52h), PR 4 (l2r, 82h) and PR 5
-    // (s1, 110h). PR 20 merged before it, PRs 6, 30 and 33 after it; z1's PR is another repo's.
-    // Reverted by the window's end: PR 5 (130h). PR 2's revert is at 900h, after it.
-    expectValue("defect_pressure", "merges.reverted", 1, 5);
+    // Merged in the window: PR 1 (a2, 20h), PR 10 (l0, 5h), PR 2 (l1, 52h), PR 4 (l2r, 82h), PR 5
+    // (s1, 110h) and PR 40 (g4, 335h). PR 20 merged before it, PRs 6, 30 and 33 after it; z1's PR is
+    // another repo's. Reverted by the window's end: PR 5 (130h). PR 2's revert is at 900h, after it.
+    expectValue("defect_pressure", "merges.reverted", 1, 6);
     // Followed up: PR 1 by a3 (card A's run at 30h) and PR 5 by s1f (its re-run at 120h).
-    expectValue("defect_pressure", "merges.followed_up", 2, 5);
-    expectValue("defect_pressure", "follow_up_sessions", 2, 5);
+    expectValue("defect_pressure", "merges.followed_up", 2, 6);
+    expectValue("defect_pressure", "follow_up_sessions", 2, 6);
     // Reverted or followed up: PR 1 and PR 5.
-    expectValue("defect_pressure", "rate", 2 / 5, 5);
+    expectValue("defect_pressure", "rate", 2 / 6, 6);
   });
 
   it("reports recovery from re-runs, and the approval and refusal rates of the decisions", () => {
@@ -574,9 +601,9 @@ describe("readOutcomes over the seeded fixture (LOB-44)", () => {
   });
 
   it("reports adoption by trigger and repeat use by person", () => {
-    // Created in the window, this repo: 17 sessions (l0, x and c4 are outside it; z1 is elsewhere).
+    // Created in the window, this repo: 18 sessions (l0, x and c4 are outside it; z1 is elsewhere).
     const byTrigger: Record<string, number> = {
-      linear: 3, // l1, l2, l3
+      linear: 4, // l1, l2, l3, and g4: a run of the card a Linear card-mode rule filed
       sentry: 1, // s1
       github: 1, // g1
       jira: 0,
@@ -593,7 +620,7 @@ describe("readOutcomes over the seeded fixture (LOB-44)", () => {
         "adoption",
         `sessions.${trigger}`,
         byTrigger[trigger] ?? -1,
-        17,
+        18,
       );
     }
     // People: amy (a1, l2r, c1, c2), bob (s1f, c3), carol (b1) — two of the three came back.
@@ -601,7 +628,7 @@ describe("readOutcomes over the seeded fixture (LOB-44)", () => {
   });
 
   it("reports cost that reconciles with session_activity.cost_total for the same sessions", () => {
-    // The fixture's spend for the 17 sessions in the window, added by hand.
+    // The fixture's spend for the 18 sessions in the window, added by hand.
     const total =
       0.1 +
       0.2 +
@@ -619,16 +646,17 @@ describe("readOutcomes over the seeded fixture (LOB-44)", () => {
       0.1 +
       0.05 +
       0.05 +
-      0.2;
-    expect(total).toBeCloseTo(3, 9);
-    expectValue("cost", "total", 3, 17);
-    expectValue("cost", "per_session", 3 / 17, 17);
+      0.2 +
+      0.1;
+    expect(total).toBeCloseTo(3.1, 9);
+    expectValue("cost", "total", 3.1, 18);
+    expectValue("cost", "per_session", 3.1 / 18, 18);
     // And the same number LOB-17's column holds for those sessions, read in the seed's transaction
     // independently of the read.
-    expect(inWindow).toHaveLength(17);
+    expect(inWindow).toHaveLength(18);
     expect(valueOf(report, "cost", "total").value).toBeCloseTo(costColumn, 9);
     expect(valueOf(report, "cost", "per_session").value).toBeCloseTo(
-      costColumn / 17,
+      costColumn / 18,
       9,
     );
   });
@@ -687,6 +715,13 @@ describe("triggerOf", () => {
     expect(triggerOf("trigger:review-acme-w-7-abc", true)).toBe("review");
     expect(triggerOf(null, true)).toBe("board");
     expect(triggerOf("client-key", true)).toBe("board");
+    // A card a card-mode rule filed counts its runs under that rule's source (LOB-254); a card a
+    // person filed, or an actor that names no known source, is the board's.
+    expect(triggerOf(null, true, "trigger:linear")).toBe("linear");
+    expect(triggerOf(null, true, "trigger:sentry")).toBe("sentry");
+    expect(triggerOf(null, true, "person:lukas")).toBe("board");
+    expect(triggerOf(null, true, "trigger:pagerduty")).toBe("board");
+    expect(triggerOf(null, false, "trigger:linear")).toBe("direct");
     expect(triggerOf(null, false)).toBe("direct");
     expect(triggerOf("client-key", false)).toBe("direct");
   });

@@ -1202,11 +1202,11 @@ const mergeRecordOf = (doc: MergeDocView): MergeRecord | undefined => {
  * the first merge and the first revert stand, so a redelivered webhook commits nothing and answers
  * `first: false` with what the log already says. The `sessions` columns are the caller's to update.
  *
- * Read before the commit rather than decided inside it, so a repeat is no commit at all instead of
- * a commit that rewrites a document with its own value.
+ * Decided inside the commit, from the document as the mutation line holds it, and writing only the
+ * fields the event owns: a merge and a revert committed at once each keep the other's fact. A
+ * repeat touches no field, so it commits nothing.
  */
 export const recordMergeEvent = (
-  harness: Harness,
   conversation: Conversation,
   event: MergeEvent,
 ): Effect.Effect<
@@ -1214,42 +1214,29 @@ export const recordMergeEvent = (
   SessionError
 > =>
   Effect.gen(function* () {
-    const current = projectMergeDoc(
-      yield* attempt("read merge", () =>
-        harness.snapshot(MergeDoc, conversation.id, BACKGROUND_CONTEXT),
+    const { first, next } = yield* attempt("write merge", () =>
+      conversation.commit(
+        (tx) =>
+          tx.doc(MergeDoc, conversation.id).then((doc) => {
+            const current = projectMergeDoc(doc);
+            if (event._tag === "merged") {
+              if (current.mergedAt !== "")
+                return { first: false, next: current };
+              doc.url = event.url;
+              doc.number = event.number;
+              doc.mergedAt = event.mergedAt;
+              doc.commit = event.commit ?? "";
+            } else {
+              if (current.revertedAt !== "")
+                return { first: false, next: current };
+              doc.revertedBy = event.by;
+              doc.revertedAt = event.revertedAt;
+            }
+            return { first: true, next: projectMergeDoc(doc) };
+          }),
+        BACKGROUND_CONTEXT,
       ),
     );
-    const next: MergeDocView =
-      event._tag === "merged"
-        ? current.mergedAt !== ""
-          ? current
-          : {
-              ...current,
-              url: event.url,
-              number: event.number,
-              mergedAt: event.mergedAt,
-              commit: event.commit ?? "",
-            }
-        : current.revertedAt !== ""
-          ? current
-          : { ...current, revertedBy: event.by, revertedAt: event.revertedAt };
-    const first = next !== current;
-    if (first) {
-      yield* attempt("write merge", () =>
-        conversation.commit(
-          (tx) =>
-            tx.doc(MergeDoc, conversation.id).then((doc) => {
-              doc.url = next.url;
-              doc.number = next.number;
-              doc.mergedAt = next.mergedAt;
-              doc.commit = next.commit;
-              doc.revertedBy = next.revertedBy;
-              doc.revertedAt = next.revertedAt;
-            }),
-          BACKGROUND_CONTEXT,
-        ),
-      );
-    }
     const merge = mergeRecordOf(next);
     // `next` holds the event's own fact whichever branch built it, so a record is always there.
     if (merge === undefined) {

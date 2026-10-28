@@ -16,13 +16,16 @@
  *   idle; its session's last activity for a run with none), clipped to the card's lead time. A
  *   union, so two runs at once are not twice the time.
  * - `delegation.median`, `delegation.mean`: over the Linear issues whose delegation first reached a
- *   merged PR in the window, from the delegated session's creation (`request_id`
- *   `trigger:linear:<issue>:mapped`) to the first merge among it and its re-runs (sessions forked
- *   from it, transitively).
+ *   merged PR in the window, from the delegation to the first merge among its sessions and their
+ *   re-runs (sessions forked from them, transitively). A session-mode rule's delegation is the
+ *   session it opened (`request_id` `trigger:linear:<issue>:mapped`), from its creation; a card-mode
+ *   rule's (LOB-254) is the card it filed (filed by `trigger:linear`, external ref
+ *   `linear:<issue>`), from the card's creation, and its sessions are the card's runs.
  *
  * **Cycle time** (`cycle_time`): `card.median`, `card.mean` — the same cards as lead time, from the
  * card's first move (out of the column it was filed in, `intake` on the default pipeline) to its
- * first move into `done`. A card that never moved before `done` has no cycle and is not counted.
+ * first move into `done`. A card that never moved before `done` — its first move was the one into
+ * `done` — has no cycle and is not counted here, though its lead time is.
  *
  * **Defect pressure** (`defect_pressure`), over the factory's merges in the window — distinct PRs a
  * session recorded (`pr_url`) whose merge (`pr_merged_at`) falls in it:
@@ -47,7 +50,9 @@
  * - `sessions.<trigger>`: how many each trigger started, from `request_id` (`triggerOf`): a seam
  *   delivery's source (`linear`, `sentry`, `github`, `jira`, `slack`, `generic`), the docs trigger,
  *   the review trigger, any other delivery, a card's run (`board`), or a client asking directly
- *   (`direct`: the CLI, the dashboard, a fork or a replay).
+ *   (`direct`: the CLI, the dashboard, a fork or a replay). A run of a card a card-mode rule filed
+ *   (LOB-254) counts under that rule's source — the card's `created` event names `trigger:<source>`
+ *   as its actor — and a run of a card anybody else filed under `board`.
  * - `actors.repeat`: of the people who started a session in the window (`sessions.actor`, not a
  *   trigger's `trigger:<source>`), the share who started more than one.
  *
@@ -55,6 +60,11 @@
  * `session_activity.cost_total` holds (LOB-17) — the list's own number, so the two reconcile.
  *
  * A median of an even count is the mean of the middle two. Every duration is in seconds.
+ *
+ * Known limits: the read loads every session created before `until` (a merge, revert or follow-up
+ * in the window can belong to one created long before it), so its cost grows with the deployment's
+ * history rather than with the window; and `card.factory_share` reads `task_runs.finished_at`,
+ * which no log backs (docs/metrics.md, docs/design.md D7).
  */
 import { Clock, DateTime, Effect, Option, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
@@ -68,6 +78,7 @@ import type {
 } from "@repo/domain/Outcomes";
 import { SessionError } from "@repo/domain/Session";
 import { TriggerSource } from "@repo/domain/Trigger";
+import { linearIssueOfExternalRef } from "./Linear";
 
 /** The window when the caller names none: the thirty days before `until`. */
 export const DEFAULT_OUTCOME_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
@@ -90,17 +101,30 @@ export type OutcomeTrigger = (typeof OUTCOME_TRIGGERS)[number];
 
 const isTriggerSource = Schema.is(TriggerSource);
 
+/** The trigger source an actor names, when it is a trigger's (`trigger:<source>`, LOB-162). */
+const sourceOfActor = (actor: string | null): TriggerSource | undefined => {
+  const source =
+    actor?.startsWith("trigger:") === true
+      ? actor.slice("trigger:".length)
+      : undefined;
+  return source !== undefined && isTriggerSource(source) ? source : undefined;
+};
+
 /**
- * The trigger a session came from, by its `request_id` (and whether it is a card's run).
+ * The trigger a session came from, by its `request_id`, whether it is a card's run, and who filed
+ * that card.
  *
  * A seam delivery's session is `trigger:<delivery id>` (`sessionRequestIdOf`), and a delivery id
  * starts with its source (`linear:<issue>:mapped`, `sentry:event:<id>`, …); the docs trigger's are
  * `push-…` and `schedule-…`, the review trigger's `review-…`. A session with no `trigger:` key is a
- * card's run when one is recorded for it, and otherwise a client's own call.
+ * card's run when one is recorded for it — counted under the source whose card-mode rule filed the
+ * card (`cardFiledBy` is `trigger:<source>`, LOB-254), and otherwise under `board` — and otherwise
+ * a client's own call.
  */
 export const triggerOf = (
   requestId: string | null,
   cardRun: boolean,
+  cardFiledBy: string | null = null,
 ): OutcomeTrigger => {
   if (requestId?.startsWith("trigger:") === true) {
     const delivery = requestId.slice("trigger:".length);
@@ -111,7 +135,8 @@ export const triggerOf = (
     if (delivery.startsWith("review-")) return "review";
     return "other";
   }
-  return cardRun ? "board" : "direct";
+  if (!cardRun) return "direct";
+  return sourceOfActor(cardFiledBy) ?? "board";
 };
 
 /** The Linear issue a delegated session was opened for, from its seam key. */
@@ -138,6 +163,11 @@ export type OutcomeSession = {
   readonly forkedFrom: string | null;
   readonly prUrl: string | null;
   readonly taskId: string | null;
+  /** The card's filer (its `created` event's actor) and external ref, for a card's run. */
+  readonly cardFiledBy: string | null;
+  readonly cardRef: string | null;
+  /** When the card was filed, for a card's run. */
+  readonly cardCreatedMs: number | null;
   readonly createdMs: number;
   readonly mergedMs: number | null;
   readonly revertedMs: number | null;
@@ -209,14 +239,15 @@ const SOURCES = {
   share:
     "task_events, task_runs (started_at, finished_at), session_activity.last_activity_at",
   delegation:
-    "sessions.request_id (trigger:linear:<issue>:mapped), sessions.forked_from, sessions.pr_merged_at (factory.merge)",
+    "sessions.request_id (trigger:linear:<issue>:mapped), a card-mode card's task_events created actor and tasks.external_ref (linear:<issue>), sessions.forked_from, sessions.pr_merged_at (factory.merge)",
   merges:
     "sessions.pr_url, sessions.pr_merged_at and pr_reverted_at (factory.merge, from the GitHub webhook)",
   followUps:
     "sessions.pr_merged_at, sessions.forked_from, task_runs.task_id, sessions.created_at",
   reruns: "sessions.forked_from, sessions.created_at, sessions.pr_merged_at",
   approvals: "session_approvals.decision, decided_at",
-  adoption: "sessions.request_id, task_runs, sessions.created_at",
+  adoption:
+    "sessions.request_id, task_runs, the card's task_events created actor, sessions.created_at",
   actors: "sessions.actor, sessions.created_at",
   cost: "session_activity.cost_total (LOB-17), sessions.created_at",
 } as const;
@@ -314,15 +345,30 @@ export const deriveOutcomes = (
     }
     return all;
   };
-  const issues = new Map<string, OutcomeSession[]>();
+  // A session-mode delegation is the session the issue's delivery opened; a card-mode one is the
+  // card a Linear rule filed, delegated when it was filed, whose runs are its sessions.
+  const issues = new Map<string, { roots: OutcomeSession[]; start: number }>();
   for (const session of facts.sessions) {
-    const issue = LINEAR_DELEGATION.exec(session.requestId ?? "")?.[1];
+    const delegated = LINEAR_DELEGATION.exec(session.requestId ?? "")?.[1];
+    const carded =
+      delegated === undefined && sourceOfActor(session.cardFiledBy) === "linear"
+        ? linearIssueOfExternalRef(session.cardRef)
+        : undefined;
+    const issue = delegated ?? carded;
     if (issue === undefined) continue;
-    issues.set(issue, [...(issues.get(issue) ?? []), session]);
+    const at =
+      carded === undefined
+        ? session.createdMs
+        : (session.cardCreatedMs ?? session.createdMs);
+    const known = issues.get(issue);
+    if (known === undefined) issues.set(issue, { roots: [session], start: at });
+    else {
+      known.roots.push(session);
+      known.start = Math.min(known.start, at);
+    }
   }
   const delegations: number[] = [];
-  for (const roots of issues.values()) {
-    const start = Math.min(...roots.map((session) => session.createdMs));
+  for (const { roots, start } of issues.values()) {
     const merges = lineage(roots).flatMap((session) =>
       session.mergedMs === null ? [] : [session.mergedMs],
     );
@@ -351,8 +397,11 @@ export const deriveOutcomes = (
     SOURCES.delegation,
   );
 
+  // A card whose first move was the move into `done` never left its column before it: no cycle.
   const cycles = cards.flatMap((card) =>
-    card.firstMovedMs === null ? [] : [card.doneMs - card.firstMovedMs],
+    card.firstMovedMs === null || card.firstMovedMs >= card.doneMs
+      ? []
+      : [card.doneMs - card.firstMovedMs],
   );
   const cycled = {
     count: cycles.length,
@@ -379,7 +428,17 @@ export const deriveOutcomes = (
   const byPr = new Map<string, OutcomeSession[]>();
   for (const session of facts.sessions) {
     if (session.prUrl === null || session.mergedMs === null) continue;
-    byPr.set(session.prUrl, [...(byPr.get(session.prUrl) ?? []), session]);
+    const own = byPr.get(session.prUrl);
+    if (own === undefined) byPr.set(session.prUrl, [session]);
+    else own.push(session);
+  }
+  // The candidates for a merge's follow-ups, by what makes one: its parent, and its card.
+  const runsOfCard = new Map<string, OutcomeSession[]>();
+  for (const session of facts.sessions) {
+    if (session.taskId === null) continue;
+    const runs = runsOfCard.get(session.taskId);
+    if (runs === undefined) runsOfCard.set(session.taskId, [session]);
+    else runs.push(session);
   }
   const merges = [...byPr.values()]
     .map((sessions) => ({
@@ -403,13 +462,18 @@ export const deriveOutcomes = (
     const isReverted = merge.sessions.some(
       (session) => session.revertedMs !== null && session.revertedMs < untilMs,
     );
-    const followUps = facts.sessions.filter(
+    const candidates = new Map<string, OutcomeSession>();
+    for (const session of merge.sessions)
+      for (const child of children.get(session.id) ?? [])
+        candidates.set(child.id, child);
+    for (const taskId of cardsOf)
+      for (const sibling of runsOfCard.get(taskId) ?? [])
+        candidates.set(sibling.id, sibling);
+    const followUps = [...candidates.values()].filter(
       (session) =>
         !own.has(session.id) &&
         session.createdMs > merge.mergedMs &&
-        session.createdMs < untilMs &&
-        ((session.forkedFrom !== null && own.has(session.forkedFrom)) ||
-          (session.taskId !== null && cardsOf.has(session.taskId))),
+        session.createdMs < untilMs,
     );
     for (const session of followUps) followUpSessions.add(session.id);
     if (isReverted) reverted += 1;
@@ -518,7 +582,11 @@ export const deriveOutcomes = (
   };
   const byTrigger = new Map<OutcomeTrigger, number>();
   for (const session of created) {
-    const trigger = triggerOf(session.requestId, session.taskId !== null);
+    const trigger = triggerOf(
+      session.requestId,
+      session.taskId !== null,
+      session.cardFiledBy,
+    );
     byTrigger.set(trigger, (byTrigger.get(trigger) ?? 0) + 1);
   }
   for (const trigger of OUTCOME_TRIGGERS) {
@@ -669,6 +737,9 @@ export const readOutcomes = (
         s.forked_from,
         s.pr_url,
         tr.task_id,
+        filed.actor AS card_filed_by,
+        t.external_ref AS card_ref,
+        ${sql.literal(EPOCH_MS("COALESCE(filed.created_at, t.created_at)"))} AS card_created_ms,
         ${sql.literal(EPOCH_MS("s.created_at"))} AS created_ms,
         ${sql.literal(EPOCH_MS("s.pr_merged_at"))} AS merged_ms,
         ${sql.literal(EPOCH_MS("s.pr_reverted_at"))} AS reverted_ms,
@@ -676,6 +747,12 @@ export const readOutcomes = (
       FROM sessions s
       LEFT JOIN session_activity a ON a.session_id = s.id
       LEFT JOIN task_runs tr ON tr.session_id = s.id
+      LEFT JOIN tasks t ON t.id = tr.task_id
+      LEFT JOIN LATERAL (
+        SELECT e.actor, e.created_at FROM task_events e
+        WHERE e.task_id = tr.task_id AND e.kind = 'created'
+        ORDER BY e.id LIMIT 1
+      ) filed ON true
       WHERE s.created_at < ${until}::timestamptz
         AND (${repo}::text IS NULL OR s.repo = ${repo})
       ORDER BY s.id
@@ -691,10 +768,10 @@ export const readOutcomes = (
 
     const runsOf = new Map<string, OutcomeCard["runs"][number][]>();
     for (const run of runs) {
-      runsOf.set(run.taskId, [
-        ...(runsOf.get(run.taskId) ?? []),
-        { startedMs: run.startedMs, endedMs: run.endedMs },
-      ]);
+      const interval = { startedMs: run.startedMs, endedMs: run.endedMs };
+      const known = runsOf.get(run.taskId);
+      if (known === undefined) runsOf.set(run.taskId, [interval]);
+      else known.push(interval);
     }
     const values = deriveOutcomes({
       window: { sinceMs, untilMs },

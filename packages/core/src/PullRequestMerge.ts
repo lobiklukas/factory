@@ -16,7 +16,7 @@
  * event records nothing new. A session whose record fails is logged and the rest are still
  * recorded: the event already happened, and the delivery's answer is the Linear mirror's.
  */
-import { DateTime, Effect, Schema } from "effect";
+import { DateTime, Effect, Option, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import type { SessionId } from "@repo/domain/Session";
 import { SessionId as SessionIdSchema } from "@repo/domain/Session";
@@ -92,7 +92,13 @@ export const recordMergedPullRequest = (
 ): Effect.Effect<MergeRecorded, never, SessionService | SqlClient> =>
   Effect.gen(function* () {
     if (event._tag !== "merged") return NOTHING;
-    const mergedAt = event.mergedAt ?? now;
+    // GitHub's `merged_at` when it is an instant; `now` when it is absent or is not one, so a
+    // malformed payload still records the merge rather than a value no rebuild could cast.
+    const mergedAt =
+      event.mergedAt !== undefined &&
+      Option.isSome(DateTime.make(event.mergedAt))
+        ? event.mergedAt
+        : now;
     let merged = 0;
     for (const sessionId of yield* sessionsOfPullRequest(
       event.pr.url,

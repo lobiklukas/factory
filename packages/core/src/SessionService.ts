@@ -153,6 +153,7 @@ import {
   modelAccessFor,
   modelKey,
   recordMergeEvent,
+  readRecordedMerge,
   interrupt as interruptConversation,
   isBusy,
   liveSessionEvents,
@@ -4537,6 +4538,20 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return kept === undefined ? undefined : { ...kept, first: false };
         });
 
+      /** The instant an event says its fact happened at (`recordMerge` refuses one that is not one). */
+      const mergeEventAt = (event: MergeEvent): string =>
+        event._tag === "merged" ? event.mergedAt : event.revertedAt;
+
+      /** Whether a session's merge record already holds `event`'s fact: the first one stands. */
+      const holdsMergeFact = (
+        merge: MergeRecord | undefined,
+        event: MergeEvent,
+      ): merge is MergeRecord =>
+        merge !== undefined &&
+        (event._tag === "merged"
+          ? merge.mergedAt !== ""
+          : merge.revert !== undefined);
+
       const recordMerge = (input: {
         readonly sessionId: SessionId;
         readonly event: MergeEvent;
@@ -4545,13 +4560,33 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         SessionError
       > =>
         Effect.gen(function* () {
+          // Checked before anything is committed: the log is the truth the index is refolded from,
+          // and `rebuildIndexes` casts this value to a timestamp, so a value that is not an instant
+          // would fail every rebuild after it.
+          const at = mergeEventAt(input.event);
+          if (Option.isNone(DateTime.make(at))) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message: `the ${input.event._tag} time is not an ISO-8601 instant: "${at}"`,
+            });
+          }
           const row = yield* requireSession(input.sessionId);
-          const owner = yield* acquireOwner(input.sessionId, row);
-          const recorded = yield* recordMergeEvent(
-            owner.harness,
-            owner.root,
-            input.event,
-          );
+          // A redelivered event on a session nobody here owns is answered from the committed log,
+          // so recording nothing new opens no owner.
+          const owned = HashMap.has(yield* Ref.get(live), input.sessionId);
+          const kept = owned
+            ? undefined
+            : yield* withReader(input.sessionId, readRecordedMerge);
+          const recorded = holdsMergeFact(kept, input.event)
+            ? { first: false, merge: kept }
+            : yield* Effect.flatMap(
+                // Paused (LOB-25): a metrics fact is no reason to continue a run a dead process left
+                // in the log — the next acquisition for real work does, once the idle sweep has
+                // closed this owner. A released session (LOB-268, which a merge does first) opens
+                // in no directory; an unreleased one opens in its worktree as any write does.
+                acquireOwner(input.sessionId, row, { resume: false }),
+                (owner) => recordMergeEvent(owner.root, input.event),
+              );
           // The log first, then its index, as the PR step writes `pr_url`: a failure between the two
           // leaves the log ahead of the row until a rebuild, never a row the log does not back. Written
           // on a repeat too, so a row a crash left behind the log is caught up by the redelivery.

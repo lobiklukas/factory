@@ -1,6 +1,6 @@
 ---
 name: verify-cli
-description: Drive and prove the factory CLI (`factory run` / `watch` / `history` / `ls` / `status` / `send` / `withdraw` / `approvals` / `approve` / `deny` / `repo` / `discard` / `replay` / `pr` in apps/cli; `pr` is proven by verify-board's build phase) in a real tmux terminal against a real control plane. Use when asked to verify, test, or show evidence that the CLI works, or after changing apps/cli, packages/domain, or apps/api.
+description: Drive and prove the factory CLI (`factory run` / `watch` / `history` / `ls` / `status` / `send` / `withdraw` / `approvals` / `approve` / `deny` / `repo` / `discard` / `replay` / `pr` / `outcomes` in apps/cli; `pr` is proven by verify-board's build phase, `outcomes` by verify-api's `outcomes.sh`) in a real tmux terminal against a real control plane. Use when asked to verify, test, or show evidence that the CLI works, or after changing apps/cli, packages/domain, or apps/api.
 ---
 
 # Verify the CLI

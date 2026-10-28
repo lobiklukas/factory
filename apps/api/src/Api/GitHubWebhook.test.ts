@@ -644,4 +644,49 @@ describe("POST /webhooks/github records the merge on the session's log (LOB-44)"
     });
     expect(await mergeRow(bystander.id)).toMatchObject({ mergedAt: null });
   }, 120_000);
+
+  it("keeps both facts when a merge and its revert arrive at once, and records a malformed merge time as the delivery's", async () => {
+    const work = await opened(54);
+    const revert = `https://github.com/${repo}/pull/55`;
+    // Decided inside one commit each, from the document as the log holds it: neither overwrites
+    // the other's fact, in the log or in the row.
+    await Promise.all([
+      deliver(merged(54, work.url, "2026-10-23T10:00:00Z")),
+      deliver(merged(55, revert, "2026-10-23T11:00:00Z", `Reverts ${repo}#54`)),
+    ]);
+    expect(await mergeRow(work.id)).toMatchObject({
+      mergedAt: "2026-10-23T10:00:00Z",
+      revertedAt: "2026-10-23T11:00:00Z",
+    });
+
+    // A `merged_at` that is no instant is not committed: the merge is recorded at the delivery's
+    // time, so the log holds a value every later rebuild can cast.
+    const odd = await opened(56);
+    // oxlint-disable-next-line effecttsgo/global-date -- the route's own clock is the real one.
+    const before = Date.now();
+    expect((await deliver(merged(56, odd.url, "yesterday-ish"))).status).toBe(
+      200,
+    );
+    const row = await mergeRow(odd.id);
+    expect(row?.mergedAt).not.toBeNull();
+    expect(Date.parse(row?.mergedAt ?? "")).toBeGreaterThanOrEqual(
+      Math.floor(before / 1000) * 1000,
+    );
+    const rebuilt = await inService(
+      Effect.gen(function* () {
+        yield* rebuildIndexes;
+        const sql = yield* SqlClient;
+        return yield* Effect.acquireUseRelease(
+          Effect.promise(() => PostgresStorage.reader(sql, work.id)),
+          readSessionLog,
+          (storage) => Effect.promise(() => storage.dispose()),
+        );
+      }),
+    );
+    expect(rebuilt.merge).toMatchObject({
+      mergedAt: "2026-10-23T10:00:00Z",
+      revert: { by: revert, at: "2026-10-23T11:00:00Z" },
+    });
+    expect(await mergeRow(odd.id)).toEqual(row);
+  }, 120_000);
 });

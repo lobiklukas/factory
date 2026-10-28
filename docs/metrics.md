@@ -82,6 +82,22 @@ reverts (`Reverts owner/repo#N`, GitHub's revert wording); `sessions.pr_merged_a
 `pr_reverted_at` are its index, refolded by `rebuildIndexes`. A merge before this was recorded is in
 no number. A run's end (`task_runs.finished_at`) is written where its session goes idle.
 
+A card-mode rule's card (LOB-254) carries its source into the numbers: its runs count under that
+source in `adoption` (the card's `created` event names `trigger:<source>`), and a Linear card's
+delegation runs from the card's filing to the first merge of its runs. A card that went from its
+filed column straight into `done` has a lead time and no cycle time.
+
+Known limits:
+
+- **`card.factory_share` does not fully survive a rebuild from scratch.** `task_runs.finished_at` is
+  in no log (docs/design.md D7, "As built (LOB-44)"): a run row `rebuildIndexes` re-creates starts at
+  its session's first commit and reads as ending at the session's last activity, which a later
+  commit stretches, so the share is an upper bound for those runs.
+- **The read scans every session created before `until`**, in the repo when one is named: a merge,
+  revert or follow-up in the window can belong to a session created long before it. Its cost grows
+  with the deployment's history, not with the window; a bound to the sessions related to the window
+  is the next step if it shows up in the read's latency.
+
 Not here yet: the share of all merged PRs the factory authored and of issues it closed (their
 denominators are outside the factory's records), a policy `block`'s refusal rate (indexed nowhere),
 emission over OTLP, and a board view.
