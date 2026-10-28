@@ -4,6 +4,7 @@
  * instead of raw string kinds.
  */
 import type { JsonValue } from "@earendil-works/chord";
+import type { TaskId } from "@earendil-works/pi-durable";
 import { defineDoc, defineDocFamily } from "@earendil-works/pi-durable";
 import { REPLAY_DOC_KIND } from "./projection";
 
@@ -177,6 +178,14 @@ export const PagePromptDoc = defineDoc({
  *
  * Empty `phase` is "this mission has not entered a phase yet", which is what the seed says; the seed
  * cannot say `plan`, because a mission that never ran never planned anything.
+ *
+ * `workers` is the roster a fan-out writes (LOB-194): per worker, its id, its task and the
+ * conversation its first commit created, which is how a read finds the ledger a worker's spend is
+ * in. The seed has none and a mission that fanned out to none never writes one, so — like
+ * `factory.pr`'s `evidence` — a document written before the field existed reads as an empty roster
+ * and its version did not change. Each entry is written in the commit that creates what it names; a
+ * worker only fills in an entry that exists, so a mission that fanned out before the roster stays at
+ * no workers instead of listing the ones that opened after an upgrade.
  */
 export const MissionDoc = defineDocFamily({
   kind: MISSION_DOC_KIND,
@@ -185,13 +194,27 @@ export const MissionDoc = defineDocFamily({
   history: "latest",
   fork: "current",
   family: true,
-  initial: (mission: string) => ({
+  initial: (
+    mission: string,
+  ): {
+    mission: string;
+    phase: string;
+    definitionVersion: number;
+    entered: string[];
+    workers?: { id: string; taskId: string; conversationId: string }[];
+  } => ({
     mission,
     phase: "",
     definitionVersion: 0,
     entered: [] as string[],
   }),
 });
+
+/**
+ * The key a mission's own documents are filed under: its task id. One conversation holds several
+ * missions, so each one's phase record is its own.
+ */
+export const missionKey = (taskId: TaskId): string => String(taskId);
 
 /**
  * The mission this session is running (LOB-230), keyed by nothing: one conversation has one current

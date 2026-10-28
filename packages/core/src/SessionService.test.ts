@@ -9514,11 +9514,26 @@ describe("a mission on a session", () => {
       });
       // Both workers completed, so the join moved on to verify, where a scratch session settles for
       // its own reason (no verify command), and the log names every phase the mission entered.
-      expect(outcome.settled.mission).toEqual({
+      expect(outcome.settled.mission).toMatchObject({
         taskId: outcome.started.taskId,
         phase: "verify",
         entered: ["plan", "implement", "verify"],
       });
+      // And the snapshot names each worker with the conversation it owns, which is where its spend
+      // is read from (LOB-194): the same ids the task graph showed while the workers ran.
+      expect(
+        outcome.settled.mission?.workers?.map((worker) => ({
+          id: worker.id,
+          taskId: worker.taskId,
+          conversationId: worker.conversationId,
+        })),
+      ).toEqual(
+        outcome.workers.map((worker, index) => ({
+          id: index === 0 ? "a" : "b",
+          taskId: worker.id,
+          conversationId: worker.conversations[0],
+        })),
+      );
     } finally {
       writeFileSync(join(hold, "release"), "");
     }
@@ -9799,7 +9814,7 @@ describe("a mission across a restart", () => {
       );
 
       expect(outcome.folded.session.mode).toBe("historical");
-      expect(outcome.folded.mission).toEqual({
+      expect(outcome.folded.mission).toMatchObject({
         taskId: armed.started.taskId,
         phase: "implement",
         entered: ["plan", "implement"],
@@ -9835,11 +9850,15 @@ describe("a mission across a restart", () => {
         })),
       );
       // And carries on to the end without passing through plan again.
-      expect(outcome.settled.mission).toEqual({
+      expect(outcome.settled.mission).toMatchObject({
         taskId: armed.started.taskId,
         phase: "verify",
         entered: ["plan", "implement", "verify"],
       });
+      // The same two workers, in the conversations they had before the stop (LOB-194).
+      expect(
+        outcome.settled.mission?.workers?.map((worker) => worker.taskId),
+      ).toEqual(workersBefore.map((task) => task.id));
       expect(runsOf(worktree, "a")).toBe(2);
       expect(runsOf(worktree, "b")).toBe(2);
     } finally {

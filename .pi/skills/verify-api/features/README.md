@@ -159,6 +159,11 @@ The abort reason on the aborted worker, `allSettled`, and the join reading only 
 are terminal are proven from the task graph in `packages/harness/src/mission.fanout.test.ts` — see
 `mission.md`.
 
+The per-worker cost checks (LOB-194) were run from the `agent/LOB-194` worktree on 2026-10-28
+(`MISSION_COST_PORT=9581`, a priced faux, `DATABASE_URL=…/factory_agent_lob_194` on 5442):
+`./mission-cost.sh` **10/10** (7 driver checks across the run and the reopen, 3 shell checks),
+evidence `.verify/evidence/lob-194/api/`. See [mission.md](mission.md).
+
 The `verify` tool checks (LOB-78) were run from the `agent/LOB-78` worktree on 2026-10-27
 (`DATABASE_URL` the worker's own `factory_agent_lob_78` on 5442, faux): `./verify-tool.sh` **13/13** (re-run after the second review: the declared command once per call, and the `VERIFY_NO_DATABASE` check in `pass`),
 evidence `.verify/evidence/lob-78/api/`. Like `./docs-run.sh` it starts no API process. `bun drive.ts`

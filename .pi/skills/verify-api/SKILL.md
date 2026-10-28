@@ -43,6 +43,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | A mission (LOB-230)                     | `startMission` → an id, then `getSession().mission` reports `verify` with `entered`, live and folded                                                                                                                                                                                                                        | a mission's phase is the session's state, not a call                               |
 | A mission's fan-out (LOB-193)           | two `workers` live, owned, two conversations, `waiting` failFast; a failing worker stops its sibling's running check; a check outside the policy is refused                                                                                                                                                                 | a failing subtask stops its siblings, per policy                                   |
 | A mission across a kill (LOB-231)       | `mission-restart.sh`: SIGTERM while the checkpoint is `implement` and both workers are on a tool call; a fresh process resumes it at boot, unasked, in `implement`, and the same workers finish                                                                                                                             | a mission resumes in the phase it died in                                          |
+| Per-worker cost (LOB-194)               | `mission-cost.sh`: two workers report two separate costs (two requests each) whose sum is the session's total and the list's `costTotal`; the same breakdown from the fold and from a restarted API; a mission with no workers reports none                                                                                 | a finished mission says what each worker spent                                     |
 | A docs trigger (LOB-197)                | `docs-trigger.sh`: a push starts one docs session on `factory/doc-<id>`, the schedule one per interval, the ledger no write to main                                                                                                                                                                                         | a docs run starts without a person, off the trunk                                  |
 | Docs trigger callers (LOB-234)          | `docs-trigger-http.sh`: `DOCS_SCHEDULE_MS=400` ticks sessions, unset none; a signed push processed, a redelivery replayed, another branch 400, a bad signature 401                                                                                                                                                          | a deployment starts docs runs with no script                                       |
 | The `verify` tool (LOB-78)              | `verify-tool.sh`: exit 0 with output, exit 3 with the tail, no evidence for a skill-less surface, the declared command first                                                                                                                                                                                                | a run's verification is a record, not prose                                        |
@@ -108,6 +109,7 @@ running, and writes its own evidence:
 ```sh
 ./sigterm.sh     # api on :9400 (SIGTERM_PORT) — a busy session with a commit, SIGTERM, a fresh process resumes it on the same branch
 ./approval-restart.sh  # api on :9416 — a gated call parks on an approval, SIGKILL, a fresh process re-asks nothing
+./mission-cost.sh     # api on :9430 (MISSION_COST_PORT), a priced faux — two workers' costs add up to the session's, live, folded and after a restart (features/mission.md)
 ./mission-restart.sh  # api on :9418 (MISSION_RESTART_PORT or API_PORT), its own database minted on DATABASE_URL's server — SIGTERM mid-implement, a fresh process resumes the mission at boot (features/mission.md)
 ./degraded.sh    # api on :9500 — Postgres stopped: /livez 200, /readyz 503, typed errors; then back
 ./pr-once.sh     # fake GitHub on :9411 — SIGKILL between the PR call and its acknowledgement
@@ -207,6 +209,9 @@ order you want the evidence to end in.
 - `mission-restart-arm.json` / `mission-restart-verify.json` — from `./mission-restart.sh`: the
   mission's task, its workers and its document before the signal (implement, both workers on a tool
   call) and after the restart (resumed by the boot, then settled in verify)
+- `mission-cost-run.json` / `mission-cost-reopen.json`, `mission-cost-process.json`, `mission-cost-api.log` —
+  from `./mission-cost.sh`: the breakdown the driver read live, folded and after the API restarted, with
+  its checks, and the script's own
 - `mission-restart-process.json`, `mission-restart-api.log` — what the process did: the exit, the
   shutdown and boot-resume log lines, and the row the next boot reads, set while nothing ran
 - `degraded-down.json`, `degraded-up.json`, `degraded-process.json`, `degraded-api.log` — from
