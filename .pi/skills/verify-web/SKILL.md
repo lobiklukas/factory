@@ -169,6 +169,22 @@ and `DefinitionNotFound` (the page's own request rewritten in flight to name a d
 not exist) to be shown verbatim with nothing written (`features/board-create.md`). `drive.mjs` makes
 its own board through the same form. Evidence goes to `.verify/evidence/latest/board-create/`.
 
+### Board settings
+
+```sh
+BOARD_SETTINGS_API_PORT=9471 BOARD_SETTINGS_WEB_PORT=3471 ./board-settings.sh   # its own instance with a role model; leaves nothing running
+```
+
+A column's model is deployment configuration, so `board-settings.sh` starts its own API
+(`ROLE_MODELS=specifier=faux/faux-spec`) and dashboard and makes two boards over the RPC, one on the
+default definition's newest version and one pinned to v2. `board-settings.mjs` opens each board's
+**Settings** page from its header and requires every column read back from the page — kind, role,
+model and its source, skills, requirements marked checked or "not yet checked", moves out and human
+gates — to equal `getDefinition` for the board's version; `planning → building` to be the gate "plan
+approval" and `specifying`'s role `specifier`; the v2 board to say v3 exists; each lane header's
+disclosure to show its column's same facts; and a malformed or missing board to be refused
+(`features/board-settings.md`). Evidence goes to `.verify/evidence/latest/board-settings/`.
+
 ### The dashboard's credential
 
 ```sh
@@ -312,6 +328,7 @@ touch `.verify/evidence/`; after cleanup, confirm the evidence is still there.
 | `seed-spend.ts`     | The spend drive's board and the two cards its runs start from                    |
 | `repos.sh`          | The repositories page's own instance, checkouts and drive (`repos.mjs`)          |
 | `board-create.sh`   | The New board form's own instance, empty database and drive (`board-create.mjs`) |
+| `board-settings.sh` | The settings page's own instance (a role model) and drive (`board-settings.mjs`) |
 | `backend.sh`        | The anthropic-inferred instance, no banner, and the model (`backend.mjs`)        |
 | `history.sh`        | A long history's own short-idle instance and its drive (`history.mjs`)           |
 | `auth.sh`           | An API that requires a token, two dashboards and the drive (`auth.mjs`)          |

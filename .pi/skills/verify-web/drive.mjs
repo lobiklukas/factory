@@ -1979,6 +1979,8 @@ boardObserved.definitionOrder = definitionOrder;
 const BOARD_READS = new Set([
   "listBoards",
   "getBoard",
+  // A lane's settings disclosure (D3) reads the board's configuration when it is opened.
+  "getBoardConfig",
   "listTasks",
   "listSessions",
   "listTaskRuns",
@@ -2028,8 +2030,10 @@ const readLanes = (target) =>
       cardText: cards.map((card) =>
         (card.textContent ?? "").replace(/\s+/g, " ").trim(),
       ),
+      // A lane header's settings disclosure (D3) is the one button a lane holds: it opens what the
+      // column does, read-only, and writes nothing — the write check below would catch it if it did.
       controls: document.querySelectorAll(
-        "[aria-label='Lanes'] button, [aria-label='Lanes'] [role='button'], [aria-label='Lanes'] [draggable='true']",
+        "[aria-label='Lanes'] button:not([data-lane-settings-toggle]), [aria-label='Lanes'] [role='button']:not([data-lane-settings-toggle]), [aria-label='Lanes'] [draggable='true']",
       ).length,
     };
   }, cardId);
