@@ -295,6 +295,7 @@ submissions. No drive mutation was run; the root scoping is mutation-checked in 
 | Approve proposals        | passing | [approve-proposals.md](approve-proposals.md) |
 | The model backend        | passing | [model-backend.md](model-backend.md)         |
 | What the server runs     | passing | [server-info.md](server-info.md)             |
+| Control-plane identity   | passing | [identity.md](identity.md)                   |
 
 The model-backend checks (LOB-258) were run from the `agent/LOB-258` worktree on 2026-10-28
 (`BACKEND_BOOT_PORT=9542`, the worktree's own database on 5442, no repo-root `.env`):
@@ -311,6 +312,15 @@ credentials, and `faux/faux-1` on a session's create, get and list row), evidenc
 `.verify/evidence/latest/api/server-info.json`. With the owner open's write of `sessions.model`
 removed, the list-row check fails (`.verify/evidence/lob-269/mutation-no-model-write/`). See
 [server-info.md](server-info.md).
+
+The identity checks (LOB-20) were run from the `agent/LOB-20` worktree on 2026-10-28
+(`API_PORT=9520`, the worktree's own database on 5442): `./identity.sh` **15/15** plus the shell's
+two (unauthenticated `listSessions` and `watchSession` refused with `missing` and `invalid`; amy's
+`createSession`, `decideApproval`, `createTask`, `moveTask` and the CLI's `board move` all recorded
+`amy` over a body naming `mallory`; `listSpend` by the authenticated actors; a signed delivery with no
+credential accepted as `trigger:generic`), evidence `.verify/evidence/latest/api/identity.json`. With
+the `createSession` handler passing the body through, or the middleware serving every call as auth
+off, `apps/api/src/Rpc/Auth.test.ts` fails (2 and 7 cases). See [identity.md](identity.md).
 
 ## Deliberately absent
 

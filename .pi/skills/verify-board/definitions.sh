@@ -19,6 +19,11 @@
 # .verify/run/board.json) and DATABASE_URL naming the same database, for `board-create.ts`'s reads.
 set -uo pipefail
 
+# This suite runs its API with auth off (LOB-20): its clients send no credential, and it declares
+# actors (a run's session id) that only an open control plane keeps. A token exported for the
+# rest of the verify skills must not turn auth on here.
+unset FACTORY_API_TOKEN FACTORY_API_TOKENS VITE_FACTORY_API_TOKEN FACTORY_API_AUTH
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 API_PORT="${API_PORT:-9400}"
 API_URL="${API_URL:-http://localhost:$API_PORT}"

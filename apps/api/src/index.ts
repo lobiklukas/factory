@@ -64,6 +64,13 @@ import {
 } from "./Api/TriggerAdapters";
 import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
+import {
+  ApiAuthConfig,
+  bindRefusal,
+  controlPlaneAuthLayer,
+  describeApiAuth,
+  tokenTableOf,
+} from "./Rpc/Auth";
 import { ServerFacts, webhookRouteStates } from "./ServerInfo";
 import { describeLoadedEnvFiles, loadedEnvFiles } from "./EnvFiles";
 import {
@@ -94,7 +101,12 @@ const MIGRATION_RETRY_MS = 3_000;
 
 export const ServerConfig = Config.all({
   port: Config.Number("PORT").pipe(Config.withDefault(9000)),
-  hostname: Config.String("HOST").pipe(Config.withDefault("0.0.0.0")),
+  /**
+   * Loopback unless a deployment says otherwise (LOB-20): a control plane with no token serves every
+   * caller, so it listens beyond this machine only with a token or `FACTORY_API_AUTH=off`
+   * (`./Rpc/Auth`'s `bindRefusal`).
+   */
+  hostname: Config.String("HOST").pipe(Config.withDefault("127.0.0.1")),
   idleTimeout: Config.Number("IDLE_TIMEOUT").pipe(Config.withDefault(120)),
   allowedOrigins: Config.String("ALLOWED_ORIGINS").pipe(
     Config.withDefault("http://localhost:3000"),
@@ -535,6 +547,13 @@ const HttpLive = Effect.gen(function* () {
   const docsSchedule = yield* DocsScheduleConfig;
   const sandboxChoice = yield* SandboxRuntimeConfig;
   const missionResume = yield* MissionResumeConfig;
+  // Who may call the RPC surface (LOB-20): a malformed token table refuses the boot here, and no
+  // table at all is auth off, which the boot says in a warning rather than an info line — and which
+  // listens beyond loopback only when FACTORY_API_AUTH=off asks for it.
+  const apiAuth = yield* ApiAuthConfig;
+  const apiTokens = yield* tokenTableOf(apiAuth);
+  const unsafeBind = bindRefusal(apiTokens, config.hostname, apiAuth.authOff);
+  if (unsafeBind !== undefined) return yield* unsafeBind;
   const docsEveryMs = Option.getOrElse(docsSchedule.everyMs, () => 0);
   if (docsEveryMs > 0 && Option.isNone(docsSchedule.repo)) {
     return yield* new InvalidDocsSchedule({
@@ -772,6 +791,7 @@ const HttpLive = Effect.gen(function* () {
     TriggerCheckoutLog(triggerRules),
     PullRequestStepDeps,
     ServerFactsLive,
+    controlPlaneAuthLayer(apiTokens),
   ).pipe(
     // The Linear sync sits beside Postgres so the session layer and the routes share one instance
     // (`./Api/LinearSync`): a layer first built inside `serve` would be the routes' private copy.
@@ -780,10 +800,17 @@ const HttpLive = Effect.gen(function* () {
     ),
   );
 
+  if (apiTokens === undefined) {
+    yield* Effect.logWarning(describeApiAuth(apiTokens));
+  } else {
+    yield* Effect.logInfo(describeApiAuth(apiTokens));
+  }
   yield* Effect.logInfo(`CORS allowed origins: ${allowedOrigins.join(", ")}`);
   yield* Effect.logInfo("Starting server with:");
   yield* Effect.logInfo("  - HTTP API at /");
-  yield* Effect.logInfo("  - RPC at /rpc");
+  yield* Effect.logInfo(
+    `  - RPC at /rpc (${apiTokens === undefined ? "unauthenticated" : "bearer token required"}; webhooks keep their own signatures)`,
+  );
   yield* Effect.logInfo("  - probes at /livez and /readyz");
   yield* Effect.logInfo(
     `  - session working directories under ${model.sessionRoot}`,

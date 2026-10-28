@@ -304,16 +304,22 @@ export type SessionServiceShape = {
   /**
    * Fork a session at one of its entries: a new session whose transcript is the parent's prefix
    * (LOB-180). The fork's log is its own, so neither transcript can reach the other.
+   *
+   * `actor` is who the fork's spend is attributed to: the RPC surface passes the caller its
+   * credential authenticated (LOB-20). Absent, the parent's actor (LOB-162).
    */
   readonly fork: (
-    input: ForkSessionInput,
+    input: ForkSessionInput & { readonly actor?: SessionActor },
   ) => Effect.Effect<SessionSummary, SessionError>;
   /**
    * Replay a session against another model (LOB-198): the same task in a new session, on the model
    * the caller names, at the source's repo and base ref. The source log is only ever read.
+   *
+   * `actor` is who the replay's spend is attributed to: the RPC surface passes the caller its
+   * credential authenticated (LOB-20). Absent, the source's actor (LOB-162).
    */
   readonly replay: (
-    input: ReplaySessionInput,
+    input: ReplaySessionInput & { readonly actor?: SessionActor },
   ) => Effect.Effect<SessionSummary, SessionError>;
   /**
    * Start a new model context, opened with the handoff note (LOB-181). The transcript keeps the
@@ -2618,10 +2624,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * ownership of the log it copies from, and a reader never does.
        */
       const fork = (
-        input: ForkSessionInput,
+        input: ForkSessionInput & { readonly actor?: SessionActor },
       ): Effect.Effect<SessionSummary, SessionError> =>
         Effect.gen(function* () {
           const parent = yield* requireSession(input.sessionId);
+          // Whoever asked for the fork when the RPC surface authenticated them (LOB-20); otherwise
+          // the parent's, as a fork continues its parent's work (LOB-162).
+          const actor = input.actor ?? parent.actor;
           const id = yield* mintSessionId;
           // A fork works where its parent worked: the same transcript reopened against another repo
           // would be a history that never happened.
@@ -2642,7 +2651,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               undefined,
               binding,
               input.sessionId,
-              parent.actor,
+              actor,
             ),
           );
           const row = inserted[0] ?? {
@@ -2653,7 +2662,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             branch: null,
             prUrl: null,
             forkedFrom: input.sessionId,
-            actor: parent.actor,
+            actor,
             createdAt: "",
             workspaceReleasedAt: null,
             workspaceReleaseReason: null,
@@ -2690,9 +2699,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                             baseRef: binding.baseRef,
                           },
                         }),
-                    // A fork continues its parent's work, so its spend is the parent's actor's
-                    // (LOB-162), committed with the lineage.
-                    ...(parent.actor === null ? {} : { actor: parent.actor }),
+                    // The fork's actor (the caller's, or its parent's), committed with the lineage.
+                    ...(actor === null ? {} : { actor }),
                     model: options.model,
                     cwd,
                     ...(options.sandbox === undefined
@@ -2734,10 +2742,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * parent entry or is a mistake, both of which are decided by the copy.
        */
       const replay = (
-        input: ReplaySessionInput,
+        input: ReplaySessionInput & { readonly actor?: SessionActor },
       ): Effect.Effect<SessionSummary, SessionError> =>
         Effect.gen(function* () {
           const source = yield* requireSession(input.sessionId);
+          // Whoever asked for the replay when the RPC surface authenticated them (LOB-20); otherwise
+          // the source's, as a replay is its source's task run again (LOB-162).
+          const actor = input.actor ?? source.actor;
           const target = (yield* sessionModelFor(input.model)) ?? options.model;
           const origin = yield* withReader(input.sessionId, readReplaySource);
           const binding: Binding = {
@@ -2749,14 +2760,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const id = yield* mintSessionId;
           const inserted = yield* paper(
             "create session",
-            insertSession(
-              id,
-              source.title,
-              undefined,
-              binding,
-              null,
-              source.actor,
-            ),
+            insertSession(id, source.title, undefined, binding, null, actor),
           );
           const row = inserted[0] ?? {
             id,
@@ -2766,7 +2770,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             branch: null,
             prUrl: null,
             forkedFrom: null,
-            actor: source.actor,
+            actor,
             createdAt: "",
             workspaceReleasedAt: null,
             workspaceReleaseReason: null,
@@ -2788,9 +2792,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 target: storage,
                 model: target,
                 title: source.title,
-                // A replay is its source's task run again, so its spend is the source's actor's
-                // (LOB-162), committed with the lineage.
-                ...(source.actor === null ? {} : { actor: source.actor }),
+                // The replay's actor (the caller's, or its source's), committed with the lineage.
+                ...(actor === null ? {} : { actor }),
                 cwd,
                 ...(options.sandbox === undefined
                   ? {}

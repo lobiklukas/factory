@@ -40,6 +40,8 @@ const databaseUrl = (database: string) =>
 interface ResolvedEnvironment {
   readonly specified: { readonly env: readonly string[] | null };
   readonly configured: readonly string[] | null;
+  /** `NAME=<hash>` for each variable framework inference (Vite's `VITE_*`) added to the hash. */
+  readonly inferred?: readonly string[] | null;
 }
 
 interface DryRun {
@@ -91,6 +93,8 @@ const resolveScript = (
   script: "test" | "dev",
   filter: string,
   url: string,
+  /** More variables set for the dry run, so turbo reports what it does with their values. */
+  extra: Readonly<Record<string, string>> = {},
 ): DryRun => {
   const env = Object.fromEntries(
     Object.entries(process.env).filter(([name]) => !name.startsWith("TURBO_")),
@@ -103,6 +107,7 @@ const resolveScript = (
       encoding: "utf8",
       env: {
         ...env,
+        ...extra,
         DATABASE_URL: url,
         TURBO_TELEMETRY_DISABLED: "1",
         DO_NOT_TRACK: "1",
@@ -814,9 +819,35 @@ describe("the API's environment reads (LOB-257)", () => {
       "ANTHROPIC_API_KEY",
       "ANTHROPIC_OAUTH_TOKEN",
       "ANTHROPIC_AUTH_TOKEN",
+      "FACTORY_API_TOKEN",
+      "FACTORY_API_TOKENS",
     ]) {
       expect(passThrough).toContain(name);
       expect(declared(dryRun, DEV_TASK)).not.toContain(name);
     }
+  }, 90_000);
+
+  it("passes the CLI's control-plane credential through without hashing it, and declares the dashboard's (LOB-20)", () => {
+    // Stripped, `bun run dev` would send no credential to an API that requires one, and every call
+    // would answer `unauthenticated` with the token sitting in the shell.
+    const cli = resolveScript(
+      "dev",
+      "@repo/cli",
+      databaseUrl("factory_probe"),
+      {
+        FACTORY_API_TOKEN: "turbo-env-probe-token-0123456789",
+      },
+    );
+    expect(
+      taskOf(cli, CLI_DEV_TASK).resolvedTaskDefinition.passThroughEnv,
+    ).toContain("FACTORY_API_TOKEN");
+    expect(declared(cli, CLI_DEV_TASK)).not.toContain("FACTORY_API_TOKEN");
+    const inferred = taskOf(cli, CLI_DEV_TASK).environmentVariables.inferred;
+    expect(
+      (inferred ?? []).some((entry) => entry.startsWith("FACTORY_API_TOKEN=")),
+    ).toBe(false);
+    // The dashboard's is baked into its bundle, so it is hashed on purpose (apps/web/turbo.json).
+    const web = resolveScript("dev", "@repo/web", databaseUrl("factory_probe"));
+    expect(declared(web, WEB_DEV_TASK)).toContain("VITE_FACTORY_API_TOKEN");
   }, 90_000);
 });

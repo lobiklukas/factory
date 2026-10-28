@@ -29,7 +29,12 @@ import { DatabaseLive } from "@repo/storage-postgres";
 import { Clock, Effect, Layer } from "effect";
 import { RpcClient } from "effect/rpc";
 import { SqlClient } from "effect/sql/SqlClient";
-import { makeChecker, protocolFor, waitUntil } from "./harness.ts";
+import {
+  makeChecker,
+  protocolFor,
+  recordedActor,
+  waitUntil,
+} from "./harness.ts";
 import type { CheckRecord } from "./harness.ts";
 
 const API_URL = process.env["API_URL"] ?? "http://localhost:9416";
@@ -343,7 +348,7 @@ const verify = Effect.gen(function* () {
   assert(
     "the approval is settled and still asked for once",
     pendingAfterApproval.approvals.length === 0 &&
-      decision.actor === ACTOR &&
+      decision.actor === recordedActor(ACTOR) &&
       afterApproval === 1,
     `pending=${pendingAfterApproval.approvals.length} actor=${decision.actor} requestCommits=${afterApproval}`,
   );

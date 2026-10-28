@@ -18,6 +18,7 @@
   "exports": {
     "./Api": "./src/Api.ts",
     "./Approval": "./src/Approval.ts",
+    "./Auth": "./src/Auth.ts",
     "./Decomposition": "./src/Decomposition.ts",
     "./Ids": "./src/Ids.ts",
     "./Mission": "./src/Mission.ts",

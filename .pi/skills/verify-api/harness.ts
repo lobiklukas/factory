@@ -2,15 +2,48 @@
 // wait primitive, one RPC client. Two drivers that disagreed about what "PASS" looks like would
 // make the evidence unreadable, and the client must be the one the CLI and the dashboard build.
 import { Effect, Layer, Option, Schema } from "effect";
-import { FetchHttpClient } from "effect/http";
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 import { RpcClient, RpcSerialization } from "effect/rpc";
 
 /**
- * The RPC client layer for an API base URL: `RpcClient.make(SessionRpc)` over NDJSON, exactly as
- * `apps/web/src/lib/rpc-client.ts` and `apps/cli/src/rpc.ts` build it.
+ * The control-plane credential (LOB-20): `FACTORY_API_TOKEN`, the variable the CLI sends and the API
+ * reads as its shared token, so a drive run with it exported talks to an API that requires it.
+ * `undefined` when unset: the drive talks to an open API, as before.
  */
-export const protocolFor = (apiUrl: string) =>
-  RpcClient.layerProtocolHttp({ url: `${apiUrl}/rpc` }).pipe(
+export const API_TOKEN = process.env["FACTORY_API_TOKEN"]?.trim() || undefined;
+
+/**
+ * Who the API records for this drive's writes: the shared token's actor when the drive sends one
+ * (`FACTORY_API_ACTOR`, `operator` unless named — the API's own default), and otherwise whatever the
+ * drive declared, which an open API keeps.
+ */
+export const recordedActor = (declared: string): string =>
+  API_TOKEN === undefined
+    ? declared
+    : process.env["FACTORY_API_ACTOR"]?.trim() || "operator";
+
+/** The header a raw `fetch` to `/rpc` carries, so it is authenticated as the typed client is. */
+export const authHeaders = (): Record<string, string> =>
+  API_TOKEN === undefined ? {} : { authorization: `Bearer ${API_TOKEN}` };
+
+/**
+ * The RPC client layer for an API base URL: `RpcClient.make(SessionRpc)` over NDJSON, exactly as
+ * `apps/web/src/lib/rpc-client.ts` and `apps/cli/src/rpc.ts` build it — the credential included.
+ * `token` defaults to `FACTORY_API_TOKEN`; `null` sends none, for a drive that proves the refusal.
+ */
+export const protocolFor = (
+  apiUrl: string,
+  token: string | null = API_TOKEN ?? null,
+) =>
+  RpcClient.layerProtocolHttp({
+    url: `${apiUrl}/rpc`,
+    ...(token === null
+      ? {}
+      : {
+          transformClient: <E, R>(client: HttpClient.HttpClient.With<E, R>) =>
+            HttpClient.mapRequest(client, HttpClientRequest.bearerToken(token)),
+        }),
+  }).pipe(
     Layer.provide(FetchHttpClient.layer),
     Layer.provide(RpcSerialization.layerNdjson),
   );

@@ -9,6 +9,7 @@ import { Effect, Layer } from "effect";
 import { HttpClient } from "effect/http";
 import { RpcSerialization, RpcServer } from "effect/rpc";
 import { ApprovalsRpcHandlers } from "./Approvals";
+import { attributed } from "./Auth";
 import { ServerRpcHandlers } from "./Server";
 import { TaskRpcHandlers } from "./Task";
 import { TriggerRoutesRpcHandlers } from "./TriggerRoutes";
@@ -31,14 +32,21 @@ const SessionRpcHandlers = SessionRpc.toLayer(
     const credentials = yield* CredentialProvider;
     const forge = yield* HttpClient.HttpClient;
     return SessionRpc.of({
-      createSession: (input) => sessions.create(input),
+      // The actor is the credential's, not the body's (LOB-20): `sessions.actor`, `factory.actor`
+      // and so `listSpend` name who the control plane authenticated.
+      createSession: (input) =>
+        attributed(input).pipe(Effect.flatMap(sessions.create)),
       getSession: (input) => sessions.get(input.sessionId),
       readSessionHistory: (input) => sessions.history(input),
       sendMessage: (input) => sessions.send(input),
       withdrawMessage: (input) => sessions.withdraw(input),
       interruptSession: (input) => sessions.interrupt(input.sessionId),
-      forkSession: (input) => sessions.fork(input),
-      replaySession: (input) => sessions.replay(input),
+      // A fork or a replay over the wire is the caller's new session, so its spend is the caller's;
+      // with auth off it keeps its source's actor, as an in-process one does (LOB-162).
+      forkSession: (input) =>
+        attributed(input).pipe(Effect.flatMap(sessions.fork)),
+      replaySession: (input) =>
+        attributed(input).pipe(Effect.flatMap(sessions.replay)),
       resetSession: (input) => sessions.reset(input),
       compactSession: (input) => sessions.compact(input),
       // A mission is a session's (LOB-230): the call answers its id, and the phase it reached is read
@@ -74,6 +82,11 @@ const SessionRpcHandlers = SessionRpc.toLayer(
   }),
 );
 
+/**
+ * The `/rpc` endpoint over every group. It requires `ControlPlaneAuth` (LOB-20): the process provides
+ * the one its token table configures (`controlPlaneAuthLayer` in `./Auth`), and a suite provides its
+ * own, so no wiring serves the surface without deciding who may call it.
+ */
 export const SessionRpcLive = RpcServer.layerHttp({
   group: RpcApi,
   path: "/rpc",

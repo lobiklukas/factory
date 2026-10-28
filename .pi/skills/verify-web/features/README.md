@@ -25,28 +25,29 @@ under Known gaps.
 `model.sh` (the New session model picker, LOB-274) last passed **11/11** on 2026-10-28 from the
 `agent/LOB-274` worktree, API `:9505` / web `:3505`.
 
-| Feature                  | Status  | File                                                               |
-| ------------------------ | ------- | ------------------------------------------------------------------ |
-| Dashboard shell renders  | passing | [dashboard-shell.md](dashboard-shell.md)                           |
-| Routing                  | passing | [routing.md](routing.md)                                           |
-| Approvals inbox          | passing | [routing.md](routing.md)                                           |
-| Browser reaches the API  | passing | [api-connectivity.md](api-connectivity.md)                         |
-| Session stream           | passing | [session-stream.md](session-stream.md)                             |
-| Fork lineage             | passing | [fork-lineage.md](fork-lineage.md)                                 |
-| Transcript               | passing | [transcript.md](transcript.md)                                     |
-| Live tasks               | passing | [live-tasks.md](live-tasks.md)                                     |
-| Compaction from the pane | passing | [compaction.md](compaction.md)                                     |
-| Board lanes              | passing | [board.md](board.md)                                               |
-| Card pane (write path)   | passing | [card-pane.md](card-pane.md)                                       |
-| What needs a person      | passing | [attention.md](attention.md)                                       |
-| The card's thread        | passing | [thread.md](thread.md) (`thread.sh`)                               |
-| The session's PR link    | passing | [pr-link.md](pr-link.md)                                           |
-| Spend by repo and actor  | passing | [spend.md](spend.md) (`spend.sh`)                                  |
-| Repositories             | passing | [repos.md](repos.md) (`repos.sh`)                                  |
-| New card (board page)    | passing | [card-create.md](card-create.md) (verify-board's `card-create.sh`) |
-| Earlier history          | passing | [history.md](history.md) (`history.sh`)                            |
-| Model backend and model  | passing | [backend-badge.md](backend-badge.md) (`backend.sh`)                |
-| New session model picker | passing | [model-picker.md](model-picker.md) (`model.sh`)                    |
+| Feature                    | Status  | File                                                                          |
+| -------------------------- | ------- | ----------------------------------------------------------------------------- |
+| Dashboard shell renders    | passing | [dashboard-shell.md](dashboard-shell.md)                                      |
+| Routing                    | passing | [routing.md](routing.md)                                                      |
+| Approvals inbox            | passing | [routing.md](routing.md)                                                      |
+| Browser reaches the API    | passing | [api-connectivity.md](api-connectivity.md)                                    |
+| Session stream             | passing | [session-stream.md](session-stream.md)                                        |
+| Fork lineage               | passing | [fork-lineage.md](fork-lineage.md)                                            |
+| Transcript                 | passing | [transcript.md](transcript.md)                                                |
+| Live tasks                 | passing | [live-tasks.md](live-tasks.md)                                                |
+| Compaction from the pane   | passing | [compaction.md](compaction.md)                                                |
+| Board lanes                | passing | [board.md](board.md)                                                          |
+| Card pane (write path)     | passing | [card-pane.md](card-pane.md)                                                  |
+| What needs a person        | passing | [attention.md](attention.md)                                                  |
+| The card's thread          | passing | [thread.md](thread.md) (`thread.sh`)                                          |
+| The session's PR link      | passing | [pr-link.md](pr-link.md)                                                      |
+| Spend by repo and actor    | passing | [spend.md](spend.md) (`spend.sh`)                                             |
+| Repositories               | passing | [repos.md](repos.md) (`repos.sh`)                                             |
+| New card (board page)      | passing | [card-create.md](card-create.md) (verify-board's `card-create.sh`)            |
+| Earlier history            | passing | [history.md](history.md) (`history.sh`)                                       |
+| Model backend and model    | passing | [backend-badge.md](backend-badge.md) (`backend.sh`)                           |
+| New session model picker   | passing | [model-picker.md](model-picker.md) (`model.sh`)                               |
+| The dashboard's credential | passing | verify-api's [identity.md](../../verify-api/features/identity.md) (`auth.sh`) |
 
 ## Known gaps
 

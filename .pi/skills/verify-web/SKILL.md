@@ -138,6 +138,20 @@ the flagged repo turned runnable in place, a session on the registered repo cut 
 behind the registry's back flipping its row on the poll (`features/repos.md`). Evidence goes to
 `.verify/evidence/latest/repos/`.
 
+### The dashboard's credential
+
+```sh
+AUTH_API_PORT=9445 AUTH_WEB_PORT=3445 AUTH_OPEN_WEB_PORT=3446 ./auth.sh   # an API that requires a token, two dashboards; leaves nothing running
+```
+
+`auth.sh` boots an API with `FACTORY_API_TOKENS=dashboard-op=<per-run token>` and two dashboards on it,
+one built with `VITE_FACTORY_API_TOKEN` and one without (LOB-20). `auth.mjs` requires the first to list
+a session the API holds, to send `Authorization: Bearer` on every RPC, and to have its **New session**
+(body actor `dashboard`) recorded as `dashboard-op` in `listSpend`; and the second to be answered
+`Unauthenticated` and show no session. The shell checks the token is in neither the evidence nor the
+API log. Evidence goes to `.verify/evidence/latest/auth/`. Every other drive here runs against an API
+with auth off (its checks expect the declared `dashboard` actor).
+
 ### The model backend and each session's model
 
 ```sh
@@ -225,6 +239,7 @@ touch `.verify/evidence/`; after cleanup, confirm the evidence is still there.
 | `repos.sh`          | The repositories page's own instance, checkouts and drive (`repos.mjs`)   |
 | `backend.sh`        | The anthropic-inferred instance, no banner, and the model (`backend.mjs`) |
 | `history.sh`        | A long history's own short-idle instance and its drive (`history.mjs`)    |
+| `auth.sh`           | An API that requires a token, two dashboards and the drive (`auth.mjs`)   |
 | `model.sh`          | The model picker's own instance (`DEFAULT_MODEL`) and drive (`model.mjs`) |
 | `features/`         | Feature map: what each user-facing feature is and how to prove it         |
 

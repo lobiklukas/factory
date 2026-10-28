@@ -1,3 +1,4 @@
+import type { Unauthenticated } from "@repo/domain/Auth";
 import type {
   QueuedMessage,
   SessionEvent,
@@ -143,7 +144,10 @@ export const followSession = (
   client: SessionRpcClient,
   sessionId: SessionId,
   options: { readonly printMode: boolean },
-): Effect.Effect<FollowResult, SessionError | RpcClientError> =>
+): Effect.Effect<
+  FollowResult,
+  SessionError | Unauthenticated | RpcClientError
+> =>
   Effect.gen(function* () {
     const state = yield* Ref.make<FollowResult>({
       mode: undefined,

@@ -25,6 +25,11 @@
 # Env: ASK_PORT, DATABASE_URL, EVIDENCE_DIR. Evidence: .verify/evidence/latest/board/ask-*.
 set -uo pipefail
 
+# This suite runs its API with auth off (LOB-20): its clients send no credential, and it declares
+# actors (a run's session id) that only an open control plane keeps. A token exported for the
+# rest of the verify skills must not turn auth on here.
+unset FACTORY_API_TOKEN FACTORY_API_TOKENS VITE_FACTORY_API_TOKEN FACTORY_API_AUTH
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PORT="${ASK_PORT:-9401}"
 API_URL="http://localhost:$PORT"

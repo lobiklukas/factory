@@ -37,6 +37,7 @@ import {
   makeChecker,
   probeFor,
   protocolFor,
+  recordedActor,
   waitUntil,
 } from "./harness.ts";
 
@@ -1077,14 +1078,16 @@ const program = Effect.gen(function* () {
     `mode=${foldedApproval.session.mode} pending=${pendingFolded.approvals.length}`,
   );
 
-  // Decide it. The actor string is what the caller said it was, and it must come back in the
+  // Decide it. The decision records the actor the API authenticated the drive as when it sends a
+  // credential (LOB-20), and the declared one on an open API; either way it must come back in the
   // decision and survive in the evidence file.
-  const actor = "verify-api operator";
+  const declared = "verify-api operator";
+  const actor = recordedActor(declared);
   const decision = yield* approvals.decideApproval({
     sessionId: toApprove.id,
     requestId: ask.requestId,
     decision: "approved",
-    actor,
+    actor: declared,
   });
   const pendingAfterDecide = yield* approvals.listApprovals({
     sessionId: toApprove.id,
