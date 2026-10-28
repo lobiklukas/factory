@@ -561,6 +561,44 @@ describe("readPullRequestState (C20)", () => {
     expect(answer).toBe("GitHub did not answer within 5s");
   });
 
+  /**
+   * Mutation: bound the HTTP call only — a GitHub App mints its installation token over the network,
+   * and a mint that hangs would hold the move past the documented bound.
+   */
+  it("gives up within STATE_READ_TIMEOUT on a token that is never resolved", async () => {
+    let asked = 0;
+    const minting = Layer.merge(
+      Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make(() => {
+          asked += 1;
+          return Effect.never;
+        }),
+      ),
+      Layer.succeed(CredentialProvider, {
+        source: "github-app",
+        tokenFor: () => Effect.never,
+      }),
+    );
+    const answer = await Effect.runPromise(
+      Effect.gen(function* () {
+        const fiber = yield* Effect.forkChild(
+          readPullRequestState("https://github.com/o/r/pull/7").pipe(
+            Effect.provide(minting),
+            Effect.match({
+              onFailure: (error) => error.message,
+              onSuccess: () => "answered",
+            }),
+          ),
+        );
+        yield* TestClock.adjust(STATE_READ_TIMEOUT);
+        return yield* Fiber.join(fiber);
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+    expect(answer).toBe("GitHub did not answer within 5s");
+    expect(asked).toBe(0);
+  });
+
   /** Mutation: ignore `fresh` — a move right after the merge would be judged on the kept "open". */
   it("asks GitHub again when the read is fresh, past the answer it kept", async () => {
     next = { status: 200, body: { state: "open" } };

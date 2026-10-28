@@ -65,6 +65,30 @@ describe("moveWarning", () => {
     ]);
   });
 
+  /**
+   * Mutation: warn on `human_merge` for every target — a review column that also exits back to
+   * building would say that move is held on a merge the server checks only on a move into done (C20).
+   */
+  it("names an unmet human_merge only on a move into done", () => {
+    const review = Schema.decodeSync(TaskExit)({
+      taskId: ID,
+      column: "review",
+      revision: 3,
+      requirements: [
+        {
+          key: "human_merge",
+          description: "a human merge",
+          status: "unmet",
+          reason: "no merge of the card's PR is on record",
+        },
+      ],
+    });
+    expect(moveWarning(review, "done")).toEqual([
+      { key: "human_merge", reason: "no merge of the card's PR is on record" },
+    ]);
+    expect(moveWarning(review, "building")).toBeNull();
+  });
+
   /** Mutation: drop the canceled exemption — abandoning a card would say it is held. */
   it("says nothing for a move into canceled, or before the checklist is read", () => {
     expect(moveWarning(exit("specifying"), "canceled")).toBeNull();

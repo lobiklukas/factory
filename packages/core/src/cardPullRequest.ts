@@ -111,10 +111,10 @@ export const readPullRequestState = (
   PullRequestState,
   PrError,
   CredentialProvider | HttpClient.HttpClient
-> =>
-  Effect.gen(function* () {
-    const fail = (message: string) =>
-      new PrError({ operation: "readPullRequestState", ref: url, message });
+> => {
+  const fail = (message: string) =>
+    new PrError({ operation: "readPullRequestState", ref: url, message });
+  return Effect.gen(function* () {
     const page = pullRequestOfPage(url);
     if (page === undefined)
       return yield* fail("the PR's link is not a GitHub pull request page");
@@ -146,15 +146,6 @@ export const readPullRequestState = (
             )
           : Effect.fail(fail(`GitHub answered ${response.status}`)),
       ),
-      Effect.timeoutOrElse({
-        duration: STATE_READ_TIMEOUT,
-        orElse: () =>
-          Effect.fail(
-            fail(
-              `GitHub did not answer within ${Duration.toSeconds(STATE_READ_TIMEOUT)}s`,
-            ),
-          ),
-      }),
     );
     if (pr.merged === true || (pr.merged_at ?? "") !== "") {
       return {
@@ -168,7 +159,20 @@ export const readPullRequestState = (
     return pr.state === "closed"
       ? ({ _tag: "closed" } satisfies PullRequestState)
       : ({ _tag: "open" } satisfies PullRequestState);
-  });
+  }).pipe(
+    // The whole read is bounded, the token included: a GitHub App mints its installation token over
+    // the network, and a forge that hangs there must not hold a move or the pane any longer.
+    Effect.timeoutOrElse({
+      duration: STATE_READ_TIMEOUT,
+      orElse: () =>
+        Effect.fail(
+          fail(
+            `GitHub did not answer within ${Duration.toSeconds(STATE_READ_TIMEOUT)}s`,
+          ),
+        ),
+    }),
+  );
+};
 
 /** The forge read the card follows its PR with when no webhook told it (module doc). */
 export type PullRequestStatesShape = {

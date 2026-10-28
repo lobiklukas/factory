@@ -7,8 +7,11 @@ the server would refuse says why before it is clicked (D9; docs/board.md B5, B8)
 `requires[]` under the card's pinned definition version, in declaration order, `status` `met`,
 `unmet` (with `reason`) or `unchecked`. `TaskService.exit` judges each checked key with the same
 `requirementVerdict` `move` refuses on (`packages/core/src/requirements.ts`), so a reason listed here
-is the sentence a refusal carries, word for word. Keys nothing checks (`plan_doc`, the `human_*`
-labels) are `unchecked`, never `met`. Two keys are checked since D9:
+is the sentence a refusal carries, word for word. Keys nothing checks (`plan_doc`, `human_move`) are
+`unchecked`, never `met`. `human_merge` is checked since C20, on a move into `done` only: met when a
+run of the card recorded GitHub's merge of the card's PR (or the card has no PR on record), unmet
+while the PR is open, so the pane shows it `met` or `unmet` in `review`, and a move back to
+`building` is never warned on it. Two keys are checked since D9:
 
 - `spec_doc` is met when the card holds a `specified` event (a specifying run's `spec` tool wrote one,
   LOB-238), whatever the spec's gaps.

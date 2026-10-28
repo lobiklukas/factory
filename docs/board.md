@@ -331,7 +331,7 @@ which stay the ask's to raise. `run_completed` (`building`, first among its keys
 _newest run started in the column being left_ (a planner's run is not the builder's), and is met when
 that run's newest turn ended on its own (`runTurnOf`): a run still working or parked, one ending on a
 failed or aborted model answer or one cut off at the output limit, one interrupted (C8) or one its
-budget stopped has not completed, and a card with no run started there has completed nothing. `plan_doc` and the `human_*` labels stay unchecked. The same verdicts feed `getTaskExit`,
+budget stopped has not completed, and a card with no run started there has completed nothing. `plan_doc` and `human_move` stay unchecked (`human_merge` is checked since C20, above). The same verdicts feed `getTaskExit`,
 which the card pane reads to list "Leaves <column> when" — each key `met`, `unmet` with the refusal's
 own reason, or `not checked` — and to say, before a click, why a move would be refused; the move stays
 clickable, because the server's answer is the decision. `factory board show` prints the same list

@@ -907,7 +907,9 @@ export type GetTaskExitInput = typeof GetTaskExitInput.Type;
 
 /**
  * The requirements a move to `to` would be refused on, from a card's exit view: the unmet ones, none
- * for a move into `ABANDON_COLUMN`. What a move control says before it is clicked.
+ * for a move into `ABANDON_COLUMN`, and `human_merge` only on a move into `MERGED_COLUMN` (C20: the
+ * server checks it there only, `exitRequirements` in core). What a move control says before it is
+ * clicked.
  */
 export const unmetFor = (
   exit: TaskExit,
@@ -915,7 +917,11 @@ export const unmetFor = (
 ): ReadonlyArray<ExitRequirementView> =>
   to === ABANDON_COLUMN
     ? []
-    : exit.requirements.filter((requirement) => requirement.status === "unmet");
+    : exit.requirements.filter(
+        (requirement) =>
+          requirement.status === "unmet" &&
+          (requirement.key !== HUMAN_MERGE_REQUIREMENT || to === MERGED_COLUMN),
+      );
 
 /** The spec a card holds, or `null` when no run on it has declared one (LOB-238). */
 export const GetTaskSpecInput = Schema.Struct({ taskId: TaskId });

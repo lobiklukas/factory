@@ -173,13 +173,16 @@ const onePull = async (
       },
     ],
   });
-  const pull = read().pulls.find((candidate) => candidate.number === number);
+  // Looked up by the repository the URL names as well as the number: a PR opened under another
+  // `owner/repo` is a 404, as GitHub answers it, so a read built with the wrong slug fails here.
+  const page = `https://github.com/${owner}/${repo}/pull/${number}`;
+  const pull = read().pulls.find((candidate) => candidate.url === page);
   if (pull === undefined) return json(404, { message: "Not Found" });
   const update = (next: Ledger["pulls"][number]) => {
     write({
       ...read(),
       pulls: read().pulls.map((candidate) =>
-        candidate.number === number ? next : candidate,
+        candidate.url === page ? next : candidate,
       ),
     });
     return next;
