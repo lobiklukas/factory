@@ -101,7 +101,6 @@ import type {
 import {
   RepoCloneFailed,
   RepoNotFound,
-  RepoPolicyRejected,
   RepoSlug,
   SessionActor,
   SessionError as SessionErrorClass,
@@ -2340,7 +2339,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         },
       ): string => {
         const branch = (base: string) =>
-          at.mirrored && !isCommitId(base) ? `refs/remotes/origin/${base}` : base;
+          at.mirrored && !isCommitId(base)
+            ? `refs/remotes/origin/${base}`
+            : base;
         if (at.reviewBase !== undefined) return branch(at.reviewBase);
         const baseRef = row.baseRef ?? registered.defaultBaseRef;
         if (isCommitId(baseRef)) return branch(registered.defaultBaseRef);
@@ -5121,11 +5122,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const column = yield* runColumnFor(runSession);
           // Strict: a check runs without a run of its own to read the repo's policy later, so a
           // base that names no commit to read it at refuses the mission rather than waiving it.
-          const { recorded, review } = yield* withReader(runSession, (storage) =>
-            Effect.all({
-              recorded: readPolicyRecord(storage),
-              review: readRecordedReview(storage),
-            }),
+          const { recorded, review } = yield* withReader(
+            runSession,
+            (storage) =>
+              Effect.all({
+                recorded: readPolicyRecord(storage),
+                review: readRecordedReview(storage),
+              }),
           );
           const repoPolicy = yield* repoPolicyFor(row, recorded, {
             reviewBase: review?.target.base,
