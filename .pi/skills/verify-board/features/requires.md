@@ -151,8 +151,8 @@ commits), `requires-settled2.txt`, `requires-pr2.txt`, `requires-review-diff.txt
 
 ## What it does not prove
 
-The other key of the default pipeline (`plan_doc`)
-is not checked: nothing records its evidence yet, and `requirements.ts` says so. A faulted, interrupted
+`plan_doc` (checked since D10) is driven here only as the refusal and the in-process plan
+(`lib/seed-plan.ts`); a real planner run declaring one is `drive.sh`'s ([plan.md](plan.md)). A faulted, interrupted
 or unfinished latest run refusing `run_completed` is `TaskService.test.ts`'s ("refuses building → review
 after a faulted run…") and `runEnding.test.ts`'s, not driven here: the faux backend cannot fail a model
 request, so `requires.sh`'s `run_completed` refusal is the no-run one. A review run that

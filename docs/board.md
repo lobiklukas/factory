@@ -185,8 +185,13 @@ is still a copy, `factory skill put --file`, and it is still unbuilt as a flow.
 `edit` or `verify` at all (`STAGE_REFUSED_TOOLS`), so a call to one meets Pi Durable's
 `tool_unavailable`. LOB-74's hook refusal still judges every `bash` call, and it is the only line for
 `write` and `edit` on a root whose tool list still offers them: one pinned before the filter existed (a
-run in flight across the deploy that brought it), or one configured since. `READ_ONLY_ROLES` stays
-the one table of which roles read only.
+run in flight across the deploy that brought it), or one configured since. Since D10 the role policy
+table (`packages/harness/src/rolePolicy.ts`, `DEFAULT_ROLE_POLICIES`) is the one table of what a role
+may do — `readOnly` (and the stage it names), `writesSpec`, `writesPlan` — replacing the per-feature
+`READ_ONLY_ROLES` and `SPEC_ROLES` sets. A deployment extends it with rows for its own roles
+(`ROLE_POLICIES=auditor=read-only,architect=read-only+plan`); a row redefining the factory's own
+`specifier` or `planner` fails the boot, because the default pipeline's exits are checked against them.
+A review run stays read-only because it is a review, not by a row.
 
 Built (LOB-238): the specifier's writer. A run whose role is in `SPEC_ROLES`
 (`packages/harness/src/specify.ts`, `resolveRole().writesSpec`) is offered the `spec` tool, and no
@@ -200,6 +205,18 @@ folding every run's log. The event records the run's own column, the one its rol
 specifier resumed after a person moved the card on still declares its spec from `specifying`. A spec
 is not an ask: a gap still parks the card through `ask`; the `spec_doc` exit requirement is met by
 the event's existence (D9, below).
+
+Built (D10): the planner. `planning` is a read-only stage like `specifying`: the `planner` row says
+`readOnly` (stage `planning`) and `writesPlan`, so its runs are offered no `write`, `edit` or `verify`,
+their `bash` may only read, and they are offered the `plan` tool (`packages/harness/src/planning.ts`).
+The tool validates a typed plan — `summary`, `steps` and `surfaces` (at least one each), `risks`
+(required, `[]` when there are none) — commits `factory.plan` to the run's log and posts it on the
+card as a `planned` task event, idempotent by `<session id>:<tool call id>`, as the spec's is. The card's
+plan is its newest `planned` event (`getTaskPlan`, `factory board show`, the card pane's Plan section):
+what the person crossing the plan approval gate reads. The run does not move the card on. Default
+definition v6 (`0042_seed_plan_skill.ts`) binds the seeded `plan` skill to `planning`; earlier
+versions keep a planning column with no skill, and their planners are still read-only and offered the
+tool, because both follow the role.
 
 Built (LOB-36): the reviewer. A **review run** — a session opened for one pull request's head, which
 its log records as `factory.review`'s target — is the read-only `reviewing` stage whatever its
@@ -314,7 +331,9 @@ which stay the ask's to raise. `run_completed` (`building`, first among its keys
 _newest run started in the column being left_ (a planner's run is not the builder's), and is met when
 that run's newest turn ended on its own (`runTurnOf`): a run still working or parked, one ending on a
 failed or aborted model answer or one cut off at the output limit, one interrupted (C8) or one its
-budget stopped has not completed, and a card with no run started there has completed nothing. `plan_doc` and the `human_*` labels stay unchecked. The same verdicts feed `getTaskExit`,
+budget stopped has not completed, and a card with no run started there has completed nothing. Since
+D10 `plan_doc` (`planning`) is checked the same way as `spec_doc`, by a `planned` event: `planning →
+building` with no plan is refused naming it. The `human_*` labels stay unchecked. The same verdicts feed `getTaskExit`,
 which the card pane reads to list "Leaves <column> when" — each key `met`, `unmet` with the refusal's
 own reason, or `not checked` — and to say, before a click, why a move would be refused; the move stays
 clickable, because the server's answer is the decision. `factory board show` prints the same list
