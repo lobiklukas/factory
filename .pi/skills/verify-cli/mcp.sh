@@ -275,7 +275,7 @@ head -c $((CAP + 4096)) /dev/zero | tr '\0' 'x' > "$LOCAL/big.txt"
 run_cmd "$W" cap "$FACTORY handoff --repo $REPO --note \"Too big\" --api $API_URL" || true
 pane "$W" > "$EVIDENCE_DIR/mcp-cap.txt"
 check "an oversized diff is refused with its size and the cap, non-zero" \
-  "$([ "$(exit_code "$W" cap)" != "0" ] && grep -q "^error: handoff_refused: the handoff patch is [0-9]* bytes, over the $CAP-byte cap a card carries" "$EVIDENCE_DIR/mcp-cap.txt" && echo 0 || echo 1)" \
+  "$([ "$(exit_code "$W" cap)" != "0" ] && grep -q "^error: handoff_refused: the handoff patch is [0-9]* bytes as a card carries it, over the $CAP-byte cap" "$EVIDENCE_DIR/mcp-cap.txt" && echo 0 || echo 1)" \
   "exit=$(exit_code "$W" cap)"
 run_cmd "$W" lsafter "$FACTORY board ls --board $BOARD_ID --api $API_URL" || true
 CARDS_AFTER="$(pane "$W" | grep -o 'tsk_[0-9a-z]\{26\}' | sort -u | wc -l | tr -d ' ')"

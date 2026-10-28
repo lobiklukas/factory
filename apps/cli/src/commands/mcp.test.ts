@@ -454,7 +454,7 @@ describe("the handoff tool (S-local-agent-handoff-mcp)", () => {
     );
     expect(error.message).toMatch(
       new RegExp(
-        `^handoff_refused: the handoff patch is \\d+ bytes, over the ${MAX_HANDOFF_PATCH_BYTES}-byte cap a card carries`,
+        `^handoff_refused: the handoff patch is \\d+ bytes as a card carries it, over the ${MAX_HANDOFF_PATCH_BYTES}-byte cap`,
       ),
     );
     expect(f.created).toEqual([]);

@@ -591,6 +591,83 @@ describe("a board's configuration over RPC (LOB-270)", () => {
   });
 
   /**
+   * S-local-agent-handoff-mcp over the wire: `createTask` carries a handoff patch on the card, and
+   * `getTaskHandoff` reads it back with its size and files; a card made without one is `null`, an
+   * unknown card `TaskNotFound`, and a patch that adds a credential's shape is refused before it is
+   * stored. Mutation: drop `handoff` from `CreateTaskInput`'s schema — the client's encode drops it
+   * and the read answers `null`; drop the secret check — the token card is made.
+   */
+  it("keeps a card's handoff patch and reads it back, null for a plain card and TaskNotFound for an unknown one", async () => {
+    const patch = [
+      "diff --git a/notes.md b/notes.md",
+      "new file mode 100644",
+      "index 0000000000000000000000000000000000000000..4b5fa63702dd96796042e92787f464e28f09f17d",
+      "--- /dev/null",
+      "+++ b/notes.md",
+      "@@ -0,0 +1 @@",
+      '+say "hi"',
+      "",
+    ].join("\n");
+    // Built at run time, so this file holds no token-shaped literal for a scanner to find.
+    const token = ["gh", "p_", "a".repeat(36)].join("");
+    const outcome = await call((client) =>
+      Effect.gen(function* () {
+        const board = yield* client.createBoard({
+          repo: RepoSlug.make(`acme/rpc-task-handoff-${run}`),
+          definitionId: DEFAULT,
+        });
+        const handed = yield* client.createTask({
+          boardId: board.id,
+          title: "a handoff",
+          actor: "person:rpc",
+          handoff: { patch, branch: "feature/local" },
+        });
+        const plain = yield* client.createTask({
+          boardId: board.id,
+          title: "no handoff",
+          actor: "person:rpc",
+        });
+        const secret = yield* failureOf(
+          client.createTask({
+            boardId: board.id,
+            title: "a token",
+            actor: "person:rpc",
+            handoff: { patch: patch.replace('say "hi"', `TOKEN=${token}`) },
+          }),
+        );
+        return {
+          handed,
+          read: yield* client.getTaskHandoff({ taskId: handed.id }),
+          plain: yield* client.getTaskHandoff({ taskId: plain.id }),
+          secret,
+        };
+      }),
+    );
+    expect(outcome.read).toMatchObject({
+      taskId: outcome.handed.id,
+      patch,
+      branch: "feature/local",
+      bytes: new TextEncoder().encode(patch).length,
+      files: ["notes.md"],
+    });
+    expect(outcome.plain).toBeNull();
+    expect(outcome.secret).toMatchObject({
+      _tag: "InvalidTaskInput",
+      field: "handoff.patch",
+    });
+    expect(outcome.secret.message).toContain(
+      "the handoff patch adds what looks like a credential at notes.md:1 (github-token)",
+    );
+    expect(outcome.secret.message).not.toContain(token);
+
+    const missing = TaskId.make(`tsk_${"0".repeat(26)}`);
+    const unknown = await call((client) =>
+      failureOf(client.getTaskHandoff({ taskId: missing })),
+    );
+    expect(unknown).toMatchObject({ _tag: "TaskNotFound", taskId: missing });
+  });
+
+  /**
    * LOB-263 over the wire: `createBoard` and `getBoard` answer the warning a repository with no local
    * checkout earns, the session's workspace says the same, and registering a path clears the board's.
    * The text is the server's, so a client prints it as it is. Mutation: leave `warning` off the

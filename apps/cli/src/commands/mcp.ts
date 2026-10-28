@@ -213,6 +213,12 @@ const Handoff = Tool.make("handoff", {
     base: optionalString(
       "The branch the run starts from (defaults to the remote's default branch)",
     ),
+    trackedOnly: Schema.optionalKey(
+      described(
+        Schema.Boolean,
+        "Leave untracked files out: only changes to files the checkout tracks travel",
+      ),
+    ),
     start: Schema.optionalKey(
       described(Schema.Boolean, "Start the card's run now"),
     ),
@@ -553,6 +559,7 @@ export const mcpHandlers = <B, S>(
       const collected = yield* collectHandoff({
         cwd: options.dir,
         base: params.base,
+        untracked: params.trackedOnly !== true,
       });
       const repo = options.repo ?? (yield* handoffRepo(undefined, collected));
       const out = printed();

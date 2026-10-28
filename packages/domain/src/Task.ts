@@ -1007,11 +1007,48 @@ export const handoffPatchBytes = (patch: string): number => {
 };
 
 /**
+ * A patch's size as the cap counts it: its UTF-8 bytes once JSON carries it, quotes aside — what the
+ * RPC request and the `created` event hold. Escaping only grows a patch: `"`, `\\` and the short
+ * control escapes (`\\n`, `\\t`, …) are two bytes, every other control character six (`\\u001b`),
+ * and a lone surrogate six. Counting the escaped size keeps every patch the cap lets through, with a
+ * card's longest body and title, under the API's 1 MiB request limit, so an escape-heavy patch (an
+ * ANSI log, a JSON fixture) is refused in the cap's words rather than by the transport.
+ */
+export const handoffPatchWireBytes = (patch: string): number => {
+  let bytes = 0;
+  for (const char of patch) {
+    const code = char.codePointAt(0) ?? 0;
+    bytes +=
+      code === 0x22 || code === 0x5c
+        ? 2
+        : code < 0x20
+          ? code === 0x08 ||
+            code === 0x09 ||
+            code === 0x0a ||
+            code === 0x0c ||
+            code === 0x0d
+            ? 2
+            : 6
+          : code >= 0xd800 && code <= 0xdfff
+            ? 6
+            : code < 0x80
+              ? 1
+              : code < 0x800
+                ? 2
+                : code > 0xffff
+                  ? 4
+                  : 3;
+  }
+  return bytes;
+};
+
+/**
  * The refusal of an oversized handoff, in one set of words for the CLI (which measures first and
- * sends nothing) and the server (which holds every caller to the same cap).
+ * sends nothing) and the server (which holds every caller to the same cap). `bytes` is the size the
+ * cap counts (`handoffPatchWireBytes`).
  */
 export const handoffCapRefusal = (bytes: number): string =>
-  `the handoff patch is ${bytes} bytes, over the ${MAX_HANDOFF_PATCH_BYTES}-byte cap a card carries: commit and push the work to a branch and hand off from it (--base), or hand off a smaller change`;
+  `the handoff patch is ${bytes} bytes as a card carries it, over the ${MAX_HANDOFF_PATCH_BYTES}-byte cap: commit and push the work to a branch and hand off from it (--base), or hand off a smaller change`;
 
 /**
  * The paths a patch touches, in the order git wrote them: each `diff --git a/<old> b/<new>` header's

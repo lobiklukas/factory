@@ -26,7 +26,9 @@ import { startCard, type StartClient } from "./board";
  *
  * The patch cap (`MAX_HANDOFF_PATCH_BYTES`) is checked before anything is sent: an oversized diff is
  * refused with its size and the cap named, and no card is made. Nothing local changes either way —
- * not the index, not the branch, not the files.
+ * not the index, not the branch, not the files. `--dry-run` prints the files the patch would carry
+ * and sends nothing, and `--tracked-only` leaves untracked files out of it; the server refuses a
+ * patch that adds a credential-shaped line before it stores anything (`@repo/core`'s `handoffOf`).
  */
 
 /** What a handoff needs of the client: the boards, a card, and — for `--start` — a run on it. */
@@ -154,6 +156,18 @@ export const handOff = Effect.fnUntraced(function* <B, S>(
   return { card, sessionId };
 });
 
+/**
+ * What `--dry-run` prints: what the patch would carry, file by file, and where — the list an
+ * operator checks for a file that should not leave the machine before anything is sent.
+ */
+export const handoffPreview = (
+  collected: CollectedHandoff,
+  repo: RepoSlug,
+): ReadonlyArray<string> => [
+  `dry-run ${collected.files.length} file${collected.files.length === 1 ? "" : "s"}, ${collected.bytes} bytes from ${collected.handoff.branch ?? "a detached HEAD"} at ${(collected.handoff.baseCommit ?? "").slice(0, 12)} onto ${repo} ${collected.baseRef}; nothing was sent`,
+  ...collected.files.map((file) => `file    ${file}`),
+];
+
 export const handoffCommand = Command.make(
   "handoff",
   {
@@ -191,6 +205,18 @@ export const handoffCommand = Command.make(
       Flag.withDescription("A directory inside the checkout to hand off"),
       Flag.withDefault("."),
     ),
+    trackedOnly: Flag.Boolean("tracked-only").pipe(
+      Flag.withDescription(
+        "Leave untracked files out of the patch: only changes to files the checkout tracks travel",
+      ),
+      Flag.withDefault(false),
+    ),
+    dryRun: Flag.Boolean("dry-run").pipe(
+      Flag.withDescription(
+        "Print the files and bytes the patch would carry, and send nothing",
+      ),
+      Flag.withDefault(false),
+    ),
     start: Flag.Boolean("start").pipe(
       Flag.withDescription(
         "Start the card's run now, sent the card's default prompt",
@@ -222,6 +248,8 @@ export const handoffCommand = Command.make(
     board,
     base,
     dir,
+    trackedOnly,
+    dryRun,
     start,
     column,
     actor,
@@ -239,8 +267,13 @@ export const handoffCommand = Command.make(
       const collected = yield* collectHandoff({
         cwd: path.resolve(dir),
         base: Option.getOrUndefined(base),
+        untracked: !trackedOnly,
       });
       const slug = yield* handoffRepo(Option.getOrUndefined(repo), collected);
+      if (dryRun) {
+        for (const line of handoffPreview(collected, slug)) yield* Console.log(line);
+        return;
+      }
       const { client } = yield* BoardClient;
       yield* handOff(
         client,
@@ -270,6 +303,11 @@ export const handoffCommand = Command.make(
         'factory handoff --repo acme/widget --note "Finish the retry loop; the tests in retry.test.ts are the spec"',
       description:
         "A card carrying the uncommitted diff, on the repository's board",
+    },
+    {
+      command: "factory handoff --dry-run",
+      description:
+        "List the files the patch would carry, and send nothing (add --tracked-only to leave untracked files out)",
     },
     {
       command:

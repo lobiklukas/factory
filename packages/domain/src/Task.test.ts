@@ -20,6 +20,7 @@ import { SessionId } from "./Session";
 import {
   handoffCapRefusal,
   handoffPatchBytes,
+  handoffPatchWireBytes,
   handoffPatchFiles,
   MAX_HANDOFF_PATCH_BYTES,
   Actor,
@@ -1098,6 +1099,28 @@ describe("a handoff patch (S-local-agent-handoff-mcp)", () => {
     expect(handoffPatchBytes("a\u{d800}b")).toBe(5);
   });
 
+  /**
+   * The cap counts the patch as JSON carries it, so a patch under it fits the API's request limit.
+   * Mutations this catches: count raw bytes — a quote, a backslash and ESC count one; count every
+   * control character as a short escape — ESC counts two; drop the multibyte rules — `é` counts one.
+   */
+  it("is capped at its size once JSON-escaped", () => {
+    for (const sample of [
+      "",
+      "diff\n",
+      'say "hi"\\',
+      "\u001b[31mred\u001b[0m\t\r\b\f\u0000",
+      "é€😀",
+      "a\u{d800}b",
+    ]) {
+      expect(handoffPatchWireBytes(sample)).toBe(
+        new TextEncoder().encode(JSON.stringify(sample)).length - 2,
+      );
+    }
+    expect(handoffPatchWireBytes("\u001b")).toBe(6);
+    expect(handoffPatchWireBytes("x\n")).toBe(3);
+  });
+
   it("names the files its headers touch, the new path of a rename", () => {
     const patch = [
       "diff --git a/src/a.ts b/src/a.ts",
@@ -1119,7 +1142,7 @@ describe("a handoff patch (S-local-agent-handoff-mcp)", () => {
 
   it("is refused past the cap in words that name its size and the cap", () => {
     expect(handoffCapRefusal(MAX_HANDOFF_PATCH_BYTES + 1)).toBe(
-      `the handoff patch is ${MAX_HANDOFF_PATCH_BYTES + 1} bytes, over the 524288-byte cap a card carries: commit and push the work to a branch and hand off from it (--base), or hand off a smaller change`,
+      `the handoff patch is ${MAX_HANDOFF_PATCH_BYTES + 1} bytes as a card carries it, over the 524288-byte cap: commit and push the work to a branch and hand off from it (--base), or hand off a smaller change`,
     );
   });
 });

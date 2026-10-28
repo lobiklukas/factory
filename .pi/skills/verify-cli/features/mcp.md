@@ -6,8 +6,13 @@ the CLI's own RPC client: `create_card`, `start_run`, `send_message`, `get_statu
 `answer_question` and `handoff`. `factory handoff` takes the checkout's work in progress — local
 commits, edits and untracked files against the remote's default branch — as one patch and makes a
 card carrying it; the card's run is cut on `factory/<session-id>` at the base with that patch
-committed on it before its agent's first turn. A patch over 512 KiB (`MAX_HANDOFF_PATCH_BYTES`) is
-refused before anything is sent, by the CLI and by the server in the same words.
+committed on it before its agent's first turn. A patch over 512 KiB (`MAX_HANDOFF_PATCH_BYTES`,
+counted JSON-escaped, as the request carries it) is refused before anything is sent, by the CLI and by
+the server in the same words; so is a text file that is not UTF-8 (CLI), and a line that adds a
+credential's shape (server, before it stores the patch). `--dry-run` lists the files and sends
+nothing; `--tracked-only` (MCP `trackedOnly`) leaves untracked files out. Whether a run's branch
+carries the handoff is read from the branch (its `Factory-Handoff: <task>` commit): a run that
+continues a branch whose apply was refused is refused too, and so is a message to the refused run.
 
 **How a user reaches it.** Claude Code:
 `claude mcp add factory -- bun run apps/cli/src/index.ts mcp --api http://localhost:9000` from the
@@ -16,7 +21,7 @@ credential). A terminal:
 `factory handoff --repo owner/name --note "Finish the retry loop" --start --column building` prints
 `task tsk_…`, `handoff N files, B bytes from <branch> at <sha> onto <base>`, then the run's
 `session ses_…`. An oversized diff prints
-`error: handoff_refused: the handoff patch is N bytes, over the 524288-byte cap a card carries: …`
+`error: handoff_refused: the handoff patch is N bytes as a card carries it, over the 524288-byte cap: …`
 and exits 1.
 
 **How the skill drives it.** `./mcp.sh` owns its own API (`MCP_PORT`, default `:9397`), a bare

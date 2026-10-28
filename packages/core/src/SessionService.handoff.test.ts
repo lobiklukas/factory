@@ -81,6 +81,10 @@ const strayPatch = [
   "",
 ].join("\n");
 
+/** A patch's size as a request carries it: its JSON string's UTF-8 bytes, quotes aside. */
+const wireBytes = (text: string): number =>
+  new TextEncoder().encode(JSON.stringify(text)).length - 2;
+
 const sessionRoot = mkdtempSync(join(tmpdir(), "factory-handoff-sessions-"));
 
 /** The agent's first turn reads the handed-off file: its output is the proof the turn saw it. */
@@ -444,8 +448,9 @@ describe("a handed-off card (S-local-agent-handoff-mcp)", () => {
 
   /**
    * Mutations this catches: drop the server's cap — the card is made; measure characters rather
-   * than bytes — a multibyte patch one byte over slips through; refuse at the cap itself — a patch
-   * exactly at it is refused.
+   * than bytes — a multibyte patch one byte over slips through; measure raw bytes rather than the
+   * escaped ones — the ESC-heavy patch slips through and would overrun the API's request limit;
+   * refuse at the cap itself — a patch exactly at it is refused.
    */
   it("refuses a patch over the cap, naming its size and the cap, and makes no card", async () => {
     const outcome = await runtime.runPromise(
@@ -455,9 +460,11 @@ describe("a handed-off card (S-local-agent-handoff-mcp)", () => {
         const header = "diff --git a/big.txt b/big.txt\n";
         // One byte over, in two-byte characters: under the cap counted in characters.
         const over = `${header}${"é".repeat(
-          Math.ceil((MAX_HANDOFF_PATCH_BYTES - header.length + 1) / 2),
+          Math.ceil((MAX_HANDOFF_PATCH_BYTES - wireBytes(header) + 1) / 2),
         )}`;
-        const atCap = `${header}${"x".repeat(MAX_HANDOFF_PATCH_BYTES - header.length)}`;
+        const atCap = `${header}${"x".repeat(MAX_HANDOFF_PATCH_BYTES - wireBytes(header))}`;
+        // Under the cap in raw bytes, over it once JSON-escaped: ESC is six bytes in a request.
+        const escapes = `${header}${"\u001b".repeat(MAX_HANDOFF_PATCH_BYTES / 4)}`;
         const before = yield* sql<{ n: number }>`
           SELECT count(*)::int AS n FROM tasks WHERE board_id = ${yield* board}
         `;
@@ -467,6 +474,14 @@ describe("a handed-off card (S-local-agent-handoff-mcp)", () => {
             title: "too big",
             actor: "person:handoff",
             handoff: { patch: over },
+          })
+          .pipe(Effect.flip);
+        const escaped = yield* tasks
+          .create({
+            boardId: yield* board,
+            title: "escape-heavy",
+            actor: "person:handoff",
+            handoff: { patch: escapes },
           })
           .pipe(Effect.flip);
         const after = yield* sql<{ n: number }>`
@@ -488,9 +503,11 @@ describe("a handed-off card (S-local-agent-handoff-mcp)", () => {
           .pipe(Effect.flip);
         return {
           refused,
-          overBytes: new TextEncoder().encode(over).length,
+          overBytes: wireBytes(over),
+          escaped,
+          escapesBytes: wireBytes(escapes),
           made: after[0]!.n - before[0]!.n,
-          fits: (yield* tasks.handoff(fits.id))?.bytes,
+          fits: wireBytes((yield* tasks.handoff(fits.id))?.patch ?? ""),
           notADiff,
         };
       }),
@@ -500,7 +517,10 @@ describe("a handed-off card (S-local-agent-handoff-mcp)", () => {
       field: "handoff.patch",
     });
     expect(outcome.refused.message).toBe(
-      `the handoff patch is ${outcome.overBytes} bytes, over the ${MAX_HANDOFF_PATCH_BYTES}-byte cap a card carries: commit and push the work to a branch and hand off from it (--base), or hand off a smaller change`,
+      `the handoff patch is ${outcome.overBytes} bytes as a card carries it, over the ${MAX_HANDOFF_PATCH_BYTES}-byte cap: commit and push the work to a branch and hand off from it (--base), or hand off a smaller change`,
+    );
+    expect(outcome.escaped.message).toContain(
+      `the handoff patch is ${outcome.escapesBytes} bytes as a card carries it`,
     );
     expect(outcome.made).toBe(0);
     expect(outcome.fits).toBe(MAX_HANDOFF_PATCH_BYTES);

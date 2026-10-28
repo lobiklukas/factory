@@ -9,11 +9,14 @@
  */
 import { BunServices } from "@effect/platform-bun";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect } from "effect";
-import { MAX_HANDOFF_PATCH_BYTES } from "@repo/domain/Task";
+import {
+  handoffPatchWireBytes,
+  MAX_HANDOFF_PATCH_BYTES,
+} from "@repo/domain/Task";
 import { describe, expect, it } from "vitest";
 import {
   collectHandoff,
@@ -149,21 +152,76 @@ describe("collectHandoff (S-local-agent-handoff-mcp)", () => {
     expect(refused._tag).toBe("HandoffRefused");
     expect(refused.message).toMatch(
       new RegExp(
-        `^the handoff patch is \\d+ bytes, over the ${MAX_HANDOFF_PATCH_BYTES}-byte cap a card carries: commit and push the work to a branch and hand off from it \\(--base\\), or hand off a smaller change$`,
+        `^the handoff patch is \\d+ bytes as a card carries it, over the ${MAX_HANDOFF_PATCH_BYTES}-byte cap: commit and push the work to a branch and hand off from it \\(--base\\), or hand off a smaller change$`,
       ),
     );
     const bytes = Number(/is (\d+) bytes/.exec(refused.message)?.[1]);
     expect(bytes).toBeGreaterThan(MAX_HANDOFF_PATCH_BYTES);
 
-    // A cap of its own (a test's) is held the same way, and a patch exactly at it passes.
+    // A cap of its own (a test's) is held the same way, and a patch exactly at it passes. The cap
+    // counts the patch as the request carries it: escaped, so larger than its bytes on disk.
     writeFileSync(join(local, "big.txt"), "small\n");
     const fits = await collect({ cwd: local });
-    const atCap = await collect({ cwd: local, maxBytes: fits.bytes });
+    const wire = handoffPatchWireBytes(fits.handoff.patch);
+    expect(wire).toBeGreaterThan(fits.bytes);
+    const atCap = await collect({ cwd: local, maxBytes: wire });
     expect(atCap.bytes).toBe(fits.bytes);
-    const over = await refusal({ cwd: local, maxBytes: fits.bytes - 1 });
+    const over = await refusal({ cwd: local, maxBytes: wire - 1 });
     expect(over.message).toBe(
-      `the handoff patch is ${fits.bytes} bytes, over the ${fits.bytes - 1}-byte cap`,
+      `the handoff patch is ${wire} bytes as a card carries it, over the ${wire - 1}-byte cap`,
     );
+  }, 60_000);
+
+  /**
+   * Mutations this catches: count the patch's raw bytes — an ESC-heavy file at the cap in bytes
+   * passes, and its request overruns the API's limit (six bytes per ESC once escaped).
+   */
+  it("counts the patch escaped, so an escape-heavy one is held to the request it makes", async () => {
+    const { local } = fixture();
+    writeFileSync(join(local, "ansi.log"), `${"\u001b[0m".repeat(200)}\n`);
+    const fits = await collect({ cwd: local });
+    const refused = await refusal({ cwd: local, maxBytes: fits.bytes });
+    expect(refused.message).toBe(
+      `the handoff patch is ${handoffPatchWireBytes(fits.handoff.patch)} bytes as a card carries it, over the ${fits.bytes}-byte cap`,
+    );
+  }, 60_000);
+
+  /**
+   * Mutations this catches: decode git's output leniently — a Latin-1 file travels with U+FFFD in
+   * place of its bytes and the run gets a different file; refuse every non-ASCII byte — the UTF-8
+   * file is refused too.
+   */
+  it("refuses a text file that is not UTF-8, naming it, and carries a UTF-8 one byte for byte", async () => {
+    const { local, remote } = fixture();
+    writeFileSync(join(local, "utf8.txt"), "café ☕\n");
+    const fits = await collect({ cwd: local });
+    const fresh = mkdtempSync(join(tmpdir(), "factory-handoff-fresh-"));
+    git(fresh, ["clone", "-q", remote, "."]);
+    git(fresh, ["apply", "--index", "-"], fits.handoff.patch);
+    expect(readFileSync(join(fresh, "utf8.txt"))).toEqual(
+      readFileSync(join(local, "utf8.txt")),
+    );
+
+    writeFileSync(join(local, "latin1.txt"), Buffer.from([99, 97, 102, 233, 10]));
+    const refused = await refusal({ cwd: local });
+    expect(refused.message).toBe(
+      "latin1.txt is a text file that is not UTF-8, which a handoff patch cannot carry byte for byte: commit and push the work to a branch and hand off from it (--base), or convert it to UTF-8",
+    );
+  }, 60_000);
+
+  /**
+   * Mutations this catches: ignore `untracked: false` — the stray untracked file travels; leave the
+   * tracked edits out with it — the edit is missing.
+   */
+  it("leaves untracked files out when told to, and keeps every tracked change", async () => {
+    const { local } = fixture();
+    writeFileSync(join(local, "src.txt"), "one\ntwo, unstaged\nthree\n");
+    writeFileSync(join(local, ".env.local"), "TOKEN=local\n");
+    const all = await collect({ cwd: local });
+    expect([...all.files].sort()).toEqual([".env.local", "src.txt"]);
+    const tracked = await collect({ cwd: local, untracked: false });
+    expect(tracked.files).toEqual(["src.txt"]);
+    expect(tracked.handoff.patch).not.toContain("TOKEN=local");
   }, 60_000);
 
   it("refuses a clean tree, a directory that is no checkout, and a base the checkout lacks", async () => {

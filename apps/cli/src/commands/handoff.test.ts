@@ -9,7 +9,13 @@ import type { SessionId } from "@repo/domain/Session";
 import type { CreateTaskInput, Task } from "@repo/domain/Task";
 import { describe, expect, it } from "vitest";
 import type { CollectedHandoff } from "../handoff";
-import { boardFor, handOff, handoffRepo, type HandoffClient } from "./handoff";
+import {
+  boardFor,
+  handOff,
+  handoffPreview,
+  handoffRepo,
+  type HandoffClient,
+} from "./handoff";
 
 const BOARD = "brd_01aaaaaaaaaaaaaaaaaaaaaaaa";
 const TASK = "tsk_01bbbbbbbbbbbbbbbbbbbbbbbb";
@@ -124,5 +130,21 @@ describe("factory handoff's card (S-local-agent-handoff-mcp)", () => {
     expect(await Effect.runPromise(handoffRepo(undefined, collected))).toBe(
       "acme/widget",
     );
+  });
+});
+
+describe("factory handoff --dry-run (S-local-agent-handoff-mcp)", () => {
+  /** Mutations this catches: leave a file off the list — the operator cannot see what would leave. */
+  it("lists every file the patch would carry and says nothing was sent", () => {
+    expect(
+      handoffPreview(
+        { ...collected, files: ["notes.md", ".env.local"] },
+        "acme/widget" as never,
+      ),
+    ).toEqual([
+      `dry-run 2 files, 33 bytes from feature/retry at ${"a".repeat(12)} onto acme/widget main; nothing was sent`,
+      "file    notes.md",
+      "file    .env.local",
+    ]);
   });
 });

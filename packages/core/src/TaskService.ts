@@ -93,6 +93,7 @@ import {
   gatedExit,
   handoffCapRefusal,
   handoffPatchBytes,
+  handoffPatchWireBytes,
   handoffPatchFiles,
   HUMAN_MERGE_REQUIREMENT,
   initialColumnOf,
@@ -147,6 +148,7 @@ import { projectTask, type TaskProjection } from "./taskProjection";
 import { branchDiffSize } from "./prStep";
 import { measureBaseOf } from "./RepoRemote";
 import { resolveCommit } from "./repos";
+import { parseAddedLines, scanAddedLines } from "./secretScan";
 import { noCheckoutWarning } from "./workspace";
 import {
   type BranchDiff,
@@ -885,20 +887,37 @@ export const cardText = (input: {
 
 /**
  * A create's handoff, checked (S-local-agent-handoff-mcp): a patch that is a git diff, within
- * `MAX_HANDOFF_PATCH_BYTES`. The cap is the CLI's too, which measures before it sends, so a caller
- * that skipped it is refused in the same words. A blank patch is no handoff — there is nothing to
- * apply — and is refused rather than stored as a card that claims one.
+ * `MAX_HANDOFF_PATCH_BYTES` once JSON-escaped. The cap is the CLI's too, which measures before it
+ * sends, so a caller that skipped it is refused in the same words. A blank patch is no handoff —
+ * there is nothing to apply — and is refused rather than stored as a card that claims one.
  */
 export const handoffOf = (
   handoff: TaskHandoffInput | undefined,
 ): Effect.Effect<TaskHandoffInput | undefined, InvalidTaskInput> =>
   Effect.gen(function* () {
     if (handoff === undefined) return undefined;
-    const bytes = handoffPatchBytes(handoff.patch);
+    // Counted as the request carried it (`handoffPatchWireBytes`), so a patch the cap lets through
+    // is one the API's request limit lets through too.
+    const bytes = handoffPatchWireBytes(handoff.patch);
     if (bytes > MAX_HANDOFF_PATCH_BYTES) {
       return yield* new InvalidTaskInput({
         field: "handoff.patch",
         message: handoffCapRefusal(bytes),
+      });
+    }
+    // A credential's shape in a line the patch adds is refused before the patch is stored: the
+    // `created` event keeps it, `getTaskHandoff` serves it, and a run commits it — a stray unignored
+    // `.env.local` the checkout swept in would otherwise leave the machine with the card. The shapes
+    // are the pre-push scan's (S-agent-secrets); no line opts out, since no base vouches for it here.
+    const findings = scanAddedLines(parseAddedLines(handoff.patch), []);
+    if (findings.length > 0) {
+      const named = findings
+        .slice(0, 5)
+        .map((finding) => `${finding.path}:${finding.line} (${finding.name})`)
+        .join(", ");
+      return yield* new InvalidTaskInput({
+        field: "handoff.patch",
+        message: `the handoff patch adds what looks like a credential at ${named}${findings.length > 5 ? ` and ${findings.length - 5} more` : ""}: take it out of the work (or leave an untracked file out with --tracked-only) and hand off again`,
       });
     }
     if (handoffPatchFiles(handoff.patch).length === 0) {

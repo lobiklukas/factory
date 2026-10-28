@@ -14,8 +14,12 @@
  *   (`origin` when it has one) rather than the local branch, which may be behind or ahead of what the
  *   factory's checkout holds; a base only the local repository knows is used as it stands.
  * - **The cap is measured before anything is sent.** `MAX_HANDOFF_PATCH_BYTES`, the server's own,
- *   with the server's words (`handoffCapRefusal`): a refused handoff makes no card and sends nothing.
+ *   counted as the server counts it — the patch once JSON-escaped, as the request carries it — with
+ *   the server's words (`handoffCapRefusal`): a refused handoff makes no card and sends nothing.
  *   The diff is counted as it streams, never held past the cap.
+ * - **Byte for byte, or not at all.** The patch travels as a string, so a text file that is not
+ *   UTF-8 (git prints a Latin-1 file's bytes as they are) is refused, naming it, rather than sent
+ *   with U+FFFD in place of its bytes.
  * - **Every git call runs no hook and no fsmonitor**, as the control plane's do (`@repo/core`'s
  *   `./git.ts`): reading a checkout must not execute it.
  */
@@ -55,6 +59,64 @@ type GitRun = {
   readonly exitCode: number;
   /** The bytes stdout carried, counted in full even when `stdout` stopped at `limit`. */
   readonly bytes: number;
+  /**
+   * What stdout's bytes come to once JSON-escaped (`handoffPatchWireBytes`'s count, taken from the
+   * bytes), counted in full like `bytes`: the size the handoff cap measures.
+   */
+  readonly wireBytes: number;
+  /**
+   * The paths of the `diff --git` sections of stdout that are not UTF-8 — a Latin-1 or Shift-JIS
+   * text file, which git prints as it is. A string would carry them with U+FFFD in place of their
+   * bytes, so the run would get a different file than the checkout has.
+   */
+  readonly notUtf8: ReadonlyArray<string>;
+};
+
+/**
+ * One byte's size once JSON-escaped, in a UTF-8 stream: `"` and `\\` and the short control escapes
+ * are two, every other control character six, every other byte itself (a multibyte character's
+ * bytes are carried as they are). The same count as `handoffPatchWireBytes` gives the decoded text.
+ */
+const wireSize = (byte: number): number =>
+  byte === 0x22 || byte === 0x5c
+    ? 2
+    : byte < 0x20
+      ? byte === 0x08 ||
+        byte === 0x09 ||
+        byte === 0x0a ||
+        byte === 0x0c ||
+        byte === 0x0d
+        ? 2
+        : 6
+      : 1;
+
+/** `diff --git ` as bytes: where each file's section of a patch starts, at the start of a line. */
+const DIFF_HEADER = [...new TextEncoder().encode("diff --git ")];
+
+/** The paths of the sections of `bytes` (a whole patch) whose bytes are not UTF-8. */
+const notUtf8Sections = (bytes: Uint8Array): ReadonlyArray<string> => {
+  const starts: Array<number> = [];
+  for (let at = 0; at < bytes.length; at += 1) {
+    if (
+      (at === 0 || bytes[at - 1] === 0x0a) &&
+      DIFF_HEADER.every((byte, offset) => bytes[at + offset] === byte)
+    )
+      starts.push(at);
+  }
+  if (starts[0] !== 0) starts.unshift(0);
+  const strict = new TextDecoder("utf-8", { fatal: true });
+  const lenient = new TextDecoder();
+  const found: Array<string> = [];
+  for (const [index, start] of starts.entries()) {
+    const section = bytes.subarray(start, starts[index + 1] ?? bytes.length);
+    try {
+      strict.decode(section);
+    } catch {
+      const header = lenient.decode(section).split("\n")[0] ?? "";
+      found.push(handoffPatchFiles(`${header}\n`)[0] ?? header);
+    }
+  }
+  return found;
 };
 
 /**
@@ -80,22 +142,26 @@ const git = (
       }),
     );
     const limit = options.limit ?? Number.POSITIVE_INFINITY;
-    const decoder = new TextDecoder();
     const [out, stderr, exitCode] = yield* Effect.all(
       [
         handle.stdout.pipe(
           Stream.runFold(
-            () => ({ text: "", bytes: 0 }),
-            (acc, chunk: Uint8Array) => ({
-              text:
-                acc.bytes >= limit
-                  ? acc.text
-                  : acc.text +
-                    decoder.decode(chunk.subarray(0, limit - acc.bytes), {
-                      stream: true,
-                    }),
-              bytes: acc.bytes + chunk.byteLength,
+            () => ({
+              chunks: [] as Array<Uint8Array>,
+              bytes: 0,
+              wireBytes: 0,
             }),
+            (acc, chunk: Uint8Array) => {
+              if (acc.bytes < limit)
+                acc.chunks.push(chunk.slice(0, limit - acc.bytes));
+              let wire = 0;
+              for (const byte of chunk) wire += wireSize(byte);
+              return {
+                chunks: acc.chunks,
+                bytes: acc.bytes + chunk.byteLength,
+                wireBytes: acc.wireBytes + wire,
+              };
+            },
           ),
         ),
         handle.stderr.pipe(Stream.decodeText(), Stream.mkString),
@@ -103,11 +169,24 @@ const git = (
       ],
       { concurrency: "unbounded" },
     );
+    const held = new Uint8Array(
+      out.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0),
+    );
+    let offset = 0;
+    for (const chunk of out.chunks) {
+      held.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    // Only a whole output is judged: a cut one may end inside a character, and is refused by its
+    // size anyway.
+    const notUtf8 = out.bytes > limit ? [] : notUtf8Sections(held);
     return {
-      stdout: out.text,
+      stdout: new TextDecoder().decode(held),
       stderr,
       exitCode: Number(exitCode),
       bytes: out.bytes,
+      wireBytes: out.wireBytes,
+      notUtf8,
     };
   }).pipe(
     Effect.scoped,
@@ -117,6 +196,8 @@ const git = (
         stderr: String(error),
         exitCode: -1,
         bytes: 0,
+        wireBytes: 0,
+        notUtf8: [],
       }),
     ),
   );
@@ -202,6 +283,11 @@ export const collectHandoff = (input: {
   readonly cwd: string;
   readonly base?: string | undefined;
   readonly maxBytes?: number | undefined;
+  /**
+   * `false` leaves untracked files out: only what the checkout already tracks travels, so a stray
+   * unignored file (a `.env.local`, a scratch dump) is not swept into the card. Default `true`.
+   */
+  readonly untracked?: boolean | undefined;
 }): Effect.Effect<
   CollectedHandoff,
   HandoffRefused,
@@ -292,7 +378,9 @@ export const collectHandoff = (input: {
     const diff = yield* Effect.gen(function* () {
       for (const args of [
         ["read-tree", "HEAD"],
-        ["add", "--all", "--", "."],
+        input.untracked === false
+          ? ["add", "--update", "--", "."]
+          : ["add", "--all", "--", "."],
       ]) {
         const step = yield* git(root, args, { env });
         if (step.exitCode !== 0) {
@@ -326,13 +414,20 @@ export const collectHandoff = (input: {
       });
     }
     // `git diff` ends its output with the last hunk's newline; the patch keeps it, so it applies.
+    // The cap counts the patch as the request carries it, escaped (`handoffPatchWireBytes`), as the
+    // server does; `bytes` is its size on disk, which the card reports.
     const bytes = diff.bytes;
-    if (bytes > maxBytes) {
+    if (diff.wireBytes > maxBytes) {
       return yield* new HandoffRefused({
         message:
           maxBytes === MAX_HANDOFF_PATCH_BYTES
-            ? handoffCapRefusal(bytes)
-            : `the handoff patch is ${bytes} bytes, over the ${maxBytes}-byte cap`,
+            ? handoffCapRefusal(diff.wireBytes)
+            : `the handoff patch is ${diff.wireBytes} bytes as a card carries it, over the ${maxBytes}-byte cap`,
+      });
+    }
+    if (diff.notUtf8.length > 0) {
+      return yield* new HandoffRefused({
+        message: `${diff.notUtf8.join(", ")} ${diff.notUtf8.length === 1 ? "is a text file" : "are text files"} that ${diff.notUtf8.length === 1 ? "is" : "are"} not UTF-8, which a handoff patch cannot carry byte for byte: commit and push the work to a branch and hand off from it (--base), or convert ${diff.notUtf8.length === 1 ? "it" : "them"} to UTF-8`,
       });
     }
     const patch = diff.stdout;
