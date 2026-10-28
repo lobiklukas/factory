@@ -409,145 +409,154 @@ const openedSession = (title: string) =>
     return { fixture, id: created.id, worktree, first, answer };
   });
 
-describe("a recorded PR takes the session's later commits (F14)", CASE, () => {
-  /**
-   * Mutation: answer a recorded PR from the log whatever the branch's tip (the step before F14) —
-   * the forge keeps the first commit, the answer is `already-open`, and the record names the first.
-   * Mutation: push without moving the record — `commit` stays the first, so `pr_link` stays unmet.
-   * Mutation: call GitHub on the update — a second create reaches the fake.
-   */
-  it("pushes a new commit onto the PR, answers updated, and records the new tip", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const sessions = yield* SessionService;
-        const session = yield* openedSession("a session that commits again");
-        const creates = opened.length;
-        const second = commitFile(session.worktree, "SECOND.md", "more\n");
-        const answer = yield* sessions
-          .openPullRequest({ sessionId: session.id, title: "factory: again" })
-          .pipe(Effect.provide(GitHubFake));
-        const snapshot = yield* sessions.get(session.id);
-        return {
-          ...session,
-          second,
-          updated: answer,
-          creates: opened.length - creates,
-          snapshot,
-          recorded: yield* recordedPr(session.id),
-        };
-      }),
-    );
-    const head = `factory/${result.id}`;
-    const first = link(result.answer);
-    const updated = link(result.updated);
-    expect(first.outcome).toBe("opened");
-    expect(updated.outcome).toBe("updated");
-    expect(updated.url).toBe(first.url);
-    expect(result.snapshot.session.prUrl).toBe(first.url);
-    // The forge moved to the new tip, fast-forward, and GitHub was asked for nothing more.
-    expect(shaOf(result.fixture.bare, `refs/heads/${head}`)).toBe(
-      result.second,
-    );
-    expect(result.creates).toBe(0);
-    expect(result.recorded?.commit).toBe(result.second);
-    expect(result.recorded?.url).toBe(first.url);
-    // The transcript says the PR moved, and where to.
-    expect(
-      result.snapshot.entries.filter((entry) =>
-        entry.text.startsWith(`pushed ${result.second.slice(0, 12)} to `),
-      ),
-    ).toHaveLength(1);
-  });
-
-  /**
-   * Mutation: measure and push a recorded PR on every call — the forge is asked (a push, the base's
-   * fetch) and the provider is asked for a token.
-   */
-  it("pushes nothing and reaches no forge when the branch is where the PR was published", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const sessions = yield* SessionService;
-        const session = yield* openedSession("a session that settles again");
-        const requests = remote.requests.count;
-        const tokens = asked.length;
-        const creates = opened.length;
-        const again = yield* sessions
-          .openPullRequest({ sessionId: session.id, title: "factory: again" })
-          .pipe(Effect.provide(GitHubFake));
-        return {
-          ...session,
-          again,
-          requests: remote.requests.count - requests,
-          tokens: asked.length - tokens,
-          creates: opened.length - creates,
-          recorded: yield* recordedPr(session.id),
-        };
-      }),
-    );
-    expect(link(result.answer).outcome).toBe("opened");
-    expect(link(result.again).outcome).toBe("already-open");
-    expect(result.requests).toBe(0);
-    expect(result.tokens).toBe(0);
-    expect(result.creates).toBe(0);
-    expect(result.recorded?.commit).toBe(result.first);
-    expect(shaOf(result.fixture.bare, `refs/heads/factory/${result.id}`)).toBe(
-      result.first,
-    );
-  });
-
-  /**
-   * Mutation: force the update's push — the remote's commit is overwritten.
-   * Mutation: record the new tip before the push answers — the record names a commit the forge
-   * does not hold.
-   */
-  it("answers non-fast-forward for a diverged remote, forces nothing, and keeps the PR at its commit", async () => {
-    const result = await run(
-      Effect.gen(function* () {
-        const sessions = yield* SessionService;
-        const session = yield* openedSession("a branch someone else moved");
-        const head = `factory/${session.id}`;
-        // Someone else's commit on the PR's branch, on the forge only.
-        git(session.fixture.upstream, "fetch", "-q", "origin", head);
-        git(
-          session.fixture.upstream,
-          "checkout",
-          "-q",
-          "-b",
-          head,
-          `origin/${head}`,
-        );
-        const theirs = commitFile(session.fixture.upstream, "THEIRS.md", "x\n");
-        git(session.fixture.upstream, "push", "-q", "origin", head);
-        commitFile(session.worktree, "MINE.md", "the run's next change\n");
-        const creates = opened.length;
-        const refused = yield* sessions
-          .openPullRequest({ sessionId: session.id, title: "factory: again" })
-          .pipe(Effect.provide(GitHubFake));
-        const after = yield* sessions.get(session.id);
-        return {
-          ...session,
-          head,
-          theirs,
-          refused,
-          creates: opened.length - creates,
-          prUrl: after.session.prUrl,
-          recorded: yield* recordedPr(session.id),
-        };
-      }),
-    );
-    expect(result.refused).toEqual({
-      outcome: "non-fast-forward",
-      head: result.head,
+// Two PR steps and a forge push each, under a loaded gate: twice the suite's budget.
+describe(
+  "a recorded PR takes the session's later commits (F14)",
+  { timeout: 120_000 },
+  () => {
+    /**
+     * Mutation: answer a recorded PR from the log whatever the branch's tip (the step before F14) —
+     * the forge keeps the first commit, the answer is `already-open`, and the record names the first.
+     * Mutation: push without moving the record — `commit` stays the first, so `pr_link` stays unmet.
+     * Mutation: call GitHub on the update — a second create reaches the fake.
+     */
+    it("pushes a new commit onto the PR, answers updated, and records the new tip", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const session = yield* openedSession("a session that commits again");
+          const creates = opened.length;
+          const second = commitFile(session.worktree, "SECOND.md", "more\n");
+          const answer = yield* sessions
+            .openPullRequest({ sessionId: session.id, title: "factory: again" })
+            .pipe(Effect.provide(GitHubFake));
+          const snapshot = yield* sessions.get(session.id);
+          return {
+            ...session,
+            second,
+            updated: answer,
+            creates: opened.length - creates,
+            snapshot,
+            recorded: yield* recordedPr(session.id),
+          };
+        }),
+      );
+      const head = `factory/${result.id}`;
+      const first = link(result.answer);
+      const updated = link(result.updated);
+      expect(first.outcome).toBe("opened");
+      expect(updated.outcome).toBe("updated");
+      expect(updated.url).toBe(first.url);
+      expect(result.snapshot.session.prUrl).toBe(first.url);
+      // The forge moved to the new tip, fast-forward, and GitHub was asked for nothing more.
+      expect(shaOf(result.fixture.bare, `refs/heads/${head}`)).toBe(
+        result.second,
+      );
+      expect(result.creates).toBe(0);
+      expect(result.recorded?.commit).toBe(result.second);
+      expect(result.recorded?.url).toBe(first.url);
+      // The transcript says the PR moved, and where to.
+      expect(
+        result.snapshot.entries.filter((entry) =>
+          entry.text.startsWith(`pushed ${result.second.slice(0, 12)} to `),
+        ),
+      ).toHaveLength(1);
     });
-    expect(shaOf(result.fixture.bare, `refs/heads/${result.head}`)).toBe(
-      result.theirs,
-    );
-    expect(result.creates).toBe(0);
-    // The PR is still the session's, at the commit the step last published.
-    expect(result.prUrl).toBe(link(result.answer).url);
-    expect(result.recorded?.commit).toBe(result.first);
-  });
-});
+
+    /**
+     * Mutation: measure and push a recorded PR on every call — the forge is asked (a push, the base's
+     * fetch) and the provider is asked for a token.
+     */
+    it("pushes nothing and reaches no forge when the branch is where the PR was published", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const session = yield* openedSession("a session that settles again");
+          const requests = remote.requests.count;
+          const tokens = asked.length;
+          const creates = opened.length;
+          const again = yield* sessions
+            .openPullRequest({ sessionId: session.id, title: "factory: again" })
+            .pipe(Effect.provide(GitHubFake));
+          return {
+            ...session,
+            again,
+            requests: remote.requests.count - requests,
+            tokens: asked.length - tokens,
+            creates: opened.length - creates,
+            recorded: yield* recordedPr(session.id),
+          };
+        }),
+      );
+      expect(link(result.answer).outcome).toBe("opened");
+      expect(link(result.again).outcome).toBe("already-open");
+      expect(result.requests).toBe(0);
+      expect(result.tokens).toBe(0);
+      expect(result.creates).toBe(0);
+      expect(result.recorded?.commit).toBe(result.first);
+      expect(
+        shaOf(result.fixture.bare, `refs/heads/factory/${result.id}`),
+      ).toBe(result.first);
+    });
+
+    /**
+     * Mutation: force the update's push — the remote's commit is overwritten.
+     * Mutation: record the new tip before the push answers — the record names a commit the forge
+     * does not hold.
+     */
+    it("answers non-fast-forward for a diverged remote, forces nothing, and keeps the PR at its commit", async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const session = yield* openedSession("a branch someone else moved");
+          const head = `factory/${session.id}`;
+          // Someone else's commit on the PR's branch, on the forge only.
+          git(session.fixture.upstream, "fetch", "-q", "origin", head);
+          git(
+            session.fixture.upstream,
+            "checkout",
+            "-q",
+            "-b",
+            head,
+            `origin/${head}`,
+          );
+          const theirs = commitFile(
+            session.fixture.upstream,
+            "THEIRS.md",
+            "x\n",
+          );
+          git(session.fixture.upstream, "push", "-q", "origin", head);
+          commitFile(session.worktree, "MINE.md", "the run's next change\n");
+          const creates = opened.length;
+          const refused = yield* sessions
+            .openPullRequest({ sessionId: session.id, title: "factory: again" })
+            .pipe(Effect.provide(GitHubFake));
+          const after = yield* sessions.get(session.id);
+          return {
+            ...session,
+            head,
+            theirs,
+            refused,
+            creates: opened.length - creates,
+            prUrl: after.session.prUrl,
+            recorded: yield* recordedPr(session.id),
+          };
+        }),
+      );
+      expect(result.refused).toEqual({
+        outcome: "non-fast-forward",
+        head: result.head,
+      });
+      expect(shaOf(result.fixture.bare, `refs/heads/${result.head}`)).toBe(
+        result.theirs,
+      );
+      expect(result.creates).toBe(0);
+      // The PR is still the session's, at the commit the step last published.
+      expect(result.prUrl).toBe(link(result.answer).url);
+      expect(result.recorded?.commit).toBe(result.first);
+    });
+  },
+);
 
 describe("the worktree is cut from the remote's base", CASE, () => {
   /**

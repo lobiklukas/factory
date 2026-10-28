@@ -3170,7 +3170,7 @@ describe("the diff cap", () => {
     }
   }, 120_000);
 
-  it("does not re-measure a branch whose PR the log already records", async () => {
+  it("caps a recorded PR's later commits too, keeping the PR, and re-measures nothing when the branch has not moved (F14)", async () => {
     const url = "https://github.com/lobiklukas/factory/pull/35";
     const github = makeGithubFake(201, { number: 35, url });
     const result = await program(
@@ -3199,15 +3199,18 @@ describe("the diff cap", () => {
           base: "main",
         };
         const first = yield* sessions.openPullRequest(asked);
-        // The branch then grows past the cap. The PR exists, so the step's answer is the one its
-        // log records — the cap bounds what the step would open, not what it already opened.
+        // Asked again on the same commit: the log answers, nothing is measured.
+        const repeated = yield* sessions.openPullRequest(asked);
+        // The branch then grows past the cap. Since F14 a recorded PR takes the branch's later
+        // commits, under the same cap: they are refused, and the PR stays the session's.
         commitDiff({
           worktree: openedOnce.workspace.path,
           files: 1,
           lines: DEFAULT_DIFF_CAP.maxLines + 1,
         });
-        const repeated = yield* sessions.openPullRequest(asked);
-        return { first, repeated };
+        const grown = yield* sessions.openPullRequest(asked);
+        const after = yield* sessions.get(created.id);
+        return { first, repeated, grown, prUrl: after.session.prUrl };
       }).pipe(Effect.provide(github.layer)),
     );
 
@@ -3221,7 +3224,15 @@ describe("the diff cap", () => {
       url,
       outcome: "already-open",
     });
-    // One POST for both: the retry was answered by the log, whatever the branch has become.
+    expect(result.grown).toEqual({
+      outcome: "over-cap",
+      limit: "lines",
+      cap: DEFAULT_DIFF_CAP.maxLines,
+      measured: DEFAULT_DIFF_CAP.maxLines + 1,
+    });
+    expect(result.prUrl).toBe(url);
+    // One POST for all three: the retry was answered by the log, and the refused update asks
+    // GitHub for nothing.
     expect(github.requests).toHaveLength(1);
   }, 120_000);
 
