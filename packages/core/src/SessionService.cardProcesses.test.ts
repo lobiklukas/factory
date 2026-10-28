@@ -432,9 +432,22 @@ describe("a card's branch and PR across two API processes (F13)", () => {
       }),
     );
     const started = await second.runPromise(
-      Effect.flatMap(SessionService, (service) =>
-        service.create({ taskId, taskColumn: "building" }),
-      ),
+      Effect.gen(function* () {
+        const service = yield* SessionService;
+        // `live.busy` clears before the activity row is rewritten; this process reads the row.
+        yield* waitUntil(
+          Effect.flatMap(
+            SqlClient,
+            (sql) =>
+              sql<{ status: string }>`
+              SELECT status FROM session_activity WHERE session_id = ${busyRun}
+            `,
+          ),
+          (rows) => rows[0]?.status !== "busy",
+          "the settled run's status to leave busy",
+        );
+        return yield* service.create({ taskId, taskColumn: "building" });
+      }),
     );
 
     expect(refused).toMatchObject({ code: "busy" });
