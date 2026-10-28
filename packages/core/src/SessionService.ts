@@ -3833,6 +3833,21 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             return yield* answerRetry(input, admittedRun.existing);
           }
           const { binding, inserted } = admittedRun.written;
+          if (input.taskId !== undefined && input.review === undefined) {
+            // A review that requested changes blocked the card (C21); this run is the one that
+            // addresses it — the review is on the thread it is told — and a card still blocked when
+            // it settles would hold the very push that answers the review (C18). A reviewer run is
+            // not that run. Best effort: the run is already the card's.
+            yield* tasks
+              .resumeAfterReview({ taskId: input.taskId, actor: input.actor ?? id })
+              .pipe(
+                Effect.catch((error) =>
+                  Effect.logWarning(
+                    `session ${id}: the card ${input.taskId}'s changes_requested block could not be lifted: ${error.message}`,
+                  ),
+                ),
+              );
+          }
           const row = inserted[0] ?? {
             id,
             title,

@@ -368,6 +368,7 @@ const BLOCK_FROM: Readonly<Record<TaskBlocked["reason"], string>> = {
   transient: "a transient failure",
   setup_failed: "its worktree setup failing",
   pr_closed: "its PR closed without being merged",
+  changes_requested: "a review that requested changes",
 };
 
 /**

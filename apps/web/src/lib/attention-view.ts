@@ -24,13 +24,14 @@ export type AttentionGroup = {
   readonly items: ReadonlyArray<AttentionItem>;
 };
 
-/** The groups in the order the server answers them: a run waiting live, a parked run, a gate. */
+/** The groups in the order the server answers them: a run waiting live, a parked run, a review, a gate. */
 const GROUPS: ReadonlyArray<{
   readonly kind: AttentionKind;
   readonly title: string;
 }> = [
   { kind: "approval", title: "Approve or deny a request" },
   { kind: "question", title: "Answer a run's question" },
+  { kind: "review", title: "Address a review" },
   { kind: "gate", title: "Make a person's move" },
 ];
 
@@ -68,6 +69,12 @@ export const attentionReasonText = (item: AttentionItem): string => {
         : reason.question === undefined
           ? `Blocked: needs input from ${task.blocked?.column ?? task.column}, with no question recorded`
           : `Asked: ${reason.question}`;
+    case "review":
+      // The block's note names the reviewer and the PR (C21); the review itself is on the thread,
+      // which the next run on the card is told.
+      return reason.review === undefined
+        ? `Changes requested on the card's PR; start the next run to address them`
+        : `Changes requested: ${reason.review}`;
     case "gate":
       if (task === undefined)
         return `Idle at the ${reason.gate}, a person's move`;
@@ -120,7 +127,7 @@ export type AttentionLink =
 export const attentionLink = (item: AttentionItem): AttentionLink => {
   const { task } = item;
   if (task === undefined) {
-    return item.reason._tag === "question"
+    return item.reason._tag === "question" || item.reason._tag === "review"
       ? { kind: "sessions" }
       : { kind: "session", sessionId: item.reason.sessionId };
   }
@@ -132,6 +139,7 @@ export const attentionLink = (item: AttentionItem): AttentionLink => {
         search: { card: task.id, run: item.reason.sessionId },
       };
     case "question":
+    case "review":
       return {
         kind: "card",
         boardId: task.boardId,
