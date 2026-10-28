@@ -63,7 +63,7 @@ import {
   READER_PAGE_ROWS,
 } from "./PostgresStorage";
 import { Skill } from "@repo/domain/Skill";
-import { BoardDefinition } from "@repo/domain/Task";
+import { BoardColumn, BoardDefinition } from "@repo/domain/Task";
 
 /**
  * Pi Durable's storage conformance suite is the acceptance oracle (docs/design.md M1).
@@ -1708,6 +1708,167 @@ describe("the board's tables and seed", () => {
     },
   );
 
+  /**
+   * 0044 (D10): the planning column's skill. Version 6 is version 5 with `plan` bound to `planning`
+   * and nothing else changed — caps and initial column included; version 5 keeps `planning` with no
+   * skill (B2), and a second pass writes no second row.
+   *
+   * Mutation: bind `plan` to every column — v6's other columns differ from v5's. Mutation: update
+   * version 5 in place — v5's planning has the skill. Mutation: drop the caps — v6's are null.
+   */
+  it(
+    "seeds version 6 with the plan skill on planning over version 5, and only ever once",
+    { timeout: 30_000 },
+    async () => {
+      const read = (version: number) =>
+        Effect.runPromise(
+          sql<{
+            id: string;
+            version: number;
+            name: string;
+            columns: unknown;
+            initialColumn: string | null;
+            caps: unknown;
+          }>`
+            SELECT id, version, name, columns, initial_column, caps FROM board_definitions
+            WHERE id = 'default' AND version = ${version}
+          `,
+        );
+      const decoded = (row: {
+        readonly initialColumn: string | null;
+        readonly caps: unknown;
+      }) =>
+        Schema.decodeUnknownSync(BoardDefinition)({
+          ...row,
+          initialColumn: row.initialColumn ?? undefined,
+          caps: row.caps ?? undefined,
+        });
+
+      const [row6] = await read(6);
+      const [row5] = await read(5);
+      expect(row6).toBeDefined();
+      expect(row5).toBeDefined();
+      if (row6 === undefined || row5 === undefined) return;
+      const v6 = decoded(row6);
+      const v5 = decoded(row5);
+      const planning = (columns: typeof v6.columns) =>
+        columns.find((column) => column.name === "planning");
+      expect(planning(v6.columns)?.skills).toEqual(["plan"]);
+      expect(planning(v5.columns)?.skills).toEqual([]);
+      expect(v6.columns.filter((column) => column.name !== "planning")).toEqual(
+        v5.columns.filter((column) => column.name !== "planning"),
+      );
+      expect(planning(v6.columns)?.requires).toEqual(
+        planning(v5.columns)?.requires,
+      );
+      expect(v6.caps).toEqual(v5.caps);
+      expect(v6.initialColumn).toBe(v5.initialColumn);
+      expect(v6.name).toBe(v5.name);
+
+      const migration = (await import("./migrations/0044_seed_plan_skill"))
+        .default;
+      await Effect.runPromise(
+        migration.pipe(Effect.provideService(SqlClient, sql)),
+      );
+      expect(await read(6)).toHaveLength(1);
+    },
+  );
+
+  /**
+   * 0044 (D10) against an id an operator already authored past the seeds (docs/board.md: seed
+   * migrations and authored versions share one id space). Driven on an id of its own, so the shared
+   * `default` is never touched: a seeded version 1, then an authored version 2 with its own name and
+   * no caps; binding writes version 3 over version 2 — never a fixed number — and a second pass
+   * writes nothing. A newest version with no planning column gets no new version.
+   *
+   * Mutation: insert at a fixed version 2 with `ON CONFLICT DO NOTHING` — no version 3. Mutation:
+   * read version 1 instead of the newest — version 3's name is the seed's. Mutation: drop the
+   * `skills.includes("plan")` guard — the second pass writes version 4.
+   */
+  it(
+    "binds the plan skill at the newest version + 1 over an authored version",
+    { timeout: 30_000 },
+    async () => {
+      const { bindPlanSkill } =
+        await import("./migrations/0044_seed_plan_skill");
+      const ColumnsJson = Schema.fromJsonString(Schema.Array(BoardColumn));
+      const suffix = randomBytes(6).toString("hex");
+      const id = `d10_plan_${suffix}`;
+      const flat = `d10_flat_${suffix}`;
+      const [seed] = await Effect.runPromise(
+        sql<{ columns: string; initialColumn: string | null }>`
+          SELECT columns::text AS columns, initial_column FROM board_definitions
+          WHERE id = 'default' AND version = 5
+        `,
+      );
+      expect(seed).toBeDefined();
+      if (seed === undefined) return;
+      const withoutPlanning = JSON.stringify(
+        Schema.decodeSync(ColumnsJson)(seed.columns).filter(
+          (column) => column.name !== "planning",
+        ),
+      );
+      const read = (definitionId: string) =>
+        Effect.runPromise(
+          sql<{
+            version: number;
+            name: string;
+            columns: string;
+            caps: string | null;
+          }>`
+            SELECT version, name, columns::text AS columns, caps::text AS caps
+            FROM board_definitions WHERE id = ${definitionId} ORDER BY version
+          `,
+        );
+      const run = (definitionId: string) =>
+        Effect.runPromise(
+          bindPlanSkill(definitionId).pipe(
+            Effect.provideService(SqlClient, sql),
+          ),
+        );
+      const planningSkills = (columns: string | undefined) =>
+        Schema.decodeSync(ColumnsJson)(columns ?? "[]").find(
+          (column) => column.name === "planning",
+        )?.skills;
+      const others = (columns: string | undefined) =>
+        Schema.decodeSync(ColumnsJson)(columns ?? "[]").filter(
+          (column) => column.name !== "planning",
+        );
+
+      try {
+        await Effect.runPromise(
+          sql`
+            INSERT INTO board_definitions (id, version, name, columns, initial_column, caps)
+            VALUES
+              (${id}, 1, 'Seeded', ${seed.columns}::jsonb, ${seed.initialColumn}, '{"board":2,"task":1,"repo":2}'::jsonb),
+              (${id}, 2, 'Authored', ${seed.columns}::jsonb, ${seed.initialColumn}, NULL),
+              (${flat}, 1, 'No planning', ${withoutPlanning}::jsonb, ${seed.initialColumn}, NULL)
+          `,
+        );
+
+        await run(id);
+        const rows = await read(id);
+        expect(rows.map((row) => row.version)).toEqual([1, 2, 3]);
+        const [, authored, bound] = rows;
+        expect(bound?.name).toBe("Authored");
+        expect(bound?.caps).toBeNull();
+        expect(planningSkills(bound?.columns)).toEqual(["plan"]);
+        expect(planningSkills(authored?.columns)).toEqual([]);
+        expect(others(bound?.columns)).toEqual(others(authored?.columns));
+
+        await run(id);
+        expect((await read(id)).map((row) => row.version)).toEqual([1, 2, 3]);
+
+        await run(flat);
+        expect((await read(flat)).map((row) => row.version)).toEqual([1]);
+      } finally {
+        await Effect.runPromise(
+          sql`DELETE FROM board_definitions WHERE id IN (${id}, ${flat})`,
+        );
+      }
+    },
+  );
+
   it(
     "refuses a card that is blocked without the column it blocked from",
     { timeout: 30_000 },
@@ -2211,6 +2372,50 @@ describe("the skills table and its seeds", () => {
       expect(
         after.filter((skill) => skill.name === "plan-freshness"),
       ).toHaveLength(1);
+      expect(after).toEqual(before);
+    },
+  );
+
+  // The `plan` skill 0044 seeds (D10): what a planning run is told. Deleting 0044's INSERT fails both.
+  it(
+    "seeds the plan skill with the plan tool's fields and the read-only rule",
+    { timeout: 30_000 },
+    async () => {
+      const [row] = (await skills()).filter((skill) => skill.name === "plan");
+      expect(row).toBeDefined();
+      if (row === undefined) return;
+      const skill = decode(row);
+      expect(skill.version).toBe(1);
+      const body = skill.body.toLowerCase();
+      for (const rule of [
+        "read-only",
+        "`plan` tool",
+        "`steps`",
+        "`surfaces`",
+        "`risks`",
+        "`[]` when there are none",
+        "a person approves the plan",
+      ]) {
+        expect(body).toContain(rule);
+      }
+      expect(skill.attachments).toEqual([]);
+    },
+  );
+
+  it(
+    "adds the plan row once, and rewrites no other skill row",
+    { timeout: 30_000 },
+    async () => {
+      const shipped = async () =>
+        (await skills()).filter((skill) => !skill.name.startsWith("test-"));
+      const before = await shipped();
+      const migration = (await import("./migrations/0044_seed_plan_skill"))
+        .default;
+      await Effect.runPromise(
+        migration.pipe(Effect.provideService(SqlClient, sql)),
+      );
+      const after = await shipped();
+      expect(after.filter((skill) => skill.name === "plan")).toHaveLength(1);
       expect(after).toEqual(before);
     },
   );

@@ -29,6 +29,7 @@ import type {
   TaskExit,
   TaskRun,
   TaskSpec,
+  TaskPlan,
 } from "@repo/domain/Task";
 import { resolveApiUrl } from "../api";
 import { reportFailure, reportFailures } from "../errors";
@@ -546,6 +547,22 @@ export const specLines = (spec: TaskSpec | null): ReadonlyArray<string> =>
       ];
 
 /**
+ * The card's plan (D10), printed as its spec is: the run that declared it, the column and revision it
+ * was declared at, its summary, then its steps, surfaces and risks. `risks: none` is a plan that
+ * declares none; a card no run has planned prints `plan      -`.
+ */
+export const planLines = (plan: TaskPlan | null): ReadonlyArray<string> =>
+  plan === null
+    ? ["plan      -"]
+    : [
+        `plan      ${plan.sessionId} from ${plan.column} (revision ${plan.revision})`,
+        `  summary: ${plan.summary}`,
+        ...specList("steps", plan.steps),
+        ...specList("surfaces", plan.surfaces),
+        ...specList("risks", plan.risks),
+      ];
+
+/**
  * What the card needs to leave its column (D9): a `leaves <column> when` header, then each of the
  * column's requirements — `met`, `unmet` with the reason the move would be refused with, or `not
  * checked` for a key nothing checks — in declaration order. A column that declares none says so.
@@ -588,7 +605,8 @@ export const bodyLines = (card: Task): ReadonlyArray<string> => {
 };
 
 /**
- * `factory board show <task>` — one card, as the server has it, its spec (LOB-238), and its thread
+ * `factory board show <task>` — one card, as the server has it, its spec (LOB-238) and plan (D10),
+ * and its thread
  * (B7): the question a parked run asked and the answer a person gave are read here, on the task, not
  * in a transcript.
  */
@@ -613,6 +631,7 @@ const showCommand = Command.make(
       const card = yield* client.getTask({ taskId });
       const thread = yield* client.listTaskComments({ taskId });
       const spec = yield* client.getTaskSpec({ taskId });
+      const plan = yield* client.getTaskPlan({ taskId });
       const exit = yield* client.getTaskExit({ taskId });
 
       yield* Console.log(`id        ${card.id}`);
@@ -640,6 +659,7 @@ const showCommand = Command.make(
       yield* Console.log(`title     ${card.title}`);
       for (const line of bodyLines(card)) yield* Console.log(line);
       for (const line of specLines(spec)) yield* Console.log(line);
+      for (const line of planLines(plan)) yield* Console.log(line);
       for (const line of exitLines(exit)) yield* Console.log(line);
       yield* Console.log(`thread    ${thread.length}`);
       for (const comment of thread) {
@@ -1512,7 +1532,9 @@ export const attentionLines = (item: AttentionItem): ReadonlyArray<string> => {
     case "gate":
       return [
         head,
-        `  ${reason.gate}: ${reason.sessionId} is idle; ${task?.column ?? "-"} → ${reason.to} is a person's`,
+        reason.unmet === undefined || reason.unmet.length === 0
+          ? `  ${reason.gate}: ${reason.sessionId} is idle; ${task?.column ?? "-"} → ${reason.to} is a person's`
+          : `  ${reason.gate}: ${reason.sessionId} is idle; ${task?.column ?? "-"} → ${reason.to} needs ${reason.unmet.join(", ")} first (start or prompt a run), then is a person's`,
       ];
   }
 };

@@ -417,16 +417,16 @@ describe("a card, a run and an event", () => {
   });
 
   /**
-   * `TaskEvent`'s eight tags, and the two fields B5 says every move carries.
+   * `TaskEvent`'s nine tags, and the two fields B5 says every move carries.
    *
    * B5: "Every move carries an **actor** and an expected **revision**". This is the case that proves
-   * all eight variants declare both, rather than the four that read as moves — a block and a comment
+   * all nine variants declare both, rather than the four that read as moves — a block and a comment
    * are moves too, and an event without an actor would break the audit trail `Task.ts:186` claims.
    *
    * The `task_events` table's `kind` column is what a writer would store, and it is unconstrained
-   * `TEXT`: nothing in the database ties a row's `kind` to these eight. That gap is recorded by the
+   * `TEXT`: nothing in the database ties a row's `kind` to these nine. That gap is recorded by the
    * case in `PostgresStorage.test.ts` that stores a column set the contract rejects; here the claim
-   * is only that the *contract* has eight and every one carries both fields.
+   * is only that the *contract* has nine and every one carries both fields.
    *
    * Mutation: drop `revision` from the `commented` variant — that variant's refusal goes.
    */
@@ -458,6 +458,15 @@ describe("a card, a run and an event", () => {
         openQuestions: [],
       },
       {
+        _tag: "planned",
+        taskId: A_TASK_ID,
+        column: "planning",
+        summary: "export the card count",
+        steps: ["add the export"],
+        surfaces: ["web"],
+        risks: [],
+      },
+      {
         _tag: "priorityChanged",
         taskId: A_TASK_ID,
         from: "normal",
@@ -473,7 +482,7 @@ describe("a card, a run and an event", () => {
       expect(refuses(TaskEvent, { ...variant, revision: 2 })).toBe(true);
       expect(refuses(TaskEvent, { ...variant, actor: "person:1" })).toBe(true);
     }
-    // A ninth tag is refused, so the set is closed at eight.
+    // A tenth tag is refused, so the set is closed at nine.
     expect(
       refuses(TaskEvent, {
         _tag: "renamed",

@@ -286,6 +286,7 @@ try {
     "listSessions",
     "listTasks",
     "getTaskSpec",
+    "getTaskPlan",
     "getTaskExit",
     "listTaskComments",
   ];

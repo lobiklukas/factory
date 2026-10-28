@@ -44,6 +44,8 @@ import {
   type ModelAccess,
 } from "./models";
 import { STAGE_REFUSED_TOOLS } from "./policy";
+import { extendRolePolicies } from "./rolePolicy";
+import type { PlanOptions } from "./planning";
 import {
   closeHarness,
   openSession,
@@ -174,6 +176,50 @@ describe("resolveRole", () => {
     expect(writesSpec(run("specifying"))).toBe(false);
     expect(writesSpec(run("odd", "constructor"))).toBe(false);
     expect(writesSpec(undefined)).toBe(false);
+  });
+
+  /** Mutation: offer `plan` by column name, or to the specifier — every non-planner row reddens. */
+  it("offers the plan tool to the planner role alone, whatever its column is called (D10)", () => {
+    const writesPlan = (profile: RunProfile | undefined) =>
+      resolveRole(profile, deployment.access, roles).writesPlan;
+
+    expect(writesPlan(run("planning", "planner"))).toBe(true);
+    expect(writesPlan(run("design", "planner"))).toBe(true);
+    expect(writesPlan(run("specifying", "specifier"))).toBe(false);
+    expect(writesPlan(run("building", "builder"))).toBe(false);
+    expect(writesPlan(run("planning"))).toBe(false);
+    expect(writesPlan(run("odd", "constructor"))).toBe(false);
+    expect(writesPlan(undefined)).toBe(false);
+    // A role with no column (a session with no card) has no card to post a plan on.
+    expect(
+      resolveRole({ role: "planner", skills: [] }, deployment.access, roles)
+        .writesPlan,
+    ).toBe(false);
+  });
+
+  /** Mutation: ignore the `policies` argument — the deployment's row would grant nothing. */
+  it("reads the deployment's extended table: its own role may plan and only read", () => {
+    const policies = extendRolePolicies(
+      new Map([["architect", { readOnly: true, writesPlan: true }]]),
+    );
+    const architect = resolveRole(
+      run("design", "architect"),
+      deployment.access,
+      roles,
+      policies,
+    );
+    expect(architect.writesPlan).toBe(true);
+    expect(architect.writesSpec).toBe(false);
+    expect(architect.withheldTools).toBe(STAGE_REFUSED_TOOLS);
+    expect(architect.stage).toEqual({
+      stage: "design",
+      column: "design",
+      role: "architect",
+    });
+    // Without the extension the same role writes and plans nothing.
+    const plain = resolveRole(run("design", "architect"), deployment.access);
+    expect(plain.writesPlan).toBe(false);
+    expect([...plain.withheldTools]).toEqual([]);
   });
 
   it("offers the review tool to a review run alone, and makes it read-only whatever its role (LOB-36)", () => {
@@ -312,6 +358,7 @@ const runIn = (
     readonly model?: ModelAccess;
     readonly roles?: RoleModels;
     readonly sessionModel?: ModelAccess;
+    readonly plan?: PlanOptions;
   } = {},
 ) =>
   Effect.runPromise(
@@ -322,6 +369,7 @@ const runIn = (
         storage,
         model: options.model ?? deployment.access,
         roles: options.roles ?? roles,
+        ...(options.plan === undefined ? {} : { plan: options.plan }),
         ...(options.sessionModel === undefined
           ? {}
           : { sessionModel: options.sessionModel }),
@@ -390,6 +438,30 @@ describe("two roles in one deployment", () => {
     });
     expect(untabled.models).toEqual(["faux/faux-1"]);
     expect(untabled.offered).not.toContain("write");
+  });
+
+  /**
+   * D10's acceptance, at the install site: a planner run's requests offer no `write`, `edit` or
+   * `verify`, and do offer `plan` when the run has a card to post on. Mutation: drop the planner's
+   * `readOnly` — the write tools reappear; drop its `writesPlan` — `plan` disappears.
+   */
+  it("offers a planner run no write, edit or verify tool, and the plan tool (D10)", async () => {
+    const planning = await runIn(run("planning", "planner"), {
+      plan: { post: () => Promise.resolve({ taskId: "tsk_1", revision: 2 }) },
+    });
+    expect(planning.status).toBe("done");
+    expect(planning.offered).toContain("read");
+    expect(planning.offered).toContain("bash");
+    expect(planning.offered).toContain("plan");
+    for (const tool of STAGE_REFUSED_TOOLS) {
+      expect(planning.offered).not.toContain(tool);
+    }
+    // The building run of the same deployment, given the same callback, is offered no `plan`.
+    const building = await runIn(run("building", "builder"), {
+      plan: { post: () => Promise.resolve({ taskId: "tsk_1", revision: 2 }) },
+    });
+    expect(building.offered).not.toContain("plan");
+    expect(building.offered).toContain("write");
   });
 
   it("answers a read-only role's call to a withheld tool as unavailable, and writes nothing", async () => {

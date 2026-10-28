@@ -243,7 +243,7 @@ describe("authoredDefinitionFaults (D4)", () => {
     const typo = withColumn(1, (column) => ({ ...column, role: "buidler" }));
     expect(fields(typo)).toEqual(["columns[1].role"]);
     expect(authoredDefinitionFaults(typo, LIBRARY)[0]?.message).toBe(
-      'column "doing" names role "buidler", which is not in the deployment\'s role table (ROLE_MODELS: builder, reviewer), not a role the harness knows, and not one any definition declares (reviewer, specifier)',
+      'column "doing" names role "buidler", which is not in the deployment\'s role table (ROLE_MODELS: builder, reviewer), not a role the harness knows, and not one any definition declares (planner, reviewer, specifier)',
     );
     expect(fields(typo, { ...LIBRARY, roles: new Set() })).toEqual([]);
   });

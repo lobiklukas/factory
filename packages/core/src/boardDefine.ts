@@ -48,17 +48,17 @@
  */
 import type { DefineBoardInput, DefinitionFault } from "@repo/domain/Task";
 import { definitionFaults, TERMINAL_COLUMNS } from "@repo/domain/Task";
-import { READ_ONLY_ROLES, REVIEW_ROLES, SPEC_ROLES } from "@repo/harness";
+import { DEFAULT_ROLE_POLICIES, REVIEW_ROLES } from "@repo/harness";
 import { HUMAN_GATE_REQUIREMENTS, KNOWN_REQUIREMENTS } from "./requirements";
 
 /**
- * The roles the harness itself gives meaning to, with or without a `ROLE_MODELS` row: the read-only
- * stages' (`READ_ONLY_ROLES`), the specifying stage's (`SPEC_ROLES`) and the reviewer's
- * (`REVIEW_ROLES`). An authored column may always name one.
+ * The roles the harness itself gives meaning to, with or without a `ROLE_MODELS` row: every row of
+ * its role policy table (`DEFAULT_ROLE_POLICIES` — the specifier and the planner, D10) and the
+ * reviewer's (`REVIEW_ROLES`). An authored column may always name one; a deployment's own role
+ * policy rows (`ROLE_POLICIES`) are added by the caller (`knownRoles`).
  */
 export const HARNESS_ROLES: ReadonlySet<string> = new Set([
-  ...READ_ONLY_ROLES.keys(),
-  ...SPEC_ROLES,
+  ...DEFAULT_ROLE_POLICIES.keys(),
   ...REVIEW_ROLES,
 ]);
 

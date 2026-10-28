@@ -247,7 +247,7 @@ const DEFAULT_V3: ReadonlyArray<ColumnConfig> = [
     model: deployment,
     skills: [],
     requires: [
-      { key: "plan_doc", description: "a plan doc", checked: false },
+      { key: "plan_doc", description: "a plan doc", checked: true },
       {
         key: "human_move",
         description: "a human move (B5's plan approval gate)",
@@ -255,7 +255,8 @@ const DEFAULT_V3: ReadonlyArray<ColumnConfig> = [
       },
     ],
     exits: [{ to: "building", humanGate: "plan approval" }, { to: "canceled" }],
-    autonomy: unasked,
+    // The planner only reads (D10), as the specifier does.
+    autonomy: readOnly,
   },
   {
     name: "building",
@@ -446,6 +447,17 @@ describe("a board's configuration over RPC (LOB-270)", () => {
     );
     expect(v5.caps).toEqual({ board: 2, task: 1, repo: 2 });
     expect(v5.columns).toEqual(DEFAULT_V3);
+
+    // Version 6 (D10) is version 5 with the `plan` skill bound to `planning`, and nothing else.
+    const v6 = await call((client) =>
+      client.getDefinition({ definitionId: DEFAULT, version: 6 }),
+    );
+    expect(v6.caps).toEqual(v5.caps);
+    expect(v6.columns).toEqual(
+      DEFAULT_V3.map((column) =>
+        column.name === "planning" ? { ...column, skills: ["plan"] } : column,
+      ),
+    );
 
     // Version 1 is its own row: no skills bound, and `review` does not declare `verified` yet.
     const v1 = await call((client) =>

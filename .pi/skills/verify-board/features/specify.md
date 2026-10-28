@@ -11,7 +11,8 @@ rather than on a card of its own, so the card that reaches `planning` (and LOB-8
 after it) is one that was specified and answered.
 
 The column is the specifying stage: `specifying` declares the `specifier` role, so its runs are
-read-only (LOB-74, `READ_ONLY_ROLES` in `packages/harness/src/policy.ts`). The drive asserts two
+read-only (LOB-74; since D10 the `specifier` row of the role policy table in
+`packages/harness/src/rolePolicy.ts`). The drive asserts two
 separate facts about that. The run's column, as its `task_runs` row names it, declares a role that
 `readOnlyStageOf` resolves to the `specifying` stage — so a pipeline whose column stopped declaring
 `specifier` fails the drive. And the asking run's turn, a `bash` read (the sleep that makes it busy),
@@ -20,8 +21,8 @@ get as far as asking. Neither shows the stage _refusing_ anything; see below.
 
 Before it asks, the run **declares the card's spec** (LOB-238): the typed `factory.spec` document
 LOB-72 defined — goal, acceptance, `gaps`, open questions — written with the `spec` tool, which only a
-run whose column declares the `specifier` role is offered (`SPEC_ROLES` in
-`packages/harness/src/specify.ts`). The tool changes the run's log and the card, never the workspace,
+run whose column declares the `specifier` role is offered (its `writesSpec` row in
+`packages/harness/src/rolePolicy.ts`). The tool changes the run's log and the card, never the workspace,
 so the read-only stage lets it through. A spec without `gaps` is refused with LOB-72's sentence
 naming the field, and the run retries; the accepted spec is committed to the run's log and recorded
 on the card as a `specified` event, which `getTaskSpec`, `factory board show` and the card pane's
@@ -112,7 +113,7 @@ Mutations observed on 2026-10-27, each a non-zero `./drive.sh`:
 - the `spec` tool's `gaps` parameter made required in its TypeBox schema (LOB-238), so pi-ai's
   argument validation, not LOB-72's validator, refuses the first attempt: "a spec missing gaps was
   refused, naming the field" and the spec probe fail;
-- `READ_ONLY_ROLES` keyed by a role `specifying` does not declare (the stage no longer applies, and
+- The role policy table (`DEFAULT_ROLE_POLICIES`) keyed by a role `specifying` does not declare (the stage no longer applies, and
   the read still runs): "the run's column is the read-only specifying stage" and the parked check
   fail, while "the run's read was not refused" still passes — which is why the two are separate.
 

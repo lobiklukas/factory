@@ -37,6 +37,7 @@ import { MAX_PLAN_PROPOSALS } from "@repo/domain/PlanFreshness";
 import { VERIFY_TOOL } from "./verify";
 import { ASK_TOOL, THREAD_SECTION_KEY } from "./ask";
 import { SPEC_TOOL } from "./specify";
+import { PLAN_TOOL } from "./planning";
 import { REVIEW_TOOL } from "./review";
 
 /** pi-ai's credential lookup, so a caller can read the variables a request would authenticate from. */
@@ -152,6 +153,23 @@ const nextReviewAttempt = (
   // Per turn: a reviewer told something new reviews again, which is what the tool's one-review rule
   // has to refuse.
   const results = toolResultErrors(sinceLastUser(messages), REVIEW_TOOL);
+  if (results.some((isError) => !isError)) return undefined;
+  return attempts[results.length];
+};
+
+/**
+ * The `plan` call the faux script makes next, or `undefined` when it is done planning (D10): only a
+ * run offered the tool plans, it tries the attempts in order — one per refusal, so a first attempt
+ * without `risks` is the model that forgot the field and the next is its retry — and it stops at the
+ * first accepted one, over the whole run.
+ */
+const nextPlanAttempt = (
+  messages: readonly Message[],
+  attempts: readonly FauxSpecAttempt[],
+): FauxSpecAttempt | undefined => {
+  if (attempts.length === 0 || !offersTool(messages, PLAN_TOOL))
+    return undefined;
+  const results = toolResultErrors(messages, PLAN_TOOL);
   if (results.some((isError) => !isError)) return undefined;
   return attempts[results.length];
 };
@@ -419,6 +437,11 @@ const derivedPlanAnswer = (prompt: string): AssistantMessage => {
  * `review` is the reviewer's verdict (LOB-36), in the same place: after the `bash` turn that read the
  * diff, a run offered the `review` tool calls it with the scripted attempts until one is accepted
  * (`nextReviewAttempt`).
+ *
+ * `planAttempts` is the planner's declaration (D10), after the spec's and before the review's: a run
+ * offered the `plan` tool calls it with the scripted attempts until one is accepted
+ * (`nextPlanAttempt`). A `FAUX_MODEL_SCRIPTS` row's `plan` is where they come from, so only the
+ * model a planner role runs on plans.
  */
 export const fauxAnswer = (
   messages: readonly Message[],
@@ -431,6 +454,7 @@ export const fauxAnswer = (
   decomposition?: string,
   review: readonly FauxSpecAttempt[] = [],
   plan?: string,
+  planAttempts: readonly FauxSpecAttempt[] = [],
 ): AssistantMessage => {
   // A compaction asks for a summary of a transcript rather than for a turn: it has to answer with
   // text, because a tool call there fails the compaction and the run that waited for it.
@@ -476,6 +500,12 @@ export const fauxAnswer = (
   const specAttempt = nextSpecAttempt(messages, spec);
   if (specAttempt !== undefined) {
     return fauxAssistantMessage(fauxToolCall(SPEC_TOOL, specAttempt), {
+      stopReason: "toolUse",
+    });
+  }
+  const planAttempt = nextPlanAttempt(messages, planAttempts);
+  if (planAttempt !== undefined) {
+    return fauxAssistantMessage(fauxToolCall(PLAN_TOOL, planAttempt), {
       stopReason: "toolUse",
     });
   }
@@ -618,6 +648,11 @@ export type FauxScript = {
   readonly command?: string | undefined;
   /** Whether it calls `verify` after its `bash` turn, instead of `fauxVerify`. */
   readonly verify?: boolean | undefined;
+  /**
+   * The `plan` calls it makes after its `bash` turn when it is offered the tool (D10): each the
+   * tool's arguments, verbatim, tried in order until one is accepted.
+   */
+  readonly plan?: readonly FauxSpecAttempt[] | undefined;
 };
 
 /** Faux model id → its script. */
@@ -629,13 +664,16 @@ export class InvalidFauxModelScripts extends Schema.TaggedError<InvalidFauxModel
   { message: Schema.String },
 ) {}
 
-/** The table as a deployment writes it: a JSON object of model id → `{command?, verify?}`. */
+/** The table as a deployment writes it: a JSON object of model id → `{command?, verify?, plan?}`. */
 const FauxModelScriptsJson = Schema.fromJsonString(
   Schema.Record(
     Schema.String,
     Schema.Struct({
       command: Schema.optional(Schema.NonEmptyString),
       verify: Schema.optional(Schema.Boolean),
+      plan: Schema.optional(
+        Schema.Array(Schema.Record(Schema.String, Schema.MutableJson)),
+      ),
     }),
   ),
 );
@@ -661,7 +699,7 @@ export const parseFauxModelScripts = (
       Effect.mapError(
         (cause) =>
           new InvalidFauxModelScripts({
-            message: `faux model scripts are not a {"<model>": {"command"?, "verify"?}} object: ${cause.message}`,
+            message: `faux model scripts are not a {"<model>": {"command"?, "verify"?, "plan"?}} object: ${cause.message}`,
           }),
       ),
     );
@@ -866,6 +904,7 @@ export const createFauxModelAccess = (
         options.fauxDecomposition,
         options.fauxReview ?? [],
         options.fauxPlanFreshness,
+        script?.plan ?? [],
       );
     return sleepMs > 0 && isFauxTurnStep(context.messages)
       ? fauxNap(sleepMs, streamOptions?.signal).then(answer)

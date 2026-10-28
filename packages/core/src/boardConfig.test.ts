@@ -38,6 +38,7 @@ const definition: BoardDefinition = {
       skills: ["plan", "estimate"],
       requires: [
         { key: "plan_doc", description: "a plan doc" },
+        { key: "human_move", description: "a person's move" },
         { key: NON_EMPTY_DIFF_REQUIREMENT, description: "a change" },
       ],
     },
@@ -93,10 +94,14 @@ describe("describeDefinition (LOB-270)", () => {
     expect(described.columns[1]).not.toHaveProperty("role");
   });
 
-  /** Mutation: mark a declared key checked because it is declared — `plan_doc` reads checked. */
+  /**
+   * Mutation: mark a declared key checked because it is declared — `human_move` reads checked.
+   * Mutation: leave `plan_doc` unchecked — D10 checks it.
+   */
   it("marks a requirement checked only when the board refuses a move over it", () => {
     expect(described.columns[0]?.requires).toEqual([
-      { key: "plan_doc", description: "a plan doc", checked: false },
+      { key: "plan_doc", description: "a plan doc", checked: true },
+      { key: "human_move", description: "a person's move", checked: false },
       {
         key: NON_EMPTY_DIFF_REQUIREMENT,
         description: "a change",
