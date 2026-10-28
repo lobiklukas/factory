@@ -23,7 +23,6 @@ import {
   parseRoleModels,
   resolveRoleModels,
   REVIEW_ROLES,
-  type ModelBackend,
 } from "@repo/harness";
 import { MigrationsLive, PostgresLive } from "@repo/storage-postgres";
 import { Cause, Config, Effect, Exit, Layer, Option, Schema } from "effect";
@@ -40,11 +39,12 @@ import {
 } from "./Api/LinearSync";
 import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
+import { describeLoadedEnvFiles, loadedEnvFiles } from "./EnvFiles";
 import {
-  describeFauxBackend,
-  describeLoadedEnvFiles,
-  loadedEnvFiles,
-} from "./EnvFiles";
+  describeModelBackend,
+  modelBackendWarnings,
+  selectModelBackend,
+} from "./ModelBackend";
 import { DevToolsLive } from "./observability/DevTools";
 import { MotelLive } from "./observability/Motel";
 
@@ -119,9 +119,11 @@ const ApprovalGateConfig = Config.String("APPROVAL_REQUIRED").pipe(
 /**
  * Which model a session runs against.
  *
- * `MODEL_BACKEND` wins when set. Otherwise a key decides: a real provider when one is configured,
- * pi-ai's deterministic faux provider when none is, so a checkout with no key still boots and a
- * session still runs end to end — it just reports that it is not talking to a model.
+ * `MODEL_BACKEND` wins when set. Otherwise a credential decides (`./ModelBackend`, LOB-258): the real
+ * provider when pi-ai resolves any credential it accepts, its deterministic faux provider when none
+ * does, so a checkout with no key still boots and a session still runs end to end — it just reports
+ * that it is not talking to a model. The credentials themselves are never read here: pi-ai reads
+ * them, and the boot line names the variable that authenticated, never its value.
  */
 const ModelConfig = Config.all({
   backend: Config.option(
@@ -198,7 +200,6 @@ const ModelConfig = Config.all({
   fauxModelScripts: Config.String("FAUX_MODEL_SCRIPTS").pipe(
     Config.withDefault(""),
   ),
-  apiKey: Config.option(Config.Redacted("ANTHROPIC_API_KEY")),
   sessionRoot: Config.String("SESSION_ROOT").pipe(
     Config.withDefault(".factory/sessions"),
   ),
@@ -411,9 +412,6 @@ const HttpLive = Effect.gen(function* () {
   // refuses the boot here rather than answering every delivery `skipped`.
   const triggerRules = yield* logTriggerBootFromProcess;
 
-  const backend: ModelBackend = Option.getOrElse(model.backend, () =>
-    Option.isSome(model.apiKey) ? "anthropic" : "faux",
-  );
   yield* Effect.logInfo(
     describeLoadedEnvFiles(
       yield* loadedEnvFiles({
@@ -426,9 +424,11 @@ const HttpLive = Effect.gen(function* () {
       }).pipe(Effect.provide(BunServices.layer)),
     ),
   );
-  yield* Effect.logInfo(
-    `model backend: ${backend}${Option.isSome(model.backend) ? " (MODEL_BACKEND)" : ""}`,
-  );
+  // After the env-file line, so a refused boot still says which files it read. Forced anthropic with
+  // no credential fails here, before anything is served (LOB-258).
+  const backendChoice = yield* selectModelBackend({ forced: model.backend });
+  const backend = backendChoice.backend;
+  yield* Effect.logInfo(describeModelBackend(backendChoice));
   yield* Effect.logInfo(
     Option.match(defaultBudget, {
       onNone: () => "session budget: none by default (a create may name one)",
@@ -436,8 +436,8 @@ const HttpLive = Effect.gen(function* () {
         `session budget: $${budget} by default (SESSION_BUDGET)`,
     }),
   );
-  if (backend === "faux") {
-    yield* Effect.logWarning(describeFauxBackend(Option.isSome(model.backend)));
+  for (const warning of modelBackendWarnings(backendChoice)) {
+    yield* Effect.logWarning(warning);
   }
 
   // The model every session talks to, and the one a run's role picks instead (LOB-207).

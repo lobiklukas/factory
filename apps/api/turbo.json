@@ -64,10 +64,20 @@
         "NODE_ENV"
       ],
       // A secret: it must reach the process but must not enter the task hash or the cache key.
+      // The ANTHROPIC_* names are every variable pi-ai's Anthropic provider authenticates from, which
+      // pi-ai reads itself rather than through `Config` (LOB-258), so the scanning guard cannot see
+      // them; the federation ids ride along because they only mean something beside the token file.
+      // CLAUDE_CODE_OAUTH_TOKEN is never used, only noticed, so the boot can say it is not read.
       "passThroughEnv": [
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_OAUTH_TOKEN",
         "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_FEDERATION_RULE_ID",
+        "ANTHROPIC_ORGANIZATION_ID",
+        "ANTHROPIC_IDENTITY_TOKEN_FILE",
+        "ANTHROPIC_SERVICE_ACCOUNT_ID",
+        "ANTHROPIC_WORKSPACE_ID",
+        "CLAUDE_CODE_OAUTH_TOKEN",
         "GITHUB_TOKEN",
         "GITHUB_APP_PRIVATE_KEY",
         "GITHUB_REVIEWER_TOKEN",
