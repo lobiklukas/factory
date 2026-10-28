@@ -18,6 +18,10 @@ import { describe, expect, it } from "vitest";
 import { Effect, Exit, Schema } from "effect";
 import { SessionId } from "./Session";
 import {
+  handoffCapRefusal,
+  handoffPatchBytes,
+  handoffPatchFiles,
+  MAX_HANDOFF_PATCH_BYTES,
   Actor,
   cardsByVersion,
   pinnedVersionsNotice,
@@ -1076,6 +1080,46 @@ describe("cards pinned to more than one version (D5)", () => {
       ]),
     ).toBe(
       "This board's cards pin more than one version: 1 on v2, 2 on v3 (the board's). Each card moves by the version it pins.",
+    );
+  });
+});
+
+describe("a handoff patch (S-local-agent-handoff-mcp)", () => {
+  /**
+   * The cap counts bytes, as the wire and the column do. Mutations this catches: count UTF-16 units
+   * (`length`) — `é` is one, `😀` two; count code points — every one is one.
+   */
+  it("is measured in UTF-8 bytes", () => {
+    expect(handoffPatchBytes("")).toBe(0);
+    expect(handoffPatchBytes("diff\n")).toBe(5);
+    expect(handoffPatchBytes("é")).toBe(2);
+    expect(handoffPatchBytes("€")).toBe(3);
+    expect(handoffPatchBytes("😀")).toBe(4);
+    expect(handoffPatchBytes("a\u{d800}b")).toBe(5);
+  });
+
+  it("names the files its headers touch, the new path of a rename", () => {
+    const patch = [
+      "diff --git a/src/a.ts b/src/a.ts",
+      "index 1..2 100644",
+      "diff --git a/old name.md b/new name.md",
+      "similarity index 90%",
+      "diff --git a/notes.md b/notes.md",
+      "new file mode 100644",
+      "+diff --git a/not/a/header b/not/a/header",
+      "",
+    ].join("\n");
+    expect(handoffPatchFiles(patch)).toEqual([
+      "src/a.ts",
+      "new name.md",
+      "notes.md",
+    ]);
+    expect(handoffPatchFiles("hello\n")).toEqual([]);
+  });
+
+  it("is refused past the cap in words that name its size and the cap", () => {
+    expect(handoffCapRefusal(MAX_HANDOFF_PATCH_BYTES + 1)).toBe(
+      `the handoff patch is ${MAX_HANDOFF_PATCH_BYTES + 1} bytes, over the 524288-byte cap a card carries: commit and push the work to a branch and hand off from it (--base), or hand off a smaller change`,
     );
   });
 });

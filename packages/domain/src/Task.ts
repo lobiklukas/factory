@@ -991,9 +991,20 @@ export type TaskPlan = typeof TaskPlan.Type;
  */
 export const MAX_HANDOFF_PATCH_BYTES = 524_288;
 
-/** A patch's size as the cap counts it: its UTF-8 bytes (a `--binary` patch is ASCII). */
-export const handoffPatchBytes = (patch: string): number =>
-  new TextEncoder().encode(patch).byteLength;
+/**
+ * A patch's size as the cap counts it: its UTF-8 bytes (a `--binary` patch is ASCII). Counted from
+ * the code points, since this package has no `TextEncoder` in its lib: one byte below U+0080, two
+ * below U+0800, four for an astral code point, three otherwise — a lone surrogate is three, as the
+ * encoder's replacement character is.
+ */
+export const handoffPatchBytes = (patch: string): number => {
+  let bytes = 0;
+  for (const char of patch) {
+    const code = char.codePointAt(0) ?? 0;
+    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code > 0xffff ? 4 : 3;
+  }
+  return bytes;
+};
 
 /**
  * The refusal of an oversized handoff, in one set of words for the CLI (which measures first and
