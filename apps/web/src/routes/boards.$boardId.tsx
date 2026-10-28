@@ -154,6 +154,15 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
           >
             Needs a person
           </Link>
+          {/* What each column does (LOB-245): the pinned version described, read-only. */}
+          <Link
+            to="/boards/$boardId/settings"
+            params={{ boardId }}
+            data-board-settings
+            className="text-xs text-muted-foreground hover:text-foreground"
+          >
+            Settings
+          </Link>
           <span className="text-[11px] text-muted-foreground">
             {tasks.length} {tasks.length === 1 ? "card" : "cards"} · open a card
             to move it or start a run
