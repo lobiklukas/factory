@@ -1709,7 +1709,7 @@ describe("the board's tables and seed", () => {
   );
 
   /**
-   * 0042 (D10): the planning column's skill. Version 6 is version 5 with `plan` bound to `planning`
+   * 0044 (D10): the planning column's skill. Version 6 is version 5 with `plan` bound to `planning`
    * and nothing else changed — caps and initial column included; version 5 keeps `planning` with no
    * skill (B2), and a second pass writes no second row.
    *
@@ -1765,7 +1765,7 @@ describe("the board's tables and seed", () => {
       expect(v6.initialColumn).toBe(v5.initialColumn);
       expect(v6.name).toBe(v5.name);
 
-      const migration = (await import("./migrations/0042_seed_plan_skill"))
+      const migration = (await import("./migrations/0044_seed_plan_skill"))
         .default;
       await Effect.runPromise(
         migration.pipe(Effect.provideService(SqlClient, sql)),
@@ -1775,7 +1775,7 @@ describe("the board's tables and seed", () => {
   );
 
   /**
-   * 0042 (D10) against an id an operator already authored past the seeds (docs/board.md: seed
+   * 0044 (D10) against an id an operator already authored past the seeds (docs/board.md: seed
    * migrations and authored versions share one id space). Driven on an id of its own, so the shared
    * `default` is never touched: a seeded version 1, then an authored version 2 with its own name and
    * no caps; binding writes version 3 over version 2 — never a fixed number — and a second pass
@@ -1790,7 +1790,7 @@ describe("the board's tables and seed", () => {
     { timeout: 30_000 },
     async () => {
       const { bindPlanSkill } =
-        await import("./migrations/0042_seed_plan_skill");
+        await import("./migrations/0044_seed_plan_skill");
       const ColumnsJson = Schema.fromJsonString(Schema.Array(BoardColumn));
       const suffix = randomBytes(6).toString("hex");
       const id = `d10_plan_${suffix}`;
@@ -2376,7 +2376,7 @@ describe("the skills table and its seeds", () => {
     },
   );
 
-  // The `plan` skill 0042 seeds (D10): what a planning run is told. Deleting 0042's INSERT fails both.
+  // The `plan` skill 0044 seeds (D10): what a planning run is told. Deleting 0044's INSERT fails both.
   it(
     "seeds the plan skill with the plan tool's fields and the read-only rule",
     { timeout: 30_000 },
@@ -2409,7 +2409,7 @@ describe("the skills table and its seeds", () => {
       const shipped = async () =>
         (await skills()).filter((skill) => !skill.name.startsWith("test-"));
       const before = await shipped();
-      const migration = (await import("./migrations/0042_seed_plan_skill"))
+      const migration = (await import("./migrations/0044_seed_plan_skill"))
         .default;
       await Effect.runPromise(
         migration.pipe(Effect.provideService(SqlClient, sql)),

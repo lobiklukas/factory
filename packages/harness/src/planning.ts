@@ -21,7 +21,7 @@
  *   (`./loader`'s `resolveRole`), and only when there is a card to post on.
  * - **Told, not only offered.** The extension carries a short `plan_stage` section saying the stage
  *   exits only with a declared plan, so a run on a version whose planning column binds no `plan`
- *   skill (versions before 0042's) is still told to call the tool.
+ *   skill (versions before 0044's) is still told to call the tool.
  */
 import type { JsonValue } from "@earendil-works/chord";
 import { Type } from "@earendil-works/pi-ai";
@@ -46,7 +46,7 @@ export const PLAN_STAGE_SECTION_KEY = "plan_stage";
 
 /**
  * What every planner run is told about its exit, whatever skills its column binds. `plan_doc` is
- * checked on every definition version, but only the versions seeded since 0042 bind the `plan` skill
+ * checked on every definition version, but only the versions seeded since 0044 bind the `plan` skill
  * to `planning`: a card pinned to an earlier one would otherwise learn of the tool only from its
  * description, and could settle in prose with a card that cannot leave the column.
  */

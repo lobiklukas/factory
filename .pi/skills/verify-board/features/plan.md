@@ -13,7 +13,7 @@ typed plan — `summary`, `steps` (at least one), `surfaces` (at least one) and 
 when there are none) — commits it as the run's `factory.plan` and records it on the card as a
 `planned` event, idempotently per tool call. `plan_doc` is now a checked exit key: `planning →
 building` is refused naming it until the card holds a plan. `getTaskPlan`, `factory board show` and
-the card pane's **Plan** section read the newest plan. `0042_seed_plan_skill.ts` binds the seeded
+the card pane's **Plan** section read the newest plan. `0044_seed_plan_skill.ts` binds the seeded
 `plan` skill to `planning` on `default`'s newest version + 1 (v6 over the seeded v5).
 
 ## How a user reaches it

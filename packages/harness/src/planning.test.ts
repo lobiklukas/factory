@@ -274,7 +274,7 @@ describe("who is offered the plan tool", () => {
   });
 
   /**
-   * A planning column with no `plan` skill (every definition version before 0042's) still exits on
+   * A planning column with no `plan` skill (every definition version before 0044's) still exits on
    * `plan_doc`, so the run is told so beside the tool. Mutation: drop the section — `skills: []`'s
    * planner is told nothing about its exit.
    */

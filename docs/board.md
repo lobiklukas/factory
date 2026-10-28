@@ -216,7 +216,7 @@ The tool validates a typed plan — `summary`, `steps` and `surfaces` (at least 
 card as a `planned` task event, idempotent by `<session id>:<tool call id>`, as the spec's is. The card's
 plan is its newest `planned` event (`getTaskPlan`, `factory board show`, the card pane's Plan section):
 what the person crossing the plan approval gate reads. The run does not move the card on.
-`0042_seed_plan_skill.ts` binds the seeded `plan` skill to `planning` on a new version of `default`:
+`0044_seed_plan_skill.ts` binds the seeded `plan` skill to `planning` on a new version of `default`:
 the id's newest version + 1, read under `defineBoard`'s advisory lock (v6 over the seeded v5; over an
 operator's authored `default`, that version with the skill added), per the seed rule above. Earlier
 versions keep a planning column with no skill, and their planners are still read-only and offered the
