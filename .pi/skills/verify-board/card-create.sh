@@ -10,8 +10,9 @@
 # turns through signal files in .verify/run/card-create/ (see card-create.mjs).
 #
 # The terminal's card is `factory board add` (LOB-261). On a tree where the CLI does not offer `add`
-# yet, the twin is made over the API's `createTask` with the same inputs and the CLI's actor, and the
-# check that names the door says which one it used: the comparison is the server's either way.
+# yet, the twin is made over the API's `createTask` with the same inputs and the CLI's actor; the
+# door check fails when the CLI's source declares a `board add` and the twin did not come through
+# it. The fallback is scaffolding until LOB-261 lands: whichever of the two merges second deletes it.
 #
 # Requires the instance from ./up.sh (API on API_PORT, default 9400; web on WEB_PORT, read from
 # .verify/run/web-port; a seeded board in .verify/run/board.json). drive.sh runs it in its both-ways
@@ -189,7 +190,15 @@ else
     "$([ -n "$CLI_TASK" ] && echo 0 || echo 1)" \
     "task=${CLI_TASK:-none}, see card-create-twin.log"
 fi
-check "the terminal's card came through $DOOR" 0 "door=$DOOR"
+# The door is checked against the CLI's source, not against the `--help` read above: a tree whose
+# CLI declares a `board add` (a `Command.make("add"` under apps/cli/src other than `repo add`) must
+# make the twin through it, so a help layout the read above stops matching fails here instead of
+# falling back to this script's own copy of the browser's payload.
+CLI_HAS_ADD="$(grep -rzlE 'Command\.make\([[:space:]]*"add"' "$ROOT/apps/cli/src" 2>/dev/null \
+  | grep -v '/commands/repo\.ts$' | head -1)"
+check "the terminal's card came through factory board add wherever the CLI declares it" \
+  "$([ "$DOOR" = "factory board add" ] || [ -z "$CLI_HAS_ADD" ] && echo 0 || echo 1)" \
+  "door=$DOOR, board add declared in ${CLI_HAS_ADD:-no file}"
 
 run show-cli board show --task "${CLI_TASK:-tsk_none}" --api "$API_URL"
 check "factory board show prints the twin as it prints the browser's card" \

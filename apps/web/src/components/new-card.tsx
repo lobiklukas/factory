@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useAtomSet } from "@effect/atom-react";
 import { Cause, Exit, Option } from "effect";
 import { PlusIcon } from "lucide-react";
@@ -44,6 +44,10 @@ const PRIORITIES: ReadonlyArray<{
  * board's: the repository is the board's (LOB-255) and is shown, not asked for, and the column is
  * the definition's initial one (LOB-267). `onCreated` gets the server's card; the lanes show it from
  * the board read, never from this answer.
+ *
+ * Closing the form does not cancel a create already sent: the server may take it. `onCreated` runs
+ * only while the form is still open and on the page; a card that lands after the person closed it,
+ * or left the board, is a toast that links to it, so an answer never pulls anyone back to a pane.
  */
 export const NewCardDialog = ({
   boardId,
@@ -59,22 +63,42 @@ export const NewCardDialog = ({
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly onCreated: (task: Task) => void;
-}) => (
-  <Dialog open={open} onOpenChange={(next) => onOpenChange(next)}>
-    <DialogContent data-new-card-dialog className="sm:max-w-lg">
-      <DialogHeader>
-        <DialogTitle>New card</DialogTitle>
-        <DialogDescription>
-          On <span className="font-mono">{repo}</span>, opening in{" "}
-          <span className="font-mono">{column ?? "the first column"}</span>. A
-          run started on it is told the title and the body.
-        </DialogDescription>
-      </DialogHeader>
-      {/* Mounted only while the dialog is open, so each opening starts from an empty form. */}
-      <NewCardForm boardId={boardId} onCreated={onCreated} />
-    </DialogContent>
-  </Dialog>
-);
+}) => {
+  // Read when the create answers, not when it was sent: whether the person is still on this form.
+  const live = useRef(open);
+  useEffect(() => {
+    live.current = open;
+    return () => {
+      live.current = false;
+    };
+  }, [open]);
+  const landed = (task: Task) => {
+    if (live.current) {
+      onCreated(task);
+      return;
+    }
+    toast.success("Card created", {
+      description: task.title,
+      action: { label: "Open", onClick: () => onCreated(task) },
+    });
+  };
+  return (
+    <Dialog open={open} onOpenChange={(next) => onOpenChange(next)}>
+      <DialogContent data-new-card-dialog className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>New card</DialogTitle>
+          <DialogDescription>
+            On <span className="font-mono">{repo}</span>, opening in{" "}
+            <span className="font-mono">{column ?? "the first column"}</span>. A
+            run started on it is told the title and the body.
+          </DialogDescription>
+        </DialogHeader>
+        {/* Mounted only while the dialog is open, so each opening starts from an empty form. */}
+        <NewCardForm boardId={boardId} onCreated={landed} />
+      </DialogContent>
+    </Dialog>
+  );
+};
 
 /**
  * The form itself: `createTask` as the dashboard. A problem the payload cannot get past (an empty

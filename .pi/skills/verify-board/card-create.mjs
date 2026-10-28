@@ -20,6 +20,8 @@
 //   same      the server holds the two with the same title, body, repo, priority and base ref
 //   link      a fresh page opened at `?new=card` shows the form, its title focused; Escape closes it
 //             and takes `new` out of the URL
+//   late      a create held in flight until Escape closed the form lands as a "Card created" toast:
+//             the URL stays where the person left it until they press the toast's Open
 //
 // The halves take turns through files in SIGNAL_DIR, each written whole (a rename) before it is read:
 //
@@ -36,7 +38,7 @@
 //   EVIDENCE_DIR      default .verify/evidence/latest/board
 //
 // Writes `card-create-web.json` (every check, what the page sent and rendered, and the server's
-// reads as the oracle) and `card-create-{form,refused,created,followed,link}.png`, and exits non-zero
+// reads as the oracle) and `card-create-{form,refused,created,followed,link,late}.png`, and exits non-zero
 // when a check fails. Uses the locally installed Chrome (channel: "chrome"), as both-ways.mjs does.
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -489,6 +491,97 @@ try {
     `open ${String(linkedOpen)}, focused ${String(focused)}, closed ${String(dismissed)}, url ${linked.url()}`,
   );
   await linked.close();
+
+  // --- late: a create that answers after the form was closed does not pull the page to its card ----
+  // The page's `createTask` is held until Escape has closed the form; the card the server then makes
+  // is a toast linking to it, and the URL stays where the person left it until they follow the link.
+  const late = await browser.newPage({
+    viewport: { width: 1440, height: 900 },
+  });
+  const lateTitle = `${TITLE} (closed while sending)`;
+  let releaseCreate = () => undefined;
+  const createHeld = new Promise((resolve) => {
+    releaseCreate = resolve;
+  });
+  let createSent = false;
+  await late.route(/\/rpc\/?$/, async (route) => {
+    if ((route.request().postData() ?? "").includes('"tag":"createTask"')) {
+      createSent = true;
+      await createHeld;
+    }
+    await route.continue();
+  });
+  await late.goto(`${WEB_URL}/boards/${BOARD_ID}?new=card`, {
+    waitUntil: "domcontentloaded",
+  });
+  await form(late).waitFor({ timeout: OPEN_TIMEOUT_MS });
+  await late.locator("#new-card-title").fill(lateTitle);
+  await late.locator("[data-card-submit]").click();
+  await late
+    .waitForFunction(
+      () =>
+        document
+          .querySelector("[data-card-submit]")
+          ?.getAttribute("aria-busy") === "true",
+      undefined,
+      { timeout: 5_000 },
+    )
+    .catch(() => undefined);
+  await late.keyboard.press("Escape");
+  const lateClosed = await form(late)
+    .waitFor({ state: "detached", timeout: 5_000 })
+    .then(
+      () => true,
+      () => false,
+    );
+  releaseCreate();
+  const landedToast = late
+    .locator("[data-sonner-toast]")
+    .filter({ hasText: "Card created" });
+  const lateToast = await landedToast
+    .first()
+    .waitFor({ timeout: 10_000 })
+    .then(
+      () => true,
+      () => false,
+    );
+  const lateUrlKept = !searchOf(late).has("card") && !searchOf(late).has("new");
+  const lateListed = await rpcExit("listTasks", { boardId: BOARD_ID });
+  const lateCard = (lateListed._tag === "Success" ? lateListed.value : []).find(
+    (card) => card.title === lateTitle,
+  );
+  await late.screenshot({
+    path: path.join(EVIDENCE_DIR, "card-create-late.png"),
+    fullPage: true,
+  });
+  if (lateToast)
+    await landedToast.first().getByRole("button", { name: "Open" }).click();
+  const lateOpened =
+    lateCard !== undefined &&
+    (await late
+      .waitForFunction(
+        (id) => new URL(location.href).searchParams.get("card") === id,
+        lateCard.id,
+        { timeout: 5_000 },
+      )
+      .then(
+        () => true,
+        () => false,
+      ));
+  observed.late = {
+    sent: createSent,
+    closed: lateClosed,
+    toast: lateToast,
+    urlKept: lateUrlKept,
+    card: lateCard?.id ?? null,
+    opened: lateOpened,
+  };
+  check(
+    "a create answered after the form closed is a toast linking to the card, not a jump to it",
+    createSent && lateClosed && lateToast && lateUrlKept && lateOpened,
+    JSON.stringify(observed.late),
+  );
+  await late.close();
 
   observed.consoleErrors = consoleErrors;
   check(

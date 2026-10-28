@@ -1,9 +1,9 @@
 # New card (the board page)
 
 **Status: passing** (2026-10-28, `agent/LOB-275`, API `:9600` / web `:3600`: verify-board's
-`card-create.sh` **8/8** with `card-create.mjs`'s **10/10** folded in, inside `./drive.sh` exit 0, 66/66;
-and once against LOB-261's `factory board add` from its worktree, the twin made through it, 8/8 and
-10/10).
+`card-create.sh` **8/8** with `card-create.mjs`'s **11/11** folded in (the late-answer leg among
+them), inside `./drive.sh` exit 0, 66/66; earlier, before the late-answer leg, once against LOB-261's
+`factory board add` from its worktree, the twin made through it, 8/8 and 10/10).
 
 An operator delegates work from the browser (LOB-275): the board page's **New card** puts a card on
 the board through `createTask`, as the dashboard, exactly as `factory board add` (LOB-261) and a
@@ -37,6 +37,10 @@ path that link to it are C9's (planned), the New session form E6's (planned).
   it in intake when the board read the create invalidated (`BOARD_KEY`) answers, without a reload.
   Until that read lands the pane says `Opening the new card` (`[data-card-pane-opening]`), never
   `No such card on this board`.
+- **Closing the form does not cancel a create already sent**, and an answer that lands after it is
+  closed (Cancel, Escape, or the person left the board) does not pull the page to the card: it is a
+  `Card created` toast whose **Open** opens the card's pane. Only a create answered while its form is
+  still open navigates.
 
 ## How to get to it (user POV)
 
@@ -74,18 +78,23 @@ The page requires, in order:
    priority, base ref, column and revision.
 7. **Link.** A fresh page at `?new=card` opens the form with the title focused; Escape closes it and
    removes `new` from the URL.
-8. **No console errors.**
+8. **Late.** A fresh page's `createTask` is held until Escape has closed the form; once released, a
+   `Card created` toast shows, the URL has neither `card` nor `new`, and the toast's **Open** opens the
+   server's card (found by its own title) in the pane.
+9. **No console errors.**
 
 The terminal half requires `factory board ls` to list the browser's card under `intake`, `factory board
 show` to print it as filed (column, revision 1, `urgent`, the board's repo, the title, `base main`, every
 body line indented), the twin to be made with the same inputs, and its `show` to print the same lines
 but the id. The twin is `factory board add` when the CLI offers it (read off `factory board --help`'s
-subcommand list); on a tree without LOB-261 it is `createTask` with the same inputs as the CLI's actor,
-and the check naming the door says which one ran.
+subcommand list); on a tree without LOB-261 it is `createTask` with the same inputs as the CLI's actor.
+The check naming the door is judged against the CLI's source, not that help read: it fails when
+`apps/cli/src` declares a `Command.make("add"` other than `repo add` and the twin did not come through
+`factory board add`. The fallback is scaffolding until LOB-261 lands; whichever merges second deletes it.
 
 Evidence (`.verify/evidence/latest/board/`): `card-create.json` (the terminal's checks, both ids, the
 door), `card-create-web.json` (the page's checks, what it sent, the oracle's reads),
-`card-create-{form,refused,created,followed,link}.png`, `card-create-{ls,show-browser,add,show-cli}.txt`.
+`card-create-{form,refused,created,followed,link,late}.png`, `card-create-{ls,show-browser,add,show-cli}.txt`.
 
 ## Gotchas
 

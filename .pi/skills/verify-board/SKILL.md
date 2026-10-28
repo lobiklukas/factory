@@ -47,8 +47,8 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 | the surfaces' drives (LOB-87)    | `equivalence.sh`: verify-cli, verify-web, then this drive, one at a time                       | the equivalence holds with both surfaces' own drives green           |
 | definitions and config (LOB-270) | `definitions.sh`: `definitions`, `definition show`, `list`, `config`; v3 against a golden      | an operator sees what a board will do before trusting it             |
 
-Every check is required: `drive.sh`, `ask.sh`, `requires.sh`, `board-create.sh`, `definitions.sh`, `triage.sh`, `start-body.sh` and
-`equivalence.sh` each exit non-zero when one fails, and `drive.sh` folds `create.ts`'s, `ask.ts`'s and `spec.ts`'s (its
+Every check is required: `drive.sh`, `ask.sh`, `requires.sh`, `board-create.sh`, `definitions.sh`, `triage.sh`, `start-body.sh`,
+`card-create.sh` and `equivalence.sh` each exit non-zero when one fails, and `drive.sh` folds `create.ts`'s, `ask.ts`'s and `spec.ts`'s (its
 specify phase), `spec-pane.mjs`'s, `web.mjs`'s, `both-ways.mjs`'s, `card-create.sh`'s (itself folding
 `card-create.mjs`'s) and `build.ts`'s (its build phase) exit codes into its own.
 

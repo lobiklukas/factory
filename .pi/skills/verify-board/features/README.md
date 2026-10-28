@@ -38,8 +38,9 @@ GitHub fake on `:9503`: **8/8** checks passed (`start-body.json`), with `body-cr
 `body-told.json`'s **6/6** folded in, and `./drive.sh` exit 0 beside it against the same instance.
 The both-ways phase's new-card leg (LOB-275, 2026-10-28, `agent/LOB-275`), API on `:9600`, web on
 `:3600`, the GitHub fake on `:9603`: `./drive.sh` exit 0, **66/66**, with `card-create.sh`'s **8/8**
-(`card-create.json`) and `card-create.mjs`'s **10/10** (`card-create-web.json`) folded in; standalone
-`./card-create.sh` also passed with LOB-261's `factory board add` making the twin.
+(`card-create.json`) and `card-create.mjs`'s **11/11** (`card-create-web.json`) folded in; an earlier
+standalone `./card-create.sh` (10/10 on the page) also passed with LOB-261's `factory board add`
+making the twin.
 Evidence: `.verify/evidence/latest/board/`.
 
 | Feature                                 | Status  | File                             |
