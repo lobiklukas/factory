@@ -727,17 +727,24 @@ export type AttentionReason = typeof AttentionReason.Type;
 /**
  * One row of the attention view (LOB-77): a card, the repository its board binds (so a row from any
  * board says where it is), and one reason it needs a person. A card with two reasons is two rows.
+ *
+ * An approval can also belong to a session no card owns — a scratch session, or one opened from a
+ * repo with no card (LOB-271). That row has no `task`: `sessionTitle` names the session instead
+ * (an untitled session says `""`), `repo` is the session's own repo when it has one, and the reason's
+ * `sessionId` is where the row links. Only the `approval` reason ever appears without a card, and
+ * only on the every-board read: a board's view lists the board's cards.
  */
 export const AttentionItem = Schema.Struct({
-  task: Task,
-  repo: RepoSlug,
+  task: Schema.optional(Task),
+  repo: Schema.optional(RepoSlug),
+  sessionTitle: Schema.optional(Schema.String),
   reason: AttentionReason,
 });
 export type AttentionItem = typeof AttentionItem.Type;
 
 /**
  * What needs a person, on one board or on every board (LOB-77). The answer is ordered approvals
- * first (oldest request first), then questions (oldest block first), then gates (least recently
+ * first (oldest request first, a card-less session's among them), then questions (oldest block first), then gates (least recently
  * changed card first). An unknown board is `BoardNotFound`, not an empty list: "nothing needs you"
  * must not be what a board that does not exist says.
  */

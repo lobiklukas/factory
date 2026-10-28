@@ -65,7 +65,9 @@ fresh browser context), a pane move that `factory board show` prints, and a run 
 card (`features/card-pane.md`). It then seeds a second board (`seed-attention.ts`) and requires
 `/attention` to show an explicit empty state while nothing on it needs a person, then a run's
 pending approval, a run's question and a done run at the plan approval, each with its reason and a
-link that opens the card, and never a card blocked on a dependency (`features/attention.md`). Exit
+link that opens the card, and never a card blocked on a dependency; a card-less session's approval is
+one row linking to the session, the rail badge equals the row count, and `?board=` leaves the row out
+(`features/attention.md`). Exit
 code is non-zero when a required check fails. Each run
 seeds a new board, so the drive can be rerun against the same instance; run it with the
 `DATABASE_URL` `./up.sh` started the API with.
@@ -115,9 +117,9 @@ Written to `.verify/evidence/latest/` (override with `EVIDENCE_DIR`), gitignored
   after the CLI move
 - `card-pane-intake.png`, `card-pane-stale.png`, `card-pane-run.png` — the card pane in `intake`, with
   the stale-revision refusal, and with a run started from it
-- `attention-empty.png`, `attention.png`, `attention-card.png`, `attention-all.png` — the attention
-  view of the seeded board with nothing waiting, with its three rows, the card a row opened, and
-  every board's view
+- `attention-empty.png`, `attention.png`, `attention-card.png`, `attention-all.png`, `attention-scratch.png` — the attention
+  view of the seeded board with nothing waiting, with its three rows, the card a row opened, every
+  board's view, and the every-board view with a card-less session's approval
 - `session-pane-narrow.png`, `fork-lineage-narrow.png` — a session's pane at 390 px, and the session
   list its header's back link opened there (LOB-210, `features/fork-lineage.md`)
 - `observed.json` — heading, per-check pass/fail with details, the API body, the session card's

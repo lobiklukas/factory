@@ -344,7 +344,8 @@ export class TasksRpc extends RpcGroup.make(
     error: TaskErrorSchema,
   }),
   // What needs a person (LOB-77): cards with a pending approval, an unanswered question, or a done
-  // run at a human gate, on one board or every board. One read over the indexes, so the attention
+  // run at a human gate, on one board or every board; the every-board read also lists the pending
+  // approvals of sessions no card owns (LOB-271). One read over the indexes, so the attention
   // view never walks cards, runs and approvals from the browser.
   Rpc.make("listAttention", {
     payload: ListAttentionInput,
