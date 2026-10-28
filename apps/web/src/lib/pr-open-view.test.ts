@@ -90,6 +90,56 @@ describe("attemptOfCause", () => {
     ).toEqual({ _tag: "failed", reason: message });
   });
 
+  it("keeps a condition that passes pressable: at capacity, a lease held elsewhere, a mint that failed", () => {
+    for (const code of [
+      "at_capacity",
+      "owned_elsewhere",
+      "busy",
+      "storage",
+      "harness",
+      "repo_clone_failed",
+    ] as const) {
+      expect(
+        attemptOfCause(
+          Cause.fail(new SessionError({ code, message: `session ${code}` })),
+        ),
+      ).toEqual({ _tag: "failed", reason: `session ${code}` });
+    }
+    expect(
+      attemptOfCause(
+        Cause.fail(
+          new CredentialError({
+            repo: "acme/web",
+            code: "failed",
+            message: "GitHub App token for acme/web failed: network",
+          }),
+        ),
+      ),
+    ).toEqual({
+      _tag: "failed",
+      reason: "GitHub App token for acme/web failed: network",
+    });
+  });
+
+  it("refuses for good only what the same call would meet again", () => {
+    expect(
+      attemptOfCause(
+        Cause.fail(
+          new CredentialError({
+            repo: "acme/web",
+            code: "unsupported",
+            message: "no",
+          }),
+        ),
+      )._tag,
+    ).toBe("refused");
+    expect(
+      attemptOfCause(
+        Cause.fail(new SessionError({ code: "not_found", message: "gone" })),
+      )._tag,
+    ).toBe("refused");
+  });
+
   it("falls back to the cause's text for a failure that is not typed", () => {
     const attempt = attemptOfCause(Cause.die(new Error("connection dropped")));
     expect(attempt._tag).toBe("failed");
@@ -175,18 +225,27 @@ describe("prOffer", () => {
 });
 
 describe("staleRefusal", () => {
-  it("drops a verdict once a run has started on the branch it judged", () => {
-    expect(staleRefusal({ _tag: "refused", reason: "x" }, "busy")).toBe(true);
-    expect(staleRefusal({ _tag: "failed", reason: "x" }, "busy")).toBe(true);
+  const refused = { _tag: "refused", reason: "x" } as const;
+
+  it("drops a verdict once a run starts under the pane's eyes", () => {
+    expect(staleRefusal(refused, "idle", "busy")).toBe(true);
+    expect(staleRefusal({ _tag: "failed", reason: "x" }, "idle", "busy")).toBe(
+      true,
+    );
+  });
+
+  it("keeps a verdict a leftover busy would wipe: the polled row held busy before the press", () => {
+    expect(staleRefusal(refused, "busy", "busy")).toBe(false);
+    expect(staleRefusal(refused, undefined, "busy")).toBe(false);
   });
 
   it("keeps it while the session is idle, and ignores attempts that are not verdicts", () => {
-    expect(staleRefusal({ _tag: "refused", reason: "x" }, "idle")).toBe(false);
-    expect(staleRefusal({ _tag: "opening" }, "busy")).toBe(false);
-    expect(staleRefusal({ _tag: "opened", url: URL }, "busy")).toBe(false);
-    expect(staleRefusal({ _tag: "refused", reason: "x" }, undefined)).toBe(
+    expect(staleRefusal(refused, "idle", "idle")).toBe(false);
+    expect(staleRefusal({ _tag: "opening" }, "idle", "busy")).toBe(false);
+    expect(staleRefusal({ _tag: "opened", url: URL }, "idle", "busy")).toBe(
       false,
     );
+    expect(staleRefusal(refused, "idle", undefined)).toBe(false);
   });
 });
 

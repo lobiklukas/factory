@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import { Exit } from "effect";
 import { Atom } from "effect/reactivity";
@@ -125,10 +125,14 @@ const usePrControl = (session: PrSession) => {
   });
   const reset = useAtomSet(openPullRequestAtom(session.id));
   const attempt = attemptOfResult(result);
-  const stale = staleRefusal(attempt, session.status);
+  // The status this pane showed at its previous commit: a refusal is stale when a run *started*
+  // under this pane's eyes, not when the status it holds happens to say busy (`staleRefusal`).
+  const previous = useRef(session.status);
+  const stale = staleRefusal(attempt, previous.current, session.status);
   useEffect(() => {
     if (stale) reset(Atom.Reset);
-  }, [reset, stale]);
+    previous.current = session.status;
+  }, [reset, stale, session.status]);
 
   const url = session.prUrl ?? openedUrl(attempt);
   const offer =

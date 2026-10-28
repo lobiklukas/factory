@@ -15,7 +15,7 @@ import { runtime } from "../atom";
 import { definitionOfConfig } from "../board-view";
 import { RpcClient } from "../rpc-client";
 import { DASHBOARD_ACTOR } from "../approvals-view";
-import { SESSIONS_KEY, SESSION_LIST_LIMIT } from "./session-list";
+import { SESSIONS_KEY, sessionListAtom } from "./session-list";
 
 /** The reactivity key a move invalidates: every board read re-runs once a move lands. */
 export const BOARD_KEY = "board";
@@ -175,14 +175,9 @@ export const taskRunsAtom = Atom.family((taskId: TaskId) =>
  * than the newest page the index returns has no entry here and its row offers nothing; the run
  * open in the pane has its own control in the session header, which reads the live stream.
  */
-export const runSessionsAtom = runtime
-  .atom(
-    Effect.gen(function* () {
-      const rpc = yield* RpcClient;
-      return yield* rpc.client.listSessions({ limit: SESSION_LIST_LIMIT });
-    }),
-  )
-  .pipe(Atom.withReactivity([SESSIONS_KEY]), Atom.withRefresh(BOARD_POLL));
+export const runSessionsAtom = sessionListAtom.pipe(
+  Atom.withRefresh(BOARD_POLL),
+);
 
 /**
  * A card's spec (LOB-238): what its newest specifying run declared with the `spec` tool, or `null`.

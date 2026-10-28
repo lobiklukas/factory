@@ -1,6 +1,9 @@
 import { Cause, Option } from "effect";
 import { AsyncResult } from "effect/reactivity";
-import type { PullRequestStep } from "@repo/domain/PullRequest";
+import {
+  pullRequestRefusal,
+  type PullRequestStep,
+} from "@repo/domain/PullRequest";
 import type { SessionStatus } from "@repo/domain/Session";
 
 /**
@@ -35,27 +38,35 @@ export const attemptOfStep = (step: PullRequestStep): PrAttempt => {
     case "opened":
     case "already-open":
       return { _tag: "opened", url: step.url };
-    // The same words the tracker write-back posts for the same answers (`pullRequestReport`).
+    // The same words the tracker write-back posts: one function in the domain, not a copy.
     case "over-cap":
-      return {
-        _tag: "refused",
-        reason: `the branch changes ${step.measured} ${step.limit}, over the cap of ${step.cap}, so no pull request was opened`,
-      };
     case "no-change":
-      return {
-        _tag: "refused",
-        reason:
-          "the run changed no file against its base branch, so there is nothing to open a pull request for",
-      };
+      return { _tag: "refused", reason: pullRequestRefusal(step) };
   }
 };
 
 /**
- * The failures that are the server's determinate word about this session. A `PrError` is the forge
- * failing and is retryable; everything else that arrives typed is a decision (no credential, no
- * repo, an unsafe branch name) that the same call would meet again.
+ * Whether a typed failure is the server's determinate word about this session — one the same call
+ * would meet again — judged by its code rather than its tag. A missing or unsupported credential, an
+ * unbound repo or an unsafe branch name are decisions. Everything else that arrives typed is a
+ * condition that passes: `at_capacity` (a session is released and there is room), `owned_elsewhere`
+ * (the lease lapses), `busy`, `storage`, `harness`, `repo_clone_failed`, a credential mint that
+ * `failed` on the network, and a `PrError` from the forge. Those stay pressable and offer a retry; a
+ * button disabled beside a message that says "retry" would be a dead end.
  */
-const DETERMINATE = new Set(["CredentialError", "SessionError"]);
+const isDeterminate = (error: {
+  readonly _tag: string;
+  readonly code?: unknown;
+}): boolean => {
+  switch (error._tag) {
+    case "CredentialError":
+      return error.code === "missing" || error.code === "unsupported";
+    case "SessionError":
+      return error.code === "invalid_input" || error.code === "not_found";
+    default:
+      return false;
+  }
+};
 
 /**
  * The attempt a failed `openPullRequest` call comes to.
@@ -65,13 +76,19 @@ const DETERMINATE = new Set(["CredentialError", "SessionError"]);
  */
 export const attemptOfCause = (cause: Cause.Cause<unknown>): PrAttempt => {
   const error = Option.getOrUndefined(Cause.findErrorOption(cause)) as
-    | { readonly _tag?: unknown; readonly message?: unknown }
+    | {
+        readonly _tag?: unknown;
+        readonly code?: unknown;
+        readonly message?: unknown;
+      }
     | undefined;
   return typeof error?._tag === "string" &&
     typeof error.message === "string" &&
     error.message.length > 0
     ? {
-        _tag: DETERMINATE.has(error._tag) ? "refused" : "failed",
+        _tag: isDeterminate({ _tag: error._tag, code: error.code })
+          ? "refused"
+          : "failed",
         reason: error.message,
       }
     : { _tag: "failed", reason: Cause.pretty(cause) };
@@ -136,12 +153,20 @@ export const prOffer = (
  * branch as it stood when the press was made; a run that has started since may have committed a
  * change (or removed one), so the verdict is dropped and the control is offered again when the
  * session is idle.
+ *
+ * "Started since" is a *transition* this pane saw — from a status that was not busy to busy — and
+ * not merely a busy status. The card row's status is a polled index that keeps its last answer
+ * while it refreshes, so a leftover "busy" from before the press would otherwise wipe a refusal the
+ * header (which reads the live stream) had only just received.
  */
 export const staleRefusal = (
   attempt: PrAttempt,
+  previous: SessionStatus | undefined,
   status: SessionStatus | undefined,
 ): boolean =>
   (attempt._tag === "refused" || attempt._tag === "failed") &&
+  previous !== undefined &&
+  previous !== "busy" &&
   status === "busy";
 
 /**
