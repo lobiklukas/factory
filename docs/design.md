@@ -101,6 +101,21 @@ PVCs.
 _Rejected:_ no interface (makes the Cloudflare question permanently expensive); a stub
 Cloudflare impl we never run (drifts and lies).
 
+_Host-only extension (LOB-244):_ a session's worktree is cut on the host before the session opens
+(D10), so the harness runs a session's commands in a sandbox **bound** to that existing directory
+rather than in a fresh `create`d one. `bind` is not a D6 operation: only a runtime whose commands run
+on the host the directory is on can serve it, so it lives on `BindableSandboxRuntimeShape`
+(`SandboxRuntimeShape & { bind }`), which the in-process runtime implements, and today
+`OpenSessionOptions.sandbox` and `SessionServiceOptions.sandbox` require it. apps/api selects the
+runtime with `SANDBOX_RUNTIME` and passes it as an option, not as the `SandboxRuntime` service, because
+the harness needs `bind`. A non-bindable runtime (Kubernetes, LOB-89) plugs in by the control plane
+cutting the worktree inside the sandbox it `create`s — the session's workdir becomes the sandbox's,
+not the host's — at which point the session's option widens to `SandboxRuntimeShape` and a bound
+sandbox is the in-process special case. A capability flag is not needed for that: a runtime either
+has `bind` or the control plane creates. A session's bound sandbox keeps its exec spill files when
+it ends (`BindOptions.keepSpillFiles`), because the session's transcript names them (Pi Durable's
+bash tool reports `Full output: <path>`) and outlives the sandbox through an idle release.
+
 ### D7 — Storage: append-only log is truth, projections are derived
 
 Postgres holds `commits(log_id, seq, writes json)` — one `log_id` per Pi Durable `Storage` (one

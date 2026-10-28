@@ -37,9 +37,9 @@ import {
   ROOT_CONVERSATION_ID,
 } from "@earendil-works/pi-durable";
 import { createRegistry } from "@earendil-works/pi-durable";
-import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
+import type { BindableSandboxRuntimeShape } from "@repo/sandbox";
 import { Effect, Queue, Schema, Stream } from "effect";
 import type {
   PrEvidence,
@@ -71,6 +71,7 @@ import {
   PrEvidence as PrEvidenceSchema,
   SessionError as SessionErrorClass,
 } from "@repo/domain/Session";
+import { openSessionEnvironment, type SessionEnvironment } from "./environment";
 import {
   resolveRole,
   skillsExtension,
@@ -118,6 +119,7 @@ import {
   type VerifyOptions,
   type VerifyRecord,
 } from "./verify";
+import { bodyExtension, renderBody } from "./body";
 import {
   askExtension,
   threadExtension,
@@ -319,6 +321,13 @@ export type OpenSessionOptions = {
   /** The session's working directory, which must exist. One per session, so sessions share no files. */
   readonly cwd: string;
   /**
+   * The runtime the session's commands run through (LOB-244, `./environment`): the deployment's,
+   * selected by its configuration. Each conversation's environment is a sandbox it binds to the
+   * conversation's working directory, `cwd` for the root. Absent: an in-process runtime of the
+   * session's own, which runs them on the host as every session did before there was a choice.
+   */
+  readonly sandbox?: BindableSandboxRuntimeShape;
+  /**
    * What may run unattended here (D11, `./policy`). Absent: D11's defaults resolved for `cwd`, so a
    * session opened without a policy is still policed — an unpoliced session is not a default anyone
    * can reach by forgetting an argument.
@@ -373,6 +382,12 @@ export type OpenSessionOptions = {
    */
   readonly thread?: ThreadReader;
   /**
+   * The card's body (LOB-260, `./body`): what the task asks for, quoted verbatim as the `task_body`
+   * section beside the thread. Read by the control plane when it opens the owner, like the pages.
+   * Absent (a session with no card), empty, or all whitespace: no section.
+   */
+  readonly body?: string;
+  /**
    * How a specifying run posts its spec on its card (LOB-238, `./specify`): the control plane's
    * callback that records the spec as a `specified` event. The `spec` tool is installed only when
    * this is given *and* the run's role writes the spec (`SPEC_ROLES`); any other run — a planner on
@@ -391,6 +406,13 @@ export type OpenSession = {
   readonly harness: Harness;
   readonly root: Conversation;
   /**
+   * End the sandboxes the session's commands ran in (LOB-244): their commands, handles and
+   * temporary files, never the worktree's files or the exec spill files its transcript names.
+   * After `closeHarness`, which settles what still runs in them; `closeSession` does both, in
+   * that order.
+   */
+  readonly releaseEnvironment: Effect.Effect<void>;
+  /**
    * The model the root conversation is pinned to, which its requests go to and its compaction
    * thresholds follow: the role's (or the deployment's) when this open created the root, and the
    * one the root was created with on every later open, whatever the role table says now (LOB-207).
@@ -405,7 +427,8 @@ export type OpenSession = {
  * reads at boot would reach the session's shell. A session never needs one: model calls happen in
  * the control plane, and anything that needs a forge token gets it from `CredentialProvider` per
  * call. Each such variable is set to the empty string for the session's commands, which overrides
- * the inherited value and leaves no token bytes in the environment.
+ * the inherited value and leaves no token bytes in the environment. It is read when the session's
+ * sandbox is bound (`./environment`), and the runtime starts every command with it.
  */
 const CREDENTIAL_VARIABLE = /(TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY)/i;
 
@@ -421,6 +444,20 @@ export const sessionShellEnv = (
 /** Open a harness over one session's log and ensure its root conversation exists. */
 export const openSession = (
   options: OpenSessionOptions,
+): Effect.Effect<OpenSession, SessionError> =>
+  // Where the commands run (LOB-244): a sandbox per working directory, bound on first use, so a
+  // session whose worktree is gone still opens. An open that fails after this releases it.
+  openSessionEnvironment(options.sandbox, sessionShellEnv).pipe(
+    Effect.flatMap((environment) =>
+      openSessionIn(options, environment).pipe(
+        Effect.onError(() => environment.release),
+      ),
+    ),
+  );
+
+const openSessionIn = (
+  options: OpenSessionOptions,
+  environment: SessionEnvironment,
 ): Effect.Effect<OpenSession, SessionError> =>
   Effect.gen(function* () {
     const registry = createRegistry();
@@ -447,6 +484,11 @@ export const openSession = (
     const pages = options.pages ?? [];
     const pagesPrompt = assemblePages(pages, PAGES_TOKEN_CAP);
     if (pages.length > 0) registry.install(pagesExtension(pagesPrompt));
+    // The card's body (LOB-260): what the task asks for, as it was filed, before the thread that
+    // answers questions about it. A card with an empty body installs nothing.
+    if (options.body !== undefined && renderBody(options.body) !== undefined) {
+      registry.install(bodyExtension(options.body));
+    }
     // The card's thread beside them (B7, LOB-73): what earlier runs asked and what a person answered,
     // so a run that follows a parked one starts from the answer rather than from the bare card.
     if (options.thread !== undefined) {
@@ -514,11 +556,7 @@ export const openSession = (
         {
           models: model.models,
           registry,
-          env: (target) =>
-            new NodeExecutionEnv({
-              cwd: target.cwd ?? options.cwd,
-              shellEnv: sessionShellEnv(),
-            }),
+          env: (target) => environment.env(target.cwd ?? options.cwd),
           settings: {
             progress: SESSION_PROGRESS,
             // Long sessions compact (B4). The thresholds follow the model's context window
@@ -571,7 +609,12 @@ export const openSession = (
       dropped: pagesPrompt.dropped,
     });
 
-    return { harness, root, model };
+    return {
+      harness,
+      root,
+      model,
+      releaseEnvironment: environment.release,
+    };
   });
 
 /**
@@ -1520,8 +1563,23 @@ export const resetSession = (
     conversation.reset(handoff, BACKGROUND_CONTEXT),
   );
 
+/**
+ * Close a harness: settle what runs in it and release its lease. For a harness `openSession`
+ * opened, use `closeSession`, which also ends the sandboxes its commands ran in; this alone leaves
+ * them to the session's `releaseEnvironment`, which the caller then owes.
+ */
 export const closeHarness = (harness: Harness): Effect.Effect<void> =>
   Effect.promise(() => harness.close(BACKGROUND_CONTEXT));
+
+/**
+ * Close the session's harness, then end the sandboxes its commands ran in (LOB-244). The order is
+ * the point: closing the harness settles what runs, so nothing is still using an environment when
+ * its sandbox ends. The sandboxes end even when the close fails.
+ */
+export const closeSession = (session: OpenSession): Effect.Effect<void> =>
+  closeHarness(session.harness).pipe(
+    Effect.ensuring(session.releaseEnvironment),
+  );
 
 /**
  * Compact the session on demand (B4): Pi Durable admits a compaction task that summarizes an old
@@ -1900,6 +1958,8 @@ export type ForkSessionOptions = {
   readonly actor?: string;
   readonly model: ModelAccess;
   readonly cwd: string;
+  /** The runtime the fork's commands run through (LOB-244), as `OpenSessionOptions.sandbox`. */
+  readonly sandbox?: BindableSandboxRuntimeShape;
   readonly policy?: SessionPolicy;
   /** How the fork's gated calls ask a person (D15, LOB-52); see `OpenSessionOptions.approvalAsker`. */
   readonly approvalAsker?: ApprovalAsker;
@@ -1955,6 +2015,7 @@ export const forkSession = (
       storage: options.child,
       model: options.model,
       cwd: options.cwd,
+      ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
       ...(options.policy === undefined ? {} : { policy: options.policy }),
       ...(options.approvalAsker === undefined
         ? {}
@@ -1980,9 +2041,7 @@ export const forkSession = (
         ),
       // A copy that fails leaves no fork, and an open harness on a child log nobody can read is a
       // lease the caller never releases: close it here, where the failure is.
-    ).pipe(
-      Effect.tapError(() => closeHarness(opened.harness).pipe(Effect.ignore)),
-    );
+    ).pipe(Effect.tapError(() => closeSession(opened).pipe(Effect.ignore)));
     return { ...opened, at: lineage.at };
   });
 

@@ -19,8 +19,12 @@ every column with:
   `non_empty_diff`, `pr_link` — `CHECKED_REQUIREMENTS`) or **unchecked** (declared, enforced by nothing
   yet: `spec_doc`, `plan_doc`, `run_completed`, `review_verdict`, and the `human_*` keys, whose gate the
   move's actor check enforces instead);
-- its exits, from the declared-transition table `TaskService.move` refuses by, with the **human
-  gates** marked (`plan approval` on `planning → building`, `merge` on `review → done`).
+- its exits, from the column's own `transitions` (LOB-267) — or, for default versions 1–3, which
+  declare none, the default pipeline's table — exactly what `TaskService.move` refuses by, with the
+  **human gates** marked (`plan approval` on `planning → building`, `merge` on `review → done`).
+
+Under the header, `initial` names the column a new card starts in: the definition's `initialColumn`,
+or its first column for a version that names none (`intake` in default v1–v3).
 
 The description is `packages/core`'s `describeDefinition`, a pure join of the row with those three
 tables, so the read cannot drift from what a move or a run does.
@@ -80,6 +84,6 @@ join and the reads; `apps/cli/src/commands/boardConfig.test.ts` the printed layo
 
 The dashboard has no settings view yet (the next child of LOB-245); this is the read it will use.
 Nothing here writes a definition: versions are still written only by migrations, and the role table
-is deployment configuration, read-only. Transitions and gates are still code tables, not definition
-data; a definition whose column names the tables do not know shows no exits, which is what
-`TaskService.move` enforces for it.
+is deployment configuration, read-only. Transitions and gates are definition data since LOB-267; a
+definition with its own column set is driven through the card pane by verify-web's `drive.mjs`
+(`features/card-pane.md`, "a definition's own moves").

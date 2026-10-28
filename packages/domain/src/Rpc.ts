@@ -33,6 +33,7 @@ import {
   GetTaskInput,
   GetTaskSpecInput,
   HumanGateRequired,
+  InvalidTaskInput,
   ListAttentionInput,
   ListBoardsInput,
   ListDefinitionsInput,
@@ -310,6 +311,7 @@ const TaskErrorSchema = Schema.Union([
   AlreadyBlocked,
   NotBlocked,
   EmptyComment,
+  InvalidTaskInput,
   TaskStorageError,
 ]);
 

@@ -1055,7 +1055,7 @@ describe("TaskService — a card's repository (LOB-255)", () => {
    * made before cards carried a repo: each is bound to the board's repository, on `factory/<id>`, in
    * a worktree linked into the repository's registered checkout.
    *
-   * Mutation: drop `cardRepoFor` — the run with no repo named is a scratch session with no branch.
+   * Mutation: drop `cardBindingFor` — the run with no repo named is a scratch session with no branch.
    * Mutation: read `t.repo` alone — the legacy card's run is a scratch session.
    */
   it("binds every run on the card to the board's repository, in a factory/<session-id> worktree", async () => {
@@ -2830,4 +2830,341 @@ describe("TaskService — exit requirements", () => {
     );
     expect(err.message).not.toContain(older);
   }, 180_000);
+});
+
+/**
+ * Transitions, human gates and the initial column as definition data (LOB-267): a definition whose
+ * columns are not the default pipeline's is usable. The synthetic definition is the issue's own —
+ * todo → doing → done, with a gate on doing → done — written as a row the way a migration (or, later,
+ * an authored version) writes one, and a board made over it by `createBoard`.
+ */
+describe("TaskService — a definition's own transitions, gates and initial column (LOB-267)", () => {
+  /** The synthetic definition's columns. `review` is a default pipeline name it declares no moves for. */
+  const SYNTHETIC = [
+    {
+      name: "todo",
+      kind: "resting",
+      skills: [],
+      requires: [],
+      transitions: [{ to: "doing" }],
+    },
+    {
+      name: "doing",
+      kind: "working",
+      skills: [],
+      requires: [],
+      transitions: [{ to: "done", gate: "sign-off" }],
+    },
+    { name: "review", kind: "working", skills: [], requires: [] },
+    {
+      name: "done",
+      kind: "terminal",
+      skills: [],
+      requires: [],
+      transitions: [],
+    },
+  ];
+
+  /** A board over a fresh synthetic definition whose initial column is `initialColumn`. */
+  const syntheticBoard = (initialColumn: string) =>
+    runtime
+      .runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          const id = `syn${hex(4)}`;
+          yield* sql`
+            INSERT INTO board_definitions (id, version, name, columns, initial_column)
+            VALUES (${id}, 1, 'Synthetic', ${JSON.stringify(SYNTHETIC)}::jsonb, ${initialColumn})
+          `;
+          return DefinitionId.make(id);
+        }),
+      )
+      .then((definitionId) =>
+        withService((s) => s.createBoard({ repo: newRepo(), definitionId })),
+      )
+      .then((board) => board.id);
+
+  /** The `created` event's column: the card starts where its row says, and its history agrees. */
+  const createdColumn = (taskId: string) =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const rows = yield* sql<{ column: string }>`
+          SELECT payload->>'column' AS column FROM task_events
+          WHERE task_id = ${taskId} AND kind = 'created'
+        `;
+        return rows.map((row) => row.column);
+      }),
+    );
+
+  /**
+   * Mutation: start every card in `intake` — the first case's card is in a column its definition
+   * lacks. Mutation: start every card in the definition's first column — the second case's is in
+   * `todo`, not `doing`.
+   */
+  it("puts a new card in the definition's initial column", async () => {
+    const boardId = await syntheticBoard("todo");
+    const { definition } = await withService((s) => s.getBoard(boardId));
+    expect(definition.initialColumn).toBe("todo");
+    const task = await withService((s) =>
+      s.create({ boardId, title: "synthetic", actor: LUKAS }),
+    );
+    expect(task.column).toBe("todo");
+    expect(await createdColumn(task.id)).toEqual(["todo"]);
+
+    const later = await syntheticBoard("doing");
+    const started = await withService((s) =>
+      s.create({ boardId: later, title: "starts doing", actor: LUKAS }),
+    );
+    expect(started.column).toBe("doing");
+    expect(await createdColumn(started.id)).toEqual(["doing"]);
+  });
+
+  /**
+   * A definition row whose initial column it does not declare makes no card (LOB-267 review): the
+   * card would sit in a lane the board does not render, with no moves out. Mutation: drop the check
+   * in `create` — the card is made in `backlog`.
+   */
+  it("refuses to start a card on a definition whose initial column is not one of its columns", async () => {
+    const boardId = await syntheticBoard("backlog");
+    const err = await refusal((s) =>
+      s.create({ boardId, title: "nowhere", actor: LUKAS }),
+    );
+    expect(err).toMatchObject({ _tag: "TaskStorageError" });
+    expect(err.message).toContain(
+      'the initial column "backlog" is not a column of the definition',
+    );
+    const cards = await withService((s) => s.list({ boardId }));
+    expect(cards).toEqual([]);
+  });
+
+  /**
+   * The acceptance case. Mutation: check the default pipeline's table — `todo → doing` is refused as
+   * undeclared. Mutation: check the gate from the table — the run's `doing → done` goes through.
+   */
+  it("allows todo → doing, refuses todo → done as undeclared and a run crossing the gate", async () => {
+    const boardId = await syntheticBoard("todo");
+    const task = await withService((s) =>
+      s.create({ boardId, title: "walked", actor: LUKAS }),
+    );
+
+    const skip = await refusal((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: 1,
+        to: "done",
+        actor: LUKAS,
+      }),
+    );
+    expect(skip).toMatchObject({
+      _tag: "UndeclaredTransition",
+      from: "todo",
+      to: "done",
+      message: `column "todo" declares no transition to "done"`,
+    });
+    // A default pipeline column name is not a move here either.
+    const elsewhere = await refusal((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: 1,
+        to: "specifying",
+        actor: LUKAS,
+      }),
+    );
+    expect(elsewhere._tag).toBe("UndeclaredTransition");
+
+    // An ungated declared move is one a run may make too.
+    const doing = await withService((s) =>
+      s.move({ taskId: task.id, expectedRevision: 1, to: "doing", actor: RUN }),
+    );
+    expect(doing.column).toBe("doing");
+    expect(doing.revision).toBe(2);
+
+    const gate = await refusal((s) =>
+      s.move({ taskId: task.id, expectedRevision: 2, to: "done", actor: RUN }),
+    );
+    expect(gate).toMatchObject({
+      _tag: "HumanGateRequired",
+      gate: "sign-off",
+      from: "doing",
+      to: "done",
+      actor: RUN,
+      message:
+        "the move doing → done crosses the sign-off gate, which only a person can make",
+    });
+
+    const done = await withService((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: 2,
+        to: "done",
+        actor: LUKAS,
+      }),
+    );
+    expect(done.column).toBe("done");
+    // Out of a column that declares `transitions: []`, nothing.
+    const back = await refusal((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: 3,
+        to: "todo",
+        actor: LUKAS,
+      }),
+    );
+    expect(back._tag).toBe("UndeclaredTransition");
+    // created + 2 accepted moves; every refusal added nothing.
+    expect(await eventCount(task.id)).toBe(3);
+  });
+
+  /**
+   * A column the definition leaves without `transitions` declares none, even under a default name.
+   * Mutation: fall back to the table per column — the card in `review` may move to `done`.
+   */
+  it("declares no moves out of a column without transitions in a definition that declares some", async () => {
+    const boardId = await syntheticBoard("review");
+    const task = await withService((s) =>
+      s.create({ boardId, title: "in review", actor: LUKAS }),
+    );
+    expect(task.column).toBe("review");
+    for (const to of ["done", "canceled", "doing"]) {
+      const err = await refusal((s) =>
+        s.move({ taskId: task.id, expectedRevision: 1, to, actor: LUKAS }),
+      );
+      expect([to, err._tag]).toEqual([to, "UndeclaredTransition"]);
+    }
+  });
+
+  /**
+   * Default version 4 (0026) holds exactly the table versions 1–3 resolve through, on its columns,
+   * and starts a card in `intake`: a card on it moves as one on version 1 does.
+   */
+  it("seeds default v4 with today's table on its columns, gated the same", async () => {
+    const boardId = await newBoard(4);
+    const { definition } = await withService((s) => s.getBoard(boardId));
+    expect(definition.initialColumn).toBe("intake");
+    for (const column of definition.columns) {
+      expect([column.name, column.transitions]).toEqual([
+        column.name,
+        declaredTransitions(column.name).map((to) => {
+          const gate = humanGate(column.name, to);
+          return gate === undefined ? { to } : { to, gate };
+        }),
+      ]);
+    }
+    // Every other field is version 3's, unchanged (0026 reads it back rather than copying it).
+    const v3 = await withService((s) =>
+      s.getDefinition(DEFAULT_DEFINITION_ID, 3),
+    );
+    expect(
+      definition.columns.map((column) => {
+        const { transitions, ...rest } = column;
+        expect(transitions).toBeDefined();
+        return rest;
+      }),
+    ).toEqual(v3.columns);
+    expect(definition.name).toBe(v3.name);
+    // Version 1 is untouched (B2): no transitions on it, and no initial column.
+    const v1 = await withService((s) =>
+      s.getDefinition(DEFAULT_DEFINITION_ID, 1),
+    );
+    expect(v1.columns.some((column) => column.transitions !== undefined)).toBe(
+      false,
+    );
+    expect(v1.initialColumn).toBeUndefined();
+
+    let task = await withService((s) =>
+      s.create({ boardId, title: "on v4", actor: LUKAS }),
+    );
+    expect(task.column).toBe("intake");
+    expect(task.definitionVersion).toBe(4);
+    for (const to of ["specifying", "planning"]) {
+      const at = task;
+      task = await withService((s) =>
+        s.move({
+          taskId: at.id,
+          expectedRevision: at.revision,
+          to,
+          actor: LUKAS,
+        }),
+      );
+    }
+    const gate = await refusal((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "building",
+        actor: RUN,
+      }),
+    );
+    expect(gate).toMatchObject({
+      _tag: "HumanGateRequired",
+      gate: "plan approval",
+    });
+  });
+
+  /**
+   * The attention view's gate rows are the pinned definition's gates (LOB-77, LOB-267): an idle run
+   * in `doing` waits at `sign-off`; one in `todo` waits on nothing. Seeded and read in one
+   * rolled-back transaction, like the attention cases above. Mutation: filter on the default
+   * pipeline's gated columns — the `doing` card is not listed.
+   */
+  it("lists a card waiting at its own definition's gate, and not one in an ungated column", async () => {
+    const boardId = await syntheticBoard("todo");
+    const waiting = await withService((s) =>
+      s.create({ boardId, title: "waits at sign-off", actor: LUKAS }),
+    ).then((task) =>
+      withService((s) =>
+        s.move({
+          taskId: task.id,
+          expectedRevision: 1,
+          to: "doing",
+          actor: LUKAS,
+        }),
+      ),
+    );
+    const resting = await withService((s) =>
+      s.create({ boardId, title: "still todo", actor: LUKAS }),
+    );
+    const doingRun = `ses_${hex(13)}`;
+    const todoRun = `ses_${hex(13)}`;
+    const rollback = new Error("rollback");
+    let items: ReadonlyArray<AttentionItem> = [];
+    await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const service = yield* TaskService;
+        yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              for (const [id, taskId, column] of [
+                [doingRun, waiting.id, "doing"],
+                [todoRun, resting.id, "todo"],
+              ] as const) {
+                yield* sql`INSERT INTO sessions (id) VALUES (${id})`;
+                yield* sql`
+                  INSERT INTO session_activity (session_id, status) VALUES (${id}, 'idle')
+                `;
+                yield* sql`
+                  INSERT INTO task_runs (id, task_id, session_id, "column", started_at)
+                  VALUES (${id}, ${taskId}, ${id}, ${column}, now())
+                `;
+              }
+              items = yield* service.attention(boardId);
+              return yield* Effect.die(rollback);
+            }),
+          )
+          .pipe(
+            Effect.catchDefect((defect) =>
+              defect === rollback ? Effect.void : Effect.die(defect),
+            ),
+          );
+      }),
+    );
+    expect(items.map((item) => [item.task?.title, item.reason])).toEqual([
+      [
+        "waits at sign-off",
+        { _tag: "gate", gate: "sign-off", to: "done", sessionId: doingRun },
+      ],
+    ]);
+  });
 });

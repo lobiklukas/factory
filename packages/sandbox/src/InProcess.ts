@@ -7,9 +7,13 @@
  * absolute path reaches everything the server's user can — and its descriptor says so
  * (`isolation: "none"`).
  *
- * Sandboxes live under one root directory: the caller's, or a temporary one this layer creates and
- * removes. Releasing the layer destroys every sandbox still alive, so none outlives the runtime
- * that is the only way to reach it (`persistence: "ephemeral"`).
+ * Sandboxes live under one root directory: the caller's, or a temporary one this runtime creates
+ * with its first sandbox and removes with itself. Releasing the layer destroys every sandbox still
+ * alive, so none outlives the runtime that is the only way to reach it (`persistence: "ephemeral"`).
+ *
+ * It can also bind a sandbox to a directory that already exists — a session's worktree (LOB-244,
+ * `BindableSandboxRuntimeShape`). That directory is not the runtime's: ending the sandbox ends its
+ * commands, handles and temporary files and leaves the directory as it found it, files and all.
  */
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -31,7 +35,11 @@ import {
   SandboxNotFound,
   SandboxUnsupported,
 } from "./Sandbox";
-import { SandboxRuntime, type SandboxRuntimeShape } from "./SandboxRuntime";
+import {
+  type BindableSandboxRuntimeShape,
+  type BindOptions,
+  SandboxRuntime,
+} from "./SandboxRuntime";
 
 /** What the in-process runtime provides, and by omission what it does not. */
 export const capabilities: SandboxCapabilities = {
@@ -46,7 +54,8 @@ export const capabilities: SandboxCapabilities = {
 export type InProcessOptions = {
   /**
    * The directory sandboxes are created under; it must exist, and it is left in place. Absent: a
-   * temporary directory created with the layer and removed with it.
+   * temporary directory created with the first sandbox `create` makes and removed with the runtime,
+   * so a runtime that only binds sandboxes leaves nothing behind on the host.
    */
   readonly root?: string;
   /** The environment commands start with, as `NodeExecutionEnv` takes it; the server's when absent. */
@@ -73,32 +82,51 @@ const onHost = <T>(
     ),
   );
 
-type Live = { readonly sandbox: Sandbox; readonly env: SandboxExecutionEnv };
+type Live = {
+  readonly sandbox: Sandbox;
+  readonly env: SandboxExecutionEnv;
+  /** Whether the workdir is the runtime's to remove: `create`'s are, `bind`'s are the caller's. */
+  readonly owned: boolean;
+};
 
 export const make = (
   options: InProcessOptions = {},
-): Effect.Effect<SandboxRuntimeShape, never, Scope.Scope> =>
+): Effect.Effect<BindableSandboxRuntimeShape, never, Scope.Scope> =>
   Effect.gen(function* () {
     // The host's own view, for the directories the runtime manages; never handed to a caller.
     const host = new NodeExecutionEnv({ cwd: options.root ?? "/" });
     const given = options.root;
-    // A root that cannot be made or found is a misconfigured server, not a failure to handle.
-    const root = yield* Effect.acquireRelease(
-      (given === undefined
-        ? onHost((context) => host.createTempDir("factory-sandboxes-", context))
-        : Effect.succeed(given)
-      ).pipe(
+    // A root that cannot be made or found is a misconfigured server, not a failure to handle. The
+    // caller's is checked now, so that server fails at boot; a temporary one is made when the
+    // first sandbox needs it, once, and removed with the runtime only if it was made.
+    const made = yield* Ref.make<string | undefined>(undefined);
+    yield* Effect.addFinalizer(() =>
+      Ref.get(made).pipe(
         Effect.flatMap((path) =>
-          onHost((context) => host.canonicalPath(path, context)),
+          path === undefined
+            ? Effect.void
+            : onHost((context) =>
+                host.remove(path, { recursive: true, force: true }, context),
+              ),
         ),
       ),
-      (path) =>
-        given === undefined
-          ? onHost((context) =>
-              host.remove(path, { recursive: true, force: true }, context),
-            )
-          : Effect.void,
     );
+    const root: Effect.Effect<string> =
+      given === undefined
+        ? yield* Effect.cached(
+            onHost((context) =>
+              host.createTempDir("factory-sandboxes-", context),
+            ).pipe(
+              Effect.flatMap((path) =>
+                onHost((context) => host.canonicalPath(path, context)),
+              ),
+              Effect.tap((path) => Ref.set(made, path)),
+              Effect.uninterruptible,
+            ),
+          )
+        : Effect.succeed(
+            yield* onHost((context) => host.canonicalPath(given, context)),
+          );
 
     const live = yield* Ref.make<ReadonlyMap<SandboxId, Live>>(new Map());
 
@@ -131,13 +159,15 @@ export const make = (
           }),
       }).pipe(
         Effect.andThen(
-          fileIn(entry.sandbox.id, entry.sandbox.workdir, (removeContext) =>
-            host.remove(
-              entry.sandbox.workdir,
-              { recursive: true, force: true },
-              removeContext,
-            ),
-          ),
+          entry.owned
+            ? fileIn(entry.sandbox.id, entry.sandbox.workdir, (removeContext) =>
+                host.remove(
+                  entry.sandbox.workdir,
+                  { recursive: true, force: true },
+                  removeContext,
+                ),
+              )
+            : Effect.void,
         ),
       );
 
@@ -153,10 +183,31 @@ export const make = (
         ),
       );
 
+    /** Make `sandbox` live: its environment over its workdir, its commands started with `shellEnv`. */
+    const hold = (
+      sandbox: Sandbox,
+      shellEnv: NodeJS.ProcessEnv | undefined,
+      owned: boolean,
+      keepSpillFiles = false,
+    ): Effect.Effect<Sandbox> => {
+      const env = new SandboxExecutionEnv(
+        new NodeExecutionEnv({
+          cwd: sandbox.workdir,
+          ...(shellEnv === undefined ? {} : { shellEnv }),
+        }),
+        sandbox.id,
+        { keepSpillFiles },
+      );
+      return Ref.update(live, (sandboxes) =>
+        new Map(sandboxes).set(sandbox.id, { sandbox, env, owned }),
+      ).pipe(Effect.as(sandbox));
+    };
+
     const create = Effect.gen(function* () {
       const id = yield* mintSandboxId;
-      const path = yield* fileIn(id, root, (context) =>
-        host.joinPath([root, id], context),
+      const parent = yield* root;
+      const path = yield* fileIn(id, parent, (context) =>
+        host.joinPath([parent, id], context),
       );
       yield* fileIn(id, path, (context) =>
         host.createDir(path, undefined, context),
@@ -164,21 +215,43 @@ export const make = (
       const workdir = yield* fileIn(id, path, (context) =>
         host.canonicalPath(path, context),
       );
-      const sandbox: Sandbox = { id, workdir };
-      const env = new SandboxExecutionEnv(
-        new NodeExecutionEnv({
-          cwd: workdir,
-          ...(options.shellEnv === undefined
-            ? {}
-            : { shellEnv: options.shellEnv }),
-        }),
-        id,
-      );
-      yield* Ref.update(live, (sandboxes) =>
-        new Map(sandboxes).set(id, { sandbox, env }),
-      );
-      return sandbox;
+      return yield* hold({ id, workdir }, options.shellEnv, true);
     }).pipe(Effect.withSpan("SandboxRuntime.InProcess.create"));
+
+    const bind = Effect.fn("SandboxRuntime.InProcess.bind")(function* (
+      given: string,
+      bindOptions: BindOptions = {},
+    ) {
+      const id = yield* mintSandboxId;
+      // The host's view is rooted elsewhere, so a relative path is resolved in the server's own.
+      const workdir = yield* fileIn(id, given, (context) =>
+        new NodeExecutionEnv({ cwd: process.cwd() }).canonicalPath(
+          given,
+          context,
+        ),
+      );
+      const info = yield* fileIn(id, workdir, (context) =>
+        host.fileInfo(workdir, context),
+      );
+      if (info.kind !== "directory") {
+        return yield* new SandboxFileError({
+          sandboxId: id,
+          path: workdir,
+          code: "not_directory",
+          message: `${workdir} is not a directory, so no sandbox can work in it`,
+        });
+      }
+      const shellEnv =
+        bindOptions.env === undefined
+          ? options.shellEnv
+          : { ...options.shellEnv, ...bindOptions.env };
+      return yield* hold(
+        { id, workdir },
+        shellEnv,
+        false,
+        bindOptions.keepSpillFiles ?? false,
+      );
+    });
 
     const destroy = Effect.fn("SandboxRuntime.InProcess.destroy")(function* (
       sandbox: Sandbox,
@@ -230,6 +303,7 @@ export const make = (
     return {
       capabilities,
       create,
+      bind,
       exec: (sandbox, command, execOptions) =>
         find(sandbox).pipe(
           Effect.flatMap(({ env }) =>
@@ -251,7 +325,7 @@ export const make = (
       executionEnv: (sandbox) =>
         find(sandbox).pipe(Effect.map(({ env }) => env)),
       destroy,
-    } satisfies SandboxRuntimeShape;
+    } satisfies BindableSandboxRuntimeShape;
   });
 
 /** The in-process runtime as the `SandboxRuntime` service. */

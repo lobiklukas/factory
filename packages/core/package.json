@@ -11,6 +11,7 @@
   "dependencies": {
     "@repo/domain": "workspace:*",
     "@repo/harness": "workspace:*",
+    "@repo/sandbox": "workspace:*",
     "@repo/storage-postgres": "workspace:*",
     "effect": "4.0.0"
   },
