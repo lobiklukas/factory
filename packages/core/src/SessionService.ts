@@ -151,8 +151,6 @@ import {
   NO_REPO_POLICY,
   Policy,
   PolicyLive,
-  readOnlyStageOf,
-  stageRefusalOf,
   repoPolicyWidening,
   resolveRole,
   // `startMission` is the harness's: it creates the task and commits the documents. The service
@@ -162,6 +160,7 @@ import {
   type AutonomyColumn,
   type AutonomyConfig,
   columnAutonomy,
+  columnWriteScope,
   type ApprovalAnswer,
   type MergeEvent,
   type MergeRecord,
@@ -270,6 +269,7 @@ import type { CredentialError, CredentialProvider } from "./credentials";
 import { NO_REVIEWER_IDENTITY, type ReviewPoster } from "./GitHubReview";
 import {
   BoardColumn,
+  REVIEW_VERDICT_REQUIREMENT,
   type ResolvedAutonomy,
   type ResolvedModel,
 } from "@repo/domain/Task";
@@ -1622,9 +1622,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * honest answer for a session with no card, and for a column the pinned version does not
        * declare (a stale run row is not a reason to refuse to open the session).
        */
-      const runColumnFor = (
+      const declaredRunColumnFor = (
         sessionId: SessionId,
-      ): Effect.Effect<RunColumn | undefined, SessionError> =>
+      ): Effect.Effect<BoardColumn | undefined, SessionError> =>
         Effect.gen(function* () {
           const rows = yield* paper(
             "read run column",
@@ -1651,7 +1651,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 }),
             ),
           );
-          const declared = columns.find((column) => column.name === row.column);
+          return columns.find((column) => column.name === row.column);
+        });
+
+      const runColumnFor = (
+        sessionId: SessionId,
+      ): Effect.Effect<RunColumn | undefined, SessionError> =>
+        Effect.gen(function* () {
+          const declared = yield* declaredRunColumnFor(sessionId);
           return declared === undefined
             ? undefined
             : {
@@ -3753,6 +3760,41 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           ).pipe(Effect.ignore);
         });
 
+      /**
+       * Lift the card's `changes_requested` block for a run that addresses the review (C21): one
+       * whose start column writes code. A read-only column's run (LOB-74) writes nothing, and a
+       * review column's — one that requires a review verdict, whatever its role — reviews the PR
+       * rather than answering its review, so neither lifts it: the person starts the building run.
+       * Never fails: the run has started either way, and a block left standing is a card a person
+       * still sees.
+       */
+      const liftReviewBlock = (
+        sessionId: SessionId,
+        taskId: string,
+        actor: string,
+      ): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          const column = yield* declaredRunColumnFor(sessionId);
+          if (column === undefined) return;
+          if (
+            column.requires.some(
+              (requirement) => requirement.key === REVIEW_VERDICT_REQUIREMENT,
+            ) ||
+            columnWriteScope(
+              column,
+              options.rolePolicies ?? DEFAULT_ROLE_POLICIES,
+            ) === "none"
+          )
+            return;
+          yield* tasks.resumeAfterReview({ taskId, actor });
+        }).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning(
+              `session ${sessionId}: the card ${taskId}'s changes_requested block could not be lifted: ${error.message}`,
+            ),
+          ),
+        );
+
       const create = (
         input: CreateSessionInput = {},
       ): Effect.Effect<SessionSummary, SessionError> =>
@@ -3919,6 +3961,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* input.taskId === undefined
             ? opened
             : opened.pipe(Effect.onError(() => endOpenRun(id)));
+          if (input.taskId !== undefined && input.review === undefined) {
+            // A review that requested changes blocked the card (C21); a run that writes code is the
+            // one that addresses it — the review is on the thread it is told — so the card no longer
+            // waits on a person. Only once its owner has opened: a start refused above leaves the
+            // block, and the card in 'Needs a person'. Best effort: the run is already the card's.
+            yield* liftReviewBlock(id, input.taskId, input.actor ?? id);
+          }
           // The session exists and its directory is open: the list can show it without a fold.
           yield* touchActivity(id);
           yield* countSessionCreate("create");
@@ -4860,7 +4909,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             }>`
               SELECT s.title, s.repo, s.request_id, s.pr_url, s.actor, s.forked_from,
                      s.workspace_released_at IS NOT NULL AS released,
-                     (COALESCE(t.blocked_reason IS NOT NULL, false) OR EXISTS (
+                     -- A review's changes_requested block (C21) is a prompt for a person, not a
+                     -- hold: the push it waits for is the one that answers it.
+                     (COALESCE(t.blocked_reason IS NOT NULL
+                        AND t.blocked_reason <> 'changes_requested', false) OR EXISTS (
                        SELECT 1 FROM session_approvals sa
                        WHERE sa.session_id = s.id AND sa.decision IS NULL
                      )) AS waiting,
@@ -5534,51 +5586,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             column?.autonomy,
             repoPolicy.repo,
           );
-          // A read-only stage (LOB-74, C22: a read-only role such as the specifier, or a column whose
-          // autonomy says `write: "none"`) is enforced on its agent by the stage's policy and the
-          // role's tool set, neither of which a check meets. So the check meets the stage here, as the
-          // agent's own `bash` would: one the stage cannot prove is a read is refused, naming the
-          // column, rather than left to write the worktree the stage keeps unchanged. A review run
-          // (LOB-36) is the read-only reviewing stage whatever its column, as its agent's run is.
-          const stage = readOnlyStageOf(
-            column === undefined && review === undefined
-              ? undefined
-              : {
-                  ...(column === undefined
-                    ? {}
-                    : {
-                        column: column.name,
-                        ...(column.role === undefined
-                          ? {}
-                          : { role: column.role }),
-                        ...(column.autonomy === undefined
-                          ? {}
-                          : { autonomy: column.autonomy }),
-                      }),
-                  ...(review === undefined ? {} : { reviewing: true }),
-                },
-            options.rolePolicies ?? DEFAULT_ROLE_POLICIES,
-          );
           for (const worker of workers) {
             if (worker.check === undefined) continue;
             if (worker.check.trim() === "")
               return yield* new SessionErrorClass({
                 code: "invalid_input",
                 message: `the mission worker "${worker.id}" declares an empty check`,
-              });
-            const staged =
-              stage === undefined
-                ? undefined
-                : stageRefusalOf(stage, {
-                    type: "toolCall",
-                    id: `factory.mission.check:${worker.id}`,
-                    name: "bash",
-                    arguments: { command: worker.check },
-                  });
-            if (staged !== undefined)
-              return yield* new SessionErrorClass({
-                code: "invalid_input",
-                message: `the mission worker "${worker.id}"'s check is refused: ${column === undefined ? "the review run" : `column "${staged.column}"`} is the read-only ${staged.stage} stage, where a check may only read (${staged.what} is not a read)`,
               });
             const decision = yield* sessionPolicy.decide({
               type: "toolCall",
