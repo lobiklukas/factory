@@ -280,7 +280,10 @@ const rowsHolding = (sessionId: SessionId, text: string) =>
       ...tables,
       { tableName: "sessions", columnName: "id" },
     ]) {
-      const rows = yield* sql<{ readonly total: number; readonly hits: number }>`
+      const rows = yield* sql<{
+        readonly total: number;
+        readonly hits: number;
+      }>`
         SELECT count(*)::int AS total,
           count(*) FILTER (WHERE r::text LIKE ${`%${text}%`})::int AS hits
         FROM ${sql(tableName)} AS r WHERE ${sql(columnName)} = ${sessionId}

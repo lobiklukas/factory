@@ -69,9 +69,7 @@ export const secretNeedsAt = (
       input.localPath === undefined
         ? ""
         : yield* workTreePrefix(input.localPath, deps);
-    const file = [...(prefix === "" ? [] : [prefix]), ...CONFIG_FILE].join(
-      "/",
-    );
+    const file = [...(prefix === "" ? [] : [prefix]), ...CONFIG_FILE].join("/");
     const text = yield* gitAnswer(
       input.directory,
       ["show", "--end-of-options", `${input.ref}:${file}`],
@@ -105,13 +103,15 @@ export const grantSecrets = (
     const revealed =
       store === undefined || repo === undefined
         ? { values: [], unreadable: [] }
-        : yield* store.reveal(repo, names).pipe(
-            Effect.catch((error) =>
-              Effect.logWarning(
-                `repo ${repo}: its secrets could not be read (${error.message}), so the session's commands get none`,
-              ).pipe(Effect.as({ values: [], unreadable: [] })),
-            ),
-          );
+        : yield* store
+            .reveal(repo, names)
+            .pipe(
+              Effect.catch((error) =>
+                Effect.logWarning(
+                  `repo ${repo}: its secrets could not be read (${error.message}), so the session's commands get none`,
+                ).pipe(Effect.as({ values: [], unreadable: [] })),
+              ),
+            );
     if (revealed.unreadable.length > 0) {
       yield* Effect.logWarning(
         `repo ${repo}: secret(s) ${revealed.unreadable.join(", ")} cannot be read with this server's FACTORY_SECRETS_KEY, so the session's commands get none of them`,

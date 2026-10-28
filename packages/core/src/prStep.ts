@@ -65,6 +65,13 @@
  * `non-fast-forward` outcome — nothing opened, nothing recorded — rather than a PR over commits the
  * run never saw. Any other push failure is a `PrError` naming the push.
  *
+ * The branch passes a secret scan before it is pushed (S-agent-secrets, `./secretScan`): every line
+ * its commits add — the history a push publishes, not only the net diff — is checked for a value the
+ * factory stores for the repo and for a well-known credential's shape. A finding answers
+ * `{outcome: "secret-found"}` naming where each is and never its text: no push, no GitHub call, no
+ * record. The caller hands the step the stored values; a stored value its key cannot read refuses the
+ * step as a `PrError`, so a branch is never pushed unscanned.
+ *
  * A card's later run adopts the card's PR rather than opening a second one (C19): it continues the
  * branch an earlier run of the card opened the PR from (`./cardBranch`), so the caller hands the step
  * that PR (`adopt`). The step then does everything an open does but the GitHub call — the same

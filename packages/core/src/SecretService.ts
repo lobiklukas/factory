@@ -206,7 +206,10 @@ export const makeSecretService = (
       input: SetSecretInput,
     ) {
       const value = Redacted.value(input.value);
-      if (value.length < SECRET_MIN_LENGTH || value.length > SECRET_MAX_LENGTH) {
+      if (
+        value.length < SECRET_MIN_LENGTH ||
+        value.length > SECRET_MAX_LENGTH
+      ) {
         return yield* new InvalidSecret({
           name: input.name,
           message: `secret ${input.name}: a value is ${SECRET_MIN_LENGTH} to ${SECRET_MAX_LENGTH} characters (it is masked wherever a command prints it, and a shorter one would mask ordinary words); nothing was stored`,

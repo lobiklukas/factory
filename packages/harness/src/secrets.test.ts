@@ -241,10 +241,9 @@ const scriptedModel = (
     ).length;
     const next = calls[done];
     if (next === undefined) return fauxAssistantMessage("done");
-    return fauxAssistantMessage(
-      fauxToolCall(next.tool, next.args ?? {}),
-      { stopReason: "toolUse" },
-    );
+    return fauxAssistantMessage(fauxToolCall(next.tool, next.args ?? {}), {
+      stopReason: "toolUse",
+    });
   };
   faux.setResponses([step]);
   return access;

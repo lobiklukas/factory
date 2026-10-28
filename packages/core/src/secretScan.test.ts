@@ -106,9 +106,11 @@ describe("scanAddedLines", () => {
   const at = (text: string) => [{ commit: "c", path: "f", line: 1, text }];
 
   it("finds a stored value, by name, ahead of any pattern on the line", () => {
-    expect(scanAddedLines(at(`key = "${FAKE}" ${githubToken()}`), KNOWN)).toEqual(
-      [{ commit: "c", path: "f", line: 1, kind: "stored", name: "TEST_API_KEY" }],
-    );
+    expect(
+      scanAddedLines(at(`key = "${FAKE}" ${githubToken()}`), KNOWN),
+    ).toEqual([
+      { commit: "c", path: "f", line: 1, kind: "stored", name: "TEST_API_KEY" },
+    ]);
   });
 
   it("finds well-known credential shapes", () => {
@@ -133,12 +135,14 @@ describe("scanAddedLines", () => {
     const pem: InjectedSecrets = [
       {
         name: "DEPLOY_KEY",
-        value: Redacted.make(`${pemHeader()}\nMIIEfakebodyline0123456789\n-----END-----`),
+        value: Redacted.make(
+          `${pemHeader()}\nMIIEfakebodyline0123456789\n-----END-----`,
+        ),
       },
     ];
-    expect(scanAddedLines(at("MIIEfakebodyline0123456789"), pem)[0]).toMatchObject(
-      { kind: "stored", name: "DEPLOY_KEY" },
-    );
+    expect(
+      scanAddedLines(at("MIIEfakebodyline0123456789"), pem)[0],
+    ).toMatchObject({ kind: "stored", name: "DEPLOY_KEY" });
   });
 });
 

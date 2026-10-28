@@ -19,7 +19,7 @@ wherever they would reach the log, and refused at the push.
   session's environment, which holds none of them; `env` there does not show one. The command's own
   variables win, so a secret named `DATABASE_URL` does not undo a verification's isolation.
   A declared name the store does not hold is said in the output (`== secrets: NAME (declared, not
-  stored)`).
+stored)`).
 - **Masked before it is committed.** Each injected command's output is masked at the source
   (`[secret:NAME]`, a value split across chunks included), every command the session's tools run is
   masked (`maskingEnv`), and every tool's settled result passes an `afterTool` hook that masks it
@@ -41,20 +41,20 @@ recognizes. The push's scan is the second guard, for a value that reaches a comm
 **How it is proven.** `./secrets.sh` (its own API on `API_PORT`, a store key minted per run, the faux
 model scripted to count `TEST_API_KEY` in its shell, commit a change, and call `verify`):
 
-| Check | What it proves |
-| --- | --- |
-| cli set / ls / short | the value is read from stdin and printed nowhere; ls lists the name; a short value is `invalid_secret` |
-| rpc list | `listSecrets` answers the summary, no value |
-| verify passes | the declared verify needs the stored value (checked by digest) and exits 0 |
-| placeholder | what verify printed of it is `[secret:TEST_API_KEY]` |
-| agent env | the run's own `env` holds no non-empty `TEST_API_KEY` |
-| no row | none of the rows the session wrote (its log's commits and checkpoints, every index row) holds the value |
-| projection | `getSession`'s snapshot holds the placeholder and no value |
-| leaky card | a card's building run that commits the value settles to a `secret_found` note naming `TEST_API_KEY at leaked.txt:1`, never the value |
-| factory pr | the operator's call meets the same refusal, and no PR is recorded |
-| rm | `factory secret rm` deletes it |
-| board show | `factory board show --task` prints the card's refusal |
-| no leak in evidence | no evidence file and no API log line holds the value |
+| Check                | What it proves                                                                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| cli set / ls / short | the value is read from stdin and printed nowhere; ls lists the name; a short value is `invalid_secret`                               |
+| rpc list             | `listSecrets` answers the summary, no value                                                                                          |
+| verify passes        | the declared verify needs the stored value (checked by digest) and exits 0                                                           |
+| placeholder          | what verify printed of it is `[secret:TEST_API_KEY]`                                                                                 |
+| agent env            | the run's own `env` holds no non-empty `TEST_API_KEY`                                                                                |
+| no row               | none of the rows the session wrote (its log's commits and checkpoints, every index row) holds the value                              |
+| projection           | `getSession`'s snapshot holds the placeholder and no value                                                                           |
+| leaky card           | a card's building run that commits the value settles to a `secret_found` note naming `TEST_API_KEY at leaked.txt:1`, never the value |
+| factory pr           | the operator's call meets the same refusal, and no PR is recorded                                                                    |
+| rm                   | `factory secret rm` deletes it                                                                                                       |
+| board show           | `factory board show --task` prints the card's refusal                                                                                |
+| no leak in evidence  | no evidence file and no API log line holds the value                                                                                 |
 
 The push itself is proven refused before it happens in `packages/core/src/SessionService.secrets.test.ts`
 (a real `git http-backend` forge sees no `git-receive-pack`, and its `factory/<id>` does not exist);

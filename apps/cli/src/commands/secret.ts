@@ -141,7 +141,7 @@ const setCommand = Command.make(
   Command.withExamples([
     {
       command:
-        "printf %s \"$KEY\" | factory secret set acme/widgets TEST_API_KEY",
+        'printf %s "$KEY" | factory secret set acme/widgets TEST_API_KEY',
       description: "Store TEST_API_KEY for acme/widgets from stdin",
     },
     {

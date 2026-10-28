@@ -240,7 +240,11 @@ describe("secrets over RPC", () => {
     const repo = await registered();
     const short = await call((client) =>
       failureOf(
-        client.setSecret({ repo, name: "SHORT", value: Redacted.make("short") }),
+        client.setSecret({
+          repo,
+          name: "SHORT",
+          value: Redacted.make("short"),
+        }),
       ),
     );
     const unknown = await call((client) =>

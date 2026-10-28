@@ -22,7 +22,11 @@ describe("secretsOf", () => {
   it("keeps one repo's secrets, by name", () => {
     expect(
       secretsOf(
-        [summary("ZED"), summary("ALPHA", RepoSlug.make("acme/other")), summary("ABLE")],
+        [
+          summary("ZED"),
+          summary("ALPHA", RepoSlug.make("acme/other")),
+          summary("ABLE"),
+        ],
         repo,
       ).map((secret) => secret.name),
     ).toEqual(["ABLE", "ZED"]);
@@ -43,10 +47,12 @@ describe("secretInput", () => {
   });
 
   it("refuses a name that is no variable and a value shorter than the minimum", () => {
-    expect(secretInput(repo, { name: "1BAD", value: "fake-value-1234" }).ok).toBe(
+    expect(
+      secretInput(repo, { name: "1BAD", value: "fake-value-1234" }).ok,
+    ).toBe(false);
+    expect(secretInput(repo, { ...EMPTY_SECRET_FORM, name: "OK" }).ok).toBe(
       false,
     );
-    expect(secretInput(repo, { ...EMPTY_SECRET_FORM, name: "OK" }).ok).toBe(false);
     expect(secretInput(repo, { name: "OK", value: "short" }).ok).toBe(false);
   });
 });

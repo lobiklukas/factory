@@ -100,8 +100,8 @@ export const RepoSecrets = ({ repo }: { readonly repo: RepoSlug }) => {
         <KeyRoundIcon className="size-3" strokeWidth={1.75} />
         Secrets
         <span className="font-normal text-muted-foreground">
-          write-only; given only to the commands .factory/config declares
-          them for
+          write-only; given only to the commands .factory/config declares them
+          for
         </span>
       </h3>
       {secrets === undefined ? (

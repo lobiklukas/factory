@@ -52,7 +52,10 @@ export const SECRET_PATTERNS: ReadonlyArray<SecretPattern> = [
   { name: "gitlab-token", pattern: /\bglpat-[A-Za-z0-9_-]{20,}/ },
   { name: "slack-token", pattern: /\bxox[abposr]-[A-Za-z0-9-]{10,}/ },
   { name: "stripe-secret-key", pattern: /\b[rs]k_live_[0-9A-Za-z]{24,}\b/ },
-  { name: "google-api-key", pattern: /\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/ },
+  {
+    name: "google-api-key",
+    pattern: /\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/,
+  },
   { name: "anthropic-api-key", pattern: /\bsk-ant-[A-Za-z0-9_-]{32,}/ },
   {
     name: "openai-api-key",

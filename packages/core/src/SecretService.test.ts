@@ -29,7 +29,8 @@ afterAll(async () => {
   await runtime.runPromise(
     Effect.gen(function* () {
       const sql = yield* SqlClient;
-      for (const repo of repos) yield* sql`DELETE FROM repos WHERE slug = ${repo}`;
+      for (const repo of repos)
+        yield* sql`DELETE FROM repos WHERE slug = ${repo}`;
     }),
   );
   await runtime.dispose();
@@ -45,11 +46,8 @@ const newRepo = Effect.gen(function* () {
 
 const withStore = <A, E>(
   key: Buffer | undefined,
-  f: (
-    store: SecretServiceShape,
-  ) => Effect.Effect<A, E, SqlClient>,
-): Promise<A> =>
-  runtime.runPromise(Effect.flatMap(makeSecretService(key), f));
+  f: (store: SecretServiceShape) => Effect.Effect<A, E, SqlClient>,
+): Promise<A> => runtime.runPromise(Effect.flatMap(makeSecretService(key), f));
 
 describe("the secrets store", () => {
   it("stores a value encrypted, answers only summaries, and reveals it to the control plane", async () => {

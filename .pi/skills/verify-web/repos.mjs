@@ -570,7 +570,7 @@ try {
   );
 
   {
-  // --- secrets: a repo's secret set from the page, never shown again (S-agent-secrets) ----------
+    // --- secrets: a repo's secret set from the page, never shown again (S-agent-secrets) ----------
     // Every `/rpc` response body the page receives, as text: the value must be in none of them.
     const rpcBodies = [];
     page.on("response", (response) => {
@@ -601,7 +601,9 @@ try {
     );
     const shown = await page.evaluate(() => ({
       html: document.documentElement.outerHTML,
-      inputs: [...document.querySelectorAll("input")].map((input) => input.value),
+      inputs: [...document.querySelectorAll("input")].map(
+        (input) => input.value,
+      ),
     }));
     await page.screenshot({
       path: path.join(EVIDENCE_DIR, "repos-secret-saved.png"),

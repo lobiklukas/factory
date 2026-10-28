@@ -111,7 +111,10 @@ const rowsHolding = (sessionId: SessionId, text: string) =>
       ...tables,
       { tableName: "sessions", columnName: "id" },
     ]) {
-      const rows = yield* sql<{ readonly total: number; readonly hits: number }>`
+      const rows = yield* sql<{
+        readonly total: number;
+        readonly hits: number;
+      }>`
         SELECT count(*)::int AS total,
           count(*) FILTER (WHERE r::text LIKE ${`%${text}%`})::int AS hits
         FROM ${sql(tableName)} AS r WHERE ${sql(columnName)} = ${sessionId}
@@ -149,7 +152,10 @@ const program = Effect.gen(function* () {
       }),
     }),
   });
-  const set = factory(["secret", "set", verifyRepo, "TEST_API_KEY"], `${FAKE}\n`);
+  const set = factory(
+    ["secret", "set", verifyRepo, "TEST_API_KEY"],
+    `${FAKE}\n`,
+  );
   const ls = factory(["secret", "ls", "--repo", verifyRepo]);
   const short = factory(["secret", "set", verifyRepo, "SHORT"], "short\n");
   observed.cli = { set, ls, short };
@@ -222,7 +228,8 @@ const program = Effect.gen(function* () {
       ran.output.includes("verify got [secret:TEST_API_KEY]") &&
       !ran.output.includes(FAKE),
     ran?._tag === "VerifyRan"
-      ? (ran.output.split("\n").find((line) => line.startsWith("verify got")) ?? "")
+      ? (ran.output.split("\n").find((line) => line.startsWith("verify got")) ??
+          "")
       : "",
   );
   assert(

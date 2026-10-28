@@ -1,6 +1,6 @@
 /**
  * `factory secret`'s rendering (S-agent-secrets). The commands themselves are proven by
- * `.pi/skills/verify-cli/secret.sh` against a real control plane; these cases pin what a row and a
+ * `.pi/skills/verify-api/secrets.sh` against a real control plane; these cases pin what a row and a
  * set print — never a value — and how a value read from stdin loses its line ending.
  */
 import type { SecretSummary } from "@repo/domain/Secret";
@@ -46,7 +46,9 @@ describe("factory secret's lines", () => {
   it("drops one trailing line ending from a value read from stdin, and nothing else", () => {
     expect(secretValueOf("fake-value-1234\n")).toBe("fake-value-1234");
     expect(secretValueOf("fake-value-1234\r\n")).toBe("fake-value-1234");
-    expect(secretValueOf("line one\nline two\n\n")).toBe("line one\nline two\n");
+    expect(secretValueOf("line one\nline two\n\n")).toBe(
+      "line one\nline two\n",
+    );
     expect(secretValueOf("  spaced  ")).toBe("  spaced  ");
   });
 });
