@@ -90,10 +90,12 @@ passes ten.
   streams it. A session owned by another process reads as `historical`, which is the honest answer
   while nothing can say who owns it (see task 7).
 - Reader mode under a concurrent writer's load, and replay cost on a long log (see "Storage
-  notes" below). Every historical read folds the whole log, once per read.
-- **A historical read through the dashboard.** `verify-web/up.sh` keeps `SESSION_IDLE_TIMEOUT_MS`
-  long so the pane stays live, and `.pi/skills/verify-api` owns the fold path. The header label
-  renders either way, so the check is that string the day someone drives a fold through the UI.
+  notes" below). A historical read opens the log from its checkpoint and projects the newest 200
+  entries (LOB-243); restoring the checkpoint still costs the log's bytes, once per read.
+- **A historical read through the dashboard**, beyond a long session's earlier history.
+  `verify-web/up.sh` keeps `SESSION_IDLE_TIMEOUT_MS` long so the pane stays live, and
+  `.pi/skills/verify-api` owns the fold path; `verify-web/history.sh` drives the one fold the
+  dashboard has a control for (**Show earlier entries**, LOB-243) on an instance of its own.
 - `whenBusy` queueing and steering at the RPC surface: Pi Durable's queueing is exercised at the
   service level, and `busy` is a mapped error code, but no drive run forces a session to be busy
   deterministically (the faux turn is too fast) — see task 6. `FAUX_COMMAND` is now configurable
@@ -406,13 +408,17 @@ How `PostgresStorage` works, so the next agent does not have to re-derive it:
   checkpoint encodes the fold synchronously (the next commit mutates it) and resolves; the gzip
   (async) and upsert run on a per-owner chain the commit does not wait on, which
   `checkpointsWritten()` and `close` do wait on. The whole fold still lives in memory.
-  `PostgresStorage.readers` always folds the whole log and never reads a checkpoint; its callers
-  are the index rebuild (the recovery path) and the board's run evidence in `TaskService`, which
-  therefore still pays a full fold per run log per read. Deleting `log_checkpoints` rows is always
-  safe. On a 10 250-commit log the storage open went from 167–204 ms (full fold, 10 250 commits
-  read) to 37–46 ms (checkpoint at 10 000, 250 read); `packages/storage-postgres/scripts/bench-open.ts`
-  reruns it. That is the storage half only: a historical session read (`readSessionLog`) still
-  pages and projects every entry of the fold, so a session open in the API is O(log) in in-memory
+  `PostgresStorage.readers` takes `{ checkpoints }` from its caller: the board's run evidence in
+  `TaskService` starts each run's log from its checkpoint (LOB-243), and the index rebuild — the
+  recovery path — folds from the first commit. Deleting `log_checkpoints` rows is always safe. On a
+  10 250-commit log the storage open went from 167–204 ms (full fold, 10 250 commits read) to
+  37–46 ms (checkpoint at 10 000, 250 read); `packages/storage-postgres/scripts/bench-open.ts`
+  reruns it. A historical session read (`readHistoricalSnapshot`) is bounded above it (LOB-243): it
+  reads documents and the newest `HISTORY_WINDOW` entries, `readSessionHistory` pages back on
+  request, and pending approvals come from the root's `factory.approvals` ledger rather than from
+  the transcript; `packages/harness/scripts/bench-historical-read.ts` measures it (200 entries
+  touched at 2 500 and at 10 250). The full projection (`readSessionLog`) is still what a rebuild, a
+  fork and a replay read, so those are O(log) in in-memory
   reads. A Pi Durable bump turns every checkpoint stale (one full fold per log), and if it changes
   `MemoryStorage`'s fields the `foldShape()` test fails — revisit `Checkpoint.ts` then.
 - **`writes` is `json`, not `jsonb`**, on purpose: strings must round-trip, and `jsonb` rejects

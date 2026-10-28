@@ -148,7 +148,9 @@ _Rejected:_ always read the projection (two read paths with different staleness)
 _As built (M2)._ Ownership decides the path, and it is a registry in the control plane process: a
 session this process holds open streams from the live view; one it does not is a reader-mode fold.
 The two paths project the _same_ transcript, read from the start of the log, and both are
-asserted to agree entry for entry. (A head marker — `pi.reset`, `pi.compaction` — says where the
+asserted to agree entry for entry — a historical read of a long session carries the newest
+entries and pages back through the rest on request (R6, LOB-243), and the pages join into the same
+transcript. (A head marker — `pi.reset`, `pi.compaction` — says where the
 _model's_ context begins, not where the transcript does: a reset keeps the past and marks where it
 happened, LOB-181.) `mode` is on every snapshot, and a historical stream sends its
 snapshot and then **ends**, so a completed fold is distinguishable from a dropped connection. The
@@ -450,11 +452,23 @@ folding the log. Bounded by compaction, cacheable, but it needs a benchmark befo
 the default path for a large session. The storage open is bounded (LOB-186): `Storage.open`
 restores the log's checkpoint and folds only the commits after it, with the full fold as the
 fallback — on a 10 250-commit log, 37–46 ms and 250 commits read against 167–204 ms and 10 250.
-Those are storage numbers, not session-open numbers. What stays O(log): the fold's size in memory
-and the bytes of the checkpoint itself; the harness projection, because a historical session read
-(`SessionService.withReader` → `readSessionLog`) still pages every entry of the restored fold and
-projects all of them; and `PostgresStorage.readers`, which never reads a checkpoint (the index
-rebuild and the board's run evidence).
+The historical session read on top of it is bounded too (LOB-243): `readHistoricalSnapshot` reads
+documents and the newest `HISTORY_WINDOW` (200) transcript entries — one scan of one page — and
+says where they start (`earlier`); `readSessionHistory` pages back through the rest on request, one
+page per call. The pending approvals it reports, which used to need the whole transcript, come from
+the root's approval ledger (`factory.approvals`), a document every approval entry's commit copies
+itself into and that the first open of an older log seeds once. Measured with
+`packages/harness/scripts/bench-historical-read.ts` (median of 7, a loaded machine): at 2 500 and
+10 250 entries the read touched 200 entries both times, against 2 501 and 10 251 for the full
+projection it replaced, and the projection over the open took 6–9 ms against 11–47 ms. The board's
+run evidence opens each run's log from its checkpoint too (`PostgresStorage.readers` with
+`checkpoints: true`; 32 against 194 ms on the 10 250-commit log). What stays O(log): the fold's size
+in memory and the checkpoint's bytes — restoring one is most of a historical read's time on a long
+log (42 of 56 ms at 10 250 entries); the index rebuild, which folds from the first commit on purpose
+(a recovery path does not start from a derived row) and projects every entry; a fork and a replay,
+which copy the whole transcript; the run evidence's verify records, read off every entry of the
+restored fold in memory; and the first historical read of a log written before the ledger and not
+opened since, which folds the transcript for its approvals.
 
 ---
 

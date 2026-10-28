@@ -108,6 +108,19 @@ one from `factory run`, one from the dashboard's **New session**, and one run ea
 repo × actor table to be `listSpend`'s answer and its pairs to be the list's costs added up
 (`features/spend.md`). Evidence goes to `.verify/evidence/latest/spend/`.
 
+### Earlier history of a long session
+
+```sh
+HISTORY_API_PORT=9437 HISTORY_WEB_PORT=3437 ./history.sh   # its own short-idle instance; leaves nothing running
+```
+
+The pane only pages back through a **historical** read, and this instance keeps its owners live. So
+`history.sh` starts its own API (`SESSION_IDLE_TIMEOUT_MS=4000`) and dashboard, grows and releases one
+session with `../verify-api/history.ts` (which checks the RPC half), then runs `history.mjs`: the pane
+shows the newest entries and **Show earlier entries**, each press reads one page, and once the control
+is gone every turn's message is on screen once, in order (`features/history.md`). Evidence goes to
+`.verify/evidence/latest/history/`.
+
 ## Evidence
 
 Written to `.verify/evidence/latest/` (override with `EVIDENCE_DIR`), gitignored:
@@ -152,17 +165,18 @@ touch `.verify/evidence/`; after cleanup, confirm the evidence is still there.
 
 ## Helpers
 
-| File                | Purpose                                                            |
-| ------------------- | ------------------------------------------------------------------ |
-| `up.sh`             | Launch isolated API + web, wait for readiness                      |
-| `down.sh`           | Stop only what `up.sh` started                                     |
-| `doctor.sh`         | Read-only health check of the instance                             |
-| `drive.mjs`         | Browser drive + evidence capture                                   |
-| `seed-attention.ts` | The attention block's board, cards and the run's ask               |
-| `spend.sh`          | The spend pane's own priced instance and its drive (`spend.mjs`)   |
-| `thread.sh`         | The card thread's own asking instance and its drive (`thread.mjs`) |
-| `seed-spend.ts`     | The spend drive's board and the two cards its runs start from      |
-| `features/`         | Feature map: what each user-facing feature is and how to prove it  |
+| File                | Purpose                                                                |
+| ------------------- | ---------------------------------------------------------------------- |
+| `up.sh`             | Launch isolated API + web, wait for readiness                          |
+| `down.sh`           | Stop only what `up.sh` started                                         |
+| `doctor.sh`         | Read-only health check of the instance                                 |
+| `drive.mjs`         | Browser drive + evidence capture                                       |
+| `seed-attention.ts` | The attention block's board, cards and the run's ask                   |
+| `spend.sh`          | The spend pane's own priced instance and its drive (`spend.mjs`)       |
+| `thread.sh`         | The card thread's own asking instance and its drive (`thread.mjs`)     |
+| `history.sh`        | A long history's own short-idle instance and its drive (`history.mjs`) |
+| `seed-spend.ts`     | The spend drive's board and the two cards its runs start from          |
+| `features/`         | Feature map: what each user-facing feature is and how to prove it      |
 
 ## Feature map
 

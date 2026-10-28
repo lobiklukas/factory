@@ -229,6 +229,7 @@ shutdown, and the restarted read cuts a fresh one at the base. See [lifecycle.md
 | Reset a session          | passing | [reset.md](reset.md)                       |
 | Compact on demand        | passing | [compact.md](compact.md)                   |
 | Fold a released session  | passing | [fold.md](fold.md)                         |
+| A long session's history | passing | [history.md](history.md)                   |
 | Fork a session           | passing | [fork.md](fork.md)                         |
 | Replay a session         | passing | [replay.md](replay.md)                     |
 | Request limits           | passing | [limits.md](limits.md)                     |
