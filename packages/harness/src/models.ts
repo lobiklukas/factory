@@ -643,6 +643,18 @@ export const modelKey = (access: ModelAccess): string =>
   `${access.provider}/${access.modelId}`;
 
 /**
+ * Every model the access's catalog serves, as `provider/modelId`, sorted (LOB-269): what a replay
+ * or a role row may name (`modelAccessFor` resolves against the same registry). Under faux it is
+ * the ids the process was booted with; under anthropic, pi-ai's published catalog.
+ */
+export const catalogModels = (access: ModelAccess): readonly string[] =>
+  [
+    ...new Set(
+      access.models.getModels().map((model) => `${model.provider}/${model.id}`),
+    ),
+  ].sort();
+
+/**
  * The same access, resolved onto another model of the registry it already holds.
  *
  * A session is given one `ModelAccess` when it opens, which is what pins it to a model; a replay
