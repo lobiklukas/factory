@@ -30,13 +30,22 @@
  * same issue finds the card the first made; a repo with no board is a recorded skip that names
  * `factory board create`, and — like an unregistered repo — reclaimable by a delivery keyed by its
  * work once the operator makes one. A run starts from the card (docs/board.md B12), and the Linear
- * write-back follows the card's runs to the issue (`./LinearSync`).
+ * write-back follows the card's runs to the issue (`./LinearSync`). Filing a card acknowledges
+ * nothing on any source: `TriggerWriteBack` names a session, and a card-mode delivery has none, so a
+ * Slack thread, a Jira or GitHub issue hears nothing until a run on the card reports (and only the
+ * Linear issue is followed today).
+ *
+ * A card the board refuses for its input (`TriggerCardRefused`: a base ref git would not take, a
+ * ref over the cap) is a recorded skip naming the field — a retry would be refused the same way, so
+ * it is not a failure the sender should retry. A description over the card body's cap is not
+ * refused: it is cut to the cap with a marker (`cardBodyOf`), as a session's prompt would carry it
+ * whole, and the reason says so.
  *
  * **The write-back is optional and injected.** No adapter in part 1 needs one (the generic webhook
  * has no place to write, and the Linear route only delegates), so the default is a no-op: a
  * deployment that configures no client never fails a delivery because of one.
  */
-import { Context, Duration, Effect, Exit, Layer, Option } from "effect";
+import { Context, Duration, Effect, Exit, Layer, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 import type {
@@ -44,7 +53,7 @@ import type {
   RepoSlug,
   SessionId,
 } from "@repo/domain/Session";
-import { isWebLink, type TaskId } from "@repo/domain/Task";
+import { isWebLink, MAX_TASK_BODY_CHARS, type TaskId } from "@repo/domain/Task";
 import {
   externalRefOf,
   resolveMapping,
@@ -142,15 +151,24 @@ export type TriggerCardsShape = {
     readonly externalUrl: string | undefined;
   }) => Effect.Effect<
     { readonly id: TaskId; readonly created: boolean },
-    TriggerError
+    TriggerError | TriggerCardRefused
   >;
 };
 
 /**
- * The card port. Optional in the seam's requirements, unlike `TriggerSessions`: the docs and review
- * seams carry rules of their own and never file a card, so they wire none. A card rule that reaches
- * a seam with no port fails the delivery with `card-create` naming the gap — loudly, and with the
- * claim given back — rather than quietly opening a session instead.
+ * The board refused the card for what the delivery carried (`InvalidTaskInput`): `field` names it.
+ * Permanent — the same delivery is refused the same way every time — so the seam records it as a
+ * skip rather than failing the delivery for the sender to retry.
+ */
+export class TriggerCardRefused extends Schema.TaggedError<TriggerCardRefused>()(
+  "TriggerCardRefused",
+  { field: Schema.String, message: Schema.String },
+) {}
+
+/**
+ * The card port. Required, like `TriggerWriteBack`: a seam that files no card — the docs and review
+ * seams, whose rules are their own — wires `NoCards`, so a new seam that forgets the port fails to
+ * compile rather than at the first card rule.
  */
 export class TriggerCards extends Context.Service<
   TriggerCards,
@@ -158,9 +176,48 @@ export class TriggerCards extends Context.Service<
 >()("@repo/core/TriggerCards") {}
 
 /**
- * The production card port: `TaskService.file`. A `TaskError` becomes a `TriggerError` here, so the
- * trigger path does not leak a board-shaped failure. A card whose input the service refuses (a body
- * over its cap, a base ref git would not take) fails the delivery the same way, naming the field.
+ * The card port of a seam that files no card. A card rule that reaches it fails the delivery with
+ * `card-create` naming the gap — loudly, and with the claim given back — rather than quietly opening
+ * a session instead.
+ */
+export const NoCards = Layer.succeed(
+  TriggerCards,
+  TriggerCards.of({
+    file: () =>
+      Effect.fail(
+        new TriggerError({
+          code: "card-create",
+          message:
+            "this trigger seam has no card port (TriggerCards) wired, so a card rule cannot file its card",
+        }),
+      ),
+  }),
+);
+
+/** What `cardBodyOf` appends to a description it cut. */
+const CUT_MARKER = (length: number) =>
+  `\n\n[cut at ${MAX_TASK_BODY_CHARS} characters by the factory; the source's description has ${length}]`;
+
+/**
+ * The card body a delivery's description becomes: itself, or — over `MAX_TASK_BODY_CHARS` — its
+ * head with a marker that says it was cut and how long the whole was, the result exactly at the cap.
+ * `cut` is the original length, when it was cut.
+ */
+export const cardBodyOf = (
+  body: string,
+): { readonly body: string; readonly cut?: number } => {
+  if (body.length <= MAX_TASK_BODY_CHARS) return { body };
+  const marker = CUT_MARKER(body.length);
+  return {
+    body: `${body.slice(0, MAX_TASK_BODY_CHARS - marker.length)}${marker}`,
+    cut: body.length,
+  };
+};
+
+/**
+ * The production card port: `TaskService.file`. A card whose input the service refuses
+ * (`InvalidTaskInput`) is `TriggerCardRefused`; any other `TaskError` becomes a `TriggerError`
+ * here, so the trigger path does not leak a board-shaped failure.
  */
 export const TriggerCardsFromTaskService = Layer.effect(
   TriggerCards,
@@ -183,12 +240,16 @@ export const TriggerCardsFromTaskService = Layer.effect(
           })
           .pipe(
             Effect.map(({ task, created }) => ({ id: task.id, created })),
-            Effect.mapError(
-              (cause) =>
-                new TriggerError({
-                  code: "card-create",
-                  message: `${cause._tag}: ${cause.message}`,
-                }),
+            Effect.mapError((cause) =>
+              cause._tag === "InvalidTaskInput"
+                ? new TriggerCardRefused({
+                    field: cause.field,
+                    message: cause.message,
+                  })
+                : new TriggerError({
+                    code: "card-create",
+                    message: `${cause._tag}: ${cause.message}`,
+                  }),
             ),
           ),
     });
@@ -391,7 +452,7 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
         Duration.fromInputUnsafe(options.reclaimAfter ?? TRIGGER_RECLAIM_AFTER),
       );
       const sessions = yield* TriggerSessions;
-      const cards = yield* Effect.serviceOption(TriggerCards);
+      const cards = yield* TriggerCards;
       const writeBack = yield* TriggerWriteBack;
       const fallback = envRoutedRules(options.rules, options.rulesOrigin);
       /** The rule set one delivery is routed with, stored routes first (LOB-266). */
@@ -480,13 +541,6 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
         routedBy: string,
       ): Effect.Effect<TriggerOutcome, TriggerError> =>
         Effect.gen(function* () {
-          const port = Option.getOrUndefined(cards);
-          if (port === undefined) {
-            return yield* new TriggerError({
-              code: "card-create",
-              message: `rule "${mapping.label}" files a card, but this trigger seam has no card port (TriggerCards) wired`,
-            });
-          }
           const boards = yield* storage(
             "read the repo's board",
             sql<{ id: string }>`
@@ -500,24 +554,43 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
             return yield* skip(requestId, noBoard(mapping.repo));
           }
           const externalRef = externalRefOf(event);
-          const card = yield* port.file({
-            source: event.source,
-            boardId: board.id,
-            repo: mapping.repo,
-            title: event.title,
-            body: event.body,
-            baseRef: mapping.baseRef,
-            externalRef,
-            // A link the card pane renders, so only a web link; an adapter that passed anything
-            // else gets a card with no link rather than a delivery that fails on it.
-            externalUrl:
-              event.url !== undefined && isWebLink(event.url)
-                ? event.url
-                : undefined,
-          });
+          const body = cardBodyOf(event.body);
+          const filed = yield* cards
+            .file({
+              source: event.source,
+              boardId: board.id,
+              repo: mapping.repo,
+              title: event.title,
+              body: body.body,
+              baseRef: mapping.baseRef,
+              externalRef,
+              // A link the card pane renders, so only a web link; an adapter that passed anything
+              // else gets a card with no link rather than a delivery that fails on it.
+              externalUrl:
+                event.url !== undefined && isWebLink(event.url)
+                  ? event.url
+                  : undefined,
+            })
+            .pipe(
+              Effect.map((card) => ({ _tag: "filed" as const, card })),
+              Effect.catchTag("TriggerCardRefused", (refused) =>
+                Effect.succeed({ _tag: "refused" as const, refused }),
+              ),
+            );
+          if (filed._tag === "refused") {
+            return yield* skip(
+              requestId,
+              `${routedBy}, but the board refused the card's ${filed.refused.field}: ${filed.refused.message}`,
+            );
+          }
+          const card = filed.card;
           const reason = `${routedBy}: ${
             card.created ? "filed card" : "already on the board as card"
-          } ${card.id} (${externalRef}) on board ${board.id}`;
+          } ${card.id} (${externalRef}) on board ${board.id}${
+            body.cut === undefined
+              ? ""
+              : `; its body was cut to ${MAX_TASK_BODY_CHARS} of ${body.cut} characters`
+          }`;
           yield* processed(requestId, reason);
           return {
             status: "processed",

@@ -31,7 +31,11 @@ import {
   type TriggerEvent,
   type TriggerRule,
 } from "@repo/domain/Trigger";
-import { DEFAULT_DEFINITION_ID, DefinitionId } from "@repo/domain/Task";
+import {
+  DEFAULT_DEFINITION_ID,
+  DefinitionId,
+  MAX_TASK_BODY_CHARS,
+} from "@repo/domain/Task";
 import { DatabaseLive } from "@repo/storage-postgres";
 import {
   Deferred,
@@ -52,6 +56,8 @@ import {
 } from "./TriggerRoutes";
 import { TaskService, TaskServiceLive } from "./TaskService";
 import {
+  cardBodyOf,
+  NoCards,
   NoWriteBack,
   sessionRequestIdOf,
   TriggerCardsFromTaskService,
@@ -261,6 +267,7 @@ const withRuntime = async <A>(
           Layer.mergeAll(
             Layer.succeed(TriggerSessions, TriggerSessions.of(sessions)),
             Layer.succeed(TriggerWriteBack, TriggerWriteBack.of(writeBack)),
+            NoCards,
           ),
         ),
       ),
@@ -1444,6 +1451,7 @@ describe("a card rule", () => {
       readonly board?: boolean;
       readonly cards?: boolean;
       readonly storedRoutes?: boolean;
+      readonly rules?: ReadonlyArray<TriggerRule>;
     } = {},
   ): Promise<A> => {
     const created: Array<{ readonly id: SessionId }> = [];
@@ -1458,20 +1466,16 @@ describe("a card rule", () => {
       send: () => Effect.void,
     };
     const seam = TriggerServiceLive({
-      rules: cardRules(slug),
+      rules: options.rules ?? cardRules(slug),
       ...(options.storedRoutes === true ? { storedRoutes: true } : {}),
     }).pipe(
       Layer.provide(
         Layer.mergeAll(
           Layer.succeed(TriggerSessions, TriggerSessions.of(sessions)),
           NoWriteBack,
-          ...(options.cards === false
-            ? []
-            : [
-                TriggerCardsFromTaskService.pipe(
-                  Layer.provide(TaskServiceLive),
-                ),
-              ]),
+          options.cards === false
+            ? NoCards
+            : TriggerCardsFromTaskService.pipe(Layer.provide(TaskServiceLive)),
         ),
       ),
     );
@@ -1699,6 +1703,76 @@ describe("a card rule", () => {
         expect(created).toHaveLength(0);
       },
       { cards: false },
+    );
+  }, 60_000);
+
+  it("cuts a description over the card body's cap to the cap, with a marker, and says so", () => {
+    expect(cardBodyOf("short")).toEqual({ body: "short" });
+    const exact = "x".repeat(MAX_TASK_BODY_CHARS);
+    expect(cardBodyOf(exact)).toEqual({ body: exact });
+    const long = `${"y".repeat(MAX_TASK_BODY_CHARS)}TAIL`;
+    const cut = cardBodyOf(long);
+    expect(cut.cut).toBe(long.length);
+    expect(cut.body).toHaveLength(MAX_TASK_BODY_CHARS);
+    expect(cut.body.startsWith("yyyy")).toBe(true);
+    expect(cut.body).not.toContain("TAIL");
+    expect(cut.body).toContain(
+      `[cut at ${MAX_TASK_BODY_CHARS} characters by the factory; the source's description has ${long.length}]`,
+    );
+  });
+
+  it("files the card for an issue whose description is over the card body's cap, cut to the cap", async () => {
+    // Pasted logs: longer than a card body takes, shorter than the webhook body cap. A refusal here
+    // would answer 500 and give the claim back, so the sender would retry a delivery that can never
+    // file — the card is filed instead, with the head of the description and a marker.
+    const slug = cardRepo("long");
+    await withCards(slug, async ({ trigger, created, run }) => {
+      const description = `## Logs\n\n${"log line\n".repeat(4_500)}`;
+      expect(description.length).toBeGreaterThan(MAX_TASK_BODY_CHARS);
+      const delivery = linearDeliveryFor(cardRules(slug))(
+        linearIssue(`iss-${runId}-long`, { description }),
+      );
+      const outcome = await run(trigger.deliver(delivery!));
+      expect(outcome.status).toBe("processed");
+      expect(outcome.reason).toContain(
+        `its body was cut to ${MAX_TASK_BODY_CHARS} of ${description.length} characters`,
+      );
+      const cards = await run(cardsOn(slug));
+      expect(cards).toHaveLength(1);
+      expect(cards[0]?.body).toHaveLength(MAX_TASK_BODY_CHARS);
+      expect(cards[0]?.body?.startsWith("## Logs")).toBe(true);
+      expect(cards[0]?.body).toContain("[cut at ");
+      expect(await deliveryStatus(delivery!.requestId)).toBe("processed");
+      expect(created).toHaveLength(0);
+    });
+  }, 60_000);
+
+  it("records a card the board refuses for its input as a skip naming the field, not a failure to retry", async () => {
+    const slug = cardRepo("refused");
+    const rules = cardRules(slug).map((rule) => ({
+      ...rule,
+      baseRef: "main..evil",
+    }));
+    await withCards(
+      slug,
+      async ({ trigger, created, run }) => {
+        const delivery = linearDeliveryFor(rules)(
+          linearIssue(`iss-${runId}-refused`),
+        );
+        const outcome = await run(trigger.deliver(delivery!));
+        expect(outcome.status).toBe("skipped");
+        expect(outcome.reason).toContain(
+          "the board refused the card's baseRef",
+        );
+        expect(outcome.reason).toContain('"main..evil"');
+        // Recorded, so a retry is answered with the skip rather than refused again.
+        expect(await deliveryStatus(delivery!.requestId)).toBe("skipped");
+        const replayed = await run(trigger.deliver(delivery!));
+        expect(replayed).toMatchObject({ status: "skipped", replayed: true });
+        expect(await run(cardsOn(slug))).toHaveLength(0);
+        expect(created).toHaveLength(0);
+      },
+      { rules },
     );
   }, 60_000);
 

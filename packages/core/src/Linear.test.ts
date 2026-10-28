@@ -27,6 +27,7 @@ import {
   linearRequestId,
 } from "./Linear";
 import {
+  NoCards,
   NoWriteBack,
   TriggerService,
   TriggerServiceLive,
@@ -399,7 +400,11 @@ const withSeam = async <A>(
   const runtime = ManagedRuntime.make(
     TriggerServiceLive({ rules }).pipe(
       Layer.provide(
-        Layer.mergeAll(Layer.succeed(TriggerSessions, sessions), NoWriteBack),
+        Layer.mergeAll(
+          Layer.succeed(TriggerSessions, sessions),
+          NoWriteBack,
+          NoCards,
+        ),
       ),
       Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
     ),

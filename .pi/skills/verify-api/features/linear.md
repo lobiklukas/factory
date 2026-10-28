@@ -58,6 +58,12 @@ reclaims once the board exists, as it does an unregistered repo. The rule's `pro
 card's runs are told its body (LOB-260). The run starts from the card (B12), and the write-back
 follows the run ([linear-writeback.md](linear-writeback.md)).
 
+**What the board refuses is a decision, not a failure.** A description over the card body's cap
+(32,000 characters) is cut to the cap with a marker, and the reason says so, rather than refused. A
+card the board refuses for its input (a base ref git would not take) is a recorded skip naming the
+field ("the board refused the card's baseRef"), not a 500 for Linear to retry. Filing the card
+acknowledges nothing on the issue, nor on any other source.
+
 **How the skill drives it.** `./linear.sh` boots the skill's API instance (`API_PORT`, default
 `9415`) with two per-run rules (`factory`, and `factory-later` on a repo registered mid-drive) and
 `LINEAR_WEBHOOK_SECRET`, then runs `bun linear.ts`: fourteen checks

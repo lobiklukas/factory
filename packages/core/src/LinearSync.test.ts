@@ -20,6 +20,11 @@ import { afterAll, describe, expect, it } from "vitest";
 import type { RepoSlug, SessionId } from "@repo/domain/Session";
 import { SessionError } from "@repo/domain/Session";
 import {
+  DEFAULT_DEFINITION_ID,
+  DefinitionId,
+  type TaskId,
+} from "@repo/domain/Task";
+import {
   externalRefOf,
   type TriggerEvent,
   type TriggerRule,
@@ -59,6 +64,7 @@ import {
   TEAM,
   TODO,
 } from "./linearFake";
+import { mintSessionId } from "./ids";
 import { PrError } from "./pr";
 import { proposalIssueBody, proposalMarker } from "./ProposalTracker";
 import {
@@ -66,8 +72,10 @@ import {
   SessionWriteBack,
   type PullRequestStepExit,
 } from "./SessionWriteBack";
+import { TaskService, TaskServiceLive } from "./TaskService";
 import {
   deliveryIdOfSession,
+  NoCards,
   sessionRequestIdOf,
   TriggerService,
   TriggerServiceLive,
@@ -901,7 +909,11 @@ describe("the session write-back and the PR lifecycle, on Postgres", () => {
         yield* sql`DELETE FROM sessions WHERE id LIKE ${`ses_lws_%_${runId}`}`;
         yield* sql`DELETE FROM webhook_deliveries WHERE request_id = ${triggerDelivery}`;
         yield* sql`DELETE FROM repos WHERE slug = ${triggerSlug}`;
-        yield* sql`DELETE FROM board_instances WHERE id LIKE ${`brd_lws_%_${runId}`}`;
+        // A card case's session is a canonical id (its run joins a real card), so it is named.
+        for (const id of cardSessions) {
+          yield* sql`DELETE FROM task_runs WHERE session_id = ${id}`;
+          yield* sql`DELETE FROM sessions WHERE id = ${id}`;
+        }
       }),
     );
     await runtime.dispose();
@@ -923,19 +935,54 @@ describe("the session write-back and the PR lifecycle, on Postgres", () => {
     return Promise.resolve();
   };
 
+  /** The run → card links `run` upserts, by session id (LOB-254). */
+  const cards = new Map<string, TaskId>();
+  const cardSessions: Array<SessionId> = [];
+
   /**
-   * The card a seeded session is a run of, by its external ref (LOB-254). Upserted by `run` beside
-   * the session, for the same reason: a rebuild in another suite drops a `task_runs` row with no log.
+   * A session that is a run of a card filed under `externalRef` (LOB-254). The board and the card are
+   * made by the real `TaskService`, so their ids are canonical, their `created` events are logged and
+   * the repo is registered — rows any other suite's `listBoards` or rebuild reads as it reads its own.
+   * The session id is minted for the same reason: the run row's id is the session's, and a card's
+   * runs are decoded by whoever reads the card. The `task_runs` row has no log behind it, so `run`
+   * upserts it beside the session, for the reason `seedSession` gives.
    */
-  const cards = new Map<string, string>();
-  const seedCardRun = (
-    id: string,
+  const seedCardRun = async (
+    name: string,
     externalRef: string,
     requestId: string | null,
     prUrl: string,
-  ) => {
-    cards.set(id, externalRef);
-    return seedSession(id, requestId, prUrl);
+  ): Promise<SessionId> => {
+    const slug = `acme/lws-card-${name}-${runId}` as RepoSlug;
+    const taskId = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql`INSERT INTO repos (slug) VALUES (${slug}) ON CONFLICT (slug) DO NOTHING`;
+        const tasks = yield* TaskService;
+        const board = yield* tasks.createBoard({
+          repo: slug,
+          definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
+        });
+        const filed = yield* tasks.file({
+          boardId: board.id,
+          title: "a card filed from a tracker",
+          externalRef,
+          actor: "trigger:linear",
+        });
+        return filed.task.id;
+      }).pipe(
+        Effect.provide(
+          TaskServiceLive.pipe(
+            Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
+          ),
+        ),
+      ),
+    );
+    const id = await runtime.runPromise(mintSessionId);
+    cards.set(id, taskId);
+    cardSessions.push(id);
+    await seedSession(id, requestId, prUrl);
+    return id;
   };
 
   /** Run against the fake Linear and the real database, with both write-backs wired. */
@@ -958,19 +1005,7 @@ describe("the session write-back and the PR lifecycle, on Postgres", () => {
                 ON CONFLICT (id) DO UPDATE SET pr_url = EXCLUDED.pr_url
               `;
             }
-            for (const [id, externalRef] of cards) {
-              const board = id.replace(/^ses_/, "brd_");
-              const task = id.replace(/^ses_/, "tsk_");
-              yield* sql`
-                INSERT INTO board_instances (id, repo, definition_id, definition_version)
-                VALUES (${board}, ${`acme/${board}`}, 'default', 1)
-                ON CONFLICT (id) DO NOTHING
-              `;
-              yield* sql`
-                INSERT INTO tasks (id, board_id, title, "column", definition_version, revision, external_ref)
-                VALUES (${task}, ${board}, 'a card filed from Linear', 'building', 1, 1, ${externalRef})
-                ON CONFLICT (id) DO NOTHING
-              `;
+            for (const [id, task] of cards) {
               yield* sql`
                 INSERT INTO task_runs (id, task_id, session_id, "column")
                 VALUES (${id}, ${task}, ${id}, 'building')
@@ -1043,14 +1078,14 @@ describe("the session write-back and the PR lifecycle, on Postgres", () => {
   it("follows a card's run to the issue the card was filed from (LOB-254)", async () => {
     // The run's own request id names no issue: a card-mode delivery opened no session, so the card's
     // external ref is the only binding. A mutation that drops the card join reports nothing here.
-    const id = `ses_lws_card_${runId}`;
-    await seedCardRun(
-      id,
-      `linear:${key(id)}`,
+    const issue = `ENG-card-${runId}`;
+    const id = await seedCardRun(
+      "linear",
+      `linear:${issue}`,
       `client-card-${runId}`,
       `${pr.url}-c-${runId}`,
     );
-    const fake = makeLinear({ identifier: key(id), start: TODO });
+    const fake = makeLinear({ identifier: issue, start: TODO });
     await run(fake, report(id, Exit.succeed({ ...pr, outcome: "opened" })));
     await run(
       fake,
@@ -1060,7 +1095,7 @@ describe("the session write-back and the PR lifecycle, on Postgres", () => {
     expect(fake.issue.comments).toHaveLength(1);
     expect(fake.issue.comments[0]).toContain(`factory:${id}:pr`);
 
-    const merged = makeLinear({ identifier: key(id), start: REVIEW });
+    const merged = makeLinear({ identifier: issue, start: REVIEW });
     const count = await run(
       merged,
       syncPullRequestLifecycle({
@@ -1073,14 +1108,14 @@ describe("the session write-back and the PR lifecycle, on Postgres", () => {
   });
 
   it("a card filed from anything but Linear reports nothing", async () => {
-    const id = `ses_lws_jira_${runId}`;
-    await seedCardRun(
-      id,
-      `jira:${key(id)}`,
+    const issue = `ENG-jira-${runId}`;
+    const id = await seedCardRun(
+      "jira",
+      `jira:${issue}`,
       `client-jira-${runId}`,
       `${pr.url}-j-${runId}`,
     );
-    const fake = makeLinear({ identifier: key(id), start: TODO });
+    const fake = makeLinear({ identifier: issue, start: TODO });
     await run(fake, report(id, Exit.succeed({ ...pr, outcome: "opened" })));
     expect(fake.seen).toEqual([]);
   });
@@ -1187,6 +1222,7 @@ describe("the session write-back and the PR lifecycle, on Postgres", () => {
               Layer.provide(LinearIssueSyncLive(config)),
               Layer.provide(fake.layer),
             ),
+            NoCards,
           ),
         ),
         Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
