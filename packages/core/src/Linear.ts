@@ -40,7 +40,9 @@
  * webhook" — the subscription — so it is the same on every delivery that subscription sends, and
  * nothing here reads it.
  */
+import { isWebLink } from "@repo/domain/Task";
 import {
+  externalRefOf,
   resolveMapping,
   ruleClaims,
   startsWork,
@@ -204,6 +206,9 @@ export const linearEvent = (
     action === TRIGGER_ACTION ||
     (action === "update" && addedAClaimedLabel(body, entity, rules));
   const team = teamKey(entity);
+  // The issue's own link (Linear's `data.url`, or the webhook's top-level `url` for its subject), so a
+  // card filed from it can link back (LOB-254). Only a web link: anything else is no link.
+  const url = stringField(entity, "url") ?? stringField(body, "url");
   return {
     source: "linear",
     key: id,
@@ -214,6 +219,7 @@ export const linearEvent = (
     body: stringField(entity, "description") ?? "",
     labels: labelNames(entity["labels"]),
     ...(team === undefined ? {} : { team }),
+    ...(url === undefined || !isWebLink(url) ? {} : { url }),
   };
 };
 
@@ -260,6 +266,22 @@ const MAPPED_KEY = /^linear:(.+):mapped$/;
 export const linearIssueOfDelivery = (
   deliveryId: string | undefined,
 ): string | undefined => MAPPED_KEY.exec(deliveryId ?? "")?.[1];
+
+/**
+ * The Linear issue a card was filed for, from its external ref (`linear:<issue id>`, `externalRefOf`
+ * over a Linear event — LOB-254), or `undefined` for a card no Linear delivery filed. The card's runs
+ * are how the write-back (`./LinearSync`) reaches the issue when no session was opened by the
+ * delivery itself.
+ */
+export const linearIssueOfExternalRef = (
+  externalRef: string | null | undefined,
+): string | undefined => {
+  const prefix = externalRefOf({ source: "linear", key: "" });
+  return externalRef?.startsWith(prefix) === true &&
+    externalRef.length > prefix.length
+    ? externalRef.slice(prefix.length)
+    : undefined;
+};
 
 /** The idempotency key for a normalized Linear event: **one issue is one unit of work**. */
 export const linearRequestId = (

@@ -5,7 +5,7 @@ import type {
   DefinitionConfig,
   Task,
 } from "@repo/domain/Task";
-import { columnTransitions } from "@repo/domain/Task";
+import { columnTransitions, isWebLink } from "@repo/domain/Task";
 
 /**
  * The board as lanes (LOB-75): what `/boards/$boardId` renders, computed from two server reads.
@@ -61,6 +61,28 @@ export const blockedLabel = (task: Task): string | null =>
   task.blocked === undefined
     ? null
     : `blocked · ${BLOCK_WORDS[task.blocked.reason]}`;
+
+/**
+ * Where the card came from outside the factory, as the card pane shows it (LOB-254): the external
+ * ref as its label, and a link when the card carries a web link — its `externalUrl`, or a ref that is
+ * itself one (a person may file a card with the issue's URL as its ref, LOB-260). `href` is only ever
+ * an absolute http(s) URL (`isWebLink`), so the page never renders a `javascript:` link. `null` for a
+ * card filed from nowhere.
+ */
+export const externalLink = (
+  task: Task,
+): { readonly label: string; readonly href: string | undefined } | null => {
+  const ref = task.externalRef;
+  const url = task.externalUrl;
+  if (ref === undefined && url === undefined) return null;
+  const href =
+    url !== undefined && isWebLink(url)
+      ? url
+      : ref !== undefined && isWebLink(ref)
+        ? ref
+        : undefined;
+  return { label: ref ?? url ?? "", href };
+};
 
 /**
  * One move the card pane offers (LOB-76): a column the card's own column declares a transition to,

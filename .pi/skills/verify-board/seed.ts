@@ -9,8 +9,9 @@
 // the *reading and moving* that a person does by hand.
 //
 // `SEED_CARD=0` seeds the board alone (LOB-84): `./up.sh` does, because `drive.sh` creates its own
-// card through the API's `createTask` — the door a trigger uses — so every drive starts from a card
-// at revision 1 and the drive can be run twice against one instance. `ask.sh` keeps the default.
+// card through the API's `createTask` — the service a trigger's card goes through too
+// (`TaskService.file`, LOB-254) — so every drive starts from a card at revision 1 and the drive can
+// be run twice against one instance. `ask.sh` keeps the default.
 //
 // `SEED_DEFINITION_VERSION=newest` pins the default definition's newest version instead of version 1
 // (LOB-86): `./up.sh` does, so the drive's card runs the shipped pipeline — `review` gated on

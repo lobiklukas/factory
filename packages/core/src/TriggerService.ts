@@ -22,11 +22,21 @@
  * port is two calls (`create`, `send`) and a test can prove the dedupe against real Postgres with
  * a counting fake, while `TriggerSessionsFromSessionService` is the production wiring.
  *
+ * **A card rule puts a card on the board instead (LOB-254).** A rule in `card` mode
+ * (`TriggerRule.mode`) makes no session: the delivery files one card on the repo's board through a
+ * second port (`TriggerCards`, `TaskService.file` in production), in the definition's initial
+ * column, with the event's title, its body as the card's body and `<source>:<key>` as its external
+ * ref. The card is keyed by that ref, not by the delivery, so a second, distinct delivery about the
+ * same issue finds the card the first made; a repo with no board is a recorded skip that names
+ * `factory board create`, and — like an unregistered repo — reclaimable by a delivery keyed by its
+ * work once the operator makes one. A run starts from the card (docs/board.md B12), and the Linear
+ * write-back follows the card's runs to the issue (`./LinearSync`).
+ *
  * **The write-back is optional and injected.** No adapter in part 1 needs one (the generic webhook
  * has no place to write, and the Linear route only delegates), so the default is a no-op: a
  * deployment that configures no client never fails a delivery because of one.
  */
-import { Context, Duration, Effect, Exit, Layer } from "effect";
+import { Context, Duration, Effect, Exit, Layer, Option } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 import type {
@@ -34,7 +44,9 @@ import type {
   RepoSlug,
   SessionId,
 } from "@repo/domain/Session";
+import { isWebLink, type TaskId } from "@repo/domain/Task";
 import {
+  externalRefOf,
   resolveMapping,
   ruleClaims,
   startsWork,
@@ -42,11 +54,13 @@ import {
   TriggerError,
   type TriggerDelivery,
   type TriggerEvent,
+  type TriggerMapping,
   type TriggerOutcome,
   type TriggerRule,
   type TriggerSource,
 } from "@repo/domain/Trigger";
 import { SessionService } from "./SessionService";
+import { TaskService } from "./TaskService";
 import { envRoutedRules, readRoutedRules } from "./TriggerRoutes";
 
 export type TriggerServiceShape = {
@@ -109,6 +123,77 @@ export class TriggerSessions extends Context.Service<
   TriggerSessions,
   TriggerSessionsShape
 >()("@repo/core/TriggerSessions") {}
+
+/**
+ * What the seam needs of the board, for a rule in `card` mode (LOB-254): file one card, at most once
+ * per item. `externalRef` is the dedupe key (`externalRefOf`), so an implementation answers the card
+ * the board already holds for it with `created: false` rather than making a second.
+ */
+export type TriggerCardsShape = {
+  readonly file: (input: {
+    /** Where the delivery came from: the card's actor is `trigger:<source>`, as a session's is. */
+    readonly source: TriggerSource;
+    readonly boardId: string;
+    readonly repo: RepoSlug;
+    readonly title: string;
+    readonly body: string;
+    readonly baseRef: string | undefined;
+    readonly externalRef: string;
+    readonly externalUrl: string | undefined;
+  }) => Effect.Effect<
+    { readonly id: TaskId; readonly created: boolean },
+    TriggerError
+  >;
+};
+
+/**
+ * The card port. Optional in the seam's requirements, unlike `TriggerSessions`: the docs and review
+ * seams carry rules of their own and never file a card, so they wire none. A card rule that reaches
+ * a seam with no port fails the delivery with `card-create` naming the gap — loudly, and with the
+ * claim given back — rather than quietly opening a session instead.
+ */
+export class TriggerCards extends Context.Service<
+  TriggerCards,
+  TriggerCardsShape
+>()("@repo/core/TriggerCards") {}
+
+/**
+ * The production card port: `TaskService.file`. A `TaskError` becomes a `TriggerError` here, so the
+ * trigger path does not leak a board-shaped failure. A card whose input the service refuses (a body
+ * over its cap, a base ref git would not take) fails the delivery the same way, naming the field.
+ */
+export const TriggerCardsFromTaskService = Layer.effect(
+  TriggerCards,
+  Effect.gen(function* () {
+    const tasks = yield* TaskService;
+    return TriggerCards.of({
+      file: (input) =>
+        tasks
+          .file({
+            boardId: input.boardId,
+            repo: input.repo,
+            title: input.title,
+            body: input.body,
+            ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
+            externalRef: input.externalRef,
+            ...(input.externalUrl === undefined
+              ? {}
+              : { externalUrl: input.externalUrl }),
+            actor: triggerActorOf(input.source),
+          })
+          .pipe(
+            Effect.map(({ task, created }) => ({ id: task.id, created })),
+            Effect.mapError(
+              (cause) =>
+                new TriggerError({
+                  code: "card-create",
+                  message: `${cause._tag}: ${cause.message}`,
+                }),
+            ),
+          ),
+    });
+  }),
+);
 
 /**
  * The request id a delivery's session is created under: the delivery's own id, namespaced, because
@@ -253,6 +338,14 @@ const unregisteredRepo = (repo: RepoSlug): string =>
   `repo ${repo} is not registered`;
 const UNREGISTERED_REPO_PATTERN = "repo % is not registered";
 
+/**
+ * The no-board skip reason (LOB-254), and its pattern, for the same reason: a card rule's repo with
+ * no board is the other refusal an operator fixes, and a delivery keyed by its work reclaims it.
+ */
+const noBoard = (repo: RepoSlug): string =>
+  `repo ${repo} has no board (create one with \`factory board create --repo ${repo}\`)`;
+const NO_BOARD_PATTERN = "repo % has no board (%";
+
 const toTriggerError =
   (what: string) =>
   (cause: { readonly message: string }): TriggerError =>
@@ -267,6 +360,7 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
         Duration.fromInputUnsafe(options.reclaimAfter ?? TRIGGER_RECLAIM_AFTER),
       );
       const sessions = yield* TriggerSessions;
+      const cards = yield* Effect.serviceOption(TriggerCards);
       const writeBack = yield* TriggerWriteBack;
       const fallback = envRoutedRules(options.rules, options.rulesOrigin);
       /** The rule set one delivery is routed with, stored routes first (LOB-266). */
@@ -332,6 +426,76 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           };
         });
 
+      /** Record a processed delivery's outcome reason, in the column a skip's reason goes in. */
+      const processed = (requestId: string, reason: string) =>
+        storage(
+          "record processed delivery",
+          sql`UPDATE webhook_deliveries
+            SET status = 'processed', skip_reason = ${reason}
+            WHERE request_id = ${requestId}`,
+        );
+
+      /**
+       * A card rule's delivery (LOB-254): one card on the repo's board, and no session. The board is
+       * the repo's one board (`createBoard` keeps it to one); none is a recorded skip naming the
+       * command that makes one. The card is filed under the item's key, so this delivery and any
+       * other about the same issue — a replay is answered before this, by the claim — land on one
+       * card, and the reason says which happened.
+       */
+      const fileCard = (
+        requestId: string,
+        event: TriggerEvent,
+        mapping: TriggerMapping,
+        routedBy: string,
+      ): Effect.Effect<TriggerOutcome, TriggerError> =>
+        Effect.gen(function* () {
+          const port = Option.getOrUndefined(cards);
+          if (port === undefined) {
+            return yield* new TriggerError({
+              code: "card-create",
+              message: `rule "${mapping.label}" files a card, but this trigger seam has no card port (TriggerCards) wired`,
+            });
+          }
+          const boards = yield* storage(
+            "read the repo's board",
+            sql<{ id: string }>`
+              SELECT id FROM board_instances WHERE repo = ${mapping.repo}
+              ORDER BY created_at, id
+              LIMIT 1
+            `,
+          );
+          const board = boards[0];
+          if (board === undefined) {
+            return yield* skip(requestId, noBoard(mapping.repo));
+          }
+          const externalRef = externalRefOf(event);
+          const card = yield* port.file({
+            source: event.source,
+            boardId: board.id,
+            repo: mapping.repo,
+            title: event.title,
+            body: event.body,
+            baseRef: mapping.baseRef,
+            externalRef,
+            // A link the card pane renders, so only a web link; an adapter that passed anything
+            // else gets a card with no link rather than a delivery that fails on it.
+            externalUrl:
+              event.url !== undefined && isWebLink(event.url)
+                ? event.url
+                : undefined,
+          });
+          const reason = `${routedBy}: ${
+            card.created ? "filed card" : "already on the board as card"
+          } ${card.id} (${externalRef}) on board ${board.id}`;
+          yield* processed(requestId, reason);
+          return {
+            status: "processed",
+            replayed: false,
+            taskId: card.id,
+            reason,
+          } as const;
+        });
+
       const deliver = (
         delivery: TriggerDelivery,
       ): Effect.Effect<TriggerOutcome, TriggerError> =>
@@ -361,7 +525,8 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                   ON CONFLICT (request_id) DO UPDATE
                     SET status = 'received', skip_reason = NULL, claimed_at = now()
                     WHERE (webhook_deliveries.status = 'skipped'
-                        AND webhook_deliveries.skip_reason LIKE ${UNREGISTERED_REPO_PATTERN})
+                        AND (webhook_deliveries.skip_reason LIKE ${UNREGISTERED_REPO_PATTERN}
+                          OR webhook_deliveries.skip_reason LIKE ${NO_BOARD_PATTERN}))
                       OR (webhook_deliveries.status = 'received'
                         AND webhook_deliveries.claimed_at < now() - make_interval(secs => ${reclaimSeconds}))
                   RETURNING request_id, claimed_at::text AS claim
@@ -451,6 +616,15 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                 return yield* skip(requestId, unregisteredRepo(mapping.repo));
               }
 
+              // What the delivery's recorded reason says chose the repo, whichever thing it starts.
+              const routedBy = `rule "${mapping.label}"${
+                matched.origin === undefined ? "" : ` (${matched.origin})`
+              } mapped it to ${mapping.repo}`;
+
+              if (mapping.mode === "card") {
+                return yield* fileCard(requestId, event, mapping, routedBy);
+              }
+
               const session = yield* sessions.create({
                 source: event.source,
                 title: event.title,
@@ -478,15 +652,8 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
               // (`skip_reason` is the delivery's recorded outcome reason, whatever the outcome), so a
               // replay of a processed delivery names the route that started it, and so does the row
               // an operator reads after the first response is gone.
-              const reason = `rule "${mapping.label}"${
-                matched.origin === undefined ? "" : ` (${matched.origin})`
-              } mapped it to ${mapping.repo}`;
-              yield* storage(
-                "record processed delivery",
-                sql`UPDATE webhook_deliveries
-                  SET status = 'processed', skip_reason = ${reason}
-                  WHERE request_id = ${requestId}`,
-              );
+              const reason = routedBy;
+              yield* processed(requestId, reason);
 
               return {
                 status: "processed",

@@ -17,6 +17,12 @@
  *   through a signed `pull_request` webhook (`handleGitHubPullRequestWebhook`, served at
  *   `POST /webhooks/github` by `apps/api`).
  *
+ * **A card filed from an issue is followed through its runs (LOB-254).** A card-mode delivery opens
+ * no session — it files a card whose external ref is `linear:<issue id>` — so the issue is reached
+ * from a run's session through its card (`task_runs` → `tasks.external_ref`), and the PR, failure
+ * and merge reports above land on the issue exactly as they do for a session the delivery opened.
+ * Filing the card moves nothing: the issue moves when the card's run opens its PR.
+ *
  * **The issue's state is the task's, never the review's.** Mastra Factory keeps a PR's review as
  * its own item with its own completion rules, and LOB-15 keeps that separation: there is no
  * "approved" or "changes requested" state in the map, nothing here records a review verdict on the
@@ -78,7 +84,7 @@ import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
 import type { SessionId } from "@repo/domain/Session";
 import type { VerifyRecord } from "@repo/harness";
-import { linearIssueOfDelivery } from "./Linear";
+import { linearIssueOfDelivery, linearIssueOfExternalRef } from "./Linear";
 import { pullRequestReport, SessionWriteBack } from "./SessionWriteBack";
 import { deliveryIdOfSession, TriggerWriteBack } from "./TriggerService";
 
@@ -832,21 +838,38 @@ const storageError =
       transient: false,
     });
 
+/** What a session row says about the issue it works on: its request id, and its card's ref. */
+type SessionIssueRow = {
+  readonly requestId: string | null;
+  readonly externalRef: string | null;
+};
+
+/**
+ * The Linear issue a session works on, from the two records that bind one: the session's own
+ * request id — `trigger:linear:<issue>:mapped`, written by the seam when the issue's delivery opened
+ * it — or, for a run on a card (LOB-254), the card's external ref, `linear:<issue>`, written when a
+ * card-mode delivery filed the card. Neither needs a table of its own.
+ */
+const issueOfRow = (row: SessionIssueRow | undefined): string | undefined =>
+  linearIssueOfDelivery(deliveryIdOfSession(row?.requestId)) ??
+  linearIssueOfExternalRef(row?.externalRef);
+
 /**
  * The Linear issue a session was delegated from, or `undefined` for a session no Linear delivery
- * opened. The session's own request id is the record — `trigger:linear:<issue>:mapped`, written by
- * the seam when the issue's delivery opened it — so the binding needs no table of its own.
+ * opened and no Linear card owns (`issueOfRow`).
  */
 const issueOfSession = (
   sql: SqlClient,
   sessionId: SessionId,
 ): Effect.Effect<string | undefined, LinearSyncError> =>
-  sql<{ readonly requestId: string | null }>`
-    SELECT request_id FROM sessions WHERE id = ${sessionId}
+  sql<SessionIssueRow>`
+    SELECT s.request_id, t.external_ref
+    FROM sessions s
+    LEFT JOIN task_runs tr ON tr.session_id = s.id
+    LEFT JOIN tasks t ON t.id = tr.task_id
+    WHERE s.id = ${sessionId}
   `.pipe(
-    Effect.map((rows) =>
-      linearIssueOfDelivery(deliveryIdOfSession(rows[0]?.requestId)),
-    ),
+    Effect.map((rows) => issueOfRow(rows[0])),
     Effect.mapError(storageError(sessionId, "read the session's issue")),
   );
 
@@ -960,18 +983,18 @@ export const syncPullRequestLifecycle = (
     if (event._tag === "other") return 0;
     const sync = yield* LinearIssueSync;
     const sql = yield* SqlClient;
-    const rows = yield* sql<{
-      readonly id: SessionId;
-      readonly requestId: string | null;
-    }>`
-      SELECT id, request_id FROM sessions
-      WHERE pr_url = ${event.pr.url} OR pr_url = ${event.apiUrl ?? event.pr.url}
+    const rows = yield* sql<SessionIssueRow & { readonly id: SessionId }>`
+      SELECT s.id, s.request_id, t.external_ref
+      FROM sessions s
+      LEFT JOIN task_runs tr ON tr.session_id = s.id
+      LEFT JOIN tasks t ON t.id = tr.task_id
+      WHERE s.pr_url = ${event.pr.url} OR s.pr_url = ${event.apiUrl ?? event.pr.url}
     `.pipe(
       Effect.mapError(storageError(event.pr.url, "read the PR's sessions")),
     );
     let synced = 0;
     for (const row of rows) {
-      const issueId = linearIssueOfDelivery(deliveryIdOfSession(row.requestId));
+      const issueId = issueOfRow(row);
       if (issueId === undefined) continue;
       yield* event._tag === "merged"
         ? sync.merged({ issueId, sessionId: row.id, pr: event.pr })

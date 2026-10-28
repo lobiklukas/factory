@@ -66,6 +66,8 @@ import {
   sentryDelivery,
   sentryStartsWork,
   verifySentrySignature,
+  TaskServiceLive,
+  TriggerCardsFromTaskService,
   TriggerService,
   TriggerServiceLive,
   TriggerSessionsFromSessionService,
@@ -550,6 +552,7 @@ const handle = (adapter: () => Adapter) =>
       ...(delivered.sessionId === undefined
         ? {}
         : { sessionId: delivered.sessionId }),
+      ...(delivered.taskId === undefined ? {} : { taskId: delivered.taskId }),
       ...(delivered.reason === undefined ? {} : { reason: delivered.reason }),
     });
   });
@@ -684,8 +687,10 @@ export const webhookLiveFor = (rules: ReadonlyArray<TriggerRule>) =>
           Layer.provide(
             // Linear's write-back when a key is configured (LOB-15): a delegated issue moves to its
             // started state when its session opens. Otherwise none.
+            // A card rule (LOB-254) files its card through `TaskService`, the one writer of cards.
             Layer.mergeAll(
               TriggerSessionsFromSessionService,
+              TriggerCardsFromTaskService.pipe(Layer.provide(TaskServiceLive)),
               TriggerWriteBackLive,
             ),
           ),
