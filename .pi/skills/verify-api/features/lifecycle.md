@@ -49,7 +49,7 @@ whole log's scheduler runs, a pending mission included), so
 the run carries on as the same submission in the same conversation, the tool call the kill cut short
 settles as `interrupted` rather than running twice, and the model answers after it. The boot is what
 opens it: the owner's projection marks the row while a run is in flight
-(`sessions.run_session_root`, migration `0031`), and `resumeRuns` reopens the rows marked under the
+(`sessions.run_session_root`, migration `0032`), and `resumeRuns` reopens the rows marked under the
 booting process's root, as `resumeMissions` does for missions (LOB-231). A SIGTERM's close leaves
 the same placed run, so the boot continues that too. A released session is the exception: its run
 has no directory, so it is left placed and never resumed.
