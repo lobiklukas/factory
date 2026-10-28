@@ -65,13 +65,19 @@ run — a `bash` call, then a reply — so a one-cent cap is reached by the firs
 - **again** — a second message starts a run that stops before its first request: a second stop and
   the spend unchanged.
 - **default** — a create naming no cap gets `SESSION_BUDGET`, and its run answers as an uncapped one.
+- **raise** (C23) — `setSessionBudget` on the stopped session answers the new cap (unspent past what
+  was spent) with no stop; the snapshot agrees and the transcript keeps both stops; the next message
+  runs again and its reply is sent (spend passes the old cap, no third stop). `factory budget <session>
+--cap 0.5` prints `capped <id>: $0.5000 cap, $0.0200 spent`.
 - **operator** — the API log names the stopped session; `factory run --budget 0.01` prints the
   `budget` line, the `[budget]` entry, `answer: (no answer)` and the `stopped:` line.
 
 Evidence under `$EVIDENCE_DIR/api/`: `budget.json`, `budget-transcript.txt`, `budget-cli.txt`,
-`budget-process.json`, `budget-api.log`.
+`budget-process.json`, `budget-api.log`, `budget-cli-set.txt`.
 
-The suites cover what a drive cannot reach: `packages/harness/src/budget.test.ts` counts the faux
+The suites cover what a drive cannot reach: `packages/harness/src/budget.test.ts` (C23: a raised session runs again, the stop is cleared, a
+raised cap stops again at its own limit; `SessionService.budget.test.ts` for the service, the RPC in
+`apps/api/src/Rpc/Session.test.ts`) counts the faux
 provider's calls (the stopped request was never sent), the exact-cap boundary, the fold, and a crash
 between the stop's commit and the abort — the first process holds the request instead of sending it,
 and the recovered request re-checks and records no second stop — a refused stop record and a refused
@@ -84,9 +90,11 @@ without sending a request, and a fork of an uncapped session getting the default
 
 - **Compaction and curation spend.** Neither is a generation request, so the hook does not stop
   them; their spend counts toward the total it checks.
-- **Raising a cap.** Not built: a stopped session stays stopped, and so does a fork of it. A replay
-  of it runs again from no spend, under the same cap.
+- **A fork of a stopped session** stays stopped (it carries the spend and keeps the cap), and a replay
+  of it runs again from no spend under the same cap; raising a cap is per session, on its own log.
 - **Forks and replays over the wire.** The inheritance is proven by the suites, not by `./budget.sh`.
-- **The dashboard.** The web transcript's marker row for a stop is not driven by a browser here.
+- **The dashboard.** The web transcript's marker row for a stop, and its **Raise cap** action, are
+  not driven by a browser here: `.pi/skills/verify-board/budget.sh` drives them (and the Start run
+  Budget field, and `factory board start --budget`).
 - **A real provider's prices.** The drive prices the faux model; the hook reads `pi.usage`, which a
   real provider fills the same way.

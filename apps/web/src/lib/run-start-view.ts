@@ -40,14 +40,42 @@ export const startSendable = (draft: string): StartSendable =>
     : { ok: true };
 
 /**
+ * The budget field's text as the payload carries it (C23): blank is no budget of this run's own
+ * (the server's default cap applies, or none), and anything else must be a positive amount of US
+ * dollars — the schema `createSession` and `setSessionBudget` hold it to — so a value the server
+ * would refuse is refused here, before a run is opened and left unsent.
+ */
+export type StartBudget =
+  | { readonly ok: true; readonly budget: number | undefined }
+  | { readonly ok: false; readonly reason: string };
+
+export const startBudget = (typed: string): StartBudget => {
+  const text = typed.trim();
+  if (text === "") return { ok: true, budget: undefined };
+  const amount = Number(text);
+  return Number.isFinite(amount) && amount > 0
+    ? { ok: true, budget: amount }
+    : {
+        ok: false,
+        reason: `A budget is a positive amount of US dollars, like 2.50; "${text}" is not one`,
+      };
+};
+
+/**
  * The `createSession` input for a run on `task`: the one `factory board start` sends for the same
  * card — the card named, the column it sits in, the repository it is bound to — with the
  * dashboard's actor, so the run's spend is the dashboard's (LOB-162).
  */
-export const startRunSession = (task: Task): CreateSessionInput => ({
+export const startRunSession = (
+  task: Task,
+  budget?: number,
+): CreateSessionInput => ({
   title: task.title,
   taskId: task.id,
   taskColumn: task.column,
   actor: DASHBOARD_ACTOR,
   ...(task.repo === undefined ? {} : { repo: task.repo }),
+  // C23: the run's spend ceiling, as `factory board start --budget` sends it. Absent when none was
+  // typed, so the server's default cap, if it has one, applies.
+  ...(budget === undefined ? {} : { budget }),
 });

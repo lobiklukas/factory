@@ -280,11 +280,15 @@ export const taskExitAtom = Atom.family((taskId: TaskId) =>
  * run and says so, leaving the person to type into it. Only a failed `createSession` fails the atom.
  */
 export const startRunAtom = runtime.fn(
-  (input: { readonly task: Task; readonly prompt: string }) =>
+  (input: {
+    readonly task: Task;
+    readonly prompt: string;
+    readonly budget?: number | undefined;
+  }) =>
     Effect.gen(function* () {
       const rpc = yield* RpcClient;
       const session = yield* rpc.client.createSession(
-        startRunSession(input.task),
+        startRunSession(input.task, input.budget),
       );
       const sendFailure = yield* rpc.client
         .sendMessage({ sessionId: session.id, content: input.prompt })

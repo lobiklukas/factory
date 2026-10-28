@@ -63,6 +63,8 @@ import type {
   ForkSessionInput,
   GetRepoInput,
   InterruptSessionResult,
+  SetSessionBudgetInput,
+  SetSessionBudgetResult,
   ListReposOutput,
   ListSessionsInput,
   ListSessionsOutput,
@@ -221,6 +223,8 @@ import {
   writeApprovalRequested,
   writeApprovalUsed,
   writeActor,
+  commitBudget,
+  formatDollars,
   writeBudget,
   writeCurationUsage,
   PLAN_FRESHNESS_SKILL,
@@ -421,6 +425,15 @@ export type SessionServiceShape = {
   readonly interrupt: (
     sessionId: SessionId,
   ) => Effect.Effect<InterruptSessionResult, SessionError>;
+  /**
+   * Set the session's spend cap (C23): commit the new ceiling on its log and clear the stop the old
+   * one made, so a session the cap stopped runs again on its next message. Works on an idle session,
+   * one that was stopped, and one with a run in flight (its next request is checked against the new
+   * cap); on a session created without a cap it sets one.
+   */
+  readonly setBudget: (
+    input: SetSessionBudgetInput,
+  ) => Effect.Effect<SetSessionBudgetResult, SessionError>;
   /**
    * Withdraw a queued message before a run places it (LOB-166). The answer says what happened: a
    * message a run already took, or one already over, is an outcome rather than a failure.
@@ -3969,6 +3982,37 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           };
         });
 
+      const setBudget = (
+        input: SetSessionBudgetInput,
+      ): Effect.Effect<SetSessionBudgetResult, SessionError> =>
+        Effect.gen(function* () {
+          const row = yield* requireSession(input.sessionId);
+          // Paused (LOB-25): the cap lands before anything a dead process left is continued, so a
+          // run that was stopped by the old cap is not resumed under it.
+          const owner = yield* acquireOwner(input.sessionId, row, {
+            resume: false,
+          });
+          yield* commitBudget(owner.root, input.budget);
+          yield* continueRemaining(input.sessionId, owner);
+          yield* touchActivity(input.sessionId);
+          const snapshot = yield* get(input.sessionId);
+          const budget = snapshot.budget;
+          if (budget === undefined) {
+            return yield* new SessionErrorClass({
+              code: "harness",
+              message: `session ${input.sessionId}: the cap was committed but the log reports none`,
+            });
+          }
+          const reached = budget.spent >= budget.cap;
+          return {
+            session: yield* describe(input.sessionId, row),
+            budget,
+            message: reached
+              ? `session ${input.sessionId} is capped at ${formatDollars(budget.cap)}, which its ${formatDollars(budget.spent)} of spend already reaches: its next run stops before its first request`
+              : `session ${input.sessionId} is capped at ${formatDollars(budget.cap)} (${formatDollars(budget.spent)} spent): its next run is let through until the cap is reached`,
+          };
+        });
+
       const withdraw = (
         input: WithdrawMessageInput,
       ): Effect.Effect<WithdrawMessageResult, SessionError> =>
@@ -7401,6 +7445,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         send,
         sendDeferringSetup,
         interrupt,
+        setBudget,
         withdraw,
         fork,
         replay,
