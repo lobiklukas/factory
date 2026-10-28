@@ -116,7 +116,7 @@ export const noCheckoutWarning = (repo: string): string =>
  * trailing slash: `""` for the work tree's root — any directory holding its own `.git`, which is
  * answered without running git — or for a path git cannot answer for.
  */
-const workTreePrefix = (
+export const workTreePrefix = (
   checkout: string,
   deps: WorkspaceDeps,
 ): Effect.Effect<string> =>

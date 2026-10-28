@@ -204,6 +204,55 @@ export class RepoCloneFailed extends Schema.TaggedError<RepoCloneFailed>()(
   },
 ) {}
 
+/**
+ * A repository's `.factory/config` policy that cannot be loaded (S-factory-config-as-code): read at
+ * the session's base ref, it is not a JSON object, its `policy` block is not the policy's shape (an
+ * unknown key is refused, so a key that would widen something is never silently dropped), or it tries
+ * to allow something the deployment denies (`widens`: a host off the deployment's allowlist).
+ * `reasons` names each problem; `ref` and `commit` say which base it was read at, and `path` where.
+ * A session on the repository does not open until the config on its base is fixed
+ * (`policy_rejected`), because running under part of a policy its author wrote would be running
+ * under a policy nobody wrote.
+ */
+export const RepoPolicyRejectionKind = Schema.Literals([
+  "unreadable",
+  "invalid",
+  "widens",
+]);
+export type RepoPolicyRejectionKind = typeof RepoPolicyRejectionKind.Type;
+
+export class RepoPolicyRejected extends Schema.TaggedError<RepoPolicyRejected>()(
+  "RepoPolicyRejected",
+  {
+    repo: Schema.String,
+    ref: Schema.String,
+    commit: Schema.String,
+    path: Schema.String,
+    kind: RepoPolicyRejectionKind,
+    reasons: Schema.Array(Schema.String),
+    message: Schema.String,
+  },
+) {}
+
+/**
+ * A repository's `.factory/config` policy that git could not read at the session's base
+ * (S-factory-config-as-code): the lookup of the base, or the listing or read of the config at the
+ * commit it names, failed or outlived its deadline — a busy machine, a lock, a corrupt object — rather
+ * than answering. Not a verdict on the config: nothing ran, because a run under the deployment's policy
+ * alone would drop the repository's gates without a word, and the same request is worth retrying
+ * (`policy_unreadable`). `ref` is the base it was read at; `commit` is absent when the base itself
+ * could not be looked up.
+ */
+export class RepoPolicyUnavailable extends Schema.TaggedError<RepoPolicyUnavailable>()(
+  "RepoPolicyUnavailable",
+  {
+    repo: Schema.String,
+    ref: Schema.String,
+    commit: Schema.optional(Schema.String),
+    message: Schema.String,
+  },
+) {}
+
 export const SessionSummary = Schema.Struct({
   id: SessionId,
   title: Schema.String,
@@ -1096,6 +1145,14 @@ export type CompactSessionResult = typeof CompactSessionResult.Type;
  * - `setup_running` — the session's worktree setup is still running after the send waited the time
  *   it waits for one (S-env-setup), so nothing was submitted. Transient: the setup goes on without
  *   the request, and the same send again waits for that setup rather than starting another.
+ * - `policy_rejected` — the repository's `.factory/config` at the session's base declares a policy
+ *   that cannot be loaded (S-factory-config-as-code, `RepoPolicyRejected`): not JSON, not the
+ *   policy's shape, or allowing something the deployment denies. Nothing ran; the message names the
+ *   repo, the base, the commit and each problem. Fix the config on the base and try again.
+ * - `policy_unreadable` — git could not read the repository's `.factory/config` at the session's
+ *   base (S-factory-config-as-code, `RepoPolicyUnavailable`): the lookup or read failed or timed out
+ *   rather than answering, so the policy is unknown and nothing ran. Transient: not a fault in the
+ *   config, and the same request succeeds once git can read the base again.
  */
 export const SessionErrorCode = Schema.Literals([
   "not_found",
@@ -1108,6 +1165,8 @@ export const SessionErrorCode = Schema.Literals([
   "at_capacity",
   "setup_failed",
   "setup_running",
+  "policy_rejected",
+  "policy_unreadable",
 ]);
 export type SessionErrorCode = typeof SessionErrorCode.Type;
 

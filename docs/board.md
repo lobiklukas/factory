@@ -280,6 +280,26 @@ it is, and both scopes), which the settings view, the lane disclosures and `fact
 show` print. An absent `autonomy` — every version written before the field — is the deployment's
 policy unchanged.
 
+Built (S-factory-config-as-code): **a repository's policy**, between the deployment's and the
+column's. A repo's `.factory/config` may carry a `policy` block — `approvalRequired[]` (gates added
+to `APPROVAL_REQUIRED`), `deny[]` (command prefixes refused outright, read the way a gate is) and
+`allowedHosts[]` (the session's egress allowlist narrowed to these, each one the deployment allows).
+It is read at the session's base ref in the registered checkout or the factory's mirror
+(`packages/core/src/repoPolicy.ts`, `git cat-file`), never from the worktree, and pinned in the log
+by the first open (`factory.policy`, which also records the effective rules the run met), so an
+agent that edits `.factory/config` on its branch — or a base that moves under a running session —
+changes nothing for that run; the next session reads the base again. The order is deployment, then
+repository (`withRepoPolicy`), then column (`withColumnAutonomy`), each tighten-only. A block that
+tries to allow something the deployment denies (a host off its allowlist), has a key the policy does
+not know, or a config that is not JSON, is refused at load (`RepoPolicyRejected`), and the session
+does not open (`policy_rejected`) and leaves no worktree behind; a base git could not read (failed or
+timed out) is never read as no policy, and refuses the open as transient (`policy_unreadable`). A
+review run is read at its pull request's base, fetched from the forge first, not at the head under
+review. For a repo with no remote, the base is the checkout's
+local branch, whose refs every session worktree shares, so it holds only as long as no run writes
+that ref (`.pi/skills/verify-api/features/repo-policy.md`). Per-repo `roles` model overrides and
+trigger rules in the same file are not built.
+
 ## B7 — Asking a human happens on the task, never in the transcript
 
 A run that needs something **ends** — parked, not hanging — with the question recorded on the task: a
