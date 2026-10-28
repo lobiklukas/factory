@@ -8,6 +8,7 @@ export * from "./taskProjection";
 export * from "./requirements";
 export * from "./boardConfig";
 export * from "./boardDefine";
+export * from "./definitionVocabulary";
 export * from "./pr";
 export * from "./prStep";
 
