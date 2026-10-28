@@ -8,22 +8,30 @@
  * comment on the issue, the label-set key across the `opened` + `labeled` pair) is
  * `.pi/skills/verify-api/github-issues.ts` against the real session layer and a loopback GitHub.
  */
+import { createHmac } from "node:crypto";
 import { Effect, Layer, Option, Redacted } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import type { RepoSlug, SessionId } from "@repo/domain/Session";
-import type { TriggerRule } from "@repo/domain/Trigger";
+import {
+  TriggerError,
+  type TriggerDelivery,
+  type TriggerOutcome,
+  type TriggerRule,
+} from "@repo/domain/Trigger";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
 import {
   githubComment,
   githubDelivery,
   githubEvent,
   githubDeliveryFor,
+  githubIssueIntake,
   githubRequestId,
   GitHubWriteBack,
+  handleGitHubIssueWebhook,
 } from "./GitHub";
-import { TriggerWriteBack } from "./TriggerService";
+import { TriggerService, TriggerWriteBack } from "./TriggerService";
 
 const repo = "acme/widget" as RepoSlug;
 
@@ -394,5 +402,320 @@ describe("GitHubWriteBack", () => {
     );
     expect(error.code).toBe("write-back");
     expect(error.message).toContain("named no repository");
+  });
+});
+
+/** GitHub's `issue_comment` webhook payload: the issue, its labels, and the comment. */
+const commentPayload = (
+  over: {
+    readonly action?: string;
+    readonly text?: string;
+    readonly login?: string;
+    readonly userType?: string;
+    readonly senderType?: string;
+    readonly labels?: ReadonlyArray<string>;
+    readonly pullRequest?: boolean;
+  } = {},
+): Record<string, unknown> => ({
+  action: over.action ?? "created",
+  issue: {
+    number: 7,
+    title: "The widget wobbles",
+    body: "It wobbles when it spins.",
+    labels: (over.labels ?? []).map((name) => ({ name })),
+    ...(over.pullRequest === true ? { pull_request: { url: "x" } } : {}),
+  },
+  comment: {
+    body: over.text ?? "@factory please look at this",
+    user: { login: over.login ?? "alice", type: over.userType ?? "User" },
+  },
+  sender: { login: over.login ?? "alice", type: over.senderType ?? "User" },
+  repository: { full_name: "acme/widget" },
+});
+
+describe("githubDelivery's key is the work", () => {
+  const rules = [
+    { label: "factory", repo, prompt: "{{title}}" },
+  ] as ReadonlyArray<TriggerRule>;
+
+  it("marks a mapped delivery keyedByWork, so a skip for an unregistered repo is reclaimable", () => {
+    expect(githubDelivery(payload({}), rules)?.keyedByWork).toBe(true);
+  });
+
+  it("does not mark one no rule claims: its skip is the answer, not a claim on the issue", () => {
+    expect(
+      githubDelivery(payload({ labels: [{ name: "bug" }] }), rules),
+    ).not.toHaveProperty("keyedByWork");
+  });
+});
+
+describe("githubIssueIntake", () => {
+  const rules = [
+    { label: "factory", repo, prompt: "{{title}}: {{body}}" },
+  ] as ReadonlyArray<TriggerRule>;
+  const issues = (body: unknown) =>
+    githubIssueIntake({ event: "issues", payload: body, rules });
+  const comment = (body: unknown, mention?: string) =>
+    githubIssueIntake({
+      event: "issue_comment",
+      payload: body,
+      rules,
+      mention,
+    });
+
+  it("delivers an issue opened or labeled, as a delivery for the issue", () => {
+    for (const action of ["opened", "labeled"]) {
+      const intake = issues(payload({ action }));
+      expect(intake._tag).toBe("delivery");
+      if (intake._tag !== "delivery") return;
+      expect(intake.delivery.requestId).toBe("github:acme/widget#7:mapped");
+      expect(intake.delivery.event.action).toBe("create");
+    }
+  });
+
+  it("ignores an issue event that starts no work, so an edit cannot claim the issue's key", () => {
+    for (const action of ["edited", "closed", "unlabeled", "assigned"]) {
+      const intake = issues(payload({ action }));
+      expect(intake._tag).toBe("ignored");
+    }
+  });
+
+  it("refuses a payload it cannot address: a pull request, or no issue at all", () => {
+    expect(issues(payload({ pullRequest: true }))._tag).toBe("refused");
+    expect(issues({ action: "opened" })._tag).toBe("refused");
+  });
+
+  it("reads a comment mentioning @factory as the factory label on the comment's issue", () => {
+    const intake = comment(commentPayload({}));
+    expect(intake._tag).toBe("delivery");
+    if (intake._tag !== "delivery") return;
+    expect(intake.delivery.requestId).toBe("github:acme/widget#7:mapped");
+    expect(intake.delivery.keyedByWork).toBe(true);
+    expect(intake.delivery.event).toEqual({
+      source: "github",
+      key: "acme/widget#7",
+      action: "create",
+      title: "The widget wobbles",
+      body: "It wobbles when it spins.\n\nComment from alice:\n@factory please look at this",
+      labels: ["factory"],
+      repo,
+    });
+  });
+
+  it("makes the label and the mention one delivery: the same key either way", () => {
+    const labeled = issues(payload({ action: "labeled" }));
+    const mentioned = comment(commentPayload({ labels: ["factory"] }));
+    if (labeled._tag !== "delivery" || mentioned._tag !== "delivery") {
+      throw new Error("both should deliver");
+    }
+    expect(mentioned.delivery.requestId).toBe(labeled.delivery.requestId);
+    // The issue's own labels are kept, and the handle is not added twice.
+    expect(mentioned.delivery.event.labels).toEqual(["factory"]);
+  });
+
+  it("finds the mention as a handle and not as part of a longer word or an address", () => {
+    const text = (text: string) => comment(commentPayload({ text }))._tag;
+    expect(text("hey @Factory, go")).toBe("delivery");
+    expect(text("@factory.")).toBe("delivery");
+    expect(text("line one\n@factory")).toBe("delivery");
+    expect(text("ask someone@factory.example")).toBe("ignored");
+    expect(text("@factory-bot please")).toBe("ignored");
+    expect(text("@factorybot please")).toBe("ignored");
+    expect(text("no mention at all")).toBe("ignored");
+  });
+
+  it("takes the handle from the deployment, and the label is the handle without its @", () => {
+    const custom = comment(commentPayload({ text: "@robot do it" }), "@robot");
+    expect(custom._tag).toBe("delivery");
+    if (custom._tag === "delivery") {
+      expect(custom.delivery.event.labels).toEqual(["robot"]);
+    }
+    expect(
+      comment(commentPayload({ text: "@factory do it" }), "@robot")._tag,
+    ).toBe("ignored");
+  });
+
+  it("ignores what cannot ask: a pull request's comment, an edit, a bot", () => {
+    expect(comment(commentPayload({ pullRequest: true }))._tag).toBe("ignored");
+    expect(comment(commentPayload({ action: "edited" }))._tag).toBe("ignored");
+    expect(comment(commentPayload({ action: "deleted" }))._tag).toBe("ignored");
+    expect(comment(commentPayload({ userType: "Bot" }))._tag).toBe("ignored");
+    expect(comment(commentPayload({ senderType: "Bot" }))._tag).toBe("ignored");
+  });
+
+  it("refuses a mention on a payload that names no repository", () => {
+    const body = commentPayload({});
+    expect(comment({ ...body, repository: {} })._tag).toBe("refused");
+  });
+});
+
+describe("handleGitHubIssueWebhook", () => {
+  const SECRET = "lob-259-github-secret";
+  const rules = [
+    { label: "factory", repo, prompt: "{{title}}" },
+  ] as ReadonlyArray<TriggerRule>;
+  const sign = (raw: string) =>
+    `sha256=${createHmac("sha256", SECRET).update(raw).digest("hex")}`;
+
+  /** The seam, recording what the handler hands it. */
+  const run = (
+    over: {
+      readonly body?: unknown;
+      readonly raw?: string;
+      readonly secret?: string | undefined;
+      readonly signature?: (raw: string) => string | undefined;
+      readonly event?: "issues" | "issue_comment";
+      readonly outcome?: TriggerOutcome;
+      readonly fail?: TriggerError;
+    } = {},
+  ) => {
+    const delivered: Array<TriggerDelivery> = [];
+    const raw = over.raw ?? JSON.stringify(over.body ?? payload({}));
+    const seam = Layer.succeed(
+      TriggerService,
+      TriggerService.of({
+        deliver: (delivery) =>
+          Effect.suspend(() => {
+            delivered.push(delivery);
+            return over.fail === undefined
+              ? Effect.succeed(
+                  over.outcome ?? {
+                    status: "processed",
+                    replayed: false,
+                    sessionId: sessionId,
+                    reason: 'rule "factory" mapped it to acme/widget',
+                  },
+                )
+              : Effect.fail(over.fail);
+          }),
+      }),
+    );
+    const answer = Effect.runPromise(
+      handleGitHubIssueWebhook({
+        secret: "secret" in over ? over.secret : SECRET,
+        raw,
+        signature: (over.signature ?? sign)(raw),
+        event: over.event ?? "issues",
+        rules,
+      }).pipe(Effect.provide(seam)),
+    );
+    return { delivered, answer };
+  };
+
+  it("hands a signed factory label to the seam once, and answers what the seam did", async () => {
+    const { delivered, answer } = run();
+    const answered = await answer;
+    expect(answered.status).toBe(200);
+    expect(answered.body).toMatchObject({
+      ok: true,
+      status: "processed",
+      replayed: false,
+      sessionId,
+    });
+    expect(delivered.map((d) => d.requestId)).toEqual([
+      "github:acme/widget#7:mapped",
+    ]);
+  });
+
+  it("answers a redelivery with the seam's replay, and a replay still in flight with 503", async () => {
+    const replay = await run({
+      outcome: { status: "processed", replayed: true },
+    }).answer;
+    expect(replay.status).toBe(200);
+    expect(replay.body).toMatchObject({ replayed: true });
+    const inFlight = await run({
+      outcome: { status: "received", replayed: true },
+    }).answer;
+    expect(inFlight.status).toBe(503);
+    expect(inFlight.body).toMatchObject({ code: "in-progress" });
+  });
+
+  it("is 503 naming GITHUB_WEBHOOK_SECRET when no secret is set, and hands the seam nothing", async () => {
+    // Signed with the empty key, which is what an unset secret degrades to: without the 503 branch
+    // this would verify.
+    for (const secret of [undefined, ""]) {
+      const { delivered, answer } = run({
+        secret,
+        signature: (raw) =>
+          `sha256=${createHmac("sha256", "").update(raw).digest("hex")}`,
+      });
+      const answered = await answer;
+      expect(answered.status).toBe(503);
+      expect(JSON.stringify(answered.body)).toContain("GITHUB_WEBHOOK_SECRET");
+      expect(delivered).toEqual([]);
+    }
+  });
+
+  it("is 401 for a missing or wrong signature, and hands the seam nothing", async () => {
+    for (const signature of [
+      () => undefined,
+      () => "sha256=00",
+      (raw: string) => sign(`${raw} `),
+    ]) {
+      const { delivered, answer } = run({ signature });
+      expect((await answer).status).toBe(401);
+      expect(delivered).toEqual([]);
+    }
+  });
+
+  it("is 400 for a body that is not a JSON object, and for an issue it cannot address", async () => {
+    const notJson = run({ raw: "{" });
+    expect((await notJson.answer).status).toBe(400);
+    const list = run({ raw: "[]" });
+    expect((await list.answer).status).toBe(400);
+    const pull = run({ body: payload({ pullRequest: true }) });
+    const refused = await pull.answer;
+    expect(refused.status).toBe(400);
+    expect(refused.body).toMatchObject({ code: "bad-payload" });
+    expect([
+      ...notJson.delivered,
+      ...list.delivered,
+      ...pull.delivered,
+    ]).toEqual([]);
+  });
+
+  it("answers 202 and ignores an event that asks for nothing, handing the seam nothing", async () => {
+    const edited = run({ body: payload({ action: "edited" }) });
+    const answered = await edited.answer;
+    expect(answered.status).toBe(202);
+    expect(answered.body).toMatchObject({ ok: true });
+    expect(edited.delivered).toEqual([]);
+    const chatter = run({
+      event: "issue_comment",
+      body: commentPayload({ text: "just a comment" }),
+    });
+    expect((await chatter.answer).status).toBe(202);
+    expect(chatter.delivered).toEqual([]);
+  });
+
+  it("hands a comment mentioning the factory to the seam as the issue's delivery", async () => {
+    const { delivered, answer } = run({
+      event: "issue_comment",
+      body: commentPayload({}),
+    });
+    expect((await answer).status).toBe(200);
+    expect(delivered.map((d) => d.requestId)).toEqual([
+      "github:acme/widget#7:mapped",
+    ]);
+  });
+
+  it("answers a skip with its reason, and a failed delivery with 500 and its code", async () => {
+    const skipped = await run({
+      outcome: {
+        status: "skipped",
+        replayed: false,
+        reason: "repo acme/widget is not registered",
+      },
+    }).answer;
+    expect(skipped.status).toBe(200);
+    expect(skipped.body).toMatchObject({
+      status: "skipped",
+      reason: "repo acme/widget is not registered",
+    });
+    const failed = await run({
+      fail: new TriggerError({ code: "write-back", message: "no credential" }),
+    }).answer;
+    expect(failed.status).toBe(500);
+    expect(failed.body).toMatchObject({ ok: false, code: "write-back" });
   });
 });

@@ -32,6 +32,7 @@
  */
 import { Effect, Layer, Redacted, Schema } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import type { SessionId } from "@repo/domain/Session";
 import {
   TRIGGER_ACTION,
@@ -45,6 +46,45 @@ import { TriggerWriteBack } from "./TriggerService";
 const JiraCommentPage = Schema.Struct({
   comments: Schema.Array(Schema.Struct({ body: Schema.Unknown })),
 });
+
+/**
+ * The header Jira Cloud signs an admin webhook into, when the webhook was registered with a secret:
+ * `sha256=<hex HMAC-SHA256 of the raw body>` (WebSub's scheme, as Atlassian documents it).
+ */
+export const JIRA_SIGNATURE_HEADER = "x-hub-signature";
+
+/** Why a Jira delivery's signature was not accepted. */
+export type JiraSignatureVerdict =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly refusal: "missing-signature" | "bad-signature";
+    };
+
+/**
+ * Whether a delivery is Jira's: the header carries `sha256=` and the hex HMAC of the raw body under
+ * the webhook's secret. A digest without the prefix, or of another body, is `bad-signature`, so a
+ * route can tell an unsigned delivery from a wrongly signed one. The comparison is constant-time.
+ */
+export const verifyJiraSignature = (input: {
+  readonly raw: string;
+  readonly signature: string | undefined;
+  readonly secret: string;
+}): JiraSignatureVerdict => {
+  const signature = input.signature ?? "";
+  if (signature === "") return { ok: false, refusal: "missing-signature" };
+  const prefix = "sha256=";
+  if (!signature.startsWith(prefix)) {
+    return { ok: false, refusal: "bad-signature" };
+  }
+  const expected = createHmac("sha256", input.secret)
+    .update(input.raw)
+    .digest();
+  const given = Buffer.from(signature.slice(prefix.length), "hex");
+  return given.length === expected.length && timingSafeEqual(given, expected)
+    ? { ok: true }
+    : { ok: false, refusal: "bad-signature" };
+};
 
 /** Jira's one event that starts work; every other `webhookEvent` is the seam's to refuse. */
 const JIRA_CREATE_EVENT = "jira:issue_created";
@@ -194,7 +234,7 @@ export const jiraConfigFromEnv = (env: JiraEnv): JiraConfig | undefined => {
     baseUrl: baseUrl.replace(/\/+$/, ""),
     email,
     apiToken: Redacted.make(apiToken),
-    ...(sessionUrlBase === undefined ? {} : { sessionUrlBase }),
+    ...(sessionUrlBase ? { sessionUrlBase } : {}),
   };
 };
 

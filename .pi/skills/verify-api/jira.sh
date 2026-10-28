@@ -1,98 +1,80 @@
 #!/usr/bin/env bash
-# Drive the Jira adapter end to end (LOB-189): a Jira issue event creates one session and one Jira
-# comment, and the same event replayed creates neither a second session nor a second comment.
+# Drive the Jira adapter over HTTP (LOB-189, served by LOB-259): a signed `jira:issue_created`
+# delivery posted at `POST /webhooks/jira` of a booted API opens one session and one Jira comment,
+# the same body again opens neither, a bad signature is refused, and the same API booted with
+# `JIRA_WEBHOOK_SECRET` unset answers 503.
 #
 #   ./jira.sh
+#   API_PORT=9580 JIRA_FAKE_PORT=9581 ./jira.sh        # another pair of ports
 #
-# The driver builds the adapter in-process (`jira.ts`), so there is no API instance here: the port a
-# run reserved for this surface is the port the loopback Jira fake listens on. Only Jira is fake —
-# the seam, the session layer and the run's Postgres are real.
+# Only Jira is fake: the loopback `jira-fake.ts` answers the comment API. The API, its signature
+# check, the seam, the session layer and the run's Postgres are real (`adapter-lib.sh` boots them).
+# The API's own environment is the deployment's: `JIRA_WEBHOOK_SECRET` arms the route,
+# `JIRA_BASE_URL`/`JIRA_EMAIL`/`JIRA_API_TOKEN` point the write-back at the fake, and `TRIGGER_RULES`
+# maps the `factory` label to this run's own repo.
 #
-# The session root is a throwaway git repo whose origin is a local bare repository, so no git call
-# can reach a real remote (LOB-94), and the run's `DATABASE_URL` is the database the driver opens.
+# Env: API_PORT (or JIRA_API_PORT; 9424), JIRA_FAKE_PORT (9412), DATABASE_URL, JIRA_TRIGGER_REPO,
+# EVIDENCE_DIR.
 #
 # What the fake cannot prove: that Jira Cloud accepts the ADF document, the Basic-auth header or the
-# comment path as spelled. The request shape is asserted in `packages/core/src/Jira.test.ts` from
-# the documented API; the fake is only as right as that reading. See `docs/testing-third-parties.md`.
+# comment path as spelled, or signs `X-Hub-Signature` the way `verifyJiraSignature` reads it. The
+# request shape is asserted in `packages/core/src/Jira.test.ts` from the documented API; the fake is
+# only as right as that reading. See `docs/testing-third-parties.md`.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PORT="${JIRA_PORT:-${API_PORT:-9412}}"
-JIRA_URL="http://127.0.0.1:$PORT"
-RUN_DIR="$ROOT/.verify/run/jira"
-EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/lob-189}"
-LEDGER="$RUN_DIR/jira-ledger.json"
-SESSION_ROOT="$RUN_DIR/sessions"
-ORIGIN_DIR="$RUN_DIR/origin.git"
+source "$ROOT/.pi/skills/verify-api/adapter-lib.sh"
+API_PORT="${JIRA_API_PORT:-${API_PORT:-9424}}"
+FAKE_PORT="${JIRA_FAKE_PORT:-9412}"
+API_URL="http://127.0.0.1:$API_PORT"
+FAKE_URL="http://127.0.0.1:$FAKE_PORT"
+EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/lob-259}"
 DRIVER="$ROOT/.pi/skills/verify-api/jira.ts"
-FAKE="$ROOT/.pi/skills/verify-api/jira-fake.ts"
-REPO="${JIRA_TRIGGER_REPO:-acme/verify-api-jira}"
+SECRET="${JIRA_WEBHOOK_SECRET:-lob259-jira-webhook-secret}"
+RUN_STAMP="$(date +%s)"
+REPO="${JIRA_TRIGGER_REPO:-acme/verify-api-jira}-$RUN_STAMP"
 
-mkdir -p "$RUN_DIR" "$EVIDENCE_DIR" "$SESSION_ROOT"
+mkdir -p "$EVIDENCE_DIR"
+adapter_init jira
+LEDGER="$RUN_DIR/jira-ledger.json"
 rm -f "$LEDGER"
+trap adapter_cleanup EXIT
+adapter_check_ports "$API_PORT" "$FAKE_PORT"
 
-stop_fake() {
-  [ -f "$RUN_DIR/fake.pid" ] || return 0
-  local pid; pid="$(cat "$RUN_DIR/fake.pid")"
-  kill "$pid" 2>/dev/null || true
-  for _ in $(seq 1 40); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
-  kill -9 "$pid" 2>/dev/null || true
-  rm -f "$RUN_DIR/fake.pid"
+adapter_start_fake jira "$LEDGER" "$ROOT/.pi/skills/verify-api/jira-fake.ts" \
+  JIRA_FAKE_PORT="$FAKE_PORT" JIRA_FAKE_LEDGER="$LEDGER" JIRA_FAKE_FAIL_AFTER_WRITE=FAC-2 || exit 1
+
+RULES="$(printf '[{"label":"factory","repo":"%s","baseRef":"main","prompt":"Work on {{title}}:\\n{{body}}"}]' "$REPO")"
+status=0
+
+drive() { # mode
+  MODE="$1" API_URL="$API_URL" JIRA_FAKE_LEDGER="$LEDGER" JIRA_WEBHOOK_SECRET="$SECRET" \
+    JIRA_TRIGGER_REPO="$REPO" JIRA_RUN_STAMP="$RUN_STAMP" EVIDENCE_DIR="$EVIDENCE_DIR" \
+    DATABASE_URL="$DATABASE_URL" bun "$DRIVER" 2>&1 | tee "$EVIDENCE_DIR/jira-$1.log"
+  return "${PIPESTATUS[0]}"
 }
 
-trap 'stop_fake' EXIT
+# --- configured: the route armed, the write-back pointed at the fake ------------------------------
+adapter_start_api "$API_PORT" \
+  TRIGGER_RULES="$RULES" JIRA_WEBHOOK_SECRET="$SECRET" \
+  JIRA_BASE_URL="$FAKE_URL" JIRA_EMAIL="factory@example.com" JIRA_API_TOKEN="jira-drive-token" \
+  JIRA_SESSION_URL_BASE="http://localhost:3000/sessions" || exit 1
+drive configured || status=1
+cp "$RUN_DIR/api.log" "$EVIDENCE_DIR/jira-api.log"
+adapter_stop_api
 
-source "$ROOT/.pi/skills/lib/postgres.sh"
-ensure_postgres || exit 1
-
-# The session root the service opens workspaces under: a real git repo with a local origin.
-if [ ! -d "$SESSION_ROOT/.git" ]; then
-  rm -rf "$SESSION_ROOT" "$ORIGIN_DIR"
-  mkdir -p "$SESSION_ROOT"
-  git init -q -b main "$SESSION_ROOT"
-  git -C "$SESSION_ROOT" config user.email jira@localhost
-  git -C "$SESSION_ROOT" config user.name "jira-drive"
-  git -C "$SESSION_ROOT" commit -q --allow-empty -m "jira drive session root"
-  git init -q -b main --bare "$ORIGIN_DIR"
-  git -C "$SESSION_ROOT" remote add origin "$ORIGIN_DIR"
-  git -C "$SESSION_ROOT" push -q origin main
-fi
-
-# --- the loopback Jira ------------------------------------------------------------------------
-: > "$RUN_DIR/fake.log"
-( exec env \
-    JIRA_FAKE_PORT="$PORT" \
-    JIRA_FAKE_LEDGER="$LEDGER" \
-    JIRA_FAKE_FAIL_AFTER_WRITE=FAC-2 \
-    bun "$FAKE" ) >> "$RUN_DIR/fake.log" 2>&1 &
-echo $! > "$RUN_DIR/fake.pid"
-for _ in $(seq 1 60); do
-  [ -s "$LEDGER" ] && break
-  sleep 0.1
-done
-if [ ! -s "$LEDGER" ]; then
-  echo "the fake Jira did not start — see $RUN_DIR/fake.log" >&2
-  exit 1
-fi
-
-# --- the drive ---------------------------------------------------------------------------------
-env \
-  JIRA_FAKE_URL="$JIRA_URL" \
-  JIRA_FAKE_LEDGER="$LEDGER" \
-  JIRA_TRIGGER_REPO="$REPO" \
-  SESSION_ROOT="$SESSION_ROOT" \
-  EVIDENCE_DIR="$EVIDENCE_DIR" \
-  DATABASE_URL="${DATABASE_URL:?jira.sh needs DATABASE_URL from the run}" \
-  bun "$DRIVER" 2>&1 | tee "$EVIDENCE_DIR/jira.log"
-STATUS="${PIPESTATUS[0]}"
+# --- unconfigured: the same API with no secret: every delivery is refused ---------------------------
+adapter_start_api "$API_PORT" TRIGGER_RULES="$RULES" JIRA_WEBHOOK_SECRET="" || exit 1
+drive unconfigured || status=1
+cp "$RUN_DIR/api.log" "$EVIDENCE_DIR/jira-api-unconfigured.log"
 
 cp "$LEDGER" "$EVIDENCE_DIR/jira-ledger.json" 2>/dev/null || true
-cp "$RUN_DIR/fake.log" "$EVIDENCE_DIR/jira-fake.log" 2>/dev/null || true
+cp "$RUN_DIR/jira.log" "$EVIDENCE_DIR/jira-fake.log" 2>/dev/null || true
 
 echo
-if [ "$STATUS" -eq 0 ]; then
+if [ "$status" -eq 0 ]; then
   echo "jira: all checks passed — evidence in $EVIDENCE_DIR"
 else
-  echo "jira: FAILURES — see $EVIDENCE_DIR/jira.log" >&2
+  echo "jira: FAILURES — see $EVIDENCE_DIR/jira-*.log" >&2
 fi
-exit "$STATUS"
+exit "$status"

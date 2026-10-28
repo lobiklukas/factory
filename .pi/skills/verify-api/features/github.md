@@ -33,38 +33,64 @@ opened unlabelled records its skip without swallowing the delivery that labels i
 are the seam's, so a route builds its delivery with `githubDeliveryFor(rules)` — the same value it
 hands `TriggerServiceLive` — rather than a second copy.
 
-**How the skill drives it.** `./github-issues.sh` boots `./github-issues-fake.ts` on the run's
-`API_PORT` and runs `bun github-issues.ts`, which builds the **real** seam, the real
-`SessionService` and the real write-back client over the run's Postgres — only GitHub is a loopback
-fake. Eighteen checks:
+**How a user reaches it.** `POST /webhooks/github` (LOB-259) — the same route, the same
+`GITHUB_WEBHOOK_SECRET` and `X-Hub-Signature-256` as the `pull_request` and `push` events — now also
+reads `issues` and `issue_comment` (subscribe the webhook to both). Two things start work: a **label**
+(an issue `opened` or `labeled`, the rule's label picks the work) and an **`@factory` mention**, a
+comment _created_ on an issue whose text mentions `GITHUB_MENTION` (default `@factory`). The mention
+is the same ask, so the event carries the handle without its `@` (`factory`) as one more label and a
+rule on `factory` claims it; its key is the issue's, so labelling and then mentioning is one session.
+The prompt's `{{body}}` is the issue's body followed by `Comment from <login>:` and the comment.
+Everything else is `202` and ignored _before_ the seam, so it records no delivery: an `edited`,
+`closed` or `unlabeled` issue event, a comment that is not a mention, a comment on a pull request
+and a bot's comment (the factory's own is posted as one; a loop is what getting that wrong costs).
+An `edited` delivery is ignored rather than recorded because it would share the issue's key and its
+skip would answer the label added next as a replay. A mapped delivery is also `keyedByWork` (as
+Linear's is), so a skip for a repo nobody had registered is reclaimed by the next delivery under the
+same key once the operator registers it. With no secret the issue path is `503`, like the rest of the
+route. Who _may_ ask is not decided here: any commenter on a repository the webhook watches can,
+until the trust gate (S:trigger-trust-gating, planned) lands.
 
-1. an `opened` issue carrying the label starts a session and names it;
+**How the skill drives it.** `./github-issues.sh` boots `./github-issues-fake.ts`, boots the **real
+API** with `GITHUB_API_URL` pointed at it (`adapter-lib.sh`), and runs `bun github-issues.ts`, which
+signs deliveries the way GitHub does and posts them at the API over HTTP, reading sessions back
+through the RPC client. Only GitHub is a loopback fake. Fifteen checks, then the API is booted again
+with the secret unset:
+
+1. a signed `opened` issue carrying the label is processed and names a session;
 2. the session's repo is the payload's, not the rule's decoy;
 3. the session's title is the issue's, and its first message is the rendered rule;
 4. the write-back posted exactly one comment, on the payload's issue, naming the session and
    linking to it;
-5. it read the issue first, then posted once, to GitHub's own path, with the App token and
+5. it read the issue first, then posted once, to GitHub's own path, with the token and
    `X-GitHub-Api-Version: 2022-11-28`;
-6. GitHub's `labeled` twin is a replay — one session;
-7. re-running the `opened` delivery is a replay — one session, one comment;
-8. a second label the same rule claims is a replay too, not a second session;
-9. two rules, either label first, cannot start two sessions on one issue;
-10. an `unlabeled` delivery is skipped, with GitHub's own action in the reason;
-11. an issue opened with no mapped label is skipped;
-12. labelling that same issue afterwards starts a session (the later label is new work);
-13. a pull-request payload does not normalize to a delivery at all;
-14. a delivery whose comment landed but whose acknowledgement was lost fails;
-15. the retry reads the issue's comments before it posts;
-16. the retry posts no second comment — the issue still carries exactly one;
-17. the retry is processed and reuses the session the failed attempt opened.
+6. GitHub's `labeled` twin, a redelivery and a second label are replays — one session, one comment;
+7. two rules, either label first, cannot start two sessions on one issue;
+8. an `unlabeled` and an `edited` delivery are `202` ignored and record no delivery;
+9. an issue opened with no mapped label is skipped, and labelling it afterwards starts a session
+   (the later label is new work);
+10. a pull-request payload on the issues event is `400 bad-payload`;
+11. an `@factory` comment on an issue with no label opens one session and one comment, a second
+    mention is a replay, a bot's mention and a comment with no mention are `202`;
+12. that session's prompt carries the issue and the comment that asked;
+13. a missing and a wrong signature are `401` and record no delivery;
+14. a delivery whose comment landed but whose acknowledgement was lost is `500 write-back`;
+15. its retry is processed, reads the issue's comments, posts no second comment and reuses the
+    session;
+16. (`unconfigured`) with the secret unset an issue delivery and a mention are `503`, naming
+    `GITHUB_WEBHOOK_SECRET`, and record and open nothing.
 
-**What proves it works.** `.verify/evidence/lob-190/` (`github-issues.log`,
-`github-issues-observed.json`, `github-issues-ledger.json`): 19/19 on Postgres 5442 and faux model.
-`packages/core/src/GitHub.test.ts` (21 cases) proves what the drive does not: the payload reading
-(a PR payload, a missing repository, a bad slug, bare string labels), the intent key (the rule's
-label, the label order, the unlabelled case, a second label, a second rule), the request shape (method, path, `Bearer`,
-`Accept`, `X-GitHub-Api-Version`, `{ body }`), the read-before-post skip, a `403` becoming a
-`write-back` error, and an event with no repo failing rather than guessing one.
+**What proves it works.** `.verify/evidence/lob-259/` (`github-issues-configured.log`,
+`github-issues-unconfigured.log`, `github-issues-*-observed.json`, `github-issues-ledger.json`, the API
+logs): 15/15 and 2/2 on Postgres 5442 and faux model. `packages/core/src/GitHub.test.ts` proves what
+the drive does not: the payload reading (a PR payload, a missing repository, a bad slug, bare string
+labels), the intent key (the rule's label, the label order, the unlabelled case, a second label, a
+second rule), `githubIssueIntake` (which events start work, the mention as a handle and not a longer
+word or an address, a custom handle, a bot, a pull request), `handleGitHubIssueWebhook` (`503`, `401`,
+`400`, `202`, the seam's answers, `500`), the request shape (method, path, `Bearer`, `Accept`,
+`X-GitHub-Api-Version`, `{ body }`), the read-before-post skip, a `403` becoming a `write-back` error,
+and an event with no repo failing rather than guessing one. `apps/api/src/Api/GitHubWebhook.test.ts`
+serves the route in-process over the real seam and a `node:http` loopback GitHub.
 
 **Non-vacuity.** Keying on the label set instead of the issue — the shape this adapter had before
 review — makes the drive fail three checks (15/18 at the time, exit 1): the second label opens a
@@ -76,10 +102,11 @@ starts nothing, even if another rule claims it, and re-adding a label that alrea
 a replay rather than new work. An issue is the unit of work on this surface; an operator who wants
 two tasks from one issue wants two issues.
 
-**Nothing is wired into `apps/api` yet.** Like the Jira adapter, this one adds no route:
-`apps/api/src/Api/Webhook.ts` (the Linear and generic adapters) is unmodified and nothing is
-enabled until a `/webhooks/github` route calls `githubDelivery` — which would also be the place to
-verify `X-Hub-Signature-256`.
+**The comment is the factory's own, and only on issues.** The write-back is `GitHubWriteBack` behind
+`TriggerWriteBackBySource` (`apps/api/src/Api/TriggerAdapters.ts`), posted with the credential seam's
+token (`GITHUB_TOKEN` or the App); with none, the delivery fails at the comment (`500 write-back`,
+the cause named) after the session was opened, and GitHub's redelivery finds the session and posts
+the comment. The comment links the session when `GITHUB_SESSION_URL_BASE` is set.
 
 **The read-then-post window.** The comment is looked for in GitHub's default page of an issue's
 comments (30). A session's comment on an issue with a longer thread could be missed and posted

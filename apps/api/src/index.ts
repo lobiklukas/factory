@@ -32,11 +32,11 @@ import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
 import { WebhookLive } from "./Api/Webhook";
 import { GitHubWebhookLive } from "./Api/GitHubWebhook";
+import { LinearIssueSyncLayer, LinearSyncLog } from "./Api/LinearSync";
 import {
-  LinearIssueSyncLayer,
-  LinearSyncLog,
-  SessionWriteBackLive,
-} from "./Api/LinearSync";
+  SessionWriteBacksLive,
+  TriggerAdaptersLog,
+} from "./Api/TriggerAdapters";
 import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
 import {
@@ -524,7 +524,7 @@ const HttpLive = Effect.gen(function* () {
       onNone: () => ({}),
       onSome: (budget) => ({ defaultBudget: budget }),
     }),
-  }).pipe(Layer.provide(SessionWriteBackLive));
+  }).pipe(Layer.provide(SessionWriteBacksLive));
 
   // The database pool is lazy (`PgClient` opens a connection on first query), so this graph builds
   // — and the server binds — even when Postgres is unreachable. Migrations run in the background so
@@ -557,6 +557,7 @@ const HttpLive = Effect.gen(function* () {
     MigrationsDaemon,
     CredentialSelectionLog,
     LinearSyncLog,
+    TriggerAdaptersLog,
     PullRequestStepDeps,
   ).pipe(
     // The Linear sync sits beside Postgres so the session layer and the routes share one instance

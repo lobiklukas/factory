@@ -14,12 +14,18 @@
  *   merge it is asked to mirror.
  * - **An unsigned merge tears nothing down**, because the signature is what the release is gated on.
  *
+ * `issues` and `issue_comment` (LOB-259) are the same route's second job: a signed `factory` label
+ * or `@factory` mention reaches the real trigger seam on this database and opens one session, and the
+ * issue gets one comment from the real `GitHubWriteBack` — posted to a loopback GitHub this file
+ * serves, because the write-back is wired in the route's own layer and must be proven wired.
+ *
  * The session service is the real one on Postgres, in a database this file creates on the server
  * `DATABASE_URL` names and drops in `afterAll`, as `../Rpc/Session.test.ts` does.
  */
-import { createHmac, randomBytes } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { execSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunServices } from "@effect/platform-bun";
@@ -42,15 +48,40 @@ import {
 } from "effect";
 import { HttpRouter } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { GitHubWebhookLive } from "./GitHubWebhook";
+
+/**
+ * The mapping the route reads once, when `./Webhook` loads, so it is set before the imports run: the
+ * `factory` label maps to this file's own repo, which the cases register.
+ */
+const { run } = await vi.hoisted(async () => {
+  const { randomBytes } = await import("node:crypto");
+  const run = randomBytes(4).toString("hex");
+  process.env["TRIGGER_RULES"] = JSON.stringify([
+    {
+      label: "factory",
+      repo: `acme/gh-merge-${run}`,
+      baseRef: "main",
+      prompt: "Work on {{title}}: {{body}}",
+    },
+  ]);
+  return { run };
+});
 
 const SECRET = "lob-268-webhook-secret";
 const saved = process.env["GITHUB_WEBHOOK_SECRET"];
 
 const sessionRoot = mkdtempSync(join(tmpdir(), "factory-api-gh-"));
 const checkout = mkdtempSync(join(tmpdir(), "factory-api-gh-repo-"));
-const run = randomBytes(4).toString("hex");
 const repo = RepoSlug.make(`acme/gh-merge-${run}`);
 
 const git = (cwd: string, command: string) =>
@@ -73,6 +104,48 @@ const branchSha = (branch: string): string | undefined => {
     return undefined;
   }
 };
+
+/**
+ * A loopback GitHub that answers the two calls `GitHubWriteBack` makes — the issue's comments, and
+ * a new one — and keeps what was posted. It is up, and `GITHUB_API_URL` points at it, before the
+ * route's layer is built: `toWebHandler` builds it when it is called, and the write-back reads the
+ * variable then. Nothing in this file may reach the real GitHub.
+ */
+const posted: Array<{ readonly path: string; readonly body: string }> = [];
+const savedApiUrl = process.env["GITHUB_API_URL"];
+const loopback: Server = createServer((request, response) => {
+  const chunks: Array<Buffer> = [];
+  request.on("data", (chunk: Buffer) => chunks.push(chunk));
+  request.on("end", () => {
+    const path = request.url ?? "";
+    response.setHeader("content-type", "application/json");
+    if (request.method === "POST") {
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+        readonly body: string;
+      };
+      posted.push({ path, body: body.body });
+      response.statusCode = 201;
+      response.end(JSON.stringify({ id: posted.length }));
+      return;
+    }
+    response.end(
+      JSON.stringify(
+        posted
+          .filter((comment) => comment.path === path)
+          .map((comment) => ({ body: comment.body })),
+      ),
+    );
+  });
+});
+// oxlint-disable-next-line effecttsgo/new-promise -- a node:http server's `listen` takes a callback.
+await new Promise<void>((resolve) => loopback.listen(0, "127.0.0.1", resolve));
+{
+  const address = loopback.address();
+  const port =
+    typeof address === "object" && address !== null ? address.port : 0;
+  // oxlint-disable-next-line effecttsgo/process-env -- a test harness sets up its own process.
+  process.env["GITHUB_API_URL"] = `http://127.0.0.1:${port}`;
+}
 
 /**
  * The run's own database, on the server `DATABASE_URL` names, and `DATABASE_URL` pointed at it.
@@ -163,6 +236,10 @@ const { handler, dispose } = HttpRouter.toWebHandler(
 afterAll(async () => {
   await dispose();
   await runtime.dispose();
+  // oxlint-disable-next-line effecttsgo/new-promise -- a node:http server's `close` takes a callback.
+  await new Promise<void>((resolve) => loopback.close(() => resolve()));
+  if (savedApiUrl === undefined) delete process.env["GITHUB_API_URL"];
+  else process.env["GITHUB_API_URL"] = savedApiUrl;
   await admin.runPromise(
     Effect.gen(function* () {
       const sql = yield* SqlClient;
@@ -276,4 +353,144 @@ describe("POST /webhooks/github tears a merged PR's workspaces down (LOB-268)", 
       expect(branchSha(workspace.branch)).toBeDefined();
     }
   }, 120_000);
+});
+
+const deliverEvent = (
+  event: "issues" | "issue_comment",
+  body: unknown,
+  secret: string = SECRET,
+) => {
+  const raw = JSON.stringify(body);
+  return handler(
+    new Request("http://factory.test/webhooks/github", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-event": event,
+        "x-hub-signature-256": `sha256=${createHmac("sha256", secret).update(raw).digest("hex")}`,
+      },
+      body: raw,
+    }),
+  );
+};
+
+const labeledIssue = (number: number, labels = ["factory"]) => ({
+  action: "opened",
+  issue: {
+    number,
+    title: "The widget wobbles",
+    body: "It wobbles when it spins.",
+    labels: labels.map((name) => ({ name })),
+  },
+  repository: { full_name: repo },
+});
+
+const mentioned = (number: number) => ({
+  action: "created",
+  issue: { number, title: "The widget wobbles", body: "", labels: [] },
+  comment: {
+    body: "@factory take this",
+    user: { login: "alice", type: "User" },
+  },
+  sender: { login: "alice", type: "User" },
+  repository: { full_name: repo },
+});
+
+describe("POST /webhooks/github opens a session from an issue (LOB-259)", () => {
+  it("is 503 for an issue event when no secret is set, before anything is read or written", async () => {
+    delete process.env["GITHUB_WEBHOOK_SECRET"];
+    // Signed with the empty key, which is what an unset secret degrades to.
+    const response = await deliverEvent("issues", labeledIssue(70), "");
+    expect(response.status).toBe(503);
+    expect(JSON.stringify(await response.json())).toContain(
+      "GITHUB_WEBHOOK_SECRET",
+    );
+    expect(posted).toEqual([]);
+  });
+
+  it("is 401 for an issue event with a wrong signature, and opens nothing", async () => {
+    const response = await deliverEvent("issues", labeledIssue(71), "another");
+    expect(response.status).toBe(401);
+    expect(posted).toEqual([]);
+  });
+
+  it("opens one session for a factory label and comments its link once, however often it is delivered", async () => {
+    await inService(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        yield* sessions.registerRepo({ repo, localPath: checkout });
+      }),
+    );
+    const first = await deliverEvent("issues", labeledIssue(72));
+    const firstBody = (await first.json()) as {
+      status: string;
+      replayed: boolean;
+      sessionId: string;
+    };
+    expect(first.status).toBe(200);
+    expect(firstBody).toMatchObject({ status: "processed", replayed: false });
+    expect(firstBody.sessionId).toBeDefined();
+
+    // GitHub's own twin of the opened delivery, a redelivery, and a mention on the same issue.
+    const twin = await deliverEvent("issues", {
+      ...labeledIssue(72),
+      action: "labeled",
+    });
+    const redelivered = await deliverEvent("issues", labeledIssue(72));
+    const asked = await deliverEvent("issue_comment", mentioned(72));
+    for (const response of [twin, redelivered, asked]) {
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ replayed: true });
+    }
+
+    const comments = posted.filter((comment) =>
+      comment.path.endsWith("/issues/72/comments"),
+    );
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.path).toBe(`/repos/${repo}/issues/72/comments`);
+    expect(comments[0]?.body).toContain(firstBody.sessionId);
+    const count = await inService(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        return yield* sql<{ count: number }>`
+          SELECT count(*)::int AS count FROM sessions
+          WHERE repo = ${repo} AND request_id = ${`trigger:github:${repo}#72:mapped`}
+        `;
+      }),
+    );
+    expect(count[0]?.count).toBe(1);
+  }, 120_000);
+
+  it("opens a session for an @factory mention on an issue with no label", async () => {
+    const response = await deliverEvent("issue_comment", mentioned(73));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      status: "processed",
+      replayed: false,
+    });
+    expect(
+      posted.filter((comment) => comment.path.endsWith("/issues/73/comments")),
+    ).toHaveLength(1);
+  }, 120_000);
+
+  it("records an unmapped label as skipped, opens no session and comments nothing", async () => {
+    const before = posted.length;
+    const response = await deliverEvent("issues", labeledIssue(74, ["bug"]));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      status: "skipped",
+      reason: "no rule matches labels [bug]",
+    });
+    expect(posted).toHaveLength(before);
+  });
+
+  it("answers an issue edit with 202 and starts nothing", async () => {
+    const before = posted.length;
+    const response = await deliverEvent("issues", {
+      ...labeledIssue(75),
+      action: "edited",
+    });
+    expect(response.status).toBe(202);
+    expect(posted).toHaveLength(before);
+  });
 });
