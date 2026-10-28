@@ -27,3 +27,4 @@ export * from "./LinearSync";
 export * from "./ProposalTracker";
 export * from "./SessionWriteBack";
 export * from "./WorkspaceRelease";
+export * from "./metrics";

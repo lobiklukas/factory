@@ -220,6 +220,12 @@ import {
 import { isSafeBranchName } from "./git";
 import type { RepoMirror } from "./RepoMirror";
 import { mintSessionId } from "./ids";
+import {
+  countRefusal,
+  countSessionCreate,
+  recordRunDuration,
+  shiftSessionsActive,
+} from "./metrics";
 import type { DiffCap, PrError, PullRequestStep } from "./pr";
 import { DEFAULT_DIFF_CAP } from "./pr";
 import { openPullRequest } from "./prStep";
@@ -882,6 +888,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         options.writeBackBudget ?? SESSION_WRITE_BACK_BUDGET,
       );
       const live = yield* Ref.make(HashMap.empty<SessionId, LiveOwner>());
+      /**
+       * When each owned session's current run started, as its activity projection saw it turn busy
+       * (`observeRun`); the run's duration is recorded when it turns idle (`factory.run.duration`).
+       * Only the projection writes an entry, and `releaseOwner` drops it with the projection.
+       */
+      const runStarts = new Map<SessionId, number>();
       /** Serializes owner acquisition so two callers cannot open the same log twice. */
       const gate = yield* Semaphore.make(1);
       /**
@@ -1430,6 +1442,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         Effect.gen(function* () {
           const release = yield* releaseOf(row);
           if (release === undefined) return;
+          yield* countRefusal("released");
           return yield* releasedError(row.id, release);
         });
 
@@ -1855,6 +1868,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             const current = yield* requireSession(id);
             const released = yield* releaseOf(current);
             if (released !== undefined && acquisition.starts === true) {
+              yield* countRefusal("released");
               return yield* releasedError(id, released);
             }
             const workspace = yield* workspaceFor(row, {
@@ -1968,6 +1982,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               lastUsedAt: now,
             };
             yield* Ref.update(live, HashMap.set(id, owner));
+            // Every owner added here is removed by exactly one `releaseOwner`, which takes it back off.
+            yield* shiftSessionsActive(1);
             // Published first, so a replay's comparison finds the owner whose run it waits for. An
             // owner opened on a replay is either its first open or the one that resumes its run, and
             // either way the comparison is owed from here (LOB-199); on any other log it is one
@@ -2296,6 +2312,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           }
           // The session exists and its directory is open: the list can show it without a fold.
           yield* touchActivity(id);
+          yield* countSessionCreate("create");
           return yield* describe(id, row);
         });
 
@@ -2345,6 +2362,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       ): Effect.Effect<SendMessageResult, SessionError> =>
         Effect.gen(function* () {
           if (input.content.length > MAX_MESSAGE_CHARS) {
+            yield* countRefusal("message_too_long");
             return yield* new SessionErrorClass({
               code: "invalid_input",
               message: `message is ${input.content.length} characters; the limit is ${MAX_MESSAGE_CHARS}`,
@@ -2374,7 +2392,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             ...(input.whenBusy === undefined
               ? {}
               : { whenBusy: input.whenBusy }),
-          });
+          }).pipe(
+            // `whenBusy: "reject"` on a running session: Pi Durable refuses it, nothing is queued.
+            Effect.tapError((error) =>
+              error.code === "busy" ? countRefusal("busy") : Effect.void,
+            ),
+          );
           yield* touchActivity(input.sessionId);
           const session = yield* describe(input.sessionId, { ...row, title });
           return {
@@ -2725,6 +2748,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ),
           );
           yield* touchActivity(id);
+          yield* countSessionCreate("fork");
           return yield* describe(id, row);
         });
 
@@ -2820,6 +2844,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // (`reconcileReplay`), which waits for it in the background, and the caller gets the replay
           // now, as it always has.
           yield* touchActivity(id);
+          yield* countSessionCreate("replay");
           return yield* describe(id, row);
         });
 
@@ -3558,7 +3583,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       ): Effect.Effect<void> => {
         switch (event._tag) {
           case "status":
-            return setActivityStatus(sessionId, event.status).pipe(
+            return observeRun(sessionId, event.status).pipe(
+              Effect.andThen(setActivityStatus(sessionId, event.status)),
               Effect.andThen(
                 setRunInFlight(sessionId, event.status === "busy"),
               ),
@@ -3571,10 +3597,16 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             return event.entry.kind === "budget"
               ? Effect.logWarning(
                   `session ${sessionId} stopped by its budget: ${event.entry.text}`,
-                ).pipe(Effect.andThen(touchActivity(sessionId)))
+                ).pipe(
+                  Effect.andThen(countRefusal("budget")),
+                  Effect.andThen(touchActivity(sessionId)),
+                )
               : touchActivity(sessionId);
           case "snapshot":
-            return setActivityStatus(sessionId, event.session.status).pipe(
+            return observeRun(sessionId, event.session.status).pipe(
+              Effect.andThen(
+                setActivityStatus(sessionId, event.session.status),
+              ),
               Effect.andThen(
                 setRunInFlight(sessionId, event.session.status === "busy"),
               ),
@@ -3592,6 +3624,27 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             return touchActivity(sessionId);
         }
       };
+
+      /**
+       * Time a run from the status the projection reports: the first `busy` starts the clock, and the
+       * first `idle` after it records the wall time (`factory.run.duration`). A repeated status
+       * changes nothing, so a snapshot that restates `busy` mid-run does not restart it.
+       */
+      const observeRun = (
+        sessionId: SessionId,
+        status: SessionStatus,
+      ): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          const now = yield* Clock.currentTimeMillis;
+          const started = runStarts.get(sessionId);
+          if (status === "busy") {
+            if (started === undefined) runStarts.set(sessionId, now);
+            return;
+          }
+          if (started === undefined) return;
+          runStarts.delete(sessionId);
+          yield* recordRunDuration(now - started);
+        });
 
       /**
        * Mirror whether the session's task graph holds a live mission into its row (LOB-231), so the
@@ -4387,6 +4440,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         Effect.gen(function* () {
           // Interrupting the projection first: a released owner has no status to report.
           yield* FiberMap.remove(projectors, sessionId);
+          // A run the release cuts short has no end to measure, so it is not recorded.
+          runStarts.delete(sessionId);
+          yield* shiftSessionsActive(-1);
           yield* closeHarness(owner.harness).pipe(Effect.ignore);
           // Then its sandboxes, which nothing runs in once the harness is closed; never the
           // worktree's files, which stay for the session's next run like the worktree itself.

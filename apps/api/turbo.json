@@ -7,7 +7,7 @@
       "cache": false
     },
     "dev": {
-      // Every variable apps/api reads (ServerConfig, the model backend, the session root, the Motel
+      // Every variable apps/api reads (ServerConfig, the model backend, the session root, the Motel, OTLP metrics
       // and DevTools exporters, DATABASE_MAX_CONNECTIONS via storage-postgres, and the trigger,
       // Linear, Sentry, Jira, Slack and GitHub webhook receivers and their write-backs). Strict Mode strips anything not declared here,
       // so a value set in the shell silently does nothing (LOB-101). A guard in
@@ -43,6 +43,8 @@
         "DATABASE_MAX_CONNECTIONS",
         "MOTEL_URL",
         "OTEL_SERVICE_NAME",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+        "OTEL_METRIC_EXPORT_INTERVAL",
         "DEVTOOLS",
         "DEVTOOLS_URL",
         "GITHUB_APP_ID",
