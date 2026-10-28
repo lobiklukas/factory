@@ -59,8 +59,10 @@ card's runs are told its body (LOB-260). The run starts from the card (B12), and
 follows the run ([linear-writeback.md](linear-writeback.md)).
 
 **What the board refuses is a decision, not a failure.** A description over the card body's cap
-(32,000 characters) is cut to the cap with a marker, and the reason says so, rather than refused. A
-card the board refuses for its input (a base ref git would not take) is a recorded skip naming the
+(32,000 characters) is cut to the cap with a marker, and the reason says so, rather than refused.
+So is a title over the card title's cap (300 characters, F10): the card's title is its head and `…`,
+exactly at the cap, and the whole title opens the body (`Title: …`); a blank title is the item's
+source and key. A card the board refuses for its input (a base ref git would not take) is a recorded skip naming the
 field ("the board refused the card's baseRef"), not a 500 for Linear to retry. Filing the card
 acknowledges nothing on the issue, nor on any other source.
 
