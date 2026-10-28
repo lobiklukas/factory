@@ -310,6 +310,38 @@ export const LINEAR_RELATIONS_QUERY = `query FactoryRelations($id: String!) {
   }
 }`;
 
+/**
+ * The issues that block this one (T5). Linear stores "A blocks B" once, as a relation owned by A
+ * whose `relatedIssue` is B, so B reads it as an *inverse* relation, and `issue` is the blocker. Its
+ * `state.type` says whether the blocker still holds B up. One page of 250, Linear's maximum, as the
+ * reads above.
+ */
+export const LINEAR_BLOCKERS_QUERY = `query FactoryBlockers($id: String!) {
+  issue(id: $id) {
+    id
+    identifier
+    inverseRelations(first: 250) { nodes { type issue { id identifier state { type } } } }
+  }
+}`;
+
+/**
+ * A session for the factory's agent on an issue (T5): the thread an elicitation is posted in and a
+ * person's reply comes back on. Linear creates one when an issue is delegated to the app; an issue
+ * the factory started from a label has none, so the first question opens it.
+ */
+export const LINEAR_AGENT_SESSION_CREATE = `mutation FactoryAgentSession($input: AgentSessionCreateOnIssue!) {
+  agentSessionCreateOnIssue(input: $input) { success agentSession { id } }
+}`;
+
+/**
+ * One agent activity (T5). The factory posts only an `elicitation` (`{type, body}`): Linear shows it
+ * to the person as a question to answer in the thread, and sends their reply back as an
+ * `AgentSessionEvent` of action `prompted`.
+ */
+export const LINEAR_AGENT_ACTIVITY_CREATE = `mutation FactoryAgentActivity($input: AgentActivityCreateInput!) {
+  agentActivityCreate(input: $input) { success }
+}`;
+
 export const LINEAR_RELATION_CREATE = `mutation FactoryRelationCreate($input: IssueRelationCreateInput!) {
   issueRelationCreate(input: $input) { success }
 }`;
@@ -365,6 +397,32 @@ const RelationsData = Schema.Struct({
         ),
       }),
     }),
+  ),
+});
+
+const BlockersData = Schema.Struct({
+  issue: Schema.NullOr(
+    Schema.Struct({
+      inverseRelations: Schema.Struct({
+        nodes: Schema.Array(
+          Schema.Struct({
+            type: Schema.String,
+            issue: Schema.Struct({
+              id: Schema.String,
+              identifier: Schema.String,
+              state: Schema.Struct({ type: Schema.String }),
+            }),
+          }),
+        ),
+      }),
+    }),
+  ),
+});
+
+const AgentSessionCreateResult = Schema.Struct({
+  success: Schema.Boolean,
+  agentSession: Schema.optional(
+    Schema.NullOr(Schema.Struct({ id: Schema.String })),
   ),
 });
 
@@ -586,6 +644,32 @@ export type LinearIssueSyncShape = {
     readonly blocker: LinearIssueRef;
     readonly blocked: LinearIssueRef;
   }) => Effect.Effect<{ readonly created: boolean }, LinearSyncError>;
+  /**
+   * The issues that block `issueId` and are not finished (T5), by the identifiers a person reads: a
+   * `blocks` relation whose blocker's state is not `completed` or `canceled`. A read only. A blocker
+   * Linear calls canceled no longer holds the issue up, as in Linear's own board.
+   */
+  readonly openBlockers: (input: {
+    readonly issueId: string;
+  }) => Effect.Effect<readonly string[], LinearSyncError>;
+  /**
+   * Open the factory agent's session on `issueId` (T5) and answer its id: the thread an elicitation
+   * is posted in. Not idempotent on its own — the caller keeps the id (`linear_agent_sessions`) so
+   * an issue has one.
+   */
+  readonly openAgentSession: (input: {
+    readonly issueId: string;
+  }) => Effect.Effect<string, LinearSyncError>;
+  /**
+   * Post one `elicitation` activity into `agentSessionId`: the question as Linear's own typed
+   * activity, which Linear shows as a question and answers back as an event (T5). One call is one
+   * activity; the caller is what makes a replayed ask send one.
+   */
+  readonly elicit: (input: {
+    readonly issueId: string;
+    readonly agentSessionId: string;
+    readonly question: string;
+  }) => Effect.Effect<void, LinearSyncError>;
   /**
    * The children of `issueId` as the plan (LOB-45): each child's title, state and acceptance
    * checklist. A read only.
@@ -1087,6 +1171,84 @@ export const LinearIssueSyncLive = (
           }),
         );
 
+      /** The issue's open blockers, read once (T5). */
+      const openBlockers: LinearIssueSyncShape["openBlockers"] = (input) =>
+        retried(
+          Effect.gen(function* () {
+            const { issue } = yield* read(
+              "issueBlockers",
+              input.issueId,
+              LINEAR_BLOCKERS_QUERY,
+              BlockersData,
+              { id: input.issueId },
+            );
+            if (issue === null) {
+              return yield* noIssue("issueBlockers", input.issueId);
+            }
+            return issue.inverseRelations.nodes
+              .filter(
+                (relation) =>
+                  relation.type === "blocks" &&
+                  relation.issue.state.type !== "completed" &&
+                  relation.issue.state.type !== "canceled",
+              )
+              .map((relation) => relation.issue.identifier);
+          }),
+        );
+
+      const openAgentSession: LinearIssueSyncShape["openAgentSession"] = (
+        input,
+      ) =>
+        retried(
+          Effect.gen(function* () {
+            const field = yield* mutationField(
+              "agentSessionCreateOnIssue",
+              input.issueId,
+              LINEAR_AGENT_SESSION_CREATE,
+              { input: { issueId: input.issueId } },
+            );
+            const fail = (message: string) =>
+              new LinearSyncError({
+                issueId: input.issueId,
+                operation: "agentSessionCreateOnIssue",
+                message,
+                transient: false,
+              });
+            const created = yield* Schema.decodeUnknownEffect(
+              AgentSessionCreateResult,
+            )(field).pipe(
+              Effect.mapError(() =>
+                fail(
+                  "Linear's answer to agentSessionCreateOnIssue could not be read",
+                ),
+              ),
+            );
+            if (!created.success || !created.agentSession) {
+              return yield* fail(
+                created.success
+                  ? "Linear answered agentSessionCreateOnIssue without the session it made"
+                  : "Linear answered success: false to agentSessionCreateOnIssue",
+              );
+            }
+            return created.agentSession.id;
+          }),
+        );
+
+      const elicit: LinearIssueSyncShape["elicit"] = (input) =>
+        retried(
+          mutate(
+            "agentActivityCreate",
+            input.issueId,
+            LINEAR_AGENT_ACTIVITY_CREATE,
+            {
+              input: {
+                agentSessionId: input.agentSessionId,
+                content: { type: "elicitation", body: input.question },
+              },
+            },
+          ),
+        );
+
       /** The parent's children, read once: what a plan-freshness pass is shown. */
       const children: LinearIssueSyncShape["children"] = (input) =>
         retried(
@@ -1199,6 +1361,9 @@ export const LinearIssueSyncLive = (
       return LinearIssueSync.of({
         createChild,
         blocks,
+        openBlockers,
+        openAgentSession,
+        elicit,
         children,
         rescope,
         close,
@@ -1311,6 +1476,27 @@ export const NoLinearIssueSync = Layer.succeed(
           issueId: input.blocker.identifier,
           operation: "issueRelationCreate",
           message: "no Linear key is configured; nothing was related",
+          transient: false,
+        }),
+      ),
+    // No key, no way to know: the readiness gate is not wired without one (`apps/api`), and a caller
+    // that reaches this anyway is told there is nothing holding the issue up.
+    openBlockers: () => Effect.succeed([]),
+    openAgentSession: (input) =>
+      Effect.fail(
+        new LinearSyncError({
+          issueId: input.issueId,
+          operation: "agentSessionCreateOnIssue",
+          message: "no Linear key is configured; no session was opened",
+          transient: false,
+        }),
+      ),
+    elicit: (input) =>
+      Effect.fail(
+        new LinearSyncError({
+          issueId: input.issueId,
+          operation: "agentActivityCreate",
+          message: "no Linear key is configured; nothing was posted",
           transient: false,
         }),
       ),

@@ -121,3 +121,15 @@ the issue once its rule's repo is registered…").
 guard). A write-back to the issue (`NoWriteBack`): a comment or agent activity naming the session is
 LOB-14's follow-on, not this mapping. Team → repo mapping: a rule is a label, and a team that wants
 its own repo gives its issues its own label.
+
+**A reply in an agent session answers the card's question (T5).** An `AgentSessionEvent` with
+action `prompted` — a person writing in the thread of the agent session the factory posted an
+`elicitation` in — is a reply, not an issue: its delivery id is `linear:<activity id>:reply`, and
+the seam records the text as the `answer` comment on the card filed from that issue if one is
+blocked `needs_input` (the delivery is `processed`, naming the card), and a recorded skip otherwise.
+Other agent-session events (`created`) are answered `200` and skipped as any other entity. The
+question's half, and the blocker gate (an issue with an open `blockedBy` relation is skipped
+`blocked by <id>` until the blocker is Done), are in [linear-writeback.md](linear-writeback.md).
+`./linear.sh` drives the reply over HTTP (checks 22–24: skipped when no card waits, a reply answers
+the parked card verbatim, a redelivery and a second reply record nothing) and finds it in
+`listTriggerDeliveries`.

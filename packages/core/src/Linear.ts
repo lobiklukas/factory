@@ -36,6 +36,12 @@
  * and turn the label that arrives later into a replay of a skip. Its own retry may record a second
  * skip row; a skip starts nothing, so that costs a row and not a session.
  *
+ * **A reply in an agent session is not an issue** (T5). An `AgentSessionEvent` of action `prompted` is a
+ * person answering a question the factory posted in Linear (`./LinearElicitation`): it normalizes to
+ * an event carrying `reply`, keyed by the activity that carries the text (`linear:<activity>:reply`),
+ * so Linear's redelivery is one answer, and the seam routes it to the card rather than through a rule.
+ * Any other agent-session event (`created`) is another entity, answered and skipped.
+ *
  * `webhookId` is not a delivery id. Linear's docs call it the "ID uniquely identifying this
  * webhook" — the subscription — so it is the same on every delivery that subscription sends, and
  * nothing here reads it.
@@ -54,6 +60,16 @@ import {
 
 /** The one Linear entity type that starts work. */
 export const LINEAR_ISSUE_TYPE = "Issue";
+
+/**
+ * The webhook entity a Linear agent session sends (T5): `created` when the agent is brought onto an
+ * issue, `prompted` when a person writes in its thread — which is how the answer to an `elicitation`
+ * the factory posted reaches it.
+ */
+export const LINEAR_AGENT_SESSION_TYPE = "AgentSessionEvent";
+
+/** The action an `AgentSessionEvent` carries when a person replied in the session's thread. */
+export const LINEAR_AGENT_PROMPTED = "prompted";
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -163,6 +179,49 @@ const addedAClaimedLabel = (
 };
 
 /**
+ * An agent session's `prompted` event as a reply (T5): the issue the session is on, the session, the
+ * activity that carries the person's text, and the text. `undefined` when the payload is not that
+ * (another action, no issue, no activity id or an empty reply) — the caller then reads it as any
+ * other entity, a recorded skip.
+ *
+ * Linear puts the reply on `agentActivity.content.body` (the activity's typed content); a relay's
+ * hand-written body may carry it as `agentActivity.body`. The text is read from the event and never
+ * fetched again, because a Linear comment is editable and an event is what was said.
+ */
+const agentReply = (
+  body: Record<string, unknown>,
+): TriggerEvent | undefined => {
+  if (stringField(body, "action") !== LINEAR_AGENT_PROMPTED) return undefined;
+  const session = asRecord(body["agentSession"]);
+  const activity = asRecord(body["agentActivity"]);
+  const issue = asRecord(session?.["issue"]);
+  const agentSessionId = stringField(session, "id");
+  const activityId = stringField(activity, "id");
+  const issueId = issue === undefined ? undefined : entityId(issue);
+  const text =
+    stringField(asRecord(activity?.["content"]), "body") ??
+    stringField(activity, "body");
+  if (
+    agentSessionId === undefined ||
+    activityId === undefined ||
+    issueId === undefined ||
+    text === undefined ||
+    text.trim() === ""
+  ) {
+    return undefined;
+  }
+  return {
+    source: "linear",
+    key: issueId,
+    action: `${LINEAR_AGENT_SESSION_TYPE}:${LINEAR_AGENT_PROMPTED}`,
+    title: stringField(issue, "title") ?? "",
+    body: "",
+    labels: [],
+    reply: { agentSessionId, activityId, body: text },
+  };
+};
+
+/**
  * A Linear webhook payload, normalized against the rules that decide which label adds are work.
  *
  * `undefined` is "this names nothing this adapter can address": not an object, or an issue (a body
@@ -181,6 +240,11 @@ export const linearEvent = (
   // A payload with no `type` is a relay's hand-written issue; Linear itself always sends one.
   const type = stringField(body, "type") ?? LINEAR_ISSUE_TYPE;
   const action = stringField(body, "action") ?? TRIGGER_ACTION;
+
+  if (type === LINEAR_AGENT_SESSION_TYPE) {
+    const reply = agentReply(body);
+    if (reply !== undefined) return reply;
+  }
 
   if (type !== LINEAR_ISSUE_TYPE) {
     // Another entity: its own key space, and an action the filter cannot mistake for an issue's.
@@ -290,6 +354,10 @@ export const linearRequestId = (
   payload: unknown,
   headers: LinearDeliveryHeaders = {},
 ): string => {
+  // A reply is one answer however many times Linear sends it: keyed by the activity that carries it.
+  if (event.reply !== undefined) {
+    return `linear:${event.reply.activityId}:reply`;
+  }
   if (isMappedWork(event, rules)) return linearMappedRequestId(event.key);
   if (canStartWork(event, rules)) {
     const labels = [...new Set(event.labels)].sort().join(",");

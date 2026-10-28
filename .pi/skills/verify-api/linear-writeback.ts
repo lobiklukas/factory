@@ -44,6 +44,23 @@
 //  14. starting a run on the card and opening its PR moves the issue to In Review, with the PR as
 //      an attachment and exactly one comment carrying the PR link — and a retried PR step adds none
 //
+// The Linear-delegated run's questions and an issue's blockers (T5):
+//
+//  15. a mapped delivery for an issue with an open `blockedBy` relation is skipped with `blocked by
+//      <id>` and files no card — the blocker read is Linear's real query against the loopback fake
+//  16. once the blocker is Done in Linear, the same delivery, arriving again, files the card — and a
+//      replay of that is a replay
+//  17. a run on a card filed from a Linear issue that calls `ask` parks the card `needs_input` on its
+//      question and posts exactly one agent activity of type `elicitation` into Linear, in an agent
+//      session opened on that issue, carrying the question verbatim
+//  18. the ask replayed (the ask write-back called again with the same ask id) posts nothing: still one
+//      activity, still one session
+//  19. a person's reply, as Linear's `AgentSessionEvent` `prompted` event, lifts the block: it is the
+//      card's `answer` comment, verbatim, and it cost no request to Linear — the reply is an event,
+//      never a comment read back
+//  20. Linear's redelivery of that reply, and a second reply to the answered wait, record nothing: the
+//      thread keeps one answer
+//
 // Env: DATABASE_URL (via DatabaseLive), SESSION_ROOT, REPO_DIR, LINEAR_FAKE_URL, LINEAR_FAKE_LEDGER,
 // LINEAR_RUN_STAMP, LINEAR_LOSE_ACK_ISSUE, GITHUB_API_URL (read by the PR client), EVIDENCE_DIR.
 import { execSync } from "node:child_process";
@@ -59,12 +76,17 @@ import { RepoSlug as RepoSlugSchema } from "@repo/domain/Session";
 import type { SessionId } from "@repo/domain/Session";
 import type { TriggerRule } from "@repo/domain/Trigger";
 import {
+  AskWriteBack,
   CredentialProvider,
   DEFAULT_LINEAR_STATES,
   handleGitHubPullRequestWebhook,
   linearDelivery,
+  LinearAskWriteBack,
+  LinearIssueSync,
   LinearIssueSyncLive,
   LinearSessionWriteBack,
+  LinearTriggerBlockers,
+  LinearTriggerReplies,
   LinearTriggerWriteBack,
   SessionService,
   SessionServiceLive,
@@ -77,7 +99,7 @@ import {
   TriggerSessionsFromSessionService,
 } from "@repo/core";
 import { DEFAULT_DEFINITION_ID, DefinitionId } from "@repo/domain/Task";
-import { createModelAccess } from "@repo/harness";
+import { createFauxModelAccess, createModelAccess } from "@repo/harness";
 import { DatabaseLive } from "@repo/storage-postgres";
 import { makeChecker, waitUntil } from "./harness.ts";
 import type { CheckRecord } from "./harness.ts";
@@ -143,32 +165,52 @@ const sync = LinearIssueSyncLive({
 
 const database = Layer.mergeAll(DatabaseLive, BunServices.layer);
 
-const sessions = SessionServiceLive({
-  model: createModelAccess("faux"),
-  sessionRoot: SESSION_ROOT,
-}).pipe(
-  Layer.provide(LinearSessionWriteBack.pipe(Layer.provide(sync))),
-  Layer.provideMerge(database),
-);
-
 // The card port and the drive's own board reads: `TaskService` over the same database, which the
-// session layer below provides (`provideMerge`).
+// session layer provides (`provideMerge`).
 const tasks = TaskServiceLive;
 
-const runtime = ManagedRuntime.make(
-  Layer.mergeAll(
-    TriggerServiceLive({ rules }).pipe(
-      Layer.provide(
-        Layer.mergeAll(
-          TriggerSessionsFromSessionService,
-          TriggerCardsFromTaskService.pipe(Layer.provide(tasks)),
-          LinearTriggerWriteBack.pipe(Layer.provide(sync)),
-        ),
+/**
+ * The process as `apps/api` wires it, over a model: the seam (with the Linear write-back, the blocker
+ * gate and the reply port), the session layer (with both Linear write-backs: the PR step's and the
+ * ask's), and the board. The T5 section runs a second one whose model asks.
+ */
+const runtimeOver = (model: ReturnType<typeof createModelAccess>) => {
+  const sessions = SessionServiceLive({
+    model,
+    sessionRoot: SESSION_ROOT,
+  }).pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        LinearSessionWriteBack.pipe(Layer.provide(sync)),
+        LinearAskWriteBack.pipe(Layer.provide(sync)),
       ),
     ),
-    sync,
-    tasks,
-  ).pipe(Layer.provideMerge(sessions)),
+    Layer.provideMerge(database),
+  );
+  return ManagedRuntime.make(
+    Layer.mergeAll(
+      TriggerServiceLive({ rules }).pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            TriggerSessionsFromSessionService,
+            TriggerCardsFromTaskService.pipe(Layer.provide(tasks)),
+            LinearTriggerWriteBack.pipe(Layer.provide(sync)),
+            LinearTriggerBlockers.pipe(Layer.provide(sync)),
+            LinearTriggerReplies.pipe(Layer.provide(tasks)),
+          ),
+        ),
+      ),
+      sync,
+      tasks,
+    ).pipe(Layer.provideMerge(sessions)),
+  );
+};
+
+const runtime = runtimeOver(createModelAccess("faux"));
+/** The T5 section's: a model that calls `ask` with `QUESTION` once its first turn is done. */
+const QUESTION = "Which Postgres major does this target?";
+const askRuntime = runtimeOver(
+  createFauxModelAccess({ fauxAsk: QUESTION }).access,
 );
 
 const github = Layer.merge(
@@ -197,6 +239,14 @@ type Ledger = {
   }>;
   readonly issues: Record<string, LedgerIssue>;
   readonly lostAcks: readonly string[];
+  readonly agentSessions: ReadonlyArray<{
+    readonly id: string;
+    readonly issueId: string;
+  }>;
+  readonly activities: ReadonlyArray<{
+    readonly agentSessionId: string;
+    readonly content: Record<string, unknown>;
+  }>;
 };
 
 const ledger = (): Ledger => JSON.parse(readFileSync(LEDGER, "utf8")) as Ledger;
@@ -497,10 +547,16 @@ const run = Effect.gen(function* () {
       (yield* triggerSessions) === 0,
     `outcome=${JSON.stringify(carded)} cards=${JSON.stringify(onBoard)}`,
   );
+  // The blocker gate reads the issue's relations (a read), so Linear may have seen the issue; what it
+  // must not have is a write: no comment, no attachment, and no move out of Todo.
+  const filedIssue = issue(CARDED);
   assert(
     "filing the card writes nothing to Linear: the issue moves when the card's run opens its PR",
-    issue(CARDED) === undefined,
-    `issue=${JSON.stringify(issue(CARDED))}`,
+    filedIssue === undefined ||
+      (filedIssue.state.name === "Todo" &&
+        filedIssue.comments.length === 0 &&
+        filedIssue.attachments.length === 0),
+    `issue=${JSON.stringify(filedIssue)}`,
   );
   if (card === undefined) {
     return yield* Effect.die(new Error("no card: the rest proves nothing"));
@@ -560,6 +616,60 @@ const run = Effect.gen(function* () {
     `outcome=${cardPr.outcome} issue=${JSON.stringify(afterCardPr)}`,
   );
 
+  // 15–16: an issue with an open blocker does not start (T5).
+  const BLOCKED = `BLK-${STAMP}`;
+  const BLOCKER = `DEP-${STAMP}`;
+  // Linear mints a UUID per issue; the fake's is `uuid-<key>`, and a relation names its ends by it.
+  const ref = (key: string) => ({ id: `uuid-${key}`, identifier: key });
+  const linear = yield* LinearIssueSync;
+  yield* linear.openBlockers({ issueId: BLOCKER });
+  yield* linear.openBlockers({ issueId: BLOCKED });
+  yield* linear.blocks({ blocker: ref(BLOCKER), blocked: ref(BLOCKED) });
+  const cardsBefore = (yield* (yield* TaskService).list({ boardId: board.id }))
+    .length;
+  const heldBack = yield* deliver(
+    BLOCKED,
+    "Wait for the blocker",
+    "factory-card",
+    CARD_DESCRIPTION,
+  );
+  const cardsHeld = (yield* (yield* TaskService).list({ boardId: board.id }))
+    .length;
+  assert(
+    "a mapped issue with an open blockedBy relation is skipped with `blocked by <id>` and files no card",
+    heldBack.status === "skipped" &&
+      heldBack.reason === `blocked by ${BLOCKER}` &&
+      heldBack.taskId === undefined &&
+      cardsHeld === cardsBefore &&
+      (yield* triggerSessions) === 0,
+    `outcome=${JSON.stringify(heldBack)} cards ${cardsBefore} → ${cardsHeld}`,
+  );
+  // The blocker's PR merges: Linear moves it to Done, and the blocked issue's delivery comes again.
+  yield* linear.merged({ issueId: BLOCKER, sessionId, pr: observed.pr! });
+  const released = yield* deliver(
+    BLOCKED,
+    "Wait for the blocker",
+    "factory-card",
+    CARD_DESCRIPTION,
+  );
+  const afterRelease = yield* (yield* TaskService).list({ boardId: board.id });
+  const releasedAgain = yield* deliver(
+    BLOCKED,
+    "Wait for the blocker",
+    "factory-card",
+    CARD_DESCRIPTION,
+  );
+  assert(
+    "once the blocker is Done the same delivery files the card, and a redelivery of that is a replay",
+    issue(BLOCKER)?.state.name === "Done" &&
+      released.status === "processed" &&
+      !released.replayed &&
+      afterRelease.length === cardsBefore + 1 &&
+      afterRelease.some((one) => one.externalRef === `linear:${BLOCKED}`) &&
+      releasedAgain.replayed,
+    `released=${JSON.stringify(released)} cards=${afterRelease.length} again=${JSON.stringify(releasedAgain)}`,
+  );
+
   // 11
   const keys = new Set(
     ledger().requests.map((request) => request.authorization),
@@ -571,11 +681,160 @@ const run = Effect.gen(function* () {
   );
 });
 
+/**
+ * 17–20: the Linear-delegated run's question (T5), on a runtime whose model asks. The card is filed by
+ * the same Linear delivery as above, then a real run on it calls `ask`.
+ */
+const ASKED = `ASK-${STAMP}`;
+const ANSWER = "Postgres 16.\n  Keep port 5442 \u2014 it is shared.  ";
+const askRun = Effect.gen(function* () {
+  const service = yield* SessionService;
+  const tasksService = yield* TaskService;
+  const sql = yield* SqlClient;
+  const filed = yield* deliver(
+    ASKED,
+    "Ask me something",
+    "factory-card",
+    CARD_DESCRIPTION,
+  );
+  if (filed.taskId === undefined) {
+    return yield* Effect.die(new Error("no card for the ask section"));
+  }
+  const filedCard = yield* tasksService.get(filed.taskId);
+  // As a person moves it to where a run asks (the `ask` drives do the same): `specifying`.
+  const card = yield* tasksService.move({
+    taskId: filedCard.id,
+    expectedRevision: filedCard.revision,
+    to: "specifying",
+    actor: "person:linear-writeback-drive",
+  });
+  const run = yield* service.create({
+    title: card.title,
+    taskId: card.id,
+    taskColumn: card.column,
+    repo: REPO,
+    actor: "person:linear-writeback-drive",
+  });
+  observed.sessions[ASKED] = run.id;
+  yield* service.send({ sessionId: run.id, content: "specify it" });
+  const parked = yield* waitUntil(
+    Effect.map(tasksService.get(card.id), (task) =>
+      task.blocked === undefined ? false : task,
+    ),
+    "the run to ask",
+  );
+  const thread = yield* tasksService.comments(card.id);
+  const activities = () => ledger().activities;
+  const sessionsOpened = () => ledger().agentSessions;
+  assert(
+    "a run's ask on a Linear-sourced card parks it needs_input and posts exactly one elicitation, verbatim, in an agent session on the issue",
+    parked.blocked?.reason === "needs_input" &&
+      thread.length === 1 &&
+      thread[0]?.kind === "question" &&
+      thread[0].body === QUESTION &&
+      activities().length === 1 &&
+      activities()[0]?.content["type"] === "elicitation" &&
+      activities()[0]?.content["body"] === QUESTION &&
+      sessionsOpened().length === 1 &&
+      sessionsOpened()[0]?.issueId === ASKED &&
+      activities()[0]?.agentSessionId === sessionsOpened()[0]?.id,
+    `blocked=${JSON.stringify(parked.blocked)} thread=${JSON.stringify(thread)} activities=${JSON.stringify(activities())} sessions=${JSON.stringify(sessionsOpened())}`,
+  );
+
+  // 18: the ask replayed. The ledger names the ask id the run used; the port is called with it again.
+  const asks = yield* sql<{ askId: string }>`
+    SELECT ask_id FROM linear_elicitations WHERE task_id = ${card.id}
+  `;
+  const replay = Layer.build(
+    LinearAskWriteBack.pipe(Layer.provide(sync), Layer.provide(database)),
+  );
+  yield* Effect.scoped(
+    Effect.gen(function* () {
+      const context = yield* replay;
+      const writeBack = yield* Effect.provide(AskWriteBack, context);
+      yield* writeBack.asked({
+        sessionId: run.id,
+        taskId: card.id,
+        askId: asks[0]?.askId ?? "(no ask id)",
+        question: QUESTION,
+      });
+    }),
+  );
+  assert(
+    "the ask replayed posts nothing: still one activity and one agent session",
+    asks.length === 1 &&
+      activities().length === 1 &&
+      sessionsOpened().length === 1,
+    `asks=${JSON.stringify(asks)} activities=${activities().length} sessions=${sessionsOpened().length}`,
+  );
+
+  // 19: the reply is an event.
+  const requestsBefore = ledger().requests.length;
+  const replyPayload = {
+    type: "AgentSessionEvent",
+    action: "prompted",
+    webhookTimestamp: Date.now(),
+    agentSession: {
+      id: sessionsOpened()[0]?.id ?? "(none)",
+      issue: { id: ASKED, identifier: ASKED },
+    },
+    agentActivity: {
+      id: `act-${STAMP}-answer`,
+      content: { type: "prompt", body: ANSWER },
+    },
+  };
+  const trigger = yield* TriggerService;
+  const replyDelivery = linearDelivery(replyPayload, rules);
+  if (replyDelivery === undefined) {
+    return yield* Effect.die(new Error("the reply did not normalize"));
+  }
+  const answered = yield* trigger.deliver(replyDelivery);
+  const unblocked = yield* tasksService.get(card.id);
+  const answers = yield* tasksService.comments(card.id);
+  assert(
+    "a reply event lifts needs_input as the card's verbatim answer, and cost no request to Linear",
+    answered.status === "processed" &&
+      answered.taskId === card.id &&
+      unblocked.blocked === undefined &&
+      answers.map((comment) => comment.kind).join() === "question,answer" &&
+      answers[1]?.body === ANSWER &&
+      answers[1].actor === "trigger:linear" &&
+      ledger().requests.length === requestsBefore,
+    `answer=${JSON.stringify(answered)} thread=${JSON.stringify(answers)} requests ${requestsBefore} → ${ledger().requests.length}`,
+  );
+
+  // 20: redelivery, and a second reply once the wait is answered.
+  const again = yield* trigger.deliver(replyDelivery);
+  const lateDelivery = linearDelivery(
+    {
+      ...replyPayload,
+      agentActivity: {
+        id: `act-${STAMP}-late`,
+        content: { type: "prompt", body: "Actually 15." },
+      },
+    },
+    rules,
+  );
+  const late = yield* trigger.deliver(lateDelivery!);
+  assert(
+    "a redelivered reply and a second reply to the answered wait record nothing: one answer",
+    again.replayed &&
+      late.status === "skipped" &&
+      (yield* tasksService.comments(card.id)).length === 2,
+    `again=${JSON.stringify(again)} late=${JSON.stringify(late)}`,
+  );
+});
+
 const exit = await runtime.runPromiseExit(run);
 if (exit._tag === "Failure") {
   console.error(exit.cause);
 }
 await runtime.dispose();
+const askExit = await askRuntime.runPromiseExit(askRun);
+if (askExit._tag === "Failure") {
+  console.error(askExit.cause);
+}
+await askRuntime.dispose();
 
 const checks = Object.values(observed.checks);
 const failed = checks.filter((check) => !check.passed).length;
@@ -586,4 +845,6 @@ await writeFile(
 console.log(
   `\nlinear-writeback: ${checks.length - failed}/${checks.length} checks passed — evidence in ${EVIDENCE_DIR}`,
 );
-process.exit(failed === 0 && exit._tag === "Success" ? 0 : 1);
+process.exit(
+  failed === 0 && exit._tag === "Success" && askExit._tag === "Success" ? 0 : 1,
+);

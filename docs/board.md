@@ -285,6 +285,18 @@ one transaction over one table, and B3's "cards are rows" holds for the thread t
 the harness's `ask` tool, which ends the run (`control: { terminate: true }`); every run opened on the
 card carries the thread as its `task_thread` prompt section.
 
+Built (T5): for a card filed from a Linear issue, the same ask also posts the question to Linear as
+one `elicitation` activity (`AskWriteBack`, `LinearAskWriteBack`; deduped by the ask id in
+`linear_elicitations`), and the person's reply in that agent session arrives as an
+`AgentSessionEvent` `prompted` webhook, which the trigger seam records as the card's `answer`
+comment — the event's own text, never a re-read comment — lifting the block.
+
+Built (T5): for a card filed from a Linear issue, the same ask also posts the question to Linear as
+one `elicitation` activity (`AskWriteBack`, `LinearAskWriteBack`; deduped by the ask id in
+`linear_elicitations`), and the person's reply in that agent session arrives as an
+`AgentSessionEvent` `prompted` webhook, which the trigger seam records as the card's `answer`
+comment — the event's own text, never a re-read comment — lifting the block.
+
 ## B8 — Evidence gates, not evidence prose
 
 `requires[]` is machine-checked on exit, which promotes verification-as-evidence (LOB-16) from a body
