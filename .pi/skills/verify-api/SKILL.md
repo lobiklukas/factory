@@ -56,6 +56,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | The review agent (LOB-36)          | `review.sh`: a signed `pull_request` starts a read-only reviewer at the head, on its own model; one `COMMENT` naming the bug, as its own token; a redelivery none; a push a second                                                                                                                                          | a PR is reviewed once per head, not as its author                                  |
 | Proposed child issues (LOB-201)    | `decompose.sh`: a specifier's spec → `proposeDecomposition` commits one proposal per criterion, `getSession` reads them back, and no other row in the database moves                                                                                                                                                        | a spec becomes proposals, and nothing else is made                                 |
 | The model backend (LOB-258)        | `backend-boot.sh`: faux by `MODEL_BACKEND`; forced anthropic with no credential or no federation token file exits non-zero, naming why; a dummy token boots anthropic, value unlogged                                                                                                                                       | a wrong backend fails the boot, not the first request                              |
+| What the server runs (LOB-269)     | `server-info.sh`: `getServerInfo` answers faux by `MODEL_BACKEND`, `faux/faux-1`, the `ROLE_MODELS` rows, gate, budget and armed routes; no dummy credential in the raw body or the log; a session names `faux/faux-1` on create, get and list                                                                              | a client can ask which backend and model it is on                                  |
 
 Every check is required: the driver exits non-zero when one fails.
 
@@ -123,6 +124,7 @@ DATABASE_URL=… ./backend-boot.sh  # api on :9426 (BACKEND_BOOT_PORT), booted f
 ./pages.sh       # api on :9422, a priced faux — curate, list, repeat for one call, delete the rows and rebuild them (features/pages.md)
 ./review.sh      # api on :9200, fake GitHub on :9201 — a pull_request starts the reviewer; one comment as its own identity (features/review.md)
 ./decompose.sh   # api on :9424, a faux specifier — a spec becomes proposed child issues, and nothing else is written (features/decompose.md)
+DATABASE_URL=… ./server-info.sh  # api on :9200 (API_PORT), via up.sh — getServerInfo and each session's model; no credential's value in the answer (features/server-info.md)
 ```
 
 `pr-once.sh` is the third of those, and it starts no API process: the window it proves is a kill

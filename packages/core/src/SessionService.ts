@@ -545,6 +545,11 @@ type SessionRow = {
   /** When the worktree and branch were torn down, and on which terminal event (LOB-268). */
   readonly workspaceReleasedAt: string | null;
   readonly workspaceReleaseReason: string | null;
+  /**
+   * The model the session is pinned to, `provider/modelId` (LOB-269): written when its owner opens,
+   * refolded by `rebuildIndexes`. `NULL` before the first open, or on a row older than the column.
+   */
+  readonly model: string | null;
 };
 type RepoRow = {
   readonly slug: string;
@@ -561,6 +566,8 @@ type ListRow = {
   readonly baseRef: string | null;
   /** The session this row was forked from, from the index row (LOB-182). */
   readonly forkedFrom: string | null;
+  /** The model the session is pinned to, from the index row (LOB-269). */
+  readonly model: string | null;
   readonly prUrl: string | null;
   readonly status: string;
   readonly createdAt: string;
@@ -633,6 +640,12 @@ type LiveOwner = {
   readonly storage: PostgresStorage;
   /** Resolved when the owner was opened, so a live read never touches the disk or the registry. */
   readonly workspace: SessionWorkspace;
+  /**
+   * The model the root conversation is pinned to, `provider/modelId` (LOB-269): what this open
+   * resolved — the role's or the deployment's on the open that created the root, the pinned one on
+   * every later open. The index row is written from it.
+   */
+  readonly model: string;
   readonly lastUsedAt: number;
 };
 
@@ -776,6 +789,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               : { baseRef: row.baseRef }),
             ...(row.prUrl === null ? {} : { prUrl: row.prUrl }),
             ...(forkedFrom === undefined ? {} : { forkedFrom }),
+            ...(row.model === null ? {} : { model: row.model }),
           };
         });
 
@@ -783,6 +797,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         id: SessionId,
         row: SessionRow,
         workspace: SessionWorkspace,
+        /** The live owner's model, which wins over a row read before the owner wrote it. */
+        model: string | null = row.model,
       ): SessionRef => {
         // The index row is the only reader of lineage a summary needs; a malformed value is a
         // broken index rather than a reason to fail a read, and `rebuildIndexes` refolds it.
@@ -796,6 +812,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           ...(forkedFrom !== null && Schema.is(SessionIdSchema)(forkedFrom)
             ? { forkedFrom }
             : {}),
+          ...(model === null ? {} : { model }),
         };
       };
 
@@ -1476,7 +1493,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // after the caller read the row must not be undone by cutting the worktree back
             // (LOB-268). A released session still opens — its log takes approvals, pages and a
             // curator's charge — but in no directory, because there is none to work in.
-            const released = yield* releaseOf(yield* requireSession(id));
+            const current = yield* requireSession(id);
+            const released = yield* releaseOf(current);
             if (released !== undefined && acquisition.starts === true) {
               return yield* releasedError(id, released);
             }
@@ -1541,10 +1559,28 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             }).pipe(
               Effect.tapError(() => Effect.promise(() => storage.dispose())),
             );
+            // The model the root is pinned to, onto the index row (LOB-269): on the open that created
+            // the root this is the first write, and on a later one it repairs a row older than the
+            // column. The log's `pi.agent` stays the truth `rebuildIndexes` refolds it from, so a
+            // failed write is a stale display field rather than a failed open: it is warned about,
+            // and the next open (or a rebuild) writes it again.
+            const model = modelKey(opened.model);
+            if (current.model !== model) {
+              yield* paper(
+                "write session model",
+                sql`UPDATE sessions SET model = ${model} WHERE id = ${id}`,
+              ).pipe(
+                Effect.catch((error) =>
+                  Effect.logWarning(
+                    `session ${id}: the index row's model was not written: ${error.message}`,
+                  ),
+                ),
+              );
+            }
             yield* FiberMap.run(
               projectors,
               id,
-              liveSessionEvents(opened, refOf(id, row, workspace)).pipe(
+              liveSessionEvents(opened, refOf(id, row, workspace, model)).pipe(
                 Stream.runForEach((event) => recordActivity(id, event)),
                 Effect.catchCause((cause) =>
                   Effect.logWarning(
@@ -1559,6 +1595,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               releaseEnvironment: opened.releaseEnvironment,
               storage,
               workspace,
+              model,
               lastUsedAt: now,
             };
             yield* Ref.update(live, HashMap.set(id, owner));
@@ -1637,7 +1674,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             return yield* summarize(id, row, "historical", "idle");
           const busy = yield* isBusy(owner.value.harness, owner.value.root);
           yield* touch(id);
-          return yield* summarize(id, row, "live", busy ? "busy" : "idle");
+          // The owner's model, not the row's: `create` describes the row it inserted, which was
+          // written before the owner opened and pinned the model (LOB-269).
+          return yield* summarize(
+            id,
+            { ...row, model: owner.value.model },
+            "live",
+            busy ? "busy" : "idle",
+          );
         });
 
       const setTitle = (
@@ -1720,6 +1764,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             createdAt: "",
             workspaceReleasedAt: null,
             workspaceReleaseReason: null,
+            model: null,
           };
           // The index row is written before the log because it carries the request-id dedupe key.
           // A failure between the two leaves a row whose log has no binding; `rebuildIndexes`
@@ -1800,7 +1845,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             yield* touch(sessionId);
             return yield* readLiveSnapshot(
               owner.value,
-              refOf(sessionId, row, owner.value.workspace),
+              refOf(sessionId, row, owner.value.workspace, owner.value.model),
             );
           }
           const workspace = yield* workspaceFor(row, { cut: false });
@@ -1964,7 +2009,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             yield* touch(input.sessionId);
             const snapshot = yield* readLiveSnapshot(
               owner,
-              refOf(input.sessionId, row, owner.workspace),
+              refOf(input.sessionId, row, owner.workspace, owner.model),
             );
             const model = snapshot.usage.models.reduce<
               (typeof snapshot.usage.models)[number] | undefined
@@ -2107,6 +2152,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             createdAt: "",
             workspaceReleasedAt: null,
             workspaceReleaseReason: null,
+            model: null,
           };
           // The entries, the lineage and the repo binding land in one commit: a fork that exists
           // at all exists with everything `rebuildIndexes` folds, so there is no window in which a
@@ -2228,6 +2274,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             createdAt: "",
             workspaceReleasedAt: null,
             workspaceReleaseReason: null,
+            model: null,
           };
           // The replay's transcript is its own run, so nothing is copied in: the log opens empty,
           // the title and the binding are written with the lineage, and the source's prompt is what
@@ -3180,7 +3227,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const owner = yield* acquireOwner(input.sessionId, row);
           const snapshot = yield* readLiveSnapshot(
             owner,
-            refOf(input.sessionId, row, owner.workspace),
+            refOf(input.sessionId, row, owner.workspace, owner.model),
           );
           if (snapshot.session.status === "busy") {
             return yield* new SessionErrorClass({
@@ -3376,6 +3423,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 s.repo,
                 s.base_ref,
                 s.forked_from,
+                s.model,
                 s.pr_url,
                 a.status,
                 a.cost_total,
@@ -3425,6 +3473,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 ? {}
                 : { baseRef: row.baseRef }),
               ...(forkedFrom === undefined ? {} : { forkedFrom }),
+              ...(row.model === null ? {} : { model: row.model }),
               ...(row.prUrl === null ? {} : { prUrl: row.prUrl }),
             });
           }
@@ -3523,7 +3572,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             actor,
             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
             to_char(workspace_released_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS workspace_released_at,
-            workspace_release_reason
+            workspace_release_reason,
+            model
           FROM sessions
           WHERE id = ${sessionId}
         `;
@@ -3541,7 +3591,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             actor,
             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
             to_char(workspace_released_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS workspace_released_at,
-            workspace_release_reason
+            workspace_release_reason,
+            model
           FROM sessions
           WHERE request_id = ${requestId}
         `;
@@ -3577,7 +3628,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             actor,
             to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
             to_char(workspace_released_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS workspace_released_at,
-            workspace_release_reason
+            workspace_release_reason,
+            model
         `;
 
       const readRepo = (slug: string) =>
@@ -3636,7 +3688,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               yield* touch(sessionId);
               return liveSessionEvents(
                 owner.value,
-                refOf(sessionId, row, owner.value.workspace),
+                refOf(sessionId, row, owner.value.workspace, owner.value.model),
               );
             }
             // Nobody owns it: fold once, send the snapshot, and end the stream, so a client can

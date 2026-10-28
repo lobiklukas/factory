@@ -60,6 +60,7 @@ import {
   ListPagesOutput,
 } from "@repo/domain/Page";
 import { StartMissionInput, StartMissionResult } from "@repo/domain/Mission";
+import { GetServerInfoInput, ServerInfo } from "@repo/domain/Server";
 import {
   AddTriggerRouteInput,
   ListTriggerRoutesInput,
@@ -443,7 +444,22 @@ export class TriggerRoutesRpc extends RpcGroup.make(
   }),
 ) {}
 
+/**
+ * What the control plane is running (LOB-269): the model backend and what chose it, the default and
+ * role models, and the rest of the non-secret configuration the boot resolved. Its own group, not
+ * `SessionRpc`'s: the answer is the process's, and reading it touches no session and no database,
+ * so it answers while Postgres is down. It cannot fail — every value was resolved before the server
+ * bound — and it never carries a credential's value (`@repo/domain/Server`).
+ */
+export class ServerRpc extends RpcGroup.make(
+  Rpc.make("getServerInfo", {
+    payload: GetServerInfoInput,
+    success: ServerInfo,
+  }),
+) {}
+
 // NOTE: The sandbox and sandbox-status groups merge in here next.
 export const RpcApi = SessionRpc.merge(ApprovalsRpc)
   .merge(TasksRpc)
-  .merge(TriggerRoutesRpc);
+  .merge(TriggerRoutesRpc)
+  .merge(ServerRpc);

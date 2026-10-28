@@ -256,6 +256,7 @@ shutdown, and the restarted read cuts a fresh one at the base. See [lifecycle.md
 | The pages surface        | passing | [pages.md](pages.md)                       |
 | Propose child issues     | passing | [decompose.md](decompose.md)               |
 | The model backend        | passing | [model-backend.md](model-backend.md)       |
+| What the server runs     | passing | [server-info.md](server-info.md)           |
 
 The model-backend checks (LOB-258) were run from the `agent/LOB-258` worktree on 2026-10-28
 (`BACKEND_BOOT_PORT=9542`, the worktree's own database on 5442, no repo-root `.env`):
@@ -264,6 +265,14 @@ credential and with a federation token file that does not exist, a dummy OAuth t
 bearer token through turbo), evidence `.verify/evidence/lob-258/api/`.
 With `ANTHROPIC_AUTH_TOKEN` dropped from `apps/api/turbo.json`'s `passThroughEnv`, the turbo boot's
 `auth token passed through` check fails (`.verify/evidence/lob-258/mutation-no-passthrough/`). See [model-backend.md](model-backend.md).
+
+The server-info checks (LOB-269) were run from the `agent/LOB-269` worktree on 2026-10-28
+(`API_PORT=9620`, the worktree's own database on 5442): `./server-info.sh` **17/17**
+(`getServerInfo` under faux with a role table, the raw body and the log free of three dummy
+credentials, and `faux/faux-1` on a session's create, get and list row), evidence
+`.verify/evidence/latest/api/server-info.json`. With the owner open's write of `sessions.model`
+removed, the list-row check fails (`.verify/evidence/lob-269/mutation-no-model-write/`). See
+[server-info.md](server-info.md).
 
 ## Deliberately absent
 

@@ -151,6 +151,14 @@ export const SessionSummary = Schema.Struct({
   prUrl: Schema.optional(Schema.String),
   /** The session this one was forked from, once one was (LOB-180). */
   forkedFrom: Schema.optional(SessionId),
+  /**
+   * The model the session's root conversation is pinned to, as `provider/modelId` (LOB-269): what
+   * its requests go to, `faux/faux-1` under the faux backend. Read from the log's `pi.agent`, so a
+   * replay names the model it was replayed onto and a run on a card names its role's model. Absent
+   * only for an index row written before the column existed that `rebuildIndexes` has not refolded
+   * yet, and only on a read that does not fold the log.
+   */
+  model: Schema.optional(Schema.String),
 });
 export type SessionSummary = typeof SessionSummary.Type;
 
@@ -750,6 +758,12 @@ export const SessionListEntry = Schema.Struct({
    * lineage without folding a log (R6).
    */
   forkedFrom: Schema.optional(SessionId),
+  /**
+   * The model the session is pinned to, `provider/modelId` (LOB-269), from the index row: written
+   * when its owner first opens and refolded by `rebuildIndexes` from the log's `pi.agent`, so the
+   * list names it without folding a log (R6). Absent for a row nothing has written it on yet.
+   */
+  model: Schema.optional(Schema.String),
 });
 export type SessionListEntry = typeof SessionListEntry.Type;
 

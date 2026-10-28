@@ -30,16 +30,21 @@ import { FetchHttpClient, HttpRouter, HttpServer } from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
 import { webhookLiveFor } from "./Api/Webhook";
-import { logTriggerBootFromProcess } from "./Api/WebhookBoot";
+import {
+  bootEnvFromProcess,
+  logTriggerBootFromProcess,
+} from "./Api/WebhookBoot";
 import { TriggerCheckoutLog } from "./TriggerCheckouts";
 import { GitHubWebhookLive } from "./Api/GitHubWebhook";
 import {
+  linearConfig,
   LinearIssueSyncLayer,
   LinearSyncLog,
   SessionWriteBackLive,
 } from "./Api/LinearSync";
 import { ProbesLive } from "./Api/Probes";
 import { SessionRpcLive } from "./Rpc/Session";
+import { ServerFacts } from "./ServerInfo";
 import { describeLoadedEnvFiles, loadedEnvFiles } from "./EnvFiles";
 import {
   DEFAULT_SANDBOX_RUNTIME,
@@ -524,9 +529,28 @@ const HttpLive = Effect.gen(function* () {
         }
       : {}),
   }).pipe(Effect.provide(FetchHttpClient.layer));
+  const reviewerIdentity = Option.isSome(reviewerConfig.appId)
+    ? "github-app"
+    : Option.isSome(reviewerConfig.token)
+      ? "token"
+      : "none";
   yield* Effect.logInfo(
-    `reviewer identity: ${Option.isSome(reviewerConfig.appId) ? "its own GitHub App (GITHUB_REVIEWER_APP_ID)" : Option.isSome(reviewerConfig.token) ? "its own token (GITHUB_REVIEWER_TOKEN)" : "none, so reviews are recorded and not posted"}`,
+    `reviewer identity: ${reviewerIdentity === "github-app" ? "its own GitHub App (GITHUB_REVIEWER_APP_ID)" : reviewerIdentity === "token" ? "its own token (GITHUB_REVIEWER_TOKEN)" : "none, so reviews are recorded and not posted"}`,
   );
+
+  // What `getServerInfo` answers (LOB-269): the values resolved above, as they were resolved, so the
+  // RPC and the boot lines say the same thing. Names and modes only — no credential is in here.
+  const ServerFactsLive = Layer.succeed(ServerFacts, {
+    choice: backendChoice,
+    model: modelAccess,
+    roleModels,
+    approvalRequired: autonomy.approvalRequired,
+    defaultBudget,
+    webhookEnv: bootEnvFromProcess(),
+    linearStates: linearConfig?.states,
+    reviewer: reviewerIdentity,
+    sandbox: Option.getOrElse(sandboxChoice, () => DEFAULT_SANDBOX_RUNTIME),
+  });
 
   // Sessions own one log, one working directory, and (locally) the harness that drives them. The PR
   // step's exit is mirrored on the Linear issue a session was delegated from, when a key is set
@@ -579,6 +603,7 @@ const HttpLive = Effect.gen(function* () {
     LinearSyncLog,
     TriggerCheckoutLog(triggerRules),
     PullRequestStepDeps,
+    ServerFactsLive,
   ).pipe(
     // The Linear sync sits beside Postgres so the session layer and the routes share one instance
     // (`./Api/LinearSync`): a layer first built inside `serve` would be the routes' private copy.
