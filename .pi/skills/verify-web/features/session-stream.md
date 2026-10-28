@@ -77,3 +77,6 @@ there is no hand-rolled queue, and the client layer lives in the runtime.
   header without the pane holding a copy.
 - A session id that is not `ses_` + Crockford base32 is refused by the route's decode, never sent to
   the RPC surface as a `not_found`.
+- **The no-checkout banner is not driven in a browser (LOB-263).** A session bound to a repo with no
+  local checkout shows `[data-checkout-warning]` under the pane's header, from `workspace.warning`
+  (`session-atom.test.ts` pins the projection). `drive.mjs` does not open such a session yet.

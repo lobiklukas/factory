@@ -1872,7 +1872,12 @@ describe("repo binding", () => {
       Effect.gen(function* () {
         const sessions = yield* SessionService;
         // Named, never registered: auto-registered with no path.
-        const bare = yield* sessions.create({ repo: unregistered });
+        // `trunk` is the fixture repo's only branch, named here because the session's own base ref
+        // (not the registry's default, which an auto-registered row lacks) is what the cut reads.
+        const bare = yield* sessions.create({
+          repo: unregistered,
+          baseRef: "trunk",
+        });
         const bareBefore = yield* sessions.get(bare.id);
         const registeredRow = yield* sessions.getRepo({ repo: unregistered });
         yield* sessions.registerRepo({
@@ -1885,8 +1890,8 @@ describe("repo binding", () => {
         const scratch = yield* sessions.create({});
         const scratchView = yield* sessions.get(scratch.id);
         // The operator's fix, applied after the first session was made: a session made after it is
-        // cut a worktree, so it carries no warning. The first keeps its answer — its owner already
-        // holds the empty directory, and "this run got no worktree" stays true of it.
+        // cut a worktree, so it carries no warning. The first, while its owner is live, keeps the
+        // answer it opened with; once released, the next acquisition cuts it a worktree.
         yield* sessions.registerRepo({
           repo: unregistered,
           defaultBaseRef: "trunk",
@@ -1894,8 +1899,28 @@ describe("repo binding", () => {
         });
         const fixed = yield* sessions.create({ repo: unregistered });
         const fixedView = yield* sessions.get(fixed.id);
+        // The first session, after its owner is released (the idle sweep, an API restart) and the
+        // path is registered: it must not read as "no warning" while it still has an empty plain
+        // directory. The next acquisition cuts the worktree into that directory.
+        yield* sessions.close;
+        const bareReleased = yield* sessions.get(bare.id);
+        const bareHadWorktree = existsSync(
+          join(bareBefore.workspace.path, ".git"),
+        );
+        yield* sessions.send({
+          sessionId: bare.id,
+          content: "now with a checkout",
+        });
+        const bareReopened = yield* sessions.get(bare.id);
+        const bareHasWorktree = existsSync(
+          join(bareBefore.workspace.path, ".git"),
+        );
         return {
           bare,
+          bareReleased,
+          bareHadWorktree,
+          bareReopened,
+          bareHasWorktree,
           bareBefore,
           registeredRow,
           readyView,
@@ -1919,7 +1944,14 @@ describe("repo binding", () => {
     expect("warning" in result.scratchView.workspace).toBe(false);
     expect("warning" in result.fixedView.workspace).toBe(false);
     expect(result.fixedView.workspace.branch).toBeDefined();
-  });
+    // The session made before the fix: released, it has no worktree yet and is not told it never
+    // will be; reopened, it is cut one into the directory it already held, so its run can diff.
+    // Mutation: keep `exists` as the cut's condition — `bareHasWorktree` stays false.
+    expect("warning" in result.bareReleased.workspace).toBe(false);
+    expect(result.bareHadWorktree).toBe(false);
+    expect(result.bareHasWorktree).toBe(true);
+    expect("warning" in result.bareReopened.workspace).toBe(false);
+  }, 120_000);
 
   it("answers a registered repo's checkout facts on register, list and get (LOB-253)", async () => {
     const configured = runSlug("registry-config");

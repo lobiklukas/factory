@@ -14,7 +14,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-API_PORT="${API_PORT:-9560}"
+API_PORT="${API_PORT:-9200}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/lob-263}"
 STAMP="${NO_CHECKOUT_STAMP:-$(date +%s)}"
 COVERED="acme/verify-api-covered-$STAMP"

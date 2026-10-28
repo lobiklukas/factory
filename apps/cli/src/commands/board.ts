@@ -508,8 +508,14 @@ const startCommand = Command.make(
       yield* Console.log(`task    ${card.id} in ${taskColumn}`);
       // The repo's checkout is the server's to read (LOB-263): the run's workspace says whether it
       // got a worktree, so a card on a repo with none is told so now, not when `non_empty_diff` fails.
-      const opened = yield* client.getSession({ sessionId: session.id });
-      for (const line of warningLines(opened.workspace.warning, "warning ")) {
+      // Advisory: the run has started, so a failed read skips the warning and never fails the command.
+      const opened = yield* client
+        .getSession({ sessionId: session.id })
+        .pipe(Effect.option);
+      const advice = Option.isSome(opened)
+        ? opened.value.workspace.warning
+        : undefined;
+      for (const line of warningLines(advice, "warning ")) {
         yield* Console.log(line);
       }
       if (Option.isSome(prompt)) {

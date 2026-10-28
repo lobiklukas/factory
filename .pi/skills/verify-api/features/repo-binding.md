@@ -41,9 +41,12 @@ the rule is that it says so: `workspace.warning` is set, naming the repo and the
 step would fail columns later. The same sentence (`noCheckoutWarning` in `packages/core`'s
 `workspace.ts`) is on `createBoard`'s answer (`warning`) and on `getBoard` (`BoardView.warning`), read
 from the registry each time, so registering a path clears a board's. A repo with a checkout and a
-scratch session carry no `warning` key. A live session keeps its answer after the path is registered:
-its owner already holds the empty directory, so the warning stays true of it; a session made after the
-fix is cut a worktree. The drive checks all of it over RPC; `no-checkout.sh` boots the API with two
+scratch session carry no `warning` key. A session whose owner is live keeps the answer it
+opened with after the path is registered (it holds an empty directory); once its owner is released
+(idle sweep, restart) a read says nothing, because the next acquisition cuts the worktree into that
+empty directory (`resolveWorkspace` treats an empty directory as no workspace), so the fix the
+warning names reaches the sessions it was raised for. A session made after the fix is cut a worktree
+at once. `SessionService.test.ts` pins it: release the owner, register, send, and the `.git` appears. The drive checks all of it over RPC; `no-checkout.sh` boots the API with two
 `TRIGGER_RULES` and reads the boot log, which names the rule's label and repo for each repo without a
 checkout and, after one is registered, only the other. `factory run`, `factory board create`,
 `factory board start` and `factory board ls` print it as `warning …`, and the dashboard shows it
