@@ -81,7 +81,7 @@ must not leave it for a caller who never comes:
   still `implement`, its wait still names the same workers, and each worker's checkpoint is the
   phase it was in (`converse` mid-turn, or `check`).
 - **The boot resumes it, unasked.** Each session's row carries `mission_in_flight` (migration
-  `0027`), mirrored from the live task graph by the owner's activity projection and set by
+  `0029`), mirrored from the live task graph by the owner's activity projection and set by
   `startMission` before the task exists. At boot the API (`MissionResumeDaemon`) calls
   `SessionService.resumeMissions`, which reopens every session the row names under this process's
   session root whose workspace was not released, asks its task graph whether a mission is still
