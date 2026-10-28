@@ -1,7 +1,8 @@
-// Drive the Sentry receiver (LOB-81) and its mapping (LOB-82) over real HTTP against a running API,
-// in two phases around a restart that `sentry.sh` performs between them.
+// Drive the Sentry receiver (LOB-81), its mapping (LOB-82) and its link-back (LOB-83) over real HTTP
+// against a running API, in phases around a restart that `sentry.sh` performs between them.
 //
-//   MODE=first bun sentry.ts          # the API's first process
+//   MODE=linkback bun sentry.ts       # the API's first process: the note on the alert's Sentry issue
+//   MODE=first bun sentry.ts          # the same process: receiver and mapping (and one note per alert)
 //   MODE=after-restart bun sentry.ts  # a fresh process on the same database
 //
 // Env:
@@ -19,6 +20,14 @@
 //                         every alert the drive means to be work carries `level: error`,
 //                         `environment: production` and `release: verify@1.0.0`
 //   DATABASE_URL          the database the API serves, read for the delivery rows
+//   SENTRY_FAKE_LEDGER    the ledger file of `sentry-api-fake.ts`, the Sentry REST API the API's
+//                         write-back calls (LOB-83): the drive counts the notes it holds
+//   SENTRY_SESSION_URL_BASE
+//                         the base the API links a session under, so a note carries the session URL
+//   SENTRY_LOSE_ACK_ISSUE, SENTRY_FAIL_ISSUE, SENTRY_HANG_ISSUE
+//                         the three Sentry issue ids the fake was started to misbehave for: its first
+//                         note create applied and then the connection dropped, every request
+//                         answered 503, and every request never answered
 //
 // The deliveries are signed exactly the way Sentry's documented verification recomputes them
 // (`@repo/core`'s `sentrySignature`: hex HMAC-SHA256 of the body under the client secret), and the
@@ -30,6 +39,7 @@ import path from "node:path";
 import {
   SENTRY_PROMPT_TEMPLATE,
   sentryEvent,
+  sentryEventRequestId,
   sentrySignature,
 } from "@repo/core";
 import { SessionRpc } from "@repo/domain/Rpc";
@@ -45,9 +55,11 @@ const API_LOG = process.env["API_LOG"];
 const DATABASE_URL =
   process.env["DATABASE_URL"] ??
   "postgres://factory:factory@localhost:5442/factory";
-const EVIDENCE_DIR = process.env["EVIDENCE_DIR"] ?? ".verify/evidence/lob-82";
+const EVIDENCE_DIR = process.env["EVIDENCE_DIR"] ?? ".verify/evidence/lob-83";
 const STATE =
   process.env["SENTRY_STATE"] ?? path.join(EVIDENCE_DIR, "sentry-state.json");
+/** What `linkback` hands `after-restart`: the lost-ack case, to redeliver across the restart. */
+const LINKBACK_STATE = STATE.replace(/\.json$/, "-linkback.json");
 const REPO = RepoSlug.make(
   process.env["TRIGGER_REPO"] ?? "acme/verify-api-sentry",
 );
@@ -60,6 +72,13 @@ const DEFAULT_PROMPT_PROJECT = 777;
 /** The release every alert meant as work carries: inside sentry.sh's `SENTRY_RELEASES=verify@*`. */
 const RELEASE = "verify@1.0.0";
 const RATE_LIMIT = Number(process.env["SENTRY_RATE_LIMIT"] ?? "20");
+const SENTRY_FAKE_LEDGER = process.env["SENTRY_FAKE_LEDGER"] ?? "";
+const SESSION_URL_BASE = process.env["SENTRY_SESSION_URL_BASE"] ?? "";
+const LOSE_ACK_ISSUE = process.env["SENTRY_LOSE_ACK_ISSUE"] ?? "lose-ack-issue";
+const FAIL_ISSUE = process.env["SENTRY_FAIL_ISSUE"] ?? "fail-issue";
+const HANG_ISSUE = process.env["SENTRY_HANG_ISSUE"] ?? "hang-issue";
+/** The longest a link-back that never gets an answer may hold a delivery: the API's budget is 4s. */
+const HANG_BUDGET_CEILING_MS = 15_000;
 
 /** A string that is only ever in a payload: no API log line may contain it. */
 const CANARY = "lob81-payload-canary-do-not-log";
@@ -231,6 +250,52 @@ const readLog = (needle: string) =>
     return await readFile(API_LOG, "utf8").catch(() => "");
   });
 
+/** What the fake Sentry API holds: every request it saw, and each issue's notes. */
+type SentryLedger = {
+  readonly requests: ReadonlyArray<{
+    readonly method: string;
+    readonly path: string;
+    readonly authorization: string | null;
+  }>;
+  readonly issues: Record<string, { readonly notes: ReadonlyArray<string> }>;
+  readonly lostAcks: ReadonlyArray<string>;
+};
+
+const readSentryLedger = (): Promise<SentryLedger> =>
+  readFile(SENTRY_FAKE_LEDGER, "utf8").then(
+    (text) => JSON.parse(text) as SentryLedger,
+  );
+
+/** The notes the fake holds for one Sentry issue, and the requests it saw for it, by method. */
+const ledgerFor = async (issue: string) => {
+  const ledger = await readSentryLedger();
+  const path = `/api/0/issues/${encodeURIComponent(issue)}/comments/`;
+  const requests = ledger.requests.filter((request) => request.path === path);
+  return {
+    notes: ledger.issues[issue]?.notes ?? [],
+    gets: requests.filter((request) => request.method === "GET").length,
+    posts: requests.filter((request) => request.method === "POST").length,
+    requests: requests.length,
+    lostAck: ledger.lostAcks.includes(issue),
+    total: ledger.requests.length,
+  };
+};
+
+/** The note the API posts for a session: it names the session and links to it under the base. */
+const noteFor = (sessionId: string): string =>
+  `Factory is investigating this alert in session ${sessionId} (${SESSION_URL_BASE}/${sessionId}).`;
+
+/** Forget a delivery's processed row: the state a crash between the write-back and `processed` leaves. */
+const forgetDelivery = (requestId: string) =>
+  Effect.promise(async () => {
+    const db = new SQL(DATABASE_URL);
+    try {
+      await db`DELETE FROM webhook_deliveries WHERE request_id = ${requestId}`;
+    } finally {
+      await db.close();
+    }
+  });
+
 const ProtocolLive = protocolFor(API_URL);
 
 const program = Effect.gen(function* () {
@@ -241,6 +306,212 @@ const program = Effect.gen(function* () {
     const listed = yield* client.listSessions({ limit: 100 });
     return listed.sessions.filter((entry) => entry.repo === REPO).length;
   });
+
+  if (MODE === "linkback") {
+    // Feature (LOB-83): the alert points at the session investigating it, exactly once, and a
+    // link-back that cannot be made never costs the session. Each case is one Sentry issue the fake
+    // was started to treat in its own way, so the ledger answers for it alone.
+    const runId = `${Date.now()}`;
+    yield* client.registerRepo({ repo: REPO, defaultBaseRef: "main" });
+    const notesLine = (sessionId: string, needle: string) =>
+      readLog(needle).pipe(
+        Effect.map((log) =>
+          log
+            .split("\n")
+            .filter(
+              (line) => line.includes("sentry: ") && line.includes(sessionId),
+            )
+            .filter((line) => line.includes(needle)),
+        ),
+      );
+
+    // A lost acknowledgement: the note lands, the connection drops, the delivery is still processed.
+    const loseEvent = `lob83${runId}lose`;
+    const losePayload = alert(loseEvent, `lose ack ${runId}`, {
+      issue: LOSE_ACK_ISSUE,
+    });
+    const lost = yield* Effect.promise(() =>
+      post(losePayload, { requestId: `req-${runId}-lose` }),
+    );
+    const loseSession = lost.outcome?.sessionId;
+    assert(
+      "an alert whose note's acknowledgement is lost is still a processed delivery with its session",
+      lost.status === 200 &&
+        lost.outcome?.status === "processed" &&
+        lost.outcome.replayed === false &&
+        loseSession !== undefined,
+      `status=${lost.status} body=${JSON.stringify(lost.body)}`,
+    );
+    if (loseSession !== undefined) {
+      const afterLost = yield* Effect.promise(() => ledgerFor(LOSE_ACK_ISSUE));
+      assert(
+        "the lost acknowledgement left exactly one note on the issue, and the fake saw the connection dropped",
+        afterLost.lostAck &&
+          afterLost.notes.length === 1 &&
+          afterLost.notes[0] === noteFor(loseSession) &&
+          afterLost.posts === 1,
+        `ledger=${JSON.stringify(afterLost)}`,
+      );
+      const lostLines = yield* notesLine(
+        loseSession,
+        `could not link issue ${LOSE_ACK_ISSUE} to session ${loseSession}`,
+      );
+      assert(
+        "one log line names the issue, the session and the cause of the dropped call",
+        lostLines.length === 1 &&
+          lostLines[0]?.includes("could not be reached") === true,
+        `lines=${JSON.stringify(lostLines)}`,
+      );
+
+      // The same event again, under a new Request-ID: the dedupe row answers, nothing is called.
+      const beforeReplay = yield* Effect.promise(() =>
+        ledgerFor(LOSE_ACK_ISSUE),
+      );
+      const replay = yield* Effect.promise(() =>
+        post(losePayload, { requestId: `req-${runId}-lose-again` }),
+      );
+      const afterReplay = yield* Effect.promise(() =>
+        ledgerFor(LOSE_ACK_ISSUE),
+      );
+      assert(
+        "a redelivery of the same event_id posts no note and makes no request",
+        replay.outcome?.status === "processed" &&
+          replay.outcome.replayed === true &&
+          afterReplay.notes.length === 1 &&
+          afterReplay.requests === beforeReplay.requests,
+        `status=${replay.status} before=${beforeReplay.requests} after=${JSON.stringify(afterReplay)}`,
+      );
+
+      // The crash window: the note landed, `processed` never did. The claim is gone, so the same
+      // event runs again and the seam calls the write-back for the same session a second time.
+      yield* forgetDelivery(sentryEventRequestId(loseEvent));
+      const window = yield* Effect.promise(() =>
+        post(losePayload, { requestId: `req-${runId}-lose-window` }),
+      );
+      const afterWindow = yield* Effect.promise(() =>
+        ledgerFor(LOSE_ACK_ISSUE),
+      );
+      assert(
+        "a delivery replayed after the note landed but before processed was written posts no second note",
+        window.outcome?.status === "processed" &&
+          window.outcome.replayed === false &&
+          window.outcome.sessionId === loseSession &&
+          afterWindow.notes.length === 1 &&
+          afterWindow.posts === 1 &&
+          afterWindow.gets === afterReplay.gets + 1,
+        `status=${window.status} body=${JSON.stringify(window.body)} ledger=${JSON.stringify(afterWindow)}`,
+      );
+      yield* Effect.promise(() =>
+        writeFile(
+          LINKBACK_STATE,
+          `${JSON.stringify({ eventId: loseEvent, sessionId: loseSession, runId }, null, 2)}\n`,
+        ),
+      );
+    }
+
+    // A Sentry that answers 5xx: the delivery is processed, the session runs, one line says why.
+    const failEvent = `lob83${runId}fail`;
+    const failed = yield* Effect.promise(() =>
+      post(alert(failEvent, `fail ${runId}`, { issue: FAIL_ISSUE }), {
+        requestId: `req-${runId}-fail`,
+      }),
+    );
+    const failSession = failed.outcome?.sessionId;
+    assert(
+      "a link-back that gets HTTP 503 does not fail the delivery",
+      failed.status === 200 &&
+        failed.outcome?.status === "processed" &&
+        failSession !== undefined,
+      `status=${failed.status} body=${JSON.stringify(failed.body)}`,
+    );
+    if (failSession !== undefined) {
+      const failLines = yield* notesLine(
+        failSession,
+        `could not link issue ${FAIL_ISSUE} to session ${failSession}`,
+      );
+      const afterFail = yield* Effect.promise(() => ledgerFor(FAIL_ISSUE));
+      assert(
+        "and one log line names the issue, the session and the HTTP 503",
+        failLines.length === 1 &&
+          failLines[0]?.includes("HTTP 503") === true &&
+          afterFail.notes.length === 0,
+        `lines=${JSON.stringify(failLines)} ledger=${JSON.stringify(afterFail)}`,
+      );
+      const snapshot = yield* client.getSession({ sessionId: failSession });
+      assert(
+        "the session whose link-back failed has its prompt and runs",
+        snapshot.entries.some((entry) => entry.kind === "user"),
+        `entries=${snapshot.entries.length}`,
+      );
+    }
+
+    // A Sentry that never answers: the budget ends the call, and the delivery goes on.
+    const hangEvent = `lob83${runId}hang`;
+    const hangStarted = Date.now();
+    const hung = yield* Effect.promise(() =>
+      post(alert(hangEvent, `hang ${runId}`, { issue: HANG_ISSUE }), {
+        requestId: `req-${runId}-hang`,
+      }),
+    );
+    const hangElapsed = Date.now() - hangStarted;
+    const hangSession = hung.outcome?.sessionId;
+    assert(
+      "a link-back that gets no answer is abandoned at its budget and the delivery is processed",
+      hung.status === 200 &&
+        hung.outcome?.status === "processed" &&
+        hangSession !== undefined &&
+        hangElapsed >= 3_000 &&
+        hangElapsed < HANG_BUDGET_CEILING_MS,
+      `status=${hung.status} elapsed=${hangElapsed}ms body=${JSON.stringify(hung.body)}`,
+    );
+    if (hangSession !== undefined) {
+      const hangLines = yield* notesLine(
+        hangSession,
+        `issue ${HANG_ISSUE} was not linked to session ${hangSession} within`,
+      );
+      assert(
+        "and one log line names the issue, the session and the budget",
+        hangLines.length === 1,
+        `lines=${JSON.stringify(hangLines)}`,
+      );
+    }
+
+    // An alert with no issue_id has nowhere to be answered: its session opens, nothing is posted.
+    const bareEvent = `lob83${runId}bare`;
+    const beforeBare = yield* Effect.promise(() => readSentryLedger());
+    const bare = yield* Effect.promise(() =>
+      post(
+        alert(bareEvent, `no issue ${runId}`, {
+          over: { issue_id: undefined },
+        }),
+        {
+          requestId: `req-${runId}-bare`,
+        },
+      ),
+    );
+    const afterBare = yield* Effect.promise(() => readSentryLedger());
+    const bareSession = bare.outcome?.sessionId;
+    assert(
+      "an alert with no issue_id opens its session and makes no Sentry request",
+      bare.status === 200 &&
+        bare.outcome?.status === "processed" &&
+        bareSession !== undefined &&
+        afterBare.requests.length === beforeBare.requests.length,
+      `status=${bare.status} body=${JSON.stringify(bare.body)} requests ${beforeBare.requests.length}→${afterBare.requests.length}`,
+    );
+    if (bareSession !== undefined) {
+      const bareLines = yield* notesLine(
+        bareSession,
+        `alert ${bareEvent} names no issue_id`,
+      );
+      assert(
+        "and the log says why there is no link",
+        bareLines.length === 1,
+        `lines=${JSON.stringify(bareLines)}`,
+      );
+    }
+    return;
+  }
 
   if (MODE === "first") {
     const runId = `${Date.now()}`;
@@ -281,6 +552,16 @@ const program = Effect.gen(function* () {
     );
     const sessionId = first.outcome?.sessionId;
     if (sessionId !== undefined) {
+      // Feature (LOB-83): the alert's Sentry issue holds exactly one note, naming this session and
+      // its URL, after the post and its replay.
+      const linked = yield* Effect.promise(() => ledgerFor(issueOf(eventId)));
+      assert(
+        "a mapped alert leaves exactly one note on its Sentry issue, carrying the session URL",
+        linked.notes.length === 1 &&
+          linked.notes[0] === noteFor(sessionId) &&
+          linked.posts === 1,
+        `ledger=${JSON.stringify(linked)}`,
+      );
       const snapshot = yield* client.getSession({ sessionId });
       const prompt = snapshot.entries.find(
         (entry) => entry.kind === "user",
@@ -338,6 +619,17 @@ const program = Effect.gen(function* () {
         "and it opened no second session",
         afterRepeat === afterTwice,
         `sessions ${afterTwice}→${afterRepeat}`,
+      );
+      // Feature (LOB-83): the second alert LOB-82 bound to this session called Sentry not at all.
+      const afterBound = yield* Effect.promise(() =>
+        ledgerFor(issueOf(eventId)),
+      );
+      assert(
+        "a second alert bound to the same session posts no second note and makes no request",
+        afterBound.notes.length === 1 &&
+          afterBound.posts === 1 &&
+          afterBound.requests === 2,
+        `ledger=${JSON.stringify(afterBound)}`,
       );
     }
 
@@ -535,8 +827,10 @@ const program = Effect.gen(function* () {
     // They name project 404, whose rule routes to a repo nobody registered, so the ones inside the
     // cap are recorded skips that open no session, and the burst measures the cap, not the
     // session layer. The four alerts above that can start work (the first, its replay, the repeat
-    // in its issue and the default-prompt one) spent four of this window's tokens already; the
-    // filtered ones spent none.
+    // in its issue and the default-prompt one) spent four of this window's tokens already, and the
+    // `linkback` phase's six (LOB-83: the lost-ack alert and its two redeliveries, the 503, the
+    // hang and the one with no issue id) six more; the filtered ones spent none. `sentry.sh` sizes
+    // the cap so two tokens are left for the burst's admitted ones.
     const burst = RATE_LIMIT + 4;
     const answers = [];
     for (let n = 1; n <= burst; n += 1) {
@@ -666,6 +960,63 @@ const program = Effect.gen(function* () {
     `binding=${JSON.stringify(binding)}`,
   );
 
+  // LOB-83: the note is Sentry's, not the process's, so the restart changes nothing about it: the
+  // first alert's issue still holds its one note, and the replay and the repeat above added none.
+  const restartedLedger = yield* Effect.promise(() =>
+    ledgerFor(issueOf(state.eventId)),
+  );
+  assert(
+    "after a restart, the first alert's issue still holds exactly one note",
+    restartedLedger.notes.length === 1 &&
+      restartedLedger.notes[0] === noteFor(state.sessionId) &&
+      restartedLedger.posts === 1,
+    `ledger=${JSON.stringify(restartedLedger)}`,
+  );
+  // The lost-acknowledgement case, replayed across the restart with its processed row gone: the
+  // restarted process runs the write-back for the session the first one opened, finds its note.
+  const linkback: unknown = yield* Effect.promise(() =>
+    readFile(LINKBACK_STATE, "utf8").then(
+      (text) => JSON.parse(text) as unknown,
+      () => null,
+    ),
+  );
+  const lostCase = yield* Schema.decodeUnknownEffect(
+    Schema.NullOr(
+      Schema.Struct({
+        eventId: Schema.String,
+        sessionId: Schema.String,
+        runId: Schema.String,
+      }),
+    ),
+  )(linkback);
+  if (lostCase !== null) {
+    const beforeLostReplay = yield* Effect.promise(() =>
+      ledgerFor(LOSE_ACK_ISSUE),
+    );
+    yield* forgetDelivery(sentryEventRequestId(lostCase.eventId));
+    const lostReplay = yield* Effect.promise(() =>
+      post(
+        alert(lostCase.eventId, `lose ack ${lostCase.runId}`, {
+          issue: LOSE_ACK_ISSUE,
+        }),
+        { requestId: `req-${lostCase.runId}-lose-after-restart` },
+      ),
+    );
+    const afterLostReplay = yield* Effect.promise(() =>
+      ledgerFor(LOSE_ACK_ISSUE),
+    );
+    assert(
+      "after a restart, a delivery replayed past its lost acknowledgement posts no second note",
+      lostReplay.outcome?.status === "processed" &&
+        lostReplay.outcome.replayed === false &&
+        lostReplay.outcome.sessionId === lostCase.sessionId &&
+        afterLostReplay.notes.length === 1 &&
+        afterLostReplay.posts === 1 &&
+        afterLostReplay.gets === beforeLostReplay.gets + 1,
+      `status=${lostReplay.status} body=${JSON.stringify(lostReplay.body)} ledger=${JSON.stringify(afterLostReplay)}`,
+    );
+  }
+
   // The control: the restarted process does open work, so the replay above is the dedupe and not
   // a process that could not create anything.
   const freshEvent = `${state.eventId}fresh`;
@@ -682,6 +1033,17 @@ const program = Effect.gen(function* () {
       fresh.outcome.replayed === false &&
       afterFresh === afterReplay + 1,
     `status=${fresh.status} body=${JSON.stringify(fresh.body)} sessions ${afterReplay}→${afterFresh}`,
+  );
+  const freshSession = fresh.outcome?.sessionId;
+  const freshLedger = yield* Effect.promise(() =>
+    ledgerFor(issueOf(freshEvent)),
+  );
+  assert(
+    "and the restarted process links it: one note naming its session on the new alert's issue",
+    freshSession !== undefined &&
+      freshLedger.notes.length === 1 &&
+      freshLedger.notes[0] === noteFor(freshSession),
+    `ledger=${JSON.stringify(freshLedger)}`,
   );
 });
 

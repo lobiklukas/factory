@@ -173,8 +173,18 @@ describe("a Sentry payload, normalized (the filter)", () => {
       ].join("\n"),
       labels: [SENTRY_LABEL, sentryProjectLabel("1")],
       fingerprint: "1117540176",
+      // The write-back's address is the Sentry issue, not the event the key names (LOB-83).
+      address: "1117540176",
       defaultPrompt: SENTRY_PROMPT_TEMPLATE,
     });
+  });
+
+  it("carries no address for an alert whose payload names no issue", () => {
+    const payload = alert("no-issue-id", { issue_id: undefined });
+    const event = sentryEvent(payload, { resource: "event_alert" });
+    expect(event).toBeDefined();
+    expect(event).not.toHaveProperty("address");
+    expect(event).not.toHaveProperty("fingerprint");
   });
 
   it("infers an alert from its payload when the resource header is missing", () => {
@@ -202,6 +212,7 @@ describe("a Sentry payload, normalized (the filter)", () => {
       action: "issue:created",
       title: "Error: a new issue",
       labels: [SENTRY_LABEL, sentryProjectLabel("2")],
+      address: "1170820242",
     });
     expect(startsWork(issue?.action ?? "")).toBe(false);
 

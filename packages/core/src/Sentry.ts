@@ -419,6 +419,8 @@ export const sentryEvent = (
       // Every event in one Sentry issue shares its `issue_id`: the seam binds the issue to the
       // session its first alert opened.
       ...(issueId === undefined ? {} : { fingerprint: issueId }),
+      // Where the link-back goes (LOB-83): the issue, not the event this delivery is keyed by.
+      ...(issueId === undefined ? {} : { address: issueId }),
       ...(filtered === undefined ? {} : { filtered }),
       // What a rule with a blank prompt tells the session: the adapter's, not the seam's.
       defaultPrompt: SENTRY_PROMPT_TEMPLATE,
@@ -439,7 +441,7 @@ export const sentryEvent = (
     // An `issue` delivery is about the issue an alert's `issue_id` names, so a rule that opts
     // `issue:created` in and the alerts that follow share one binding.
     ...(resource === "issue" && subjectId !== undefined
-      ? { fingerprint: subjectId }
+      ? { fingerprint: subjectId, address: subjectId }
       : {}),
     defaultPrompt: SENTRY_PROMPT_TEMPLATE,
   };

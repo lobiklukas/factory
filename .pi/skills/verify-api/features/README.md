@@ -73,6 +73,14 @@ own database on 5442): `./sentry.sh` **33/33** (23 checks on the first process, 
 one, 4 shell checks), evidence `.verify/evidence/lob-82/`, with a mutation run that skips the
 fingerprint claim failing it (`mutation-no-binding/`). See `sentry.md`.
 
+The Sentry link-back checks (LOB-83: one note on the alert's Sentry issue naming the session, once
+across a redelivery, a lost acknowledgement, a bound second alert and an API restart; a 503 or a silent
+Sentry never fails the delivery) were run from the `agent/LOB-83` worktree on 2026-10-28 (API on
+`:9560`, the fake Sentry REST API on `:9561`, faux, the worktree's own database on 5442): `./sentry.sh`
+**51/51** (12 checks in the `linkback` phase, 25 on the first process, 9 on the restarted one, 5 shell
+checks), evidence `.verify/evidence/lob-83/`, with a mutation run that skips the read-before-post
+failing it (`mutation-no-read-before-post/`). See `sentry.md`.
+
 The Jira, Slack and GitHub-issues adapters are served over HTTP (LOB-259) and their drives were run
 from the `agent/LOB-259` worktree on 2026-10-28 (faux, Postgres on 5442, the worktree's own database):
 `./jira.sh` **16/16 + 2/2**, `./slack.sh` **19/19 + 2/2** and `./github-issues.sh` **15/15 + 2/2**,
@@ -279,6 +287,7 @@ submissions. No drive mutation was run; the root scoping is mutation-checked in 
 | Slack adapter            | passing | [slack.md](slack.md)                         |
 | Linear adapter           | passing | [linear.md](linear.md)                       |
 | Sentry receiver          | passing | [sentry.md](sentry.md)                       |
+| Sentry link-back         | passing | [sentry.md](sentry.md)                       |
 | Linear write-back        | passing | [linear-writeback.md](linear-writeback.md)   |
 | Approvals                | passing | [approvals.md](approvals.md)                 |
 | Curate a session's pages | passing | [curate.md](curate.md)                       |
