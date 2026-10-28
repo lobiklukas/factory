@@ -44,6 +44,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Schema } from "effect";
 import {
+  ruleClaims,
   startsWork,
   TRIGGER_ACTION,
   type TriggerDelivery,
@@ -266,7 +267,7 @@ export const sentryStartsWork = (
   event: TriggerEvent,
   rules: ReadonlyArray<TriggerRule> = [],
 ): boolean => {
-  const routing = rules.find((rule) => event.labels.includes(rule.label));
+  const routing = rules.find((rule) => ruleClaims(rule, event));
   return startsWork(
     event.action,
     routing?.startsWorkFor === undefined ? [] : [routing.startsWorkFor],

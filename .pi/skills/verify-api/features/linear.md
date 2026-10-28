@@ -11,7 +11,9 @@ map, create) → `SessionService`.
 `/webhooks/linear`, sets `LINEAR_WEBHOOK_SECRET` to its signing secret, and names the mapping in
 `TRIGGER_RULES` — `[{"label": "factory", "repo": "acme/widgets", "baseRef": "main", "prompt": "…"}]`.
 The prompt template takes `{{key}}` (the issue id), `{{title}}`, `{{body}}` (the description),
-`{{labels}}`, `{{source}}` and `{{action}}`. The rules are read once, when the API boots.
+`{{labels}}`, `{{source}}` and `{{action}}`. `TRIGGER_RULES` is read once, when the API boots and is
+validated and logged then; a stored route (`addTriggerRoute`) is read per delivery and wins over it
+([trigger.md](trigger.md), LOB-266).
 
 **What starts work.** An issue `create`, and an `update` that _adds_ a label a rule names
 (`updatedFrom.labelIds` lacks it, the issue now carries it): the issue triaged into the factory
