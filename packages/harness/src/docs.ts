@@ -9,6 +9,7 @@ import { defineDoc, defineDocFamily } from "@earendil-works/pi-durable";
 import { MERGE_DOC_KIND, REPLAY_DOC_KIND } from "./projection";
 
 export const SPEC_DOC_KIND = "factory.spec";
+export const PLAN_DOC_KIND = "factory.plan";
 export const CRITERIA_DOC_KIND = "factory.criteria";
 export const PR_DOC_KIND = "factory.pr";
 export const RETRY_DOC_KIND = "factory.retry";
@@ -54,6 +55,32 @@ export const SpecDoc = defineDoc({
   fork: "current",
   initial: unspecified,
   migrate: unspecified,
+});
+
+/** What `PlanDoc` holds before anything was written: no steps, which the validator refuses. */
+const unplanned = () => ({
+  summary: "",
+  steps: [] as string[],
+  surfaces: [] as string[],
+  risks: [] as string[],
+});
+
+/**
+ * The planning stage's artifact (D10): summary, steps, surfaces and declared risks. The shape and its
+ * rule — at least one step and one surface, `risks` declared (`[]` when there are none) — are
+ * `./plan`'s; this token is only where the value is stored, and its one writer, a planning run's
+ * `plan` tool (`./planning`), decodes with `decodePlan` before it commits.
+ *
+ * The seed is not a plan: it has no steps, which the validator refuses, so a session that never
+ * planned reads as no plan rather than as one declaring no risks.
+ */
+export const PlanDoc = defineDoc({
+  kind: PLAN_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: unplanned,
 });
 
 /**

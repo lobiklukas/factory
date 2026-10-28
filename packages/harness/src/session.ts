@@ -121,8 +121,10 @@ import {
   PROPOSED_ISSUES_DOC_KIND,
   ProposedIssuesDoc,
   SpecDoc,
+  PlanDoc,
 } from "./docs";
 import { decodeSpec, projectSpec, type Spec, type SpecRefused } from "./spec";
+import { projectPlan, type Plan } from "./plan";
 import { assemblePages, pagesExtension, PAGES_TOKEN_CAP } from "./pages";
 import {
   assembleRepoPrompt,
@@ -155,6 +157,8 @@ import {
   type ThreadReader,
 } from "./ask";
 import { commitSpec, specExtension, type SpecOptions } from "./specify";
+import { planExtension, type PlanOptions } from "./planning";
+import type { RolePolicies } from "./rolePolicy";
 import {
   REVIEW_DIMENSIONS,
   reviewExtension,
@@ -449,10 +453,21 @@ export type OpenSessionOptions = {
   /**
    * How a specifying run posts its spec on its card (LOB-238, `./specify`): the control plane's
    * callback that records the spec as a `specified` event. The `spec` tool is installed only when
-   * this is given *and* the run's role writes the spec (`SPEC_ROLES`); any other run — a planner on
+   * this is given *and* the run's role writes the spec (`./rolePolicy`'s `writesSpec`); any other run — a planner on
    * the same card, a scratch session — is not offered it.
    */
   readonly spec?: SpecOptions;
+  /**
+   * How a planning run posts its plan on its card (D10, `./planning`): the control plane's callback
+   * that records the plan as a `planned` event. The `plan` tool is installed only when this is given
+   * *and* the run's role writes the plan (`./rolePolicy`'s `writesPlan`).
+   */
+  readonly plan?: PlanOptions;
+  /**
+   * What each role may do (`./rolePolicy`): the factory's table, extended by the deployment's
+   * `ROLE_POLICIES`. Absent is the factory's own (`DEFAULT_ROLE_POLICIES`).
+   */
+  readonly rolePolicies?: RolePolicies;
   /**
    * How a review run posts its review on the pull request (LOB-36, `./review`): the control plane's
    * callback that posts one comment under the reviewer's own identity. The `review` tool is installed
@@ -583,7 +598,12 @@ const openSessionIn = (
     const registry = createRegistry();
     // What the run's role is (B6, LOB-207): its model, the tools it is not offered, and the
     // read-only stage it makes the run, all from one resolution of the column's role.
-    const role = resolveRole(options.run, options.model, options.roles);
+    const role = resolveRole(
+      options.run,
+      options.model,
+      options.roles,
+      options.rolePolicies,
+    );
     // The agent is pinned when the root is created, and only then (`harness.root` below writes it
     // into a root that does not exist yet), so a reopened run keeps talking to the model it started
     // on. Its compaction thresholds have to follow that same model rather than whatever the role
@@ -656,6 +676,11 @@ const openSessionIn = (
     if (options.spec !== undefined && role.writesSpec) {
       registry.install(specExtension(options.spec));
     }
+    // The planner's plan (D10): the same shape as the spec, for the read-only planning stage — what
+    // the person at the plan approval gate reads. Only the role that writes the plan gets it.
+    if (options.plan !== undefined && role.writesPlan) {
+      registry.install(planExtension(options.plan));
+    }
     // The reviewer's review (LOB-36): committed to the log and posted on the PR, the one thing the
     // read-only reviewing stage may say outside its log. Only a review run gets it.
     if (options.review !== undefined && role.writesReview) {
@@ -679,11 +704,14 @@ const openSessionIn = (
     // `none` holds it too, as the subset it is, and is refused every write first by the read-only
     // stage below (`readOnlyStageOf`). Composed here, where a policy becomes hooks, so a session
     // cannot be opened with the skill or the declaration and without the rule.
-    const writeScope = columnWriteScope({
-      role: options.run?.role,
-      skills: skills.map((skill) => skill.name),
-      autonomy: options.run?.autonomy,
-    });
+    const writeScope = columnWriteScope(
+      {
+        role: options.run?.role,
+        skills: skills.map((skill) => skill.name),
+        autonomy: options.run?.autonomy,
+      },
+      options.rolePolicies,
+    );
     const columnPolicy =
       writeScope === "worktree" ? policy : docsPolicy(policy);
     // A column whose role is a read-only stage is refused its writes (LOB-74): `write`, `edit`,
@@ -1562,6 +1590,18 @@ export const readSpec = (
   attempt("read spec", () =>
     harness.snapshot(SpecDoc, conversation.id, BACKGROUND_CONTEXT),
   ).pipe(Effect.map(projectSpec));
+
+/**
+ * The session's plan (D10), read from the committed document. `undefined` when it never committed
+ * one: the document's seed has no steps, which is not a plan (`projectPlan`).
+ */
+export const readPlan = (
+  harness: Harness,
+  conversation: Conversation,
+): Effect.Effect<Plan | undefined, SessionError> =>
+  attempt("read plan", () =>
+    harness.snapshot(PlanDoc, conversation.id, BACKGROUND_CONTEXT),
+  ).pipe(Effect.map(projectPlan));
 
 /**
  * A run that found nothing to publish, announced in the transcript (LOB-196).

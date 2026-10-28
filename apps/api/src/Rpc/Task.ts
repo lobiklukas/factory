@@ -1,6 +1,7 @@
 import {
   definitionVocabulary,
   describeDefinition,
+  HARNESS_ROLES,
   releaseFinishedCard,
   SessionService,
   SkillService,
@@ -53,7 +54,15 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
       defineBoard: (input) =>
         skillNames.pipe(
           Effect.flatMap((names) =>
-            tasks.defineBoard(input, { skills: names, roles: sessions.roles }),
+            tasks.defineBoard(input, {
+              skills: names,
+              roles: sessions.roles,
+              // The harness's roles and the deployment's own role policy rows (D10, `ROLE_POLICIES`).
+              knownRoles: new Set([
+                ...HARNESS_ROLES,
+                ...sessions.rolePolicies.keys(),
+              ]),
+            }),
           ),
           Effect.map(({ outcome, definition }) => ({
             outcome,
@@ -65,7 +74,13 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
       getDefinitionVocabulary: () =>
         tasks.declaredRoles.pipe(
           Effect.map((declared) =>
-            definitionVocabulary({ table: sessions.roles, declared }),
+            definitionVocabulary({
+              table: new Set([
+                ...sessions.roles,
+                ...sessions.rolePolicies.keys(),
+              ]),
+              declared,
+            }),
           ),
         ),
       // One read: `getBoard`'s join of the instance and its pinned version, so the two cannot disagree.
@@ -114,6 +129,8 @@ export const TaskRpcHandlers = TasksRpc.toLayer(
       listTaskComments: (input) => tasks.comments(input.taskId),
       getTaskSpec: (input) =>
         tasks.spec(input.taskId).pipe(Effect.map((spec) => spec ?? null)),
+      getTaskPlan: (input) =>
+        tasks.plan(input.taskId).pipe(Effect.map((plan) => plan ?? null)),
       getTaskExit: (input) => tasks.exit(input.taskId),
       listTaskRuns: (input) => tasks.listRuns(input.taskId),
       listAttention: (input) => tasks.attention(input.boardId),

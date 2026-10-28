@@ -34,7 +34,7 @@
  * - A docs run's write allowlist (`DOCS_WRITE_ALLOWLIST`, LOB-195) narrows the same decision, so it
  *   stops what the same textual read stops: a `write` or `edit` of a code file, not a redirect or
  *   `sed -i` that writes one.
- * - A read-only stage (`READ_ONLY_ROLES`, LOB-74) refuses `write`, `edit` and `verify` outright, and
+ * - A read-only stage (a `readOnly` role, `./rolePolicy`, LOB-74) refuses `write`, `edit` and `verify` outright, and
  *   reads `bash` the other way round: an allowlist of read commands (`STAGE_READ_COMMANDS`), so a
  *   command it does not know is refused rather than let through. It is still a reading of the text,
  *   so a `sed` script's own `w` command or a program named in an environment variable gets past.
@@ -45,6 +45,11 @@ import type { Context as ChordContext } from "@earendil-works/chord";
 import type { Extension, HookApi } from "@earendil-works/pi-durable";
 import { defineExtension, hook, ToolTask } from "@earendil-works/pi-durable";
 import { Context, Effect, Layer } from "effect";
+import {
+  DEFAULT_ROLE_POLICIES,
+  rolePolicyOf,
+  type RolePolicies,
+} from "./rolePolicy";
 import type {
   AutonomyGate,
   ColumnAutonomy,
@@ -1440,20 +1445,6 @@ export const docsPolicy = (policy: SessionPolicy): SessionPolicy => ({
 // The read-only stage (LOB-74)
 // ---------------------------------------------------------------------------------------------
 
-/**
- * The roles whose stage only reads (docs/board.md B4, B6; LOB-74), each with the stage it is.
- *
- * Keyed by role because B6 says a role resolves to tool policy in one place: a column that declares
- * the `specifier` role is the specifying stage whatever the column is called, and a board that
- * renames the column keeps the rule. This is the tool-policy half of LOB-207's role table, for the
- * one role the MVP pipeline needs to be read-only; widening it is an edit here, not a change to
- * the check. A map rather than an object literal, because a role is free text in a board definition
- * and `constructor` must not find `Object.prototype`'s.
- */
-export const READ_ONLY_ROLES: ReadonlyMap<string, string> = new Map([
-  ["specifier", "specifying"],
-]);
-
 /** A run in a read-only stage: the stage, and the column and role that made it one. */
 export type ReadOnlyStage = {
   readonly stage: string;
@@ -1471,9 +1462,12 @@ export const REVIEWING_STAGE = "reviewing";
 
 /**
  * The read-only stage a run is in, or `undefined` when its column's role writes (or it has no
- * column at all — a scratch session is not a stage). A review run (`reviewing`) is always the
- * reviewing stage, with its column and role when it has them. A column whose autonomy declares
- * `write: "none"` (C22) is a read-only stage too, named after the column, whatever its role.
+ * column at all — a scratch session is not a stage). A role whose row in `policies` says `readOnly`
+ * (`./rolePolicy`, LOB-74) is the stage its row names — the specifier `specifying`, the planner
+ * `planning` — keyed by role, so a board that renames the column keeps the rule; a row naming no
+ * stage is named after the column. A review run (`reviewing`) is always the reviewing stage, with
+ * its column and role when it has them. A column whose autonomy declares `write: "none"` (C22) is a
+ * read-only stage too, named after the column, whatever its role.
  */
 export const readOnlyStageOf = (
   run:
@@ -1484,6 +1478,7 @@ export const readOnlyStageOf = (
         readonly autonomy?: ColumnAutonomy;
       }
     | undefined,
+  policies: RolePolicies = DEFAULT_ROLE_POLICIES,
 ): ReadOnlyStage | undefined => {
   if (run?.reviewing === true)
     return {
@@ -1492,10 +1487,13 @@ export const readOnlyStageOf = (
       role: run.role ?? "none",
     };
   if (run?.column === undefined) return undefined;
-  const stage =
-    run.role === undefined ? undefined : READ_ONLY_ROLES.get(run.role);
-  if (stage !== undefined && run.role !== undefined)
-    return { stage, column: run.column, role: run.role };
+  const role = rolePolicyOf(run.role, policies);
+  if (role?.readOnly === true && run.role !== undefined)
+    return {
+      stage: role.stage ?? run.column,
+      column: run.column,
+      role: run.role,
+    };
   return run.autonomy?.write === "none"
     ? { stage: run.column, column: run.column, role: run.role ?? "none" }
     : undefined;
@@ -2018,9 +2016,12 @@ const WRITE_SCOPES: readonly ColumnWriteScope[] = ["worktree", "docs", "none"];
  * still writes nothing. `openSession` composes the run's rules from this, and `getDefinition`
  * describes the column with it, so what a reader is told is what a run meets.
  */
-export const columnWriteScope = (column: AutonomyColumn): ColumnWriteScope => {
+export const columnWriteScope = (
+  column: AutonomyColumn,
+  policies: RolePolicies = DEFAULT_ROLE_POLICIES,
+): ColumnWriteScope => {
   const implied: ColumnWriteScope =
-    column.role !== undefined && READ_ONLY_ROLES.has(column.role)
+    rolePolicyOf(column.role, policies)?.readOnly === true
       ? "none"
       : column.skills.includes(DOCS_SKILL)
         ? "docs"
@@ -2065,6 +2066,7 @@ export const withColumnAutonomy = (
 export const columnAutonomy = (
   config: AutonomyConfig,
   column: AutonomyColumn,
+  policies: RolePolicies = DEFAULT_ROLE_POLICIES,
 ): ResolvedAutonomy => {
   const deployment = new Set(
     (config.approvalRequired ?? []).map(normalizeGate),
@@ -2081,7 +2083,7 @@ export const columnAutonomy = (
   }
   return {
     approvalRequired: gates,
-    write: columnWriteScope(column),
+    write: columnWriteScope(column, policies),
     push: effective.pushRefPrefixes.length === 0 ? "none" : "branch",
   };
 };

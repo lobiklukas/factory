@@ -17,8 +17,8 @@
  *   for what the run declared, then posted on the card through a callback the control plane supplies
  *   (`SpecOptions.post`, a `specified` event on the task) so the card shows it without a fold of the
  *   run's log. The callback is idempotent by tool call id, so a replay posts nothing twice.
- * - **Only for the specifier.** The tool is installed for a run whose column's role is in
- *   `SPEC_ROLES` (`./loader`'s `resolveRole`), and only when there is a card to post on — every other
+ * - **Only for the specifier.** The tool is installed for a run whose column's role
+ *   `writesSpec` (`./rolePolicy`, resolved by `./loader`'s `resolveRole`), and only when there is a card to post on — every other
  *   run is never offered it.
  *
  * It does not ask. A spec with gaps is the stage's evidence that it needs a person, and the ask on
@@ -38,13 +38,6 @@ export const SPEC_TOOL = "spec";
 
 /** The name the extension carrying the tool is installed under. */
 export const SPEC_EXTENSION = "factory.specify";
-
-/**
- * The roles whose runs write the spec (B4's `specifying` exit: "a `spec` doc, gaps declared"). Keyed
- * by role, as `READ_ONLY_ROLES` is, so a board that renames the column keeps the tool, and a set
- * rather than a literal so a role that is free text in a definition cannot find a prototype's key.
- */
-export const SPEC_ROLES: ReadonlySet<string> = new Set(["specifier"]);
 
 /** Where a posted spec left the card: the receipt the tool reports to the model. */
 export type SpecReceipt = {

@@ -88,6 +88,7 @@ export const projectTask = (
         break;
       case "commented":
       case "specified":
+      case "planned":
         card = { ...card, revision };
         break;
     }
