@@ -84,10 +84,12 @@ import {
 import {
   GetSkillInput,
   ListSkillsInput,
+  ListSkillVersionsInput,
   PutSkillInput,
   SkillErrorSchema,
   SkillRecord,
   SkillSummary,
+  SkillVersionSummary,
 } from "@repo/domain/Skill";
 import {
   AddTriggerRouteInput,
@@ -627,6 +629,13 @@ export class SkillsRpc extends RpcGroup.make(
   Rpc.make("getSkill", {
     payload: GetSkillInput,
     success: SkillRecord,
+    error: SkillErrorSchema,
+  }),
+  // Every version of one skill, newest first, without the bodies (D8): the dashboard's history. An
+  // unknown name is `SkillNotFound`.
+  Rpc.make("listSkillVersions", {
+    payload: ListSkillVersionsInput,
+    success: Schema.Array(SkillVersionSummary),
     error: SkillErrorSchema,
   }),
   // Version newest + 1 (1 for a new name), attributed to the caller's credential. A blank body is

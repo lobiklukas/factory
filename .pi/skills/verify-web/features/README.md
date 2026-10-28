@@ -57,6 +57,10 @@ from the `agent/C10` worktree, API `:9581` / web `:3581`, `FAUX_SLEEP_MS=5000`. 
 2026-10-28 from the `agent/D3` worktree, API `:9540` / web `:3540`; `drive.mjs` re-passed there
 (API `:9541` / web `:3541`), its lane-control count now leaving the settings disclosure out.
 
+`skills.sh` (the skill pages, D8) last passed **21/21** on 2026-10-28 from the `agent/D8` worktree,
+API `:9541` / web `:3541`, on a throwaway database; `board-settings.sh` re-passed there (23/23, API `:9541` /
+web `:3541`) with each column's skills now links.
+
 `cost.sh` (cost prediction on the New session form and `/spend`, LOB-38) last passed **12/12** on
 2026-10-28 from the `agent/LOB-38` worktree, API `:9552` / web `:3552`; `spend.sh` and `model.sh`
 re-passed there beside it, as the strip and the form sit on their pages.
@@ -74,6 +78,7 @@ re-passed there beside it, as the strip and the form sit on their pages.
 | Compaction from the pane     | passing | [compaction.md](compaction.md)                                                |
 | Board lanes                  | passing | [board.md](board.md)                                                          |
 | Board settings               | passing | [board-settings.md](board-settings.md) (`board-settings.sh`)                  |
+| Skill pages                  | passing | [skills.md](skills.md) (`skills.sh`)                                          |
 | Card pane (write path)       | passing | [card-pane.md](card-pane.md)                                                  |
 | What needs a person          | passing | [attention.md](attention.md)                                                  |
 | The card's thread            | passing | [thread.md](thread.md) (`thread.sh`)                                          |

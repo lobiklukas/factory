@@ -4,6 +4,7 @@ import { Option } from "effect";
 import { AsyncResult } from "effect/reactivity";
 import {
   BellIcon,
+  BookOpenTextIcon,
   CoinsIcon,
   GitBranchIcon,
   KanbanSquareIcon,
@@ -43,6 +44,8 @@ const SECTIONS = [
   { to: "/repos", label: "Repositories", icon: GitBranchIcon },
   // What the trigger seam did with each delivery, and why it skipped the ones it did (T4).
   { to: "/triggers", label: "Triggers", icon: WebhookIcon },
+  // The prompt text a column's runs are told, and the form that publishes a new version of it (D8).
+  { to: "/skills", label: "Skills", icon: BookOpenTextIcon },
 ] as const;
 
 /**
