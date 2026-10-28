@@ -42,6 +42,9 @@ export const APPROVALS_KEY = "approvals";
  */
 export const BOARD_POLL = Duration.seconds(2);
 
+/** How often an open card pane re-reads what its column needs (`taskExitAtom`): the read is heavier than the board's. */
+export const EXIT_POLL = Duration.seconds(10);
+
 /**
  * The boards this control plane holds (LOB-75), newest first: what `/boards` offers to open.
  *
@@ -208,9 +211,11 @@ export const taskSpecAtom = Atom.family((taskId: TaskId) =>
  * What a card needs to leave its column (D9): `getTaskExit`, each of the column's requirements met,
  * unmet with the reason a move would be refused with, or not checked.
  *
- * Polled with the board, because what a requirement reads — a run's log, a spec a run declared —
- * changes under the CLI's and the runs' hands, and the checklist should follow within one interval;
- * and re-read at once when a move or a run start from this page lands (`BOARD_KEY`, `RUNS_KEY`).
+ * Re-read at once when a move or a run start from this page lands (`BOARD_KEY`, `RUNS_KEY`), and
+ * polled on a slower interval than the board (`EXIT_POLL`): what a requirement reads — a run's log, a
+ * spec a run declared — changes under the CLI's and the runs' hands, but each read folds every run's
+ * log and, in a column that gates on `non_empty_diff`, measures the branch with git, which the board's
+ * two seconds would repeat for as long as the pane stays open.
  */
 export const taskExitAtom = Atom.family((taskId: TaskId) =>
   runtime
@@ -222,7 +227,7 @@ export const taskExitAtom = Atom.family((taskId: TaskId) =>
     )
     .pipe(
       Atom.withReactivity([BOARD_KEY, RUNS_KEY]),
-      Atom.withRefresh(BOARD_POLL),
+      Atom.withRefresh(EXIT_POLL),
     ),
 );
 

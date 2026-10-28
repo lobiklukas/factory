@@ -3163,6 +3163,30 @@ describe("TaskService — exit requirements", () => {
     expect(canceled.column).toBe("canceled");
   }, 60_000);
 
+  /** Mutation: judge the newest run whatever column started it — a planner's completed run meets building's gate. */
+  it("judges run_completed on the run started in the column being left, not an earlier column's (D9)", async () => {
+    const task = await inBuilding();
+    const repoRoot = fixtureRepo({ ".pi/skills/verify-web/drive.sh": PASSING });
+    // The only run is a completed one the card's earlier column started.
+    await recordRun({
+      taskId: task.id,
+      repoRoot,
+      column: "planning",
+      command: change("src/planned.ts"),
+    });
+    const err = await refusal(toReview(task));
+    expect(err).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: RUN_COMPLETED_REQUIREMENT,
+    });
+    expect(err.message).toContain("no run of the card was started in building");
+    const exit = await withService((s) => s.exit(task.id));
+    expect(
+      exit.requirements.find((r) => r.key === RUN_COMPLETED_REQUIREMENT)
+        ?.status,
+    ).toBe("unmet");
+  }, 60_000);
+
   it("refuses building → review for a run that has not answered, and judges only the latest run (D9)", async () => {
     const task = await inBuilding();
     const repoRoot = fixtureRepo({ ".pi/skills/verify-web/drive.sh": PASSING });

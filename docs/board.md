@@ -263,13 +263,15 @@ locked, at the revision the move expected.
 Built (D9): `spec_doc` and `run_completed` are checked too. `spec_doc` (`specifying`) is met when the
 card holds a `specified` event — a specifying run's `spec` tool wrote one (LOB-238) — whatever its gaps,
 which stay the ask's to raise. `run_completed` (`building`, first among its keys) reads the card's
-_latest_ run, as `pr_link` does, and is met when that run's newest turn ended on its own
-(`runTurnOf`): a run still working or parked, one ending on a failed or aborted model answer, one
-interrupted (C8) or one its budget stopped has not completed, and a card with no run has completed
-nothing. `plan_doc` and the `human_*` labels stay unchecked. The same verdicts feed `getTaskExit`,
+_newest run started in the column being left_ (a planner's run is not the builder's), and is met when
+that run's newest turn ended on its own (`runTurnOf`): a run still working or parked, one ending on a
+failed or aborted model answer or one cut off at the output limit, one interrupted (C8) or one its
+budget stopped has not completed, and a card with no run started there has completed nothing. `plan_doc` and the `human_*` labels stay unchecked. The same verdicts feed `getTaskExit`,
 which the card pane reads to list "Leaves <column> when" — each key `met`, `unmet` with the refusal's
 own reason, or `not checked` — and to say, before a click, why a move would be refused; the move stays
-clickable, because the server's answer is the decision.
+clickable, because the server's answer is the decision. `factory board show` prints the same list
+(`leaves <column> when`). The pane re-reads it every ten seconds, not the board's two, because each
+read folds the runs' logs and measures the branch.
 
 Built (C18): a run whose column requires `pr_link` opens its PR itself. When this process sees the run
 settle (its session goes idle), the control plane runs the same PR step `factory pr` and the

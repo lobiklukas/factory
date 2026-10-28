@@ -23,6 +23,7 @@ import {
   Task,
   TaskComment,
   TaskRun,
+  TaskExit,
   TaskSpec,
 } from "@repo/domain/Task";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -39,6 +40,7 @@ import {
   createdLines,
   runsLines,
   specLines,
+  exitLines,
   startCard,
   type StartClient,
   threadLines,
@@ -185,6 +187,52 @@ describe("specLines (LOB-238)", () => {
     expect(lines).toContain("  gaps: none");
     expect(lines).toContain("  open questions: none");
     expect(specLines(null)).toEqual(["spec      -"]);
+  });
+});
+
+describe("exitLines (D9)", () => {
+  const exit = (
+    requirements: TaskExit["requirements"],
+    column = "building",
+  ): TaskExit =>
+    Schema.decodeSync(TaskExit)({
+      taskId: `tsk_${"0".repeat(26)}`,
+      column,
+      revision: 3,
+      requirements,
+    });
+
+  it("lists each requirement as met, unmet with its reason, or not checked", () => {
+    expect(
+      exitLines(
+        exit([
+          {
+            key: "run_completed",
+            description: "the run finished",
+            status: "met",
+          },
+          {
+            key: "non_empty_diff",
+            description: "the branch changes a file",
+            status: "unmet",
+            reason: "the latest run's branch changes no file",
+          },
+          { key: "plan_doc", description: "a plan doc", status: "unchecked" },
+        ]),
+      ),
+    ).toEqual([
+      "leaves    building when",
+      "  run_completed: met (the run finished)",
+      "  non_empty_diff: unmet (the branch changes a file)",
+      "    the latest run's branch changes no file",
+      "  plan_doc: not checked (a plan doc)",
+    ]);
+  });
+
+  it("says a column with no requirements has none", () => {
+    expect(exitLines(exit([], "triage"))).toEqual([
+      "leaves    triage when (no requirements)",
+    ]);
   });
 });
 

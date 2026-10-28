@@ -165,7 +165,7 @@ describe("the spec_doc requirement (D9)", () => {
     expect(
       specDocVerdict({
         runs: [],
-        spec: { sessionId: "ses_a", column: "specifying" },
+        specified: true,
       }),
     ).toEqual({ met: true });
   });
@@ -190,6 +190,7 @@ describe("the run_completed requirement (D9)", () => {
   /** Mutation: treat every settled turn as completed — a failed, stopped or unanswered run passes. */
   it.each([
     ["unfinished", "has not completed its turn"],
+    ["truncated", "cut off at the output limit"],
     ["interrupted", "was interrupted"],
     ["budget", "was stopped by its budget"],
     ["failed", "faulted"],
@@ -199,6 +200,31 @@ describe("the run_completed requirement (D9)", () => {
     );
     expect(reason).toContain("ses_a");
     expect(reason).toContain(words);
+  });
+
+  /** Mutation: judge the newest run whatever column started it — a planner's completed run meets building's gate. */
+  it("judges the newest run started in the column being left, not an earlier column's", () => {
+    const runs = [
+      { ...turned("ses_build", "failed"), column: "building" },
+      { ...turned("ses_plan", "completed"), column: "planning" },
+    ];
+    expect(unmet(runCompletedVerdict({ column: "building", runs }))).toContain(
+      "ses_build",
+    );
+    expect(
+      unmet(
+        runCompletedVerdict({
+          column: "building",
+          runs: [{ ...turned("ses_plan", "completed"), column: "planning" }],
+        }),
+      ),
+    ).toContain("no run of the card was started in building");
+    expect(
+      runCompletedVerdict({
+        column: "planning",
+        runs,
+      }),
+    ).toEqual({ met: true });
   });
 
   it("is met for a latest run that completed", () => {
@@ -258,7 +284,7 @@ describe("exitView (D9)", () => {
     expect(
       exitView(planning, {
         runs: [],
-        spec: { sessionId: "ses_a", column: "specifying" },
+        specified: true,
       })[1],
     ).toEqual({ key: "spec_doc", description: "a spec", status: "met" });
   });

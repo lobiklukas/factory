@@ -37,8 +37,8 @@ const ROOT = path.resolve(
   "../../..",
 );
 const SEED_SPEC = path.join(ROOT, ".pi/skills/lib/seed-spec.ts");
-/** The board's poll interval (`BOARD_POLL`, 2 s) and the slack one read plus a render may add. */
-const POLL_MS = 2_000;
+/** The exit view's poll interval (`EXIT_POLL`, 10 s) and the slack one read plus a render may add. */
+const POLL_MS = 10_000;
 const WINDOW_MS = POLL_MS + 2_000;
 const PERSON = "person:verify-exit-checklist";
 

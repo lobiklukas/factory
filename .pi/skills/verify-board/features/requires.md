@@ -7,7 +7,7 @@
 A column's exit requirements, checked when a card leaves it (docs/board.md B5, B8; LOB-80, part 3 of
 LOB-16). Since D9 `specifying`'s `spec_doc` and `building`'s `run_completed` are checked as well:
 `specifying → planning` needs a `specified` event on the card, and `building → review` needs the card's
-latest run to have completed a turn (not failed, interrupted, budget-stopped, still working or absent),
+newest run started in `building` to have completed a turn (not failed, interrupted, budget-stopped, still working or absent),
 checked before the other two `building` keys. `requires.sh` proves each with one refusal and one pass. The default pipeline's `building` declares `non_empty_diff` and `pr_link` from version 1, and
 both are checked since LOB-240: `building → review` goes through only when the card's latest run's
 branch has a committed change against its base — measured by the PR step's own `diffSize`
@@ -38,36 +38,36 @@ document out of its review runs', and measures the latest run's branch, before i
 ## How a user reaches it
 
 ```sh
-factory board move --task tsk_… --to review --expect-revision 4
+factory board move --task tsk_… --to review --expect-revision 5
 # error: requirement_unmet: the move building → review needs "run_completed" (a run that completed),
 #   which is not met: the card has no runs, so none completed a turn                    (exit 1)
 
 factory board start --task tsk_… --prompt "build this card"   # the builder commits on its branch
-factory board move --task tsk_… --to review --expect-revision 4 --actor ses_…
+factory board move --task tsk_… --to review --expect-revision 5 --actor ses_…
 # error: requirement_unmet: the move building → review needs "pr_link" (a PR link), which is not
 #   met: the card's latest run ses_… recorded no PR (no factory.pr document in its log): open its
 #   PR (factory pr ses_…) before moving the card on                                     (exit 1)
 
 factory pr ses_…                                                   # pr https://github.com/…/pull/1
-factory board move --task tsk_… --to review --expect-revision 4 --actor ses_…
-# moved tsk_… to review (revision 5)
+factory board move --task tsk_… --to review --expect-revision 5 --actor ses_…
+# moved tsk_… to review (revision 6)
 
-factory board move --task tsk_… --to done --expect-revision 5
+factory board move --task tsk_… --to done --expect-revision 6
 # error: requirement_unmet: the move review → done needs "verified" (a passing verification of every
 #   surface the card's change touched), which is not met: none of the card's 1 run(s) recorded a
 #   verify call over a change (0 call(s) recorded)                                      (exit 1)
 
 factory board start --task tsk_… --prompt "make the change and verify it"   # the run calls verify
-factory board move --task tsk_… --to done --expect-revision 5
+factory board move --task tsk_… --to done --expect-revision 6
 # error: requirement_unmet: the move review → done needs "review_verdict" (a review verdict), which
 #   is not met: no review ran: the card has no review run (…)                          (exit 1)
 
 # GitHub's pull_request (opened, then synchronize per push) → a reviewer run per head
-factory board move --task tsk_… --to done --expect-revision 5
+factory board move --task tsk_… --to done --expect-revision 6
 # error: requirement_unmet: … "review_verdict" …: run ses_…'s review of …#1 at 3f2a…
 #   failed correctness: fix the findings and push, and the new head's review decides the move
-factory board move --task tsk_… --to done --expect-revision 5     # after the fixed head's pass
-# moved tsk_… to done (revision 6)
+factory board move --task tsk_… --to done --expect-revision 6     # after the fixed head's pass
+# moved tsk_… to done (revision 7)
 ```
 
 ## How the skill drives it

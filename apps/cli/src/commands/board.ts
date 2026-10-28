@@ -25,6 +25,7 @@ import type {
   CreateTaskInput,
   Task,
   TaskComment,
+  TaskExit,
   TaskRun,
   TaskSpec,
 } from "@repo/domain/Task";
@@ -543,6 +544,19 @@ export const specLines = (spec: TaskSpec | null): ReadonlyArray<string> =>
       ];
 
 /**
+ * What the card needs to leave its column (D9): a `leaves <column> when` header, then each of the
+ * column's requirements — `met`, `unmet` with the reason the move would be refused with, or `not
+ * checked` for a key nothing checks — in declaration order. A column that declares none says so.
+ */
+export const exitLines = (exit: TaskExit): ReadonlyArray<string> => [
+  `leaves    ${exit.column} when${exit.requirements.length === 0 ? " (no requirements)" : ""}`,
+  ...exit.requirements.flatMap((requirement) => [
+    `  ${requirement.key}: ${requirement.status === "unchecked" ? "not checked" : requirement.status} (${requirement.description})`,
+    ...(requirement.reason === undefined ? [] : [`    ${requirement.reason}`]),
+  ]),
+];
+
+/**
  * What the card says and where its runs start (LOB-260): its base ref and external ref, `-` when it
  * has none, then its body — `body      -` for a card with none, or the line count and each line of
  * the markdown indented, exactly as it was filed, the way a thread comment's body is printed. Its
@@ -597,6 +611,7 @@ const showCommand = Command.make(
       const card = yield* client.getTask({ taskId });
       const thread = yield* client.listTaskComments({ taskId });
       const spec = yield* client.getTaskSpec({ taskId });
+      const exit = yield* client.getTaskExit({ taskId });
 
       yield* Console.log(`id        ${card.id}`);
       yield* Console.log(`board     ${card.boardId}`);
@@ -623,6 +638,7 @@ const showCommand = Command.make(
       yield* Console.log(`title     ${card.title}`);
       for (const line of bodyLines(card)) yield* Console.log(line);
       for (const line of specLines(spec)) yield* Console.log(line);
+      for (const line of exitLines(exit)) yield* Console.log(line);
       yield* Console.log(`thread    ${thread.length}`);
       for (const comment of thread) {
         for (const line of threadLines(comment)) yield* Console.log(line);

@@ -626,6 +626,8 @@ const TASK_COLUMNS_T = taskColumns("t");
  */
 type RunRow = {
   readonly sessionId: string;
+  /** The column the run was started in (`task_runs.column`). */
+  readonly column: string;
   readonly indexed: string | null;
   readonly repo: string | null;
   readonly baseRef: string | null;
@@ -1722,10 +1724,14 @@ export const TaskServiceLive = Layer.effect(
      * runs are split out, in the same order, beside the head each of the card's PRs was last
      * reported at (`review_heads`), which says which of them `review_verdict` judges (LOB-241).
      */
-    const cardEvidence = (taskId: string, keys: ReadonlySet<string>) =>
+    const cardEvidence = (
+      taskId: string,
+      keys: ReadonlySet<string>,
+      column: string,
+    ) =>
       Effect.gen(function* () {
         const runs = yield* sql<RunRow>`
-          SELECT tr.session_id, s.id AS indexed, s.repo, s.base_ref, s.branch, r.local_path
+          SELECT tr.session_id, tr."column", s.id AS indexed, s.repo, s.base_ref, s.branch, r.local_path
           FROM task_runs tr
           LEFT JOIN sessions s ON s.id = tr.session_id
           LEFT JOIN repos r ON r.slug = s.repo
@@ -1770,12 +1776,24 @@ export const TaskServiceLive = Layer.effect(
         const changing = runs.filter(
           (_, index) => recordedReviews[index] === undefined,
         );
+        // `run_completed` judges the newest run started in the column being left, so only that run's
+        // turn is read: a run an earlier column started says nothing about this one.
+        const completing = changing
+          .filter((run) => run.column === column)
+          .at(-1)?.sessionId;
         const recorded = yield* Effect.forEach(
-          changing.map((run) => run.sessionId),
-          (sessionId): Effect.Effect<RunEvidence, TaskStorageError> => {
+          changing,
+          ({
+            sessionId,
+            column: startedIn,
+          }): Effect.Effect<RunEvidence, TaskStorageError> => {
             const storage = logs.get(sessionId);
             if (storage === undefined)
-              return Effect.succeed({ sessionId, calls: [] });
+              return Effect.succeed({
+                sessionId,
+                column: startedIn,
+                calls: [],
+              });
             return Effect.gen(function* () {
               const calls = yield* readVerifyCalls(storage).pipe(
                 Effect.mapError(
@@ -1793,18 +1811,20 @@ export const TaskServiceLive = Layer.effect(
                     }),
                 ),
               );
-              const turn = keys.has(RUN_COMPLETED_REQUIREMENT)
-                ? yield* readRunTurn(storage).pipe(
-                    Effect.mapError(
-                      (cause) =>
-                        new TaskStorageError({
-                          message: `task ${taskId}: run ${sessionId}'s turn does not read: ${cause.message}`,
-                        }),
-                    ),
-                  )
-                : undefined;
+              const turn =
+                keys.has(RUN_COMPLETED_REQUIREMENT) && sessionId === completing
+                  ? yield* readRunTurn(storage).pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new TaskStorageError({
+                            message: `task ${taskId}: run ${sessionId}'s turn does not read: ${cause.message}`,
+                          }),
+                      ),
+                    )
+                  : undefined;
               return {
                 sessionId,
+                column: startedIn,
                 calls,
                 ...(pr === undefined ? {} : { prUrl: pr.url }),
                 ...(turn === undefined ? {} : { turn }),
@@ -1826,26 +1846,20 @@ export const TaskServiceLive = Layer.effect(
           head: row.head,
         }));
         const latest = changing.at(-1);
-        // The card's newest spec: the newest `specified` event, which `spec` reads whole; here only
-        // that one exists is needed.
+        // Whether the card has a spec: any `specified` event.
         const specified = keys.has(SPEC_DOC_REQUIREMENT)
-          ? (yield* sql<{ actor: string; column: string }>`
-              SELECT payload->>'actor' AS actor, payload->>'column' AS "column"
-              FROM task_events
+          ? (yield* sql<{ id: number }>`
+              SELECT id FROM task_events
               WHERE task_id = ${taskId} AND kind = 'specified'
-              ORDER BY id DESC
               LIMIT 1
             `)[0]
           : undefined;
         const evidence: CardEvidence = {
+          column,
           runs: recorded,
           reviews,
           reviewHeads,
-          ...(specified === undefined
-            ? {}
-            : {
-                spec: { sessionId: specified.actor, column: specified.column },
-              }),
+          ...(specified === undefined ? {} : { specified: true }),
           ...(keys.has(NON_EMPTY_DIFF_REQUIREMENT) && latest !== undefined
             ? { diff: yield* branchDiff(latest) }
             : {}),
@@ -1882,6 +1896,7 @@ export const TaskServiceLive = Layer.effect(
         const evidence = yield* cardEvidence(
           input.taskId,
           new Set(requirements.map((requirement) => requirement.key)),
+          column.name,
         );
         for (const requirement of requirements) {
           const verdict = requirementVerdict(requirement, evidence);
@@ -1924,7 +1939,7 @@ export const TaskServiceLive = Layer.effect(
               .map((requirement) => requirement.key)
               .filter((key) => CHECKED_REQUIREMENTS.has(key)),
           );
-          const evidence = yield* cardEvidence(taskId, keys);
+          const evidence = yield* cardEvidence(taskId, keys, pinned.name);
           return { ...base, requirements: exitView(column, evidence) };
         }),
       );

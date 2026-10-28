@@ -22,7 +22,7 @@ words `met`, `unmet` or `not checked` and, for an unmet one, `[data-exit-reason]
 would refuse carries `data-move-unmet="<keys>"` and a list of the keys with their reasons under it
 (`[data-move-unmet-note=<to>]`, referenced by the button's `aria-describedby`). The button is not
 disabled: the checklist can be a poll behind, so the server's answer to a click stays the decision.
-A move into `canceled` checks nothing and is never warned. The read is polled with the board (2 s) and
+A move into `canceled` checks nothing and is never warned. The read is polled every 10 s (`EXIT_POLL`; each read folds the runs' logs and measures the branch) and
 re-read when a move or a run start from the page lands.
 
 **How the skill drives it.** `./exit-checklist.sh` (own API and dashboard, default `:9561` / `:3561`).

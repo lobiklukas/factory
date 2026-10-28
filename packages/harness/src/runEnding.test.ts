@@ -126,6 +126,21 @@ describe("runTurnOf", () => {
     expect(turn()).toBe("unfinished");
   });
 
+  /** Mutation: fold `length` into a stop — a builder whose answer was cut off mid-output passes. */
+  it("is truncated for an answer cut off at the output limit, which did not end on its own", () => {
+    expect(turn(entry("pi.user"), entry("pi.assistant", "length"))).toBe(
+      "truncated",
+    );
+    expect(
+      turn(
+        entry("pi.user"),
+        entry("pi.assistant", "length"),
+        entry("pi.user"),
+        entry("pi.assistant", "stop"),
+      ),
+    ).toBe("completed");
+  });
+
   it("is failed for an error or an abort, interrupted or budget for the markers, and the markers win", () => {
     expect(turn(entry("pi.user"), entry("pi.assistant", "error"))).toBe(
       "failed",

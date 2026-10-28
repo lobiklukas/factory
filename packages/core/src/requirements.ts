@@ -23,11 +23,12 @@
  * **What `spec_doc` and `run_completed` mean (D9).** `spec_doc` is met when a specifying run declared
  * the card's spec: the card holds a `specified` event (`getTaskSpec`'s record), whichever run posted
  * it and whichever column the card was in. A spec with open gaps still meets it — a gap parks the card
- * through `ask`, it is not this key's to refuse. `run_completed` reads the card's *latest* run, as
- * `pr_link` does, and is met when its newest turn ended on its own (`runTurnOf`): a run that is
- * still working, died mid-tool-call, ended on a failed or aborted model answer, was interrupted
- * (C8) or was stopped by its budget (LOB-163) has not completed. A card with no run has completed
- * nothing. A review run is not the card's run (`pr_link`'s rule), so its end says nothing here.
+ * through `ask`, it is not this key's to refuse. `run_completed` reads the newest run *started in the
+ * column being left* (an earlier column's run, a planner's say, is not the builder's), and is met
+ * when its newest turn ended on its own (`runTurnOf`): a run that is still working, died
+ * mid-tool-call, ended on a failed or aborted model answer or one cut off at the output limit
+ * (`stopReason: "length"`), was interrupted (C8) or was stopped by its budget (LOB-163) has not
+ * completed. A card with no run started in the column has completed nothing. A review run is not the card's run (`pr_link`'s rule), so its end says nothing here.
  *
  * **What `non_empty_diff` and `pr_link` mean.** Both read the card's *latest* run — the newest
  * `task_runs` row — for the reason `verified` reads the newest call: B12 gives each run its own
@@ -184,16 +185,12 @@ export const KNOWN_REQUIREMENTS: ReadonlySet<string> = new Set([
  */
 export type RunEvidence = {
   readonly sessionId: string;
+  /** The column the run was started in; `run_completed` judges the newest run started in the column being left. */
+  readonly column?: string;
   readonly calls: readonly TimedVerifyCall[];
   readonly prUrl?: string;
   /** How the run's newest turn ended (`runTurnOf`); read only when the move checks `run_completed`. */
   readonly turn?: RunTurn;
-};
-
-/** The card's newest `specified` event, as `spec_doc` reads it (D9). */
-export type SpecEvidence = {
-  readonly sessionId: string;
-  readonly column: string;
 };
 
 /**
@@ -234,12 +231,15 @@ export type ReportedHead = {
  * Everything a move's checked requirements read: the card's runs, oldest first, and the latest
  * one's branch diff — measured only when the move checks `non_empty_diff` and the card has a run —
  * its review runs, oldest first by when each started (absent: it has none), and the head each of
- * its PRs was last reported at (absent: none was). `spec` is the card's newest spec, read only when
+ * its PRs was last reported at (absent: none was). `specified` is whether the card has a spec, read only when
  * the move checks `spec_doc` (absent: it has none, or the move did not read).
  */
 export type CardEvidence = {
+  /** The column being left; absent: `run_completed` judges the newest run whatever column started it. */
+  readonly column?: string;
   readonly runs: readonly RunEvidence[];
-  readonly spec?: SpecEvidence;
+  /** The card has a `specified` event; read only when the move checks `spec_doc` (D9). */
+  readonly specified?: boolean;
   readonly diff?: BranchDiff;
   readonly reviews?: readonly ReviewRunEvidence[];
   readonly reviewHeads?: readonly ReportedHead[];
@@ -431,7 +431,7 @@ export const prLinkVerdict = (evidence: CardEvidence): RequirementVerdict => {
 
 /** The `spec_doc` requirement over the card's spec (module doc). */
 export const specDocVerdict = (evidence: CardEvidence): RequirementVerdict =>
-  evidence.spec === undefined
+  evidence.specified !== true
     ? {
         met: false,
         reason:
@@ -446,6 +446,8 @@ const UNCOMPLETED: Record<
 > = {
   unfinished: (id) =>
     `the card's latest run ${id} has not completed its turn: it is still working, parked on a question or an approval, or it ended mid-tool-call (wait for it, answer it, or start another run)`,
+  truncated: (id) =>
+    `the card's latest run ${id} did not complete: its last model answer was cut off at the output limit (send it on to continue, or start another run)`,
   interrupted: (id) =>
     `the card's latest run ${id} was interrupted before it completed (start another run, or send it on)`,
   budget: (id) =>
@@ -458,11 +460,19 @@ const UNCOMPLETED: Record<
 export const runCompletedVerdict = (
   evidence: CardEvidence,
 ): RequirementVerdict => {
-  const latest = evidence.runs.at(-1);
+  const column = evidence.column;
+  const latest = (
+    column === undefined
+      ? evidence.runs
+      : evidence.runs.filter((run) => run.column === column)
+  ).at(-1);
   if (latest === undefined)
     return {
       met: false,
-      reason: "the card has no runs, so none completed a turn",
+      reason:
+        column === undefined || evidence.runs.length === 0
+          ? "the card has no runs, so none completed a turn"
+          : `no run of the card was started in ${column}, so none completed a turn there (start one from the card)`,
     };
   const id = latest.sessionId;
   const turn = latest.turn;

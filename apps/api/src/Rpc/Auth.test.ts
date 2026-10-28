@@ -114,26 +114,29 @@ const query = <A, E>(effect: Effect.Effect<A, E, SqlClient>) =>
 
 /**
  * A specifying run's `spec` tool call on the card, in-process: no RPC posts a spec on a run's behalf,
- * and `specifying`'s exit needs one (`spec_doc`, D9). Returns the revision the card is at after it.
+ * and `specifying`'s exit needs one (`spec_doc`, D9). Yields the revision the card is at after it.
  */
 const declareSpec = (taskId: string, run: string) =>
-  scratch
-    .runPromise(
-      Effect.orDie(
-        Effect.gen(function* () {
-          const tasks = yield* TaskService;
-          return yield* tasks.declareSpec({
-            taskId,
-            actor: run,
-            goal: "walk the card on",
-            acceptance: ["it reaches planning"],
-            gaps: [],
-            openQuestions: [],
-          });
-        }).pipe(Effect.provide(TaskServiceLive)),
+  Effect.gen(function* () {
+    const tasks = yield* TaskService;
+    const task = yield* tasks.declareSpec({
+      taskId,
+      actor: run,
+      goal: "walk the card on",
+      acceptance: ["it reaches planning"],
+      gaps: [],
+      openQuestions: [],
+    });
+    return task.revision;
+  }).pipe(
+    Effect.orDie,
+    Effect.provide(
+      TaskServiceLive.pipe(
+        Layer.provide(PostgresLive),
+        Layer.provide(ScratchConfig),
       ),
-    )
-    .then((task) => task.revision);
+    ),
+  );
 
 /** Nothing here opens a PR. */
 const credentials = CredentialProvider.of({
@@ -685,9 +688,7 @@ describe("the actor every write records is the credential's, not the body's (LOB
         });
         // The run's own spec (its actor is the run, as the tool records it): the exit from
         // specifying needs one.
-        const specRevision = yield* Effect.promise(() =>
-          declareSpec(created.id, started.id),
-        );
+        const specRevision = yield* declareSpec(created.id, started.id);
         const planning = yield* client.moveTask({
           taskId: created.id,
           expectedRevision: specRevision,

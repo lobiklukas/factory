@@ -442,9 +442,10 @@ const scanLatestRun = (
   newestFirst: Iterable<EntryRecord>,
 ): {
   readonly marker: "interrupted" | "budget" | undefined;
-  readonly answer: "none" | "other" | "error" | "toolUse" | "stop";
+  readonly answer: "none" | "other" | "error" | "toolUse" | "length" | "stop";
 } => {
-  let answer: "none" | "other" | "error" | "toolUse" | "stop" = "none";
+  let answer: "none" | "other" | "error" | "toolUse" | "length" | "stop" =
+    "none";
   for (const entry of newestFirst) {
     if (entry.kind === "pi.user") break;
     if (entry.kind === INTERRUPTED_ENTRY_KIND)
@@ -460,7 +461,9 @@ const scanLatestRun = (
             ? "error"
             : message.stopReason === "toolUse"
               ? "toolUse"
-              : "stop";
+              : message.stopReason === "length"
+                ? "length"
+                : "stop";
     }
   }
   return { marker: undefined, answer };
@@ -470,12 +473,15 @@ const scanLatestRun = (
  * How the card's newest run stands as a board's `run_completed` exit requirement reads it (D9):
  * `completed` when its newest answer ended the turn on its own, `unfinished` when it has no answer
  * yet or its newest answer asked for a tool whose result has not been answered (still working, or
- * it died mid-loop), and `interrupted`, `budget` or `failed` as `RunEnding` says. A run that is
- * parked on a person's question or approval has not completed either; it is `unfinished`.
+ * it died mid-loop), `truncated` when its newest answer was cut off at the model's output limit
+ * (`stopReason: "length"`: the answer did not end on its own, so it is not a completed turn), and
+ * `interrupted`, `budget` or `failed` as `RunEnding` says. A run that is parked on a person's
+ * question or approval has not completed either; it is `unfinished`.
  */
 export type RunTurn =
   | "completed"
   | "unfinished"
+  | "truncated"
   | Exclude<RunEnding, "finished">;
 
 /** The newest run's turn, from the log's entries newest first (`runEndingOf`'s window). */
@@ -485,6 +491,8 @@ export const runTurnOf = (newestFirst: Iterable<EntryRecord>): RunTurn => {
   switch (run.answer) {
     case "error":
       return "failed";
+    case "length":
+      return "truncated";
     case "none":
     case "toolUse":
       return "unfinished";
