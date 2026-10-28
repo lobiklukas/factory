@@ -140,6 +140,14 @@ export type OpenPullRequestInput = {
     commit: string | undefined,
   ) => Effect.Effect<PushedBranch, GitError | CredentialError>;
   /**
+   * The base's tip on the forge, fetched by the control plane when the step is about to push
+   * (S-agent-secrets): the commit the secret scan stops at. Given with `push`, because only a push
+   * the step makes is one the scan bounds by what the forge holds rather than by a local ref, which
+   * the agent's own shell shares in a local checkout and could move to hide a commit from the scan.
+   * A fetch that fails refuses the step as a `PrError`. Absent: the scan stops at `measureBase`.
+   */
+  readonly forgeBase?: Effect.Effect<string, GitError | CredentialError>;
+  /**
    * The PR the session's card already has on this head and base (C19), opened by an earlier run of
    * the card on the branch this one continues. With one, a session whose log records no PR yet takes
    * every step of an open — measured, capped, pushed — but asks GitHub for nothing: the PR exists,
@@ -244,20 +252,44 @@ export const openPullRequest = (
     // The scan before the push (S-agent-secrets): every line the branch's commits add, for a stored
     // value or a credential's shape. Like the cap it writes nothing, so a refused session reads as
     // one with no PR; unlike the cap it reads the history, because that is what a push publishes.
+    //
+    // What it stops at is what the forge already holds: the base's tip there, fetched now, when the
+    // step pushes — never a local ref name the agent's shell could have moved onto a commit it wants
+    // unscanned — and the commit an adopted card PR was published at (C19), which an earlier run's
+    // step scanned and pushed, so a later run is not refused for history the forge already has.
     if (recorded === undefined && Option.isSome(measured)) {
-      const base = input.measureBase ?? input.base;
+      const localBase = input.measureBase ?? input.base;
       const unreadable = input.secrets?.unreadable ?? [];
       if (unreadable.length > 0) {
         return yield* new PrError({
           operation: "secretScan",
-          ref: `${base}..${input.head}`,
+          ref: `${localBase}..${input.head}`,
           message: `the repo's stored secret(s) ${unreadable.join(", ")} cannot be read with this control plane's FACTORY_SECRETS_KEY, so the branch cannot be scanned for them and nothing was pushed`,
         });
       }
+      const base =
+        input.push !== undefined && input.forgeBase !== undefined
+          ? yield* input.forgeBase.pipe(
+              Effect.mapError(
+                (error) =>
+                  new PrError({
+                    operation: "secretScan",
+                    ref: `${input.base}..${input.head}`,
+                    message: `the forge's ${input.base} could not be fetched to bound the branch's secret scan, so nothing was pushed: ${error.message}`,
+                  }),
+              ),
+            )
+          : localBase;
+      const adopted = input.adopt?.commit ?? "";
+      const published =
+        adopted === ""
+          ? undefined
+          : yield* resolveCommit(input.worktree, adopted);
       const found = yield* scanBranchForSecrets({
         checkout: input.worktree,
         base,
         head: measuredHead,
+        ...(published === undefined ? {} : { exclude: [published] }),
         known: input.secrets?.known ?? [],
       });
       if (Option.isSome(found)) return found.value;

@@ -1225,7 +1225,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const tasks = yield* TaskService;
       /**
        * The repos' secrets (S-agent-secrets): optional, so a deployment or a test with no store runs
-       * every command with none, as before there was one.
+       * every command with none, as before there was one. The PR step's secret scan runs either way:
+       * with no store it checks the credential patterns alone, so a branch that adds a token's shape
+       * is refused `secret-found` in every deployment.
        */
       const secretStore = Option.getOrUndefined(
         yield* Effect.serviceOption(SecretService),
@@ -2236,12 +2238,48 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
+       * The commit a session's secret grant is read at (S-agent-secrets): the one
+       * `session_secret_bases` pinned for it, else `base` resolved now and pinned. The first open of a
+       * session pins it, before its agent has run, so a ref the agent's shell moves afterwards — the
+       * worktree shares the checkout's refs — never changes what a later open grants. `undefined`
+       * when the base does not resolve or the table cannot answer, which grants nothing.
+       */
+      const secretsBaseFor = (
+        id: SessionId,
+        directory: string,
+        base: string,
+      ): Effect.Effect<string | undefined> =>
+        Effect.gen(function* () {
+          const read = sql<{ baseCommit: string }>`
+            SELECT base_commit FROM session_secret_bases WHERE session_id = ${id}
+          `.pipe(Effect.map((rows) => rows[0]?.baseCommit));
+          const pinned = yield* read;
+          if (pinned !== undefined) return pinned;
+          const resolved = yield* resolveCommit(directory, base);
+          if (resolved === undefined) return undefined;
+          yield* sql`
+            INSERT INTO session_secret_bases (session_id, base_commit)
+            VALUES (${id}, ${resolved})
+            ON CONFLICT (session_id) DO NOTHING
+          `;
+          return yield* read;
+        }).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning(
+              `session ${id}: the commit its secrets are granted at could not be read or pinned (${String(error)}), so its commands get none`,
+            ).pipe(Effect.as(undefined)),
+          ),
+        );
+
+      /**
        * What a session's commands are given (S-agent-secrets, `./secretNeeds`): the secrets the repo's
-       * `.factory/config` declares at `base` — the ref its `verify` measures against, so never the
+       * `.factory/config` declares at the session's pinned base (`secretsBaseFor`) — `base`, the ref
+       * its `verify` measures against, as it resolved when the session first opened; so never the
        * run's own branch — and the store's values for them. Only for a repository's own checkout
        * that is still there; anything else is given none.
        */
       const secretsFor = (
+        id: SessionId,
         workspace: SessionWorkspace,
         base: string | undefined,
       ): Effect.Effect<GrantedSecrets> =>
@@ -2258,6 +2296,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             .exists(path.join(workspace.path, ".git"))
             .pipe(Effect.orElseSucceed(() => false));
           if (!checkout) return NO_SECRETS;
+          const pinned = yield* secretsBaseFor(id, workspace.path, base);
+          if (pinned === undefined) return NO_SECRETS;
           const registered = yield* readRepo(workspace.repo).pipe(
             Effect.map((rows) => rows[0]),
             Effect.orElseSucceed(() => undefined),
@@ -2265,7 +2305,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const needs = yield* secretNeedsAt(
             {
               directory: workspace.path,
-              ref: base,
+              ref: pinned,
               localPath: registered?.localPath ?? undefined,
             },
             { fs, path },
@@ -2903,8 +2943,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // ran reaches its next run, and an edit the run made on its own branch does not.
             const repoContext = yield* repoContextFor(workspace, verifyBase);
             // What the session's commands are given (S-agent-secrets): the names the repo's config
-            // declares at that same base — never the branch's — and the store's values for them.
-            const granted = yield* secretsFor(workspace, verifyBase);
+            // declares at that same base as the session first resolved it — never the branch's, and
+            // never a ref moved since — and the store's values for them.
+            const granted = yield* secretsFor(id, workspace, verifyBase);
             // The card's thread and the means to add to it (B7, LOB-73), for a session that is a run
             // of a card. A fork or a replay has no run row of its own, so it gets neither.
             const card = yield* runTaskFor(id);
@@ -4108,7 +4149,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         head: string,
         base: string,
       ): Effect.Effect<
-        Pick<OpenPullRequestInput, "push" | "measureBase">,
+        Pick<OpenPullRequestInput, "push" | "measureBase" | "forgeBase">,
         SessionError
       > =>
         Effect.gen(function* () {
@@ -4140,6 +4181,20 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             ...measureBase,
             push: (commit: string | undefined) =>
               remote.push({ repo, url, worktree, branch: head, commit }),
+            // What the secret scan stops at (S-agent-secrets): the forge's base, fetched by the control
+            // plane when the step is about to push, so no ref the agent's shell can move bounds it. The
+            // registered checkout's fetch gate serializes it with a create's fetch of the same base.
+            // A base that is a commit is its own bound: nothing can move it.
+            forgeBase: isCommitId(base)
+              ? Effect.succeed(base)
+              : remote
+                  .fetchBase({
+                    repo,
+                    url,
+                    checkout: registered?.localPath ?? worktree,
+                    branch: base,
+                  })
+                  .pipe(Effect.map((fetched) => fetched.sha)),
           };
         });
 

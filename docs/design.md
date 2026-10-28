@@ -341,8 +341,19 @@ for `verify` — are a second kind of credential, and the same rule holds: never
 shell. They are stored write-only in Postgres, encrypted under the control plane's
 `FACTORY_SECRETS_KEY` (a KMS later), declared per step in `.factory/config` at the session's base,
 injected only into the declared setup and verify commands, and masked in everything those commands
-print before it is committed. The PR step scans every line the branch's commits add for a stored
-value or a credential's shape before it pushes, and refuses `secret-found`.
+print before it is committed. The declaration is read at the base commit the session's first open
+pinned (`session_secret_bases`), not at a ref re-resolved later: a local checkout's refs are shared
+with the agent's shell, which could otherwise move the base onto a commit that declares every name.
+The PR step scans every line the branch's commits add, and every commit's message, author and
+paths, for a stored value or a credential's shape before it pushes, and refuses `secret-found`. The
+scan stops at the base's tip as the control plane fetches it from the forge just before its push
+(and at an adopted card PR's published commit), never at a local ref; it reads every file as text
+whatever its attributes, and a merge as a dense combined diff. The credential patterns apply to
+every repo, with or without a store.
+_Limits:_ masking is literal, so a command that prints a value encoded leaks it; a repo the factory
+does not push (no forge URL) is scanned from its local base, which a local agent can move; and a
+session's first open trusts the checkout's base as it then stands, which in a local checkout every
+other session's agent shares.
 _Rejected:_ injecting them into the agent's shell (the shell's output and the model's context are
 the log); reading the declaration from the run's branch (the agent could grant itself any stored
 value); a proxy that keeps the value out of the sandbox entirely (the right end state, but a network

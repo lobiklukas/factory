@@ -25,9 +25,17 @@ stored)`).
   masked (`maskingEnv`), and every tool's settled result passes an `afterTool` hook that masks it
   (`secretMaskExtension`) — so the verify record, the live tool output, the transcript and the PR
   body's excerpt never hold a value.
+- **Declared at a pinned base.** The base the declaration is read at is resolved once, at the
+  session's first open, and pinned in `session_secret_bases` (migration
+  `0043_create_session_secret_bases.ts`): a ref the agent's shell moves afterwards grants nothing.
 - **Scanned before the push.** The PR step scans every line the branch's commits add
-  (`git log -p base..head`, not only the net diff) for any value the store holds for the repo and for
-  well-known credential shapes (`SECRET_PATTERNS`; a fixture line may opt out of the patterns with
+  (`git log -p`, not only the net diff; every file read as text whatever its `.gitattributes`; a
+  merge as a dense combined diff) and every commit's message, author, committer and paths, for any
+  value the store holds for the repo and for well-known credential shapes. The range stops at the
+  base's tip as the control plane fetches it from the forge just before its push — never a local
+  ref — and at an adopted card PR's published commit. The patterns apply to every repo, with or
+  without a store. A multi-line stored value is also recognized by each piece of it that looks like
+  key material (20+ characters mixing cases and digits), never by its boilerplate lines (`SECRET_PATTERNS`; a fixture line may opt out of the patterns with
   `factory-secret-scan:allow`, never out of a stored value). A finding answers `secret-found` — no
   push, no PR, no record — naming each finding's secret (or pattern), path, line and commit and never
   the text. A settled card run writes it as a `secret_found` note on the card; `factory pr` prints

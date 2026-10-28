@@ -12,6 +12,7 @@ import { Effect, Option, Redacted } from "effect";
 import { afterAll, describe, expect, it } from "vitest";
 import type { InjectedSecrets } from "@repo/harness";
 import {
+  COMMIT_METADATA_PATH,
   parseAddedLines,
   SECRET_SCAN_ALLOW,
   scanAddedLines,
@@ -60,11 +61,15 @@ const repo = (base: Record<string, string> = {}): string => {
   return root;
 };
 
-const commit = (root: string, files: Record<string, string>): string => {
+const commit = (
+  root: string,
+  files: Record<string, string>,
+  message = "change",
+): string => {
   for (const [file, text] of Object.entries(files))
     writeFileSync(join(root, file), text);
   git(root, "add", "-A");
-  git(root, "commit", "-q", "-m", "change");
+  git(root, "commit", "-q", "-m", message);
   return git(root, "rev-parse", "HEAD");
 };
 
@@ -98,6 +103,29 @@ describe("parseAddedLines", () => {
       { commit: "abc123", path: "src/a.ts", line: 4, text: "first" },
       { commit: "abc123", path: "src/a.ts", line: 5, text: "second" },
       { commit: "abc123", path: "src/a.ts", line: 11, text: "++ not a header" },
+    ]);
+  });
+
+  it("reads a merge's combined diff: a line new to any parent is added, a removed one is not", () => {
+    const log = [
+      "\u0000def456",
+      "diff --cc src/b.ts",
+      "index 1,2..3",
+      "--- a/src/b.ts",
+      "+++ b/src/b.ts",
+      "@@@ -1,0 -1,1 +1,2 @@@",
+      "++resolved",
+      " +from the first parent",
+      " -gone",
+    ].join("\n");
+    expect(parseAddedLines(log)).toEqual([
+      { commit: "def456", path: "src/b.ts", line: 1, text: "resolved" },
+      {
+        commit: "def456",
+        path: "src/b.ts",
+        line: 2,
+        text: "from the first parent",
+      },
     ]);
   });
 });
@@ -144,6 +172,79 @@ describe("scanAddedLines", () => {
       scanAddedLines(at("MIIEfakebodyline0123456789"), pem)[0],
     ).toMatchObject({ kind: "stored", name: "DEPLOY_KEY" });
   });
+
+  /**
+   * Mutation: treat every line of a multi-line value as the secret — `apiVersion: v1` in any
+   * manifest the branch adds is refused as the stored kubeconfig, and every PR on the repo with it.
+   */
+  it("does not refuse a boilerplate line a stored multi-line document shares, only its key material", () => {
+    const token = "FakeKubeToken0123456789abcdefXYZ";
+    const kubeconfig: InjectedSecrets = [
+      {
+        name: "KUBECONFIG",
+        value: Redacted.make(
+          [
+            "apiVersion: v1",
+            "kind: Config",
+            "users:",
+            "- name: ci",
+            "  user:",
+            `    token: ${token}`,
+          ].join("\n"),
+        ),
+      },
+    ];
+    expect(scanAddedLines(at("apiVersion: v1"), kubeconfig)).toEqual([]);
+    expect(scanAddedLines(at("kind: Config"), kubeconfig)).toEqual([]);
+    expect(
+      scanAddedLines(at(`auth = "${token}"`), kubeconfig)[0],
+    ).toMatchObject({ kind: "stored", name: "KUBECONFIG" });
+    const serviceAccount: InjectedSecrets = [
+      {
+        name: "GCP_SA",
+        value: Redacted.make(
+          JSON.stringify(
+            {
+              type: "service_account",
+              token_uri: "https://oauth2.googleapis.com/token",
+              private_key: `${pemHeader()}\nMIIEvQIBADANfakeBody0123456789\n-----END-----\n`,
+            },
+            null,
+            2,
+          ),
+        ),
+      },
+    ];
+    expect(
+      scanAddedLines(
+        at('  "token_uri": "https://oauth2.googleapis.com/token",'),
+        serviceAccount,
+      ),
+    ).toEqual([]);
+    expect(
+      scanAddedLines(at("MIIEvQIBADANfakeBody0123456789"), serviceAccount)[0],
+    ).toMatchObject({ kind: "stored", name: "GCP_SA" });
+  });
+
+  it("masks a stored value or a credential's shape in a finding's path", () => {
+    const [found] = scanAddedLines(
+      [{ commit: "c", path: `dir/${FAKE}/x.txt`, line: 1, text: FAKE }],
+      KNOWN,
+    );
+    expect(found?.path).toBe("dir/[secret]/x.txt");
+    const [shaped] = scanAddedLines(
+      [
+        {
+          commit: "c",
+          path: `${githubToken()}.txt`,
+          line: 1,
+          text: githubToken(),
+        },
+      ],
+      [],
+    );
+    expect(shaped?.path).toBe("[secret].txt");
+  });
 });
 
 describe("scanBranchForSecrets", () => {
@@ -178,6 +279,103 @@ describe("scanBranchForSecrets", () => {
     const root = repo({ "fixture.txt": `${FAKE}\n` });
     commit(root, { "b.txt": "unrelated\n" });
     expect(Option.isNone(await scan(root))).toBe(true);
+  });
+
+  /**
+   * Mutation: drop `--text` from the scan's log — the branch's own `* -diff` makes git print
+   * `Binary files … differ` with no hunk, and the stored value is pushed unscanned.
+   */
+  it("refuses a value in a file the branch's own .gitattributes marks -diff", async () => {
+    const root = repo();
+    commit(root, {
+      ".gitattributes": "* -diff\n",
+      "leaked.txt": `aws=${awsKey()}\nkey=${FAKE}\n`,
+    });
+    const found = Option.getOrUndefined(await scan(root));
+    expect(found?.findings.map((finding) => finding.name).sort()).toEqual([
+      "TEST_API_KEY",
+      "aws-access-key-id",
+    ]);
+  });
+
+  it("refuses a value in a file git would call binary (a NUL byte)", async () => {
+    const root = repo();
+    commit(root, { "blob.db": `\u0000\u0001header\n${FAKE}\u0000tail\n` });
+    const found = Option.getOrUndefined(await scan(root));
+    expect(found?.findings[0]).toMatchObject({
+      path: "blob.db",
+      kind: "stored",
+      name: "TEST_API_KEY",
+    });
+  });
+
+  /** Mutation: scan only the patches — a token quoted in a commit message is pushed. */
+  it("refuses a credential in a commit message, and in a path, never quoting it", async () => {
+    const root = repo();
+    const quoted = commit(
+      root,
+      { "a.txt": "hello\n" },
+      `fix: use ${githubToken()}`,
+    );
+    const found = Option.getOrUndefined(await scan(root));
+    expect(found?.findings).toEqual([
+      {
+        commit: quoted,
+        path: COMMIT_METADATA_PATH,
+        line: 5,
+        kind: "pattern",
+        name: "github-token",
+      },
+    ]);
+    const named = repo();
+    commit(named, { [`${FAKE}.txt`]: "" });
+    const byPath = Option.getOrUndefined(await scan(named));
+    expect(byPath?.findings).toMatchObject([
+      { path: COMMIT_METADATA_PATH, kind: "stored", name: "TEST_API_KEY" },
+    ]);
+    expect(JSON.stringify([found, byPath])).not.toContain(FAKE);
+    expect(JSON.stringify(found)).not.toContain(githubToken());
+  });
+
+  /**
+   * Mutation: diff a merge against its first parent — a pattern-shaped fixture the base gained is
+   * counted as the branch's when the branch merges the base, and the run's PR is refused for it.
+   */
+  it("does not count what a merge brings from the base, but does count what the merge adds", async () => {
+    const root = repo();
+    commit(root, { "a.txt": "work\n" });
+    git(root, "checkout", "-q", "main");
+    commit(root, {
+      "fixture.txt": `${githubToken()}\n`,
+    });
+    git(root, "checkout", "-q", "work");
+    git(root, "merge", "-q", "--no-edit", "main");
+    expect(Option.isNone(await scan(root))).toBe(true);
+    // A merge that adds a line of its own (an evil merge) is the branch's, and is scanned.
+    writeFileSync(join(root, "resolution.txt"), `${FAKE}\n`);
+    git(root, "add", "resolution.txt");
+    git(root, "commit", "-q", "--amend", "--no-edit");
+    const found = Option.getOrUndefined(await scan(root));
+    expect(found?.findings).toMatchObject([
+      { path: "resolution.txt", kind: "stored", name: "TEST_API_KEY" },
+    ]);
+  });
+
+  it("stops at every excluded commit as well as the base", async () => {
+    const root = repo();
+    const pushed = commit(root, { "old.txt": `key=${FAKE}\n` });
+    commit(root, { "new.txt": "fine\n" });
+    expect(Option.isSome(await scan(root))).toBe(true);
+    const bounded = await Effect.runPromise(
+      scanBranchForSecrets({
+        checkout: root,
+        base: "main",
+        head: "work",
+        exclude: [pushed],
+        known: KNOWN,
+      }),
+    );
+    expect(Option.isNone(bounded)).toBe(true);
   });
 
   it("fails closed when git cannot read the range", async () => {
