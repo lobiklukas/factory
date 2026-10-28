@@ -78,6 +78,9 @@ export const runCommand = Command.make(
             : ` base-ref ${opened.workspace.baseRef}`;
         yield* Console.log(`repo ${opened.workspace.repo}${ref}`);
       }
+      if (opened.workspace.warning !== undefined) {
+        yield* Console.log(`warning ${opened.workspace.warning}`);
+      }
 
       yield* client.sendMessage({ sessionId: session.id, content: task });
 

@@ -77,6 +77,15 @@ export type WorkspaceInput = {
   readonly cut?: boolean | undefined;
 };
 
+/**
+ * Why a repo-bound session or board that has no local checkout cannot produce a diff, and the
+ * command that fixes it (LOB-263). One text for every surface that names it — the session's
+ * workspace, a board's creation and read, the boot log of a trigger rule — so the operator reads the
+ * same sentence wherever they meet it. `factory repo add` is the CLI's own spelling of `registerRepo`.
+ */
+export const noCheckoutWarning = (repo: string): string =>
+  `repo ${repo} has no local checkout registered, so a run on it gets an empty directory instead of a worktree and can produce no diff: register one with \`factory repo add ${repo} --path <dir>\``;
+
 /** Read the declared commands from one directory, tolerating a missing or undecodable file. */
 const commandsIn = (
   directory: string,
@@ -145,10 +154,16 @@ export const resolveWorkspace = (
       });
       void isGit;
       const baseRef = input.baseRef ?? "main";
-      const exists = yield* deps.fs
-        .exists(directory)
-        .pipe(Effect.orElseSucceed(() => false));
-      if (!exists) {
+      // An empty directory is not a workspace yet (LOB-263): a session opened while its repo had no
+      // checkout holds one (the owner makes the directory), and the worktree is cut into it once a
+      // path is registered, so the fix the warning names reaches the sessions it was raised for.
+      // `git worktree add` takes an existing empty directory; one with anything in it is the
+      // agent's, and is left as it is.
+      const occupied = yield* deps.fs.readDirectory(directory).pipe(
+        Effect.map((entries) => entries.length > 0),
+        Effect.orElseSucceed(() => false),
+      );
+      if (!occupied) {
         yield* Effect.try({
           try: () => {
             const parent = deps.path.dirname(directory);
@@ -208,6 +223,9 @@ export const resolveWorkspace = (
       ...(input.repo === undefined ? {} : { branch }),
       commands: Option.getOrElse(found, () => NO_COMMANDS),
       commandsSource: Option.isSome(found) ? "repo" : "none",
+      ...(input.repo !== undefined && input.localPath === undefined
+        ? { warning: noCheckoutWarning(input.repo) }
+        : {}),
     };
   });
 

@@ -16,6 +16,7 @@ import {
 } from "@repo/domain/Task";
 import type {
   AttentionItem,
+  CreatedBoard,
   Task,
   TaskComment,
   TaskRun,
@@ -133,11 +134,9 @@ const createCommand = Command.make(
           ? { definitionVersion: definitionVersion.value }
           : {}),
       });
-      yield* Console.log(`board       ${board.id}`);
-      yield* Console.log(`repo        ${board.repo}`);
-      yield* Console.log(
-        `definition  ${board.definitionId} v${board.definitionVersion}`,
-      );
+      for (const line of createdLines(board)) {
+        yield* Console.log(line);
+      }
     });
 
     yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
@@ -156,6 +155,33 @@ const createCommand = Command.make(
     },
   ]),
 );
+
+/**
+ * The server's `warning` on a board or a run's workspace (LOB-263), printed under `label` — none
+ * when there is nothing to say, so a board over a checked-out repo prints what it always did.
+ */
+export const warningLines = (
+  warning: string | undefined,
+  label: string,
+): ReadonlyArray<string> =>
+  warning === undefined ? [] : [`${label}${warning}`];
+
+/**
+ * What `factory board create` prints: the board, its repo and pinned definition, then the server's
+ * warning when the repo has no local checkout (LOB-263) — with the `factory repo add … --path` that
+ * fixes it — so the operator learns it here and not when a card's diff check fails.
+ */
+export const createdLines = (
+  board: Pick<
+    CreatedBoard,
+    "id" | "repo" | "definitionId" | "definitionVersion" | "warning"
+  >,
+): ReadonlyArray<string> => [
+  `board       ${board.id}`,
+  `repo        ${board.repo}`,
+  `definition  ${board.definitionId} v${board.definitionVersion}`,
+  ...warningLines(board.warning, "warning     "),
+];
 
 /** A lane's cards, indented under the lane's own line so the lane stays readable at a glance. */
 const laneCard = (task: Task): string =>
@@ -195,6 +221,9 @@ const lsCommand = Command.make(
       yield* Console.log(
         `${view.definition.name}  ${view.instance.repo}  v${view.definition.version}`,
       );
+      for (const line of warningLines(view.warning, "warning  ")) {
+        yield* Console.log(line);
+      }
       for (const column of view.definition.columns) {
         const lane = cards.filter((card) => card.column === column.name);
         yield* Console.log(
@@ -477,6 +506,18 @@ const startCommand = Command.make(
       });
       yield* Console.log(`session ${session.id}`);
       yield* Console.log(`task    ${card.id} in ${taskColumn}`);
+      // The repo's checkout is the server's to read (LOB-263): the run's workspace says whether it
+      // got a worktree, so a card on a repo with none is told so now, not when `non_empty_diff` fails.
+      // Advisory: the run has started, so a failed read skips the warning and never fails the command.
+      const opened = yield* client
+        .getSession({ sessionId: session.id })
+        .pipe(Effect.option);
+      const advice = Option.isSome(opened)
+        ? opened.value.workspace.warning
+        : undefined;
+      for (const line of warningLines(advice, "warning ")) {
+        yield* Console.log(line);
+      }
       if (Option.isSome(prompt)) {
         // Sent, not followed: the run is headless (B7), so the command returns as soon as the turn
         // is accepted, and the card — not this terminal — is where the run's outcome is read.

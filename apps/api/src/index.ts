@@ -31,6 +31,7 @@ import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
 import { webhookLiveFor } from "./Api/Webhook";
 import { logTriggerBootFromProcess } from "./Api/WebhookBoot";
+import { TriggerCheckoutLog } from "./TriggerCheckouts";
 import { GitHubWebhookLive } from "./Api/GitHubWebhook";
 import {
   LinearIssueSyncLayer,
@@ -560,6 +561,7 @@ const HttpLive = Effect.gen(function* () {
     MigrationsDaemon,
     CredentialSelectionLog,
     LinearSyncLog,
+    TriggerCheckoutLog(triggerRules),
     PullRequestStepDeps,
   ).pipe(
     // The Linear sync sits beside Postgres so the session layer and the routes share one instance

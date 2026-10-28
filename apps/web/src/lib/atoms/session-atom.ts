@@ -31,6 +31,12 @@ export type SessionView = {
   readonly usage: SessionUsage;
   readonly queued: readonly QueuedMessage[];
   readonly tasks: readonly SessionTask[];
+  /**
+   * The server's warning that the session's repo has no local checkout (LOB-263): its runs get no
+   * worktree and can produce no diff. Set by a snapshot; absent for a scratch session and for a repo
+   * that is checked out.
+   */
+  readonly workspaceWarning?: string;
 };
 
 const emptyView = (summary: SessionSummary): SessionView => ({
@@ -63,6 +69,9 @@ export const foldSessionEvent = (
         usage: event.usage,
         queued: event.queued,
         tasks: event.tasks,
+        ...(event.workspace.warning === undefined
+          ? {}
+          : { workspaceWarning: event.workspace.warning }),
       };
     case "entry":
       return { ...state, entries: [...state.entries, event.entry] };

@@ -351,6 +351,12 @@ export type ReleaseWorkspaceResult = typeof ReleaseWorkspaceResult.Type;
  *
  * `released` is set once the worktree and branch were torn down (LOB-268): `path` is where they
  * were, not a directory that exists, and the session takes no new run.
+ *
+ * `warning` is set when the session is bound to a repo that has no local checkout (LOB-263): no
+ * worktree is cut, `path` is an empty directory, and nothing the run changes can be measured, so a
+ * `non_empty_diff` gate or a PR step would fail columns later. The session still opens — a repo is
+ * registered on first use, and a person can fix the registry while it runs — but the answer says so
+ * when it is created and names the command that fixes it. Never set for a scratch session.
  */
 export const SessionWorkspace = Schema.Struct({
   path: Schema.String,
@@ -360,6 +366,7 @@ export const SessionWorkspace = Schema.Struct({
   commands: RepoCommands,
   commandsSource: Schema.Literals(["repo", "none"]),
   released: Schema.optional(WorkspaceRelease),
+  warning: Schema.optional(Schema.String),
 });
 export type SessionWorkspace = typeof SessionWorkspace.Type;
 

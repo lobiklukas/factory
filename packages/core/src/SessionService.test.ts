@@ -129,6 +129,7 @@ import {
 import { mintSessionId } from "./ids";
 import { rebuildIndexes } from "./rebuild";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
+import { noCheckoutWarning } from "./workspace";
 import { DEFAULT_DIFF_CAP, PullRequest } from "./pr";
 import type { OpenedPullRequest, PullRequestStep } from "./pr";
 import { SkillService, SkillServiceLive } from "./SkillService";
@@ -1854,6 +1855,103 @@ describe("repo binding", () => {
     RepoSlugSchema.make(
       `factory-test/${name}-${randomBytes(4).toString("hex")}`,
     );
+
+  /**
+   * LOB-263, the rule pinned for sessions: a session bound to a repo with no `local_path` still opens
+   * (a repo is registered on first use), but its workspace carries a `warning` naming the repo and the
+   * command that fixes it, so the create says what `non_empty_diff` would say three columns later.
+   * Mutation: drop the warning — the first expectation fails.
+   * Mutation: warn for every repo-bound session — the checked-out and scratch expectations fail.
+   * Mutation: ignore the registry when answering — the session made after the path is registered
+   * still warns.
+   */
+  it("warns that a session bound to a repo with no local checkout can produce no diff, until one is registered (LOB-263)", async () => {
+    const unregistered = runSlug("no-checkout");
+    const checkedOut = runSlug("checked-out");
+    const result = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        // Named, never registered: auto-registered with no path.
+        // `trunk` is the fixture repo's only branch, named here because the session's own base ref
+        // (not the registry's default, which an auto-registered row lacks) is what the cut reads.
+        const bare = yield* sessions.create({
+          repo: unregistered,
+          baseRef: "trunk",
+        });
+        const bareBefore = yield* sessions.get(bare.id);
+        const registeredRow = yield* sessions.getRepo({ repo: unregistered });
+        yield* sessions.registerRepo({
+          repo: checkedOut,
+          defaultBaseRef: "trunk",
+          localPath: emptyRepoRoot,
+        });
+        const ready = yield* sessions.create({ repo: checkedOut });
+        const readyView = yield* sessions.get(ready.id);
+        const scratch = yield* sessions.create({});
+        const scratchView = yield* sessions.get(scratch.id);
+        // The operator's fix, applied after the first session was made: a session made after it is
+        // cut a worktree, so it carries no warning. The first, while its owner is live, keeps the
+        // answer it opened with; once released, the next acquisition cuts it a worktree.
+        yield* sessions.registerRepo({
+          repo: unregistered,
+          defaultBaseRef: "trunk",
+          localPath: emptyRepoRoot,
+        });
+        const fixed = yield* sessions.create({ repo: unregistered });
+        const fixedView = yield* sessions.get(fixed.id);
+        // The first session, after its owner is released (the idle sweep, an API restart) and the
+        // path is registered: it must not read as "no warning" while it still has an empty plain
+        // directory. The next acquisition cuts the worktree into that directory.
+        yield* sessions.close;
+        const bareReleased = yield* sessions.get(bare.id);
+        const bareHadWorktree = existsSync(
+          join(bareBefore.workspace.path, ".git"),
+        );
+        yield* sessions.send({
+          sessionId: bare.id,
+          content: "now with a checkout",
+        });
+        const bareReopened = yield* sessions.get(bare.id);
+        const bareHasWorktree = existsSync(
+          join(bareBefore.workspace.path, ".git"),
+        );
+        return {
+          bare,
+          bareReleased,
+          bareHadWorktree,
+          bareReopened,
+          bareHasWorktree,
+          bareBefore,
+          registeredRow,
+          readyView,
+          scratchView,
+          fixedView,
+        };
+      }),
+    );
+
+    // The session opened: the create is not refused.
+    expect(result.bare.repo).toBe(unregistered);
+    expect(result.registeredRow.localPath).toBeUndefined();
+    expect(result.bareBefore.workspace.warning).toBe(
+      noCheckoutWarning(unregistered),
+    );
+    expect(result.bareBefore.workspace.warning).toContain(
+      `factory repo add ${unregistered} --path <dir>`,
+    );
+    // A repo with a checkout and a scratch session say nothing: the key is absent, not empty.
+    expect("warning" in result.readyView.workspace).toBe(false);
+    expect("warning" in result.scratchView.workspace).toBe(false);
+    expect("warning" in result.fixedView.workspace).toBe(false);
+    expect(result.fixedView.workspace.branch).toBeDefined();
+    // The session made before the fix: released, it has no worktree yet and is not told it never
+    // will be; reopened, it is cut one into the directory it already held, so its run can diff.
+    // Mutation: keep `exists` as the cut's condition — `bareHasWorktree` stays false.
+    expect("warning" in result.bareReleased.workspace).toBe(false);
+    expect(result.bareHadWorktree).toBe(false);
+    expect(result.bareHasWorktree).toBe(true);
+    expect("warning" in result.bareReopened.workspace).toBe(false);
+  }, 120_000);
 
   it("answers a registered repo's checkout facts on register, list and get (LOB-253)", async () => {
     const configured = runSlug("registry-config");
