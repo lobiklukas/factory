@@ -18,4 +18,6 @@ export const FauxServerFacts = Layer.succeed(ServerFacts, {
   linearStates: undefined,
   reviewer: "none",
   sandbox: "in-process",
+  triggerRules: 0,
+  envFiles: [],
 });

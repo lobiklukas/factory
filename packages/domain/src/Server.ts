@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { RepoSlug } from "@repo/domain/Session";
 
 /**
  * What the control plane is running (LOB-269): the answer to `getServerInfo`.
@@ -125,3 +126,75 @@ export type ServerInfo = typeof ServerInfo.Type;
 /** `getServerInfo` takes nothing: there is one control plane per process. */
 export const GetServerInfoInput = Schema.Struct({});
 export type GetServerInfoInput = typeof GetServerInfoInput.Type;
+
+/**
+ * What `factory doctor` asks the server that `getServerInfo` does not answer (E8): the checks only
+ * the control plane can run, because the facts are on its disk and in its environment.
+ *
+ * Like `ServerInfo`, nothing here is a credential. The forge check says which mode resolved a token
+ * for a repo and whether one did, never the token; the env files are paths, the trigger rules a count.
+ */
+
+/** Whether the forge credential the PR step uses resolves a token for one repo. */
+export const ForgeCredentialCheck = Schema.Struct({
+  mode: Schema.Literals(["static-token", "github-app", "none"]),
+  /** `missing` is no credential configured for the repo, `failed` one that could not mint a token. */
+  status: Schema.Literals(["ok", "missing", "failed"]),
+  /** The provider's own sentence, which names the repo and the variable, never a token. */
+  message: Schema.String,
+});
+export type ForgeCredentialCheck = typeof ForgeCredentialCheck.Type;
+
+/** Whether a repo's base ref names a commit in the checkout or clone a session is cut from. */
+export const BaseRefCheck = Schema.Struct({
+  ref: Schema.String,
+  /** `no_checkout` is a repo with no work tree or clone to ask. */
+  status: Schema.Literals(["ok", "unresolved", "no_checkout"]),
+  message: Schema.String,
+});
+export type BaseRefCheck = typeof BaseRefCheck.Type;
+
+export const RepoCheck = Schema.Struct({
+  repo: Schema.String,
+  forge: ForgeCredentialCheck,
+  baseRef: BaseRefCheck,
+});
+export type RepoCheck = typeof RepoCheck.Type;
+
+export const CheckDeploymentInput = Schema.Struct({
+  /** Check only this repo; every registered repo when absent (`factory doctor owner/name`). */
+  repo: Schema.optional(RepoSlug),
+});
+export type CheckDeploymentInput = typeof CheckDeploymentInput.Type;
+
+export const DeploymentChecks = Schema.Struct({
+  /** How many rules `TRIGGER_RULES` mapped at boot (stored routes are read per delivery). */
+  triggerRules: Schema.Int,
+  /** The absolute paths of the env files the process loaded, never their contents. */
+  envFiles: Schema.Array(Schema.String),
+  /** One row per registered repo, by slug. Empty when the registry could not be read. */
+  repos: Schema.Array(RepoCheck),
+  /** Why the registry could not be read (Postgres down), when it could not. */
+  reposError: Schema.optional(Schema.String),
+});
+export type DeploymentChecks = typeof DeploymentChecks.Type;
+
+export const PingModelInput = Schema.Struct({});
+export type PingModelInput = typeof PingModelInput.Type;
+
+/**
+ * The answer to one minimal request to the default model, the only part of `factory doctor` that
+ * spends. A provider's refusal is `ok: false` with its message, not an RPC failure: the call was
+ * made, and the operator wants to read why it was refused.
+ */
+export const ModelPing = Schema.Struct({
+  model: Schema.String,
+  ok: Schema.Boolean,
+  message: Schema.String,
+  /** What the call cost, in US dollars. */
+  costUsd: Schema.Finite,
+  inputTokens: Schema.Int,
+  outputTokens: Schema.Int,
+  latencyMs: Schema.Int,
+});
+export type ModelPing = typeof ModelPing.Type;

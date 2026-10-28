@@ -72,7 +72,14 @@ import {
 } from "@repo/domain/Cost";
 import { StartMissionInput, StartMissionResult } from "@repo/domain/Mission";
 import { OutcomeReport, OutcomesInput } from "@repo/domain/Outcomes";
-import { GetServerInfoInput, ServerInfo } from "@repo/domain/Server";
+import {
+  CheckDeploymentInput,
+  DeploymentChecks,
+  GetServerInfoInput,
+  ModelPing,
+  PingModelInput,
+  ServerInfo,
+} from "@repo/domain/Server";
 import {
   GetSkillInput,
   ListSkillsInput,
@@ -569,6 +576,24 @@ export class ServerRpc extends RpcGroup.make(
 ).middleware(ControlPlaneAuth) {}
 
 /**
+ * What `factory doctor` asks beyond `getServerInfo` (E8): the checks only the control plane can run
+ * (each registered repo's forge credential and base ref, the trigger rules and env files the boot
+ * read), and, only when `--live` asks, one minimal request to the default model, which is the one
+ * thing here that spends. Neither carries a credential's value. `checkDeployment` answers while
+ * Postgres is down, with the registry's read failure as `reposError`.
+ */
+export class DoctorRpc extends RpcGroup.make(
+  Rpc.make("checkDeployment", {
+    payload: CheckDeploymentInput,
+    success: DeploymentChecks,
+  }),
+  Rpc.make("pingModel", {
+    payload: PingModelInput,
+    success: ModelPing,
+  }),
+).middleware(ControlPlaneAuth) {}
+
+/**
  * The factory's skills (D7): the prompt text a column binds (docs/board.md B6), read and edited
  * without a migration. A put is a new version, never an update, and a run keeps the version its log
  * pinned when it opened (B2), so an edit reaches the next run and no run in flight. Its own group:
@@ -604,4 +629,5 @@ export const RpcApi = SessionRpc.merge(ApprovalsRpc)
   .merge(TasksRpc)
   .merge(TriggerRoutesRpc)
   .merge(ServerRpc)
+  .merge(DoctorRpc)
   .merge(SkillsRpc);
