@@ -24,7 +24,11 @@ describe("planLists", () => {
   /** Mutation: list the risks first, or number the surfaces — the order the person reads changes. */
   it("lists steps, surfaces and risks, in that order, only the steps numbered", () => {
     expect(
-      planLists(plan).map((list) => [list.key, list.items.length, list.ordered]),
+      planLists(plan).map((list) => [
+        list.key,
+        list.items.length,
+        list.ordered,
+      ]),
     ).toEqual([
       ["steps", 2, true],
       ["surfaces", 1, false],

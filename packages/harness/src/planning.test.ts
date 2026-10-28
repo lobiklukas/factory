@@ -170,7 +170,11 @@ describe("the plan validator", () => {
 describe("the plan tool", () => {
   it("commits a planner's plan to its log and posts it on the card, keyed by the call", async () => {
     const { posts, options } = recorder();
-    const ran = await runOnce({ run: planner, plan: options, attempts: [COMPLETE] });
+    const ran = await runOnce({
+      run: planner,
+      plan: options,
+      attempts: [COMPLETE],
+    });
 
     expect(ran.offered).toContain(PLAN_TOOL);
     expect(ran.plan).toEqual(PLAN);

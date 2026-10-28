@@ -255,7 +255,11 @@ describe("exitLines (D9)", () => {
             status: "unmet",
             reason: "the latest run's branch changes no file",
           },
-          { key: "human_move", description: "a human move", status: "unchecked" },
+          {
+            key: "human_move",
+            description: "a human move",
+            status: "unchecked",
+          },
         ]),
       ),
     ).toEqual([

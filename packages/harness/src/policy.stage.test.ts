@@ -91,7 +91,9 @@ describe("which runs are a read-only stage", () => {
     expect(
       readOnlyStageOf({ column: "audit", role: "auditor" }, extended),
     ).toEqual({ stage: "audit", column: "audit", role: "auditor" });
-    expect(readOnlyStageOf({ column: "audit", role: "auditor" })).toBeUndefined();
+    expect(
+      readOnlyStageOf({ column: "audit", role: "auditor" }),
+    ).toBeUndefined();
   });
 
   it.each([

@@ -44,12 +44,10 @@ export type RolePolicies = ReadonlyMap<string, RolePolicy>;
  * reads and declares the plan. The builder and the reviewer have no row: a builder writes, and a
  * review run is read-only because it is a review (`RunProfile.reviewing`), whatever its role.
  */
-export const DEFAULT_ROLE_POLICIES: RolePolicies = new Map<string, RolePolicy>(
-  [
-    ["specifier", { readOnly: true, stage: "specifying", writesSpec: true }],
-    ["planner", { readOnly: true, stage: "planning", writesPlan: true }],
-  ],
-);
+export const DEFAULT_ROLE_POLICIES: RolePolicies = new Map<string, RolePolicy>([
+  ["specifier", { readOnly: true, stage: "specifying", writesSpec: true }],
+  ["planner", { readOnly: true, stage: "planning", writesPlan: true }],
+]);
 
 /** The policy `role` has under `policies`, or `undefined` when it has no row (or there is no role). */
 export const rolePolicyOf = (
@@ -143,7 +141,4 @@ export const extendRolePolicies = (
 ): RolePolicies =>
   extra.size === 0
     ? base
-    : new Map([
-        ...base,
-        ...[...extra].filter(([role]) => !base.has(role)),
-      ]);
+    : new Map([...base, ...[...extra].filter(([role]) => !base.has(role))]);

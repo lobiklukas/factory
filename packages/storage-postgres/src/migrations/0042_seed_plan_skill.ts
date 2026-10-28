@@ -1,10 +1,6 @@
 import { Effect, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
-import {
-  BoardCaps,
-  BoardColumn,
-  definitionProblems,
-} from "@repo/domain/Task";
+import { BoardCaps, BoardColumn, definitionProblems } from "@repo/domain/Task";
 
 /**
  * The planning stage gets its rules (docs/board.md B4, B6; D10): a seeded `plan` skill, and the

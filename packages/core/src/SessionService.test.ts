@@ -12891,7 +12891,10 @@ describe("the planning run's plan", () => {
             fauxModelScripts: Effect.runSync(
               parseFauxModelScripts(
                 JSON.stringify({
-                  [FAUX_MODEL_ID]: { command: "ls", plan: [WITHOUT_RISKS, PLAN] },
+                  [FAUX_MODEL_ID]: {
+                    command: "ls",
+                    plan: [WITHOUT_RISKS, PLAN],
+                  },
                 }),
                 [FAUX_MODEL_ID],
               ),
@@ -12913,7 +12916,11 @@ describe("the planning run's plan", () => {
         INSERT INTO board_instances (id, repo, definition_id, definition_version)
         VALUES (${boardId}, ${`factory-test/${randomBytes(6).toString("hex")}`}, 'default', 1)
       `;
-      let card = yield* tasks.create({ boardId, title: "a card", actor: PERSON });
+      let card = yield* tasks.create({
+        boardId,
+        title: "a card",
+        actor: PERSON,
+      });
       for (const to of ["specifying", "planning"]) {
         if (to === "planning") {
           if (column === "specifying") break;
@@ -12937,7 +12944,11 @@ describe("the planning run's plan", () => {
     });
 
   /** Start a run on `card` and wait for its turn to settle. */
-  const runOn = (card: { readonly id: string; readonly title: string; readonly column: string }) =>
+  const runOn = (card: {
+    readonly id: string;
+    readonly title: string;
+    readonly column: string;
+  }) =>
     Effect.gen(function* () {
       const sessions = yield* SessionService;
       const run = yield* sessions.create({

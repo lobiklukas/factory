@@ -2911,7 +2911,7 @@ describe("TaskService — exit requirements", () => {
             });
             for (const to of ["specifying", "planning", "building"]) {
               if (to === "planning") task = yield* specified(s, task);
-            if (to === "building") task = yield* planned(s, task);
+              if (to === "building") task = yield* planned(s, task);
               if (to === "building") task = yield* planned(s, task);
               task = yield* s.move({
                 taskId: task.id,

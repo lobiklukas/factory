@@ -45,14 +45,12 @@ describe("the factory's role policy table", () => {
 
 describe("a deployment's ROLE_POLICIES", () => {
   it("reads role=flag+flag rows, skipping blanks", () => {
-    expect(parsed(" auditor = read-only ,, architect=read-only+plan")).toEqual(
-      {
-        ok: [
-          ["auditor", { readOnly: true }],
-          ["architect", { readOnly: true, writesPlan: true }],
-        ],
-      },
-    );
+    expect(parsed(" auditor = read-only ,, architect=read-only+plan")).toEqual({
+      ok: [
+        ["auditor", { readOnly: true }],
+        ["architect", { readOnly: true, writesPlan: true }],
+      ],
+    });
     expect(parsed("")).toEqual({ ok: [] });
   });
 
