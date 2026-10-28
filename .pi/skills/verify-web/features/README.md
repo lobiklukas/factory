@@ -90,6 +90,7 @@ re-passed there beside it, as the strip and the form sit on their pages.
 | Open pull request            | passing | [pr-open.md](pr-open.md) (`pr.sh`)                                            |
 | Spend by repo and actor      | passing | [spend.md](spend.md) (`spend.sh`)                                             |
 | Repositories                 | passing | [repos.md](repos.md) (`repos.sh`)                                             |
+| Triggers                     | passing | [triggers.md](triggers.md) (`triggers.sh`)                                    |
 | New board (boards page)      | passing | [board-create.md](board-create.md) (`board-create.sh`)                        |
 | First run (checklist, `/`)   | passing | [first-run.md](first-run.md) (`first-run.sh`)                                 |
 | New card (board page)        | passing | [card-create.md](card-create.md) (verify-board's `card-create.sh`)            |

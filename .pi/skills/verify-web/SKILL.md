@@ -152,6 +152,19 @@ the flagged repo turned runnable in place, a session on the registered repo cut 
 behind the registry's back flipping its row on the poll (`features/repos.md`). Evidence goes to
 `.verify/evidence/latest/repos/`.
 
+### The triggers page
+
+```sh
+TRIGGERS_API_PORT=9475 TRIGGERS_WEB_PORT=3475 ./triggers.sh   # its own instance, secret and rules; leaves nothing running
+```
+
+`/triggers` lists what the trigger seam recorded for each delivery, so `triggers.sh` boots its own API
+with `TRIGGER_SECRET` and two rules and `triggers.mjs` posts signed webhooks at it. It requires the rail
+entry, the first page equal to `listTriggerDeliveries`, the seam's reasons shown verbatim, the processed
+delivery's session link, the outcome and source filters (and the empty message), "Show older" paging by
+the server's cursor with no repeats, and a delivery arriving with the page open showing up on the poll
+(`features/triggers.md`). Evidence goes to `.verify/evidence/latest/triggers/`.
+
 ### Creating a board
 
 ```sh
@@ -410,6 +423,7 @@ touch `.verify/evidence/`; after cleanup, confirm the evidence is still there.
 | `first-run.sh`       | The first run's own instance, empty database and drive (`first-run.mjs`)         |
 | `board-settings.sh`  | The settings page's own instance (a role model) and drive (`board-settings.mjs`) |
 | `skills.sh`          | The skill pages' own instance, throwaway database and drive (`skills.mjs`)       |
+| `triggers.sh`        | The triggers page's own instance (secret, rules) and drive (`triggers.mjs`)      |
 | `definition-edit.sh` | The definition editor's own instance and drive (`definition-edit.mjs`)           |
 | `backend.sh`         | The anthropic-inferred instance, no banner, and the model (`backend.mjs`)        |
 | `history.sh`         | A long history's own short-idle instance and its drive (`history.mjs`)           |

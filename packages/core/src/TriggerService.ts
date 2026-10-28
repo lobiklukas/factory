@@ -68,6 +68,7 @@ import {
 } from "@repo/domain/Session";
 import { isWebLink, MAX_TASK_BODY_CHARS, type TaskId } from "@repo/domain/Task";
 import {
+  type DeliverySource,
   externalRefOf,
   fingerprintOf,
   resolveMapping,
@@ -454,18 +455,20 @@ type ClaimRow = {
  * between its claim and its outcome). Answers the won claim's `claimed_at`, as Postgres text, or
  * `undefined` when another delivery holds the key or recorded its outcome: the caller's replay.
  * The seam's claim for a delivery not keyed by its work, and the plan-freshness cadence's (LOB-45).
+ * `source` is who sent it, recorded with the claim so `listTriggerDeliveries` can say (T4).
  */
 export const claimDeliveryRow = (
   sql: SqlClient,
   requestId: string,
   reclaimSeconds: number,
+  source: DeliverySource,
 ): Effect.Effect<string | undefined, SqlError> =>
   Effect.map(
     sql<ClaimRow>`
-      INSERT INTO webhook_deliveries (request_id, status)
-      VALUES (${requestId}, 'received')
+      INSERT INTO webhook_deliveries (request_id, status, source)
+      VALUES (${requestId}, 'received', ${source})
       ON CONFLICT (request_id) DO UPDATE
-        SET claimed_at = now()
+        SET claimed_at = now(), source = EXCLUDED.source
         WHERE webhook_deliveries.status = 'received'
           AND webhook_deliveries.claimed_at < now() - make_interval(secs => ${reclaimSeconds})
       RETURNING request_id, claimed_at::text AS claim
@@ -488,16 +491,21 @@ export const releaseDeliveryClaim = (
           AND claimed_at = ${claim}::timestamptz`,
   );
 
-/** Record the outcome of the claim `claim` on `requestId`, scoped to that claim as the release is. */
+/**
+ * Record the outcome of the claim `claim` on `requestId`, scoped to that claim as the release is.
+ * `sessionId` is the session the outcome concerns, when it has one (T4).
+ */
 export const settleDeliveryClaim = (
   sql: SqlClient,
   requestId: string,
   claim: string,
   status: "processed" | "skipped",
   reason: string,
+  sessionId?: SessionId,
 ): Effect.Effect<void, SqlError> =>
   Effect.asVoid(
-    sql`UPDATE webhook_deliveries SET status = ${status}, skip_reason = ${reason}
+    sql`UPDATE webhook_deliveries
+        SET status = ${status}, skip_reason = ${reason}, session_id = ${sessionId ?? null}
         WHERE request_id = ${requestId} AND claimed_at = ${claim}::timestamptz`,
   );
 
@@ -704,12 +712,20 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
           };
         });
 
-      /** Record a processed delivery's outcome reason, in the column a skip's reason goes in. */
-      const processed = (requestId: string, reason: string) =>
+      /**
+       * Record a processed delivery's outcome reason, in the column a skip's reason goes in, and the
+       * session or card it started or found (T4), so the delivery can be followed to its work.
+       */
+      const processed = (
+        requestId: string,
+        reason: string,
+        started: { readonly sessionId?: SessionId; readonly taskId?: TaskId },
+      ) =>
         storage(
           "record processed delivery",
           sql`UPDATE webhook_deliveries
-            SET status = 'processed', skip_reason = ${reason}
+            SET status = 'processed', skip_reason = ${reason},
+              session_id = ${started.sessionId ?? null}, task_id = ${started.taskId ?? null}
             WHERE request_id = ${requestId}`,
         );
 
@@ -779,7 +795,7 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
               ? ""
               : `; its body was cut to ${MAX_TASK_BODY_CHARS} of ${body.cut} characters`
           }`;
-          yield* processed(requestId, reason);
+          yield* processed(requestId, reason, { taskId: card.id });
           return {
             status: "processed",
             replayed: false,
@@ -887,10 +903,11 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
             delivery.keyedByWork === true
               ? Effect.map(
                   sql<ClaimRow>`
-                    INSERT INTO webhook_deliveries (request_id, status)
-                    VALUES (${requestId}, 'received')
+                    INSERT INTO webhook_deliveries (request_id, status, source)
+                    VALUES (${requestId}, 'received', ${event.source})
                     ON CONFLICT (request_id) DO UPDATE
-                      SET status = 'received', skip_reason = NULL, claimed_at = now()
+                      SET status = 'received', skip_reason = NULL, claimed_at = now(),
+                        source = EXCLUDED.source
                       WHERE (webhook_deliveries.status = 'skipped'
                           AND (webhook_deliveries.skip_reason LIKE ${UNREGISTERED_REPO_PATTERN}
                             OR webhook_deliveries.skip_reason LIKE ${NO_BOARD_PATTERN}
@@ -901,7 +918,7 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                   `,
                   (rows) => rows[0]?.claim,
                 )
-              : claimDeliveryRow(sql, requestId, reclaimSeconds),
+              : claimDeliveryRow(sql, requestId, reclaimSeconds, event.source),
           );
           if (claim === undefined) {
             return yield* replay(requestId);
@@ -1055,7 +1072,7 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                 setupFailure === undefined
                   ? routedBy
                   : `${routedBy}, but the session's worktree setup failed, so its prompt was not sent: ${setupFailure.split("\n")[0]}`;
-              yield* processed(requestId, reason);
+              yield* processed(requestId, reason, { sessionId: session.id });
 
               return {
                 status: "processed",

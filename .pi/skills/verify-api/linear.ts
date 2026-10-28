@@ -41,6 +41,11 @@
 //  19. once the board exists, the issue's next delivery files exactly one card in intake — external
 //      ref `linear:<id>`, the description as its body, the issue's link — and opens no session
 //  20. Linear's retry of that delivery is a replay, and the repo's board still holds one card
+//  21. `listTriggerDeliveries` (T4) holds the drive's own deliveries with their exact reasons: the
+//      unmapped issue's skip ("no rule matches labels [Bug, Frontend]"), the unregistered repo's
+//      skip (read before the repo is registered), the processed delivery naming its session and
+//      source, and the filed card's delivery naming its card; `status` and `source` filter it; and
+//      the forged delivery of check 13 left no row
 //
 // `linear.sh` also reads the API's boot log after the drive: the rules line and one armed/unarmed
 // line per webhook route (LOB-266).
@@ -190,6 +195,11 @@ const program = Effect.gen(function* () {
       return listed.sessions.filter((entry) => entry.repo === repo);
     });
   const forRepo = sessionsOn(REPO);
+  /** Every delivery the seam recorded, newest first (T4): what an operator reads to see why. */
+  const recorded = Effect.map(
+    routes.listTriggerDeliveries({ limit: 200 }),
+    (page) => page.deliveries,
+  );
 
   // 1–3: a labeled issue opens one session on the rule's repo, with the issue as its prompt.
   const created = issueBody({
@@ -425,6 +435,19 @@ const program = Effect.gen(function* () {
   const refused = yield* Effect.promise(() =>
     deliver("unregistered", issueBody({ ...laterIssue, labels: [LATER] })),
   );
+  // 21 (part): the skip is a recorded row, with the seam's words, until the repo is registered.
+  const unregisteredReason = `repo ${LATER_REPO} is not registered`;
+  const unregisteredRow = (yield* recorded).find(
+    (row) => row.reason === unregisteredReason,
+  );
+  assert(
+    "listTriggerDeliveries holds the unregistered-repo skip with its exact reason, and no session",
+    unregisteredRow?.status === "skipped" &&
+      unregisteredRow.source === "linear" &&
+      unregisteredRow.sessionId === undefined &&
+      unregisteredRow.taskId === undefined,
+    `row=${JSON.stringify(unregisteredRow ?? null)}`,
+  );
   yield* client.registerRepo({ repo: LATER_REPO, defaultBaseRef: "main" });
   const relabelled = yield* Effect.promise(() =>
     deliver(
@@ -459,6 +482,12 @@ const program = Effect.gen(function* () {
     "a wrong Linear-Signature is 401",
     forged.status === 401,
     `status=${forged.status} body=${JSON.stringify(forged.body)}`,
+  );
+  const afterForged = yield* recorded;
+  assert(
+    "the refused delivery is not recorded: listTriggerDeliveries holds no row for it",
+    afterForged.every((row) => !row.deliveryId.includes(`lin-${STAMP}-forged`)),
+    `rows=${afterForged.length}`,
   );
 
   // 14: the count.
@@ -631,6 +660,64 @@ const program = Effect.gen(function* () {
       (yield* boards.listTasks({ boardId: board.id })).length === 1 &&
       (yield* sessionsOn(CARD_REPO)).length === 0,
     `retry=${JSON.stringify(retriedCard.body)}`,
+  );
+
+  // 21: what an operator reads when a labelled issue started nothing.
+  const deliveries = yield* recorded;
+  // Found by this run's delivery id, not by the reason: the reason is the same on every run and the
+  // database is reused, so a row an earlier run left would satisfy a search by reason alone.
+  const skippedLabel = deliveries.find((row) =>
+    row.deliveryId.includes(`lin-${STAMP}-unmapped`),
+  );
+  assert(
+    "listTriggerDeliveries holds the unmapped issue's skip with the exact reason, its source, and no session",
+    skippedLabel?.status === "skipped" &&
+      skippedLabel.reason === "no rule matches labels [Bug, Frontend]" &&
+      skippedLabel.source === "linear" &&
+      skippedLabel.sessionId === undefined &&
+      skippedLabel.taskId === undefined &&
+      skippedLabel.receivedAt.length > 0,
+    `row=${JSON.stringify(skippedLabel ?? null)}`,
+  );
+  const startedRow = deliveries.find((row) => row.sessionId === sessionId);
+  assert(
+    "a processed delivery names its session, its source and the rule that routed it",
+    sessionId !== undefined &&
+      startedRow?.status === "processed" &&
+      startedRow.source === "linear" &&
+      startedRow.reason ===
+        `rule "factory" (env:TRIGGER_RULES[0]) mapped it to ${REPO}`,
+    `row=${JSON.stringify(startedRow ?? null)}`,
+  );
+  const cardRow = deliveries.find((row) => row.taskId === card?.id);
+  assert(
+    "a card rule's delivery names its card and no session",
+    card !== undefined &&
+      cardRow?.status === "processed" &&
+      cardRow.sessionId === undefined &&
+      cardRow.reason === filedCard.body?.["reason"],
+    `row=${JSON.stringify(cardRow ?? null)}`,
+  );
+  const skippedOnly = yield* routes.listTriggerDeliveries({
+    status: "skipped",
+    limit: 200,
+  });
+  const genericOnly = yield* routes.listTriggerDeliveries({
+    source: "generic",
+    limit: 200,
+  });
+  assert(
+    "the status filter returns only skips (the unmapped one among them) and a source filter drops this run's Linear rows",
+    skippedOnly.deliveries.length > 0 &&
+      skippedOnly.deliveries.every((row) => row.status === "skipped") &&
+      skippedOnly.deliveries.some(
+        (row) => row.deliveryId === skippedLabel?.deliveryId,
+      ) &&
+      genericOnly.deliveries.every((row) => row.source === "generic") &&
+      !genericOnly.deliveries.some(
+        (row) => row.deliveryId === startedRow?.deliveryId,
+      ),
+    `skipped=${skippedOnly.deliveries.length} generic=${genericOnly.deliveries.length}`,
   );
   yield* routes.removeTriggerRoute({ id: cardRoute.id });
 });

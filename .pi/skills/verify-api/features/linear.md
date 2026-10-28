@@ -66,7 +66,7 @@ acknowledges nothing on the issue, nor on any other source.
 
 **How the skill drives it.** `./linear.sh` boots the skill's API instance (`API_PORT`, default
 `9415`) with two per-run rules (`factory`, and `factory-later` on a repo registered mid-drive) and
-`LINEAR_WEBHOOK_SECRET`, then runs `bun linear.ts`: fourteen checks
+`LINEAR_WEBHOOK_SECRET`, then runs `bun linear.ts`: the checks below
 over real HTTP with Linear-shaped bodies, a fresh `Linear-Delivery` on every post, signed the way
 Linear signs one. Every check is required.
 
@@ -92,6 +92,14 @@ Linear signs one. Every check is required.
     in `intake` with `linear:<id>`, the description as its body and the issue's link, and the repo has
     no session.
 17. Linear's retry of that delivery is a replay, and the board still holds one card.
+18. (T4) `listTriggerDeliveries` — what an operator reads when a labelled issue started nothing —
+    holds this run's own deliveries with the seam's exact words: the unregistered repo's skip
+    (`repo <later repo> is not registered`, read before the repo is registered), the unmapped
+    issue's skip (`no rule matches labels [Bug, Frontend]`), the processed delivery naming its
+    session, source (`linear`) and routing reason, and the filed card's delivery naming its card
+    and no session. `status: "skipped"` returns only skips and `source: "generic"` none of this
+    run's Linear rows. The forged delivery of check 13 left no row: the list's length is the same
+    before and after it.
 
 **What proves it works.** LOB-254: 22/22 (the card checks among them) from the `agent/LOB-254`
 worktree on 2026-10-28 (API on `:9612`, the worktree's own database), evidence in
