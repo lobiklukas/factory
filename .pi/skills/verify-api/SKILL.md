@@ -29,6 +29,7 @@ The driver is a client, not a browser. The browser path is `.pi/skills/verify-we
 | Replay a session (LOB-215)              | `replaySession` onto `faux/faux-2` → the source's first prompt, each usage keyed by its own model, the source unchanged, the link in the replay's log, the comparison on both (LOB-199); refusals typed                                                                                                                     | a replay is the same task on another model                                         |
 | A fold's stream ends                    | exactly one `snapshot` event                                                                                                                                                                                                                                                                                                | complete is distinguishable from dropped                                           |
 | Request limits (LOB-21)                 | an oversized message → `invalid_input`                                                                                                                                                                                                                                                                                      | a refusal is typed, not a truncation or a crash                                    |
+| Admission control (LOB-70)              | `admission.sh`: `SESSION_MAX_CONCURRENT=2` — two concurrent creates admitted, the third `at_capacity` naming the cap, a signed delivery `503 at-capacity` with `Retry-After`; after the idle sweep the same create and the same delivery succeed                                                                            | the process runs no more sessions than its budget, and says so typed               |
 | Transport cap (LOB-21)                  | a 2 MiB body → 413, and `/livez` still answers                                                                                                                                                                                                                                                                              | the configured cap, not Bun's 128 MiB default                                      |
 | Probes (LOB-21)                         | `/livez` 200; `/readyz` 200 naming every check                                                                                                                                                                                                                                                                              | liveness is cheap; readiness is a live answer                                      |
 | Degraded readiness (LOB-21)             | Postgres down → `/livez` 200, `/readyz` 503, typed `storage` error; back → 200, same pid                                                                                                                                                                                                                                    | an outage is not a crash loop                                                      |
@@ -141,6 +142,7 @@ DATABASE_URL=… ./backend-boot.sh  # api on :9426 (BACKEND_BOOT_PORT), booted f
 ./pr-evidence.sh # fake GitHub on :9411 — the PR body's evidence block from the run's record (features/pr-evidence.md)
 ./spec.sh        # no port — the spec document: refused without gaps, committed with [], read by a second process
 ./budget.sh      # api on :9419 — a priced faux: a capped run stops at its limit and says so (features/budget.md)
+./admission.sh   # api on :9432 (ADMISSION_PORT), SESSION_MAX_CONCURRENT=2 — the N+1th create and a trigger delivery refused typed, both served after the idle sweep (features/limits.md)
 ./pr-rpc.sh      # api on :9420, fake GitHub on :9421 — openPullRequest over RPC: opened, then already-open, one request (features/pr-rpc.md)
 ./pages.sh       # api on :9422, a priced faux — curate, list, repeat for one call, delete the rows and rebuild them (features/pages.md)
 ./review.sh      # api on :9200, fake GitHub on :9201 — a pull_request starts the reviewer; one comment as its own identity (features/review.md)
@@ -244,6 +246,9 @@ order you want the evidence to end in.
 - `budget.json`, `budget-transcript.txt`, `budget-cli.txt`, `budget-process.json`, `budget-api.log`
   — from `./budget.sh`: the driver's checks with the stream's event log and each session's budget,
   the transcripts, what `factory run --budget` printed, the script's own checks, and the API log
+- `admission.json`, `admission-process.json`, `admission-api.log` — from `./admission.sh`: the
+  admitted sessions, the refusal as the RPC client decoded it, every webhook answer, the retries
+  before the sweep freed a slot, the script's own checks, and the API log
 - `pr-rpc.json`, `pr-rpc-ledger.json`, `pr-rpc-process.json`, `pr-rpc-api.log` — from `./pr-rpc.sh`:
   both answers and the refusals as the RPC client decoded them, the fake's ledger, the script's own
   checks, and the API log

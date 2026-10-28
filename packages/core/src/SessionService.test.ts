@@ -8622,6 +8622,401 @@ describe("request limits", () => {
 });
 
 /**
+ * Admission control (LOB-70): a process with `maxConcurrentSessions: N` owns at most N sessions at
+ * once, and the request that would open the N+1th is refused `at_capacity` — naming the cap and its
+ * key — before it writes anything.
+ *
+ * Each case runs its own runtime over this file's database and a session root of its own, so the
+ * owners it counts are only its own: the shared runtime above keeps its owners open for the whole
+ * file, and a cap on it would refuse every other case.
+ *
+ * The concurrent cases are the ones a check-then-insert would fail: four creates fired at once on an
+ * empty process all pass a check that is not made under the owners' gate with a reservation, and
+ * three sends to dormant sessions all pass a check made only before the gate. Each asserts exactly N
+ * succeeded.
+ */
+describe("admission control", () => {
+  const admissionRoot = mkdtempSync(join(tmpdir(), "factory-core-admission-"));
+  const cappedRuntime = (
+    limit: number,
+    extra: {
+      readonly idleTimeoutMs?: number;
+      readonly sweepIntervalMs?: number;
+      readonly sessionRoot?: string;
+    } = {},
+  ) =>
+    ManagedRuntime.make(
+      SessionServiceLive({
+        model: createFauxModelAccess().access,
+        sessionRoot: admissionRoot,
+        maxConcurrentSessions: limit,
+        ...extra,
+      }).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+
+  /** The `SessionError` a refused call failed with, or `undefined` when it succeeded. */
+  const refusalOf = (
+    exit: Exit.Exit<unknown, SessionError>,
+  ): SessionError | undefined => {
+    if (Exit.isSuccess(exit)) return undefined;
+    const failure = Exit.findErrorOption(exit);
+    if (failure._tag !== "Some") throw new Error("a defect, not a refusal");
+    return failure.value;
+  };
+
+  /** How many index rows exist, in total and for one request id: what a refusal must not add to. */
+  const rowCounts = (requestId: string) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const rows = yield* sql<{ total: number; requested: number }>`
+        SELECT count(*)::int AS total,
+          (count(*) FILTER (WHERE request_id = ${requestId}))::int AS requested
+        FROM sessions
+      `;
+      return rows[0] ?? { total: 0, requested: 0 };
+    });
+
+  const settled = (sessionId: SessionId, label: string) =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      yield* waitUntil(
+        sessions.get(sessionId).pipe(Effect.map((s) => !s.live.busy)),
+        label,
+      );
+    });
+
+  it("opens N sessions and refuses the N+1th create at_capacity, naming the cap, with no row written", async () => {
+    const runtime = cappedRuntime(2);
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const first = yield* sessions.create({ title: "slot one" });
+          const second = yield* sessions.create({ title: "slot two" });
+          const before = yield* rowCounts("lob-70-third");
+          const third = yield* Effect.exit(
+            sessions.create({
+              title: "one too many",
+              requestId: "lob-70-third",
+            }),
+          );
+          const after = yield* rowCounts("lob-70-third");
+          yield* sessions.close;
+          return { first, second, third, before, after };
+        }),
+      );
+      expect(outcome.first.mode).toBe("live");
+      expect(outcome.second.mode).toBe("live");
+      const refused = refusalOf(outcome.third);
+      expect(refused?.code).toBe("at_capacity");
+      expect(refused?.message).toContain("SESSION_MAX_CONCURRENT=2");
+      expect(refused?.message).toContain("at most 2 sessions");
+      // Nothing was written for the refused request: no row, so no request id a retry would dedupe on.
+      expect(outcome.after).toEqual(outcome.before);
+      expect(outcome.after.requested).toBe(0);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 60_000);
+
+  it("admits exactly N of a burst of concurrent creates, and the rest leave no row", async () => {
+    const runtime = cappedRuntime(2);
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const ids = ["a", "b", "c", "d"].map((tag) => `lob-70-burst-${tag}`);
+          const exits = yield* Effect.all(
+            ids.map((requestId) =>
+              Effect.exit(sessions.create({ title: requestId, requestId })),
+            ),
+            { concurrency: "unbounded" },
+          );
+          const rows = yield* Effect.forEach(ids, (id) =>
+            Effect.map(rowCounts(id), (counts) => counts.requested),
+          );
+          yield* sessions.close;
+          return { exits, rows };
+        }),
+      );
+      const codes = outcome.exits.map((exit) => refusalOf(exit)?.code ?? "ok");
+      expect(codes.filter((code) => code === "ok")).toHaveLength(2);
+      expect(codes.filter((code) => code === "at_capacity")).toHaveLength(2);
+      // Each admitted create wrote its row; each refused one wrote none.
+      expect(outcome.rows).toEqual(
+        codes.map((code) => (code === "ok" ? 1 : 0)),
+      );
+    } finally {
+      await runtime.dispose();
+    }
+  }, 60_000);
+
+  it("refuses a fork, a replay and a send to a dormant session at capacity, and serves the sessions already open", async () => {
+    const runtime = cappedRuntime(2);
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          // A replayable source (a prompt and a repo), and a session left dormant.
+          const source = yield* sessions.create({
+            title: "admission source",
+            repo: factoryRepo,
+          });
+          yield* sessions.send({
+            sessionId: source.id,
+            content: "do the thing",
+          });
+          yield* settled(source.id, "the source's run to settle");
+          const dormant = yield* sessions.create({
+            title: "admission dormant",
+          });
+          // Every owner released: both are dormant now, and every slot is free.
+          yield* sessions.close;
+          // Fill the cap: the source's owner reopened by a send, and one more session.
+          yield* sessions.send({ sessionId: source.id, content: "again" });
+          yield* settled(source.id, "the source's second run to settle");
+          const filler = yield* sessions.create({ title: "admission filler" });
+          const before = yield* rowCounts("");
+
+          const fork = yield* Effect.exit(
+            sessions.fork({ sessionId: source.id }),
+          );
+          const replay = yield* Effect.exit(
+            sessions.replay({ sessionId: source.id }),
+          );
+          const wake = yield* Effect.exit(
+            sessions.send({ sessionId: dormant.id, content: "wake up" }),
+          );
+          const afterRefusals = yield* rowCounts("");
+          const dormantAfter = yield* sessions.get(dormant.id);
+
+          // Open owners need no new slot: a send and a mission are served at capacity.
+          const sent = yield* Effect.exit(
+            sessions.send({ sessionId: source.id, content: "still here" }),
+          );
+          yield* settled(source.id, "the source's third run to settle");
+          const mission = yield* Effect.exit(
+            sessions.startMission({
+              sessionId: filler.id,
+              feature: "a mission at capacity",
+              workers: [{ id: "a", prompt: "do part a", check: "true" }],
+            }),
+          );
+          yield* waitUntil(
+            sessions
+              .get(filler.id)
+              .pipe(
+                Effect.map(
+                  (snapshot) =>
+                    snapshot.mission?.phase === "verify" &&
+                    snapshot.tasks.length === 0,
+                ),
+              ),
+            "the mission to settle",
+          );
+          yield* sessions.close;
+          return {
+            fork,
+            replay,
+            wake,
+            sent,
+            mission,
+            before,
+            afterRefusals,
+            dormantAfter,
+          };
+        }),
+      );
+      for (const refused of [outcome.fork, outcome.replay, outcome.wake]) {
+        const error = refusalOf(refused);
+        expect(error?.code).toBe("at_capacity");
+        expect(error?.message).toContain("SESSION_MAX_CONCURRENT=2");
+      }
+      // The refused fork and replay wrote no row, and the refused send opened nothing.
+      expect(outcome.afterRefusals.total).toBe(outcome.before.total);
+      expect(outcome.dormantAfter.session.mode).toBe("historical");
+      expect(
+        outcome.dormantAfter.entries.some((entry) => entry.text === "wake up"),
+      ).toBe(false);
+      expect(refusalOf(outcome.sent)).toBeUndefined();
+      expect(refusalOf(outcome.mission)).toBeUndefined();
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  it("admits exactly N of concurrent sends to dormant sessions", async () => {
+    const runtime = cappedRuntime(2);
+    try {
+      const exits = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          // Three dormant sessions, made two at a time under the cap.
+          const a = yield* sessions.create({ title: "dormant a" });
+          const b = yield* sessions.create({ title: "dormant b" });
+          yield* sessions.close;
+          const c = yield* sessions.create({ title: "dormant c" });
+          yield* sessions.close;
+          const exits = yield* Effect.all(
+            [a, b, c].map((session) =>
+              Effect.exit(
+                sessions.send({ sessionId: session.id, content: "wake" }),
+              ),
+            ),
+            { concurrency: "unbounded" },
+          );
+          yield* Effect.forEach(
+            [a, b, c].filter((_, index) => Exit.isSuccess(exits[index]!)),
+            (session) => settled(session.id, "a woken session's run"),
+          );
+          yield* sessions.close;
+          return exits;
+        }),
+      );
+      const codes = exits.map((exit) => refusalOf(exit)?.code ?? "ok");
+      expect(codes.filter((code) => code === "ok")).toHaveLength(2);
+      expect(codes.filter((code) => code === "at_capacity")).toHaveLength(1);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 60_000);
+
+  it("hands the slot back when a fork fails after it was admitted", async () => {
+    const runtime = cappedRuntime(1);
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const parent = yield* sessions.create({ title: "fork parent" });
+          // Every owner released, so the one slot is free for the fork to reserve.
+          yield* sessions.close;
+          // Admitted, then refused inside its owner's open: `at` names no entry of the parent.
+          const fork = yield* Effect.exit(
+            sessions.fork({ sessionId: parent.id, at: "999999" }),
+          );
+          // The reservation went back with the failure, so the one slot takes a plain create.
+          const after = yield* Effect.exit(
+            sessions.create({ title: "after the failed fork" }),
+          );
+          yield* sessions.close;
+          return { fork, after };
+        }),
+      );
+      expect(refusalOf(outcome.fork)?.code).toBe("invalid_input");
+      expect(refusalOf(outcome.after)).toBeUndefined();
+    } finally {
+      await runtime.dispose();
+    }
+  }, 60_000);
+
+  it("resumes a boot's marked run and mission at capacity, and counts their owners", async () => {
+    // A root of its own: the boot resumes read every row marked under the process's root.
+    const root = mkdtempSync(join(tmpdir(), "factory-core-admission-boot-"));
+    const runtime = cappedRuntime(1, { sessionRoot: root });
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient;
+          const sessions = yield* SessionService;
+          const run = yield* sessions.create({ title: "marked run" });
+          yield* sessions.close;
+          const mission = yield* sessions.create({ title: "marked mission" });
+          yield* sessions.close;
+          // The one slot taken by a client, then the marks a dead process would have left.
+          yield* sessions.create({ title: "the one slot" });
+          yield* sql`
+            UPDATE sessions SET run_session_root = ${root} WHERE id = ${run.id}
+          `;
+          yield* sql`
+            UPDATE sessions SET mission_in_flight = true, mission_session_root = ${root}
+            WHERE id = ${mission.id}
+          `;
+          yield* sessions.resumeRuns;
+          yield* sessions.resumeMissions;
+          // Neither had anything left to continue, so each mark went: the boot reopened both rather
+          // than being refused at capacity and leaving them for the next boot.
+          const marks = yield* sql<{
+            id: string;
+            runSessionRoot: string | null;
+            missionInFlight: boolean;
+          }>`
+            SELECT id, run_session_root AS "runSessionRoot", mission_in_flight AS "missionInFlight"
+            FROM sessions WHERE id IN (${run.id}, ${mission.id})
+          `;
+          const runMode = (yield* sessions.get(run.id)).session.mode;
+          const missionMode = (yield* sessions.get(mission.id)).session.mode;
+          // The owners the boot opened count: the server is over its cap, so a create is refused.
+          const create = yield* Effect.exit(
+            sessions.create({ title: "past the resumed" }),
+          );
+          yield* sessions.close;
+          return { marks, runMode, missionMode, create };
+        }),
+      );
+      expect(outcome.marks).toHaveLength(2);
+      for (const mark of outcome.marks) {
+        expect(mark.runSessionRoot).toBeNull();
+        expect(mark.missionInFlight).toBe(false);
+      }
+      expect(outcome.runMode).toBe("live");
+      expect(outcome.missionMode).toBe("live");
+      expect(refusalOf(outcome.create)?.code).toBe("at_capacity");
+    } finally {
+      await runtime.dispose();
+    }
+  }, 60_000);
+
+  it("frees the slot when the idle sweep releases an owner: the refused create then succeeds", async () => {
+    const runtime = cappedRuntime(1, {
+      idleTimeoutMs: 1_500,
+      sweepIntervalMs: 100,
+    });
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const held = yield* sessions.create({ title: "the one slot" });
+          const input = {
+            title: "waits for the slot",
+            requestId: "lob-70-retry",
+          };
+          const first = yield* Effect.exit(sessions.create(input));
+          // Retried as a sender would, without touching the held session (a read is use, and would
+          // keep its owner open): only the sweep can free the slot.
+          const refusals: Array<string> = [];
+          let created: SessionSummary | undefined;
+          for (
+            let attempt = 0;
+            attempt < 100 && created === undefined;
+            attempt += 1
+          ) {
+            yield* Effect.sleep(100);
+            const exit = yield* Effect.exit(sessions.create(input));
+            if (Exit.isSuccess(exit)) created = exit.value;
+            else refusals.push(refusalOf(exit)?.code ?? "defect");
+          }
+          const heldAfter = yield* sessions.get(held.id);
+          const rows = yield* rowCounts(input.requestId);
+          yield* sessions.close;
+          return { first, refusals, created, heldAfter, rows };
+        }),
+      );
+      expect(refusalOf(outcome.first)?.code).toBe("at_capacity");
+      // Every attempt before the sweep was the same typed refusal, never another failure.
+      expect(new Set(outcome.refusals)).toEqual(
+        outcome.refusals.length === 0 ? new Set() : new Set(["at_capacity"]),
+      );
+      expect(outcome.created?.mode).toBe("live");
+      // The slot came from the sweep: the held session's owner is gone.
+      expect(outcome.heldAfter.session.mode).toBe("historical");
+      expect(outcome.rows.requested).toBe(1);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 60_000);
+});
+
+/**
  * The pagination case's budget, guarded so it cannot silently go back to vitest's default (LOB-117).
  *
  * The case above reads `SELECT count(*) FROM session_activity` and issues one list statement per
