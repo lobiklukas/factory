@@ -235,7 +235,7 @@ describe("editing columns", () => {
     ]);
   });
 
-  /** Mutation: as above, for the initial column and a move a column makes back to itself's twin. */
+  /** Mutation: as above — the initial column and planning's move back would land on the real planning. */
   it("keeps moves and the initial column on a column renamed through a later column's name", () => {
     const pinned: BoardDefinition = {
       ...PINNED,
@@ -251,7 +251,9 @@ describe("editing columns", () => {
     const draft = typeName(
       start,
       keyOf(start, "specifying"),
-      [..."planning_s"].map((_letter, at) => "planning_s".slice(0, at + 1)),
+      Array.from({ length: "planning_s".length }, (_letter, at) =>
+        "planning_s".slice(0, at + 1),
+      ),
     );
     const sent = defineInputOf(pinned, draft);
     expect(sent.initialColumn).toBe("planning_s");
