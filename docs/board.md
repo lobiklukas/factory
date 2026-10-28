@@ -256,8 +256,9 @@ the call was recorded, so a resumed older run's later call counts; a newest call
 on every version (all of them declare both): the card's latest run's branch must change at least one
 file against its base, measured as the PR step measures it (`git diff --numstat base...head`, LOB-196),
 and the card must have a PR from that branch (`factory.pr`, LOB-177: the latest run's, or since C19 an
-earlier run's whose head is the branch the latest run continues) — so a card cannot leave `building`
-with no change or no PR. Only keys with a recorded artifact are checked (`packages/core/src/requirements.ts`
+earlier run's whose head is the branch the latest run continues, while that branch is still at the
+commit the PR was published at) — so a card cannot leave `building` with no change, no PR, or commits
+its PR lacks. Only keys with a recorded artifact are checked (`packages/core/src/requirements.ts`
 lists why the others are not yet); the logs are read, and the branch measured, before the card is
 locked, at the revision the move expected.
 
@@ -287,9 +288,12 @@ card's branch by name (LOB-197), on the base it was cut from, so a second buildi
 `review` start from the change the first building run made; a run that names its own branch, or a
 base other than that one, starts afresh as before. Git checks a branch out in one worktree
 at a time, so the newest run's worktree takes it over and the earlier run's is left on a detached
-HEAD at the commit it was on, its files and uncommitted edits untouched; an earlier run still going
-when a later one starts commits off the branch from then on (a board that must never run two at once
-caps `task` at 1). A later run's PR step, finding no PR in its own log, adopts the PR an earlier run of
+HEAD at the commit it was on, its files and uncommitted edits untouched. So that nothing commits on
+that detached HEAD, a start is refused (`busy`, naming the run) while a run on the card's branch is
+still busy in this process, and a message to a run whose worktree was handed over is refused, naming
+the later run that took the branch. A run of any column that continues the branch while the card has
+an unmerged PR from it takes the PR step on settle (a fix run in `review` included), so its commits
+reach the PR. A later run's PR step, finding no PR in its own log, adopts the PR an earlier run of
 the card recorded on the same head and base (unmerged): it is measured, capped and pushed as an open
 is — so its commits reach the PR — but GitHub is asked for nothing, the card's PR is recorded in its
 log, and the answer is `already-open`. A workspace release keeps a branch another unreleased session

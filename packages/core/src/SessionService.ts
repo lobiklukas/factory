@@ -3464,7 +3464,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               Effect.map((pointer) => /^gitdir: (.+)$/m.exec(pointer)?.[1]),
               Effect.flatMap((gitdir) =>
                 gitdir === undefined
-                  ? Effect.succeed(undefined)
+                  ? Effect.undefined
                   : fs.readFileString(
                       path.resolve(owner.workspace.path, gitdir.trim(), "HEAD"),
                     ),
