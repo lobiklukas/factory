@@ -88,6 +88,23 @@ describe("attentionGroups", () => {
     expect(groups.every((group) => group.title.length > 0)).toBe(true);
   });
 
+  it("groups a review between the questions and the gates (C21)", () => {
+    const groups = attentionGroups([
+      item("gate", gate),
+      item("reviewed", {
+        _tag: "review",
+        review: "@alice requested changes",
+        since: AT,
+      }),
+      item("asked", { _tag: "question", question: "Which repo?", since: AT }),
+    ]);
+    expect(groups.map((group) => [group.kind, group.title])).toEqual([
+      ["question", "Answer a run's question"],
+      ["review", "Address a review"],
+      ["gate", "Make a person's move"],
+    ]);
+  });
+
   it("is empty for an empty answer, so the route can say so once", () => {
     expect(attentionGroups([])).toEqual([]);
   });
@@ -125,6 +142,23 @@ describe("attentionReasonText", () => {
         ),
       ),
     ).toBe("Blocked: needs input from specifying, with no question recorded");
+  });
+
+  it("says who requested changes on the PR, and what to do when the note is gone (C21)", () => {
+    expect(
+      attentionReasonText(
+        item("r", {
+          _tag: "review",
+          review: "@alice requested changes on pull request #7: split it",
+          since: AT,
+        }),
+      ),
+    ).toBe(
+      "Changes requested: @alice requested changes on pull request #7: split it",
+    );
+    expect(attentionReasonText(item("r", { _tag: "review", since: AT }))).toBe(
+      "Changes requested on the card's PR; start the next run to address them",
+    );
   });
 
   it("names the gate and the move only a person can make", () => {
@@ -169,6 +203,16 @@ describe("attentionLink", () => {
       kind: "card",
       boardId: BOARD,
       search: { card: question.task?.id },
+      hash: "thread",
+    });
+  });
+
+  it("opens a review at the card's thread, where the review is (C21)", () => {
+    const reviewed = item("r", { _tag: "review", since: AT });
+    expect(attentionLink(reviewed)).toEqual({
+      kind: "card",
+      boardId: BOARD,
+      search: { card: reviewed.task?.id },
       hash: "thread",
     });
   });

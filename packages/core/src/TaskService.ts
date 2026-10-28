@@ -688,7 +688,10 @@ export type TaskServiceShape = {
   readonly resumeAfterReview: (input: {
     readonly taskId: string;
     readonly actor: Actor;
-  }) => Effect.Effect<{ readonly task: Task; readonly changed: boolean }, TaskError>;
+  }) => Effect.Effect<
+    { readonly task: Task; readonly changed: boolean },
+    TaskError
+  >;
   /** A comment; from a person on a card blocked `needs_input`, the answer that lifts the block. */
   readonly comment: (input: CommentTaskInput) => Effect.Effect<Task, TaskError>;
   /** The card's thread, oldest first: every `commented` event, verbatim. */
@@ -3587,9 +3590,7 @@ export const TaskServiceLive = Layer.effect(
 
           // A review that requested changes on the card's PR (C21): the review is on the thread, and
           // the block's note names the reviewer and the PR, so the row says it without a thread read.
-          const reviews = yield* sql<
-            TaskRow & { readonly boardRepo: string }
-          >`
+          const reviews = yield* sql<TaskRow & { readonly boardRepo: string }>`
             SELECT ${sql.literal(TASK_COLUMNS_T)}, bi.repo AS board_repo
             FROM tasks t
             JOIN board_instances bi ON bi.id = t.board_id

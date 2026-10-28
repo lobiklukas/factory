@@ -3839,7 +3839,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // it settles would hold the very push that answers the review (C18). A reviewer run is
             // not that run. Best effort: the run is already the card's.
             yield* tasks
-              .resumeAfterReview({ taskId: input.taskId, actor: input.actor ?? id })
+              .resumeAfterReview({
+                taskId: input.taskId,
+                actor: input.actor ?? id,
+              })
               .pipe(
                 Effect.catch((error) =>
                   Effect.logWarning(
