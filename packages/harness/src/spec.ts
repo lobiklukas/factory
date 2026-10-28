@@ -61,39 +61,45 @@ export class SpecRefused extends Schema.TaggedError<SpecRefused>()(
   },
 ) {}
 
-interface Fault {
+/** One field a decode refused: its dotted path, and whether the key was absent altogether. */
+export interface DecodeFault {
   readonly field: string;
   readonly missing: boolean;
 }
 
-/** Every fault an issue tree names, in field order: the dotted path, and whether the key was absent. */
-const faults = (
+/**
+ * Every fault an issue tree names, in field order: the dotted path, and whether the key was absent.
+ * `root` names the value itself, for a fault with no path. Shared with the plan's validator
+ * (`./plan`), so the two stage documents name a refused field the same way.
+ */
+export const decodeFaults = (
   issue: SchemaIssue.Issue,
   path: ReadonlyArray<PropertyKey> = [],
-): ReadonlyArray<Fault> => {
+  root = "spec",
+): ReadonlyArray<DecodeFault> => {
   switch (issue._tag) {
     case "Pointer":
-      return faults(issue.issue, [...path, ...issue.path]);
+      return decodeFaults(issue.issue, [...path, ...issue.path], root);
     case "Composite":
-      return issue.issues.flatMap((inner) => faults(inner, path));
+      return issue.issues.flatMap((inner) => decodeFaults(inner, path, root));
     case "Filter":
     case "Encoding":
-      return faults(issue.issue, path);
+      return decodeFaults(issue.issue, path, root);
     default:
       return [
         {
-          field: path.length === 0 ? "spec" : path.map(String).join("."),
+          field: path.length === 0 ? root : path.map(String).join("."),
           missing: issue._tag === "MissingKey",
         },
       ];
   }
 };
 
-const isGapsMissing = (fault: Fault): boolean =>
+const isGapsMissing = (fault: DecodeFault): boolean =>
   fault.missing && fault.field === "gaps";
 
 const refusal = (error: Schema.SchemaError): SpecRefused => {
-  const all = faults(error.issue);
+  const all = decodeFaults(error.issue);
   const fields = [...new Set(all.map((fault) => fault.field))];
   const headline = all.find(isGapsMissing) ??
     all[0] ?? { field: "spec", missing: false };

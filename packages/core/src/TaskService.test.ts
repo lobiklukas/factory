@@ -149,6 +149,20 @@ const specified = (s: TaskServiceShape, task: { readonly id: string }) =>
     openQuestions: [],
   });
 
+/**
+ * The card's plan as a planning run's `plan` tool posts it (D10): what `planning`'s exit needs.
+ * Returns the card a revision on, so a walk goes on with its revision.
+ */
+const planned = (s: TaskServiceShape, task: { readonly id: string }) =>
+  s.declarePlan({
+    taskId: task.id,
+    actor: RUN,
+    summary: "walk the card on",
+    steps: ["reach building"],
+    surfaces: ["core"],
+    risks: [],
+  });
+
 describe("TaskService", () => {
   it("creates a card in intake at revision 1 with one created event", async () => {
     const boardId = await newBoard();
@@ -285,10 +299,33 @@ describe("TaskService", () => {
     expect(stillPlanning.revision).toBe(planning.revision);
     expect(await eventCount(task.id)).toBe(4);
 
-    const building = await withService((s) =>
+    // A person's approval of no plan is refused naming `plan_doc` (D10), and writes nothing: the
+    // gate is the person's, and what they approve is the plan a planning run declared.
+    const unplanned = await refusal((s) =>
       s.move({
         taskId: task.id,
         expectedRevision: planning.revision,
+        to: "building",
+        actor: LUKAS,
+      }),
+    );
+    expect(unplanned).toMatchObject({
+      _tag: "RequirementUnmet",
+      column: "planning",
+      to: "building",
+      requirement: "plan_doc",
+    });
+    expect(unplanned.message).toContain(
+      'the move planning → building needs "plan_doc" (a plan doc), which is not met: the card has no plan',
+    );
+    expect(await eventCount(task.id)).toBe(4);
+    const withPlan = await withService((s) => planned(s, task));
+    expect(withPlan.revision).toBe(planning.revision + 1);
+
+    const building = await withService((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: withPlan.revision,
         to: "building",
         actor: LUKAS,
       }),
@@ -333,9 +370,9 @@ describe("TaskService", () => {
       _tag: "RequirementUnmet",
       requirement: REVIEW_VERDICT_REQUIREMENT,
     });
-    // created + 3 accepted moves + the spec (the seat into review writes none); every refusal added
-    // nothing.
-    expect(await eventCount(task.id)).toBe(5);
+    // created + 3 accepted moves + the spec + the plan (the seat into review writes none); every
+    // refusal added nothing.
+    expect(await eventCount(task.id)).toBe(6);
   });
 
   it("accepts every move the shared table declares out of a column, and refuses every other", async () => {
@@ -1818,6 +1855,125 @@ describe("TaskService — the card's spec (LOB-238)", () => {
   });
 });
 
+describe("TaskService — the card's plan (D10)", () => {
+  const PLAN = {
+    summary: "Export the card count",
+    steps: ["add apps/web/src/card.ts", "verify web"],
+    surfaces: ["web"],
+    risks: ["the count is read before the board loads"],
+  } as const;
+
+  /** A card walked by a person into `planning`, its spec declared on the way. */
+  const inPlanning = async () => {
+    const boardId = await newBoard();
+    return withService((s) =>
+      Effect.gen(function* () {
+        const task = yield* s.create({ boardId, title: "plan", actor: LUKAS });
+        const specifying = yield* s.move({
+          taskId: task.id,
+          expectedRevision: 1,
+          to: "specifying",
+          actor: LUKAS,
+        });
+        const spec = yield* specified(s, specifying);
+        return yield* s.move({
+          taskId: task.id,
+          expectedRevision: spec.revision,
+          to: "planning",
+          actor: LUKAS,
+        });
+      }),
+    );
+  };
+
+  /** Mutation: read `specified` events as plans — the first read answers the spec. */
+  it("reads no plan for a card no run has planned, and refuses a card that does not exist", async () => {
+    const task = await inPlanning();
+    expect(await withService((s) => s.plan(task.id))).toBeUndefined();
+    const missing = await refusal((s) => s.plan(`tsk_${hex(13)}`));
+    expect(missing._tag).toBe("TaskNotFound");
+    const posted = await refusal((s) =>
+      s.declarePlan({ taskId: `tsk_${hex(13)}`, actor: RUN, ...PLAN }),
+    );
+    expect(posted._tag).toBe("TaskNotFound");
+  });
+
+  it("records a run's plan as one planned event, a revision on, and reads it back", async () => {
+    const task = await inPlanning();
+    const before = await eventCount(task.id);
+    const card = await withService((s) =>
+      s.declarePlan({ taskId: task.id, actor: RUN, ...PLAN }),
+    );
+    expect(card.revision).toBe(task.revision + 1);
+    expect(card.column).toBe("planning");
+    expect(await eventCount(task.id)).toBe(before + 1);
+    const plan = await withService((s) => s.plan(task.id));
+    expect(plan).toEqual({
+      taskId: task.id,
+      sessionId: RUN,
+      column: "planning",
+      ...PLAN,
+      revision: task.revision,
+      createdAt: plan?.createdAt,
+    });
+    // The card's history folds the event like any other: the replayed card is the stored one.
+    const replayed = await withService((s) => s.replay(task.id));
+    expect(replayed.revision).toBe(card.revision);
+  });
+
+  /** Mutation: answer the oldest plan — the replacement would never reach the pane. */
+  it("answers the newest plan, and records a plan once per plan id", async () => {
+    const task = await inPlanning();
+    const post = { taskId: task.id, actor: RUN, ...PLAN };
+    const first = await withService((s) =>
+      s.declarePlan({ ...post, planId: `${RUN}:call-1` }),
+    );
+    const replayed = await withService((s) =>
+      s.declarePlan({ ...post, planId: `${RUN}:call-1` }),
+    );
+    expect(replayed.revision).toBe(first.revision);
+    const second = await withService((s) =>
+      s.declarePlan({ ...post, risks: [], planId: `${RUN}:call-2` }),
+    );
+    expect(second.revision).toBe(first.revision + 1);
+    const plan = await withService((s) => s.plan(task.id));
+    expect(plan?.risks).toEqual([]);
+    expect(plan?.revision).toBe(first.revision);
+  });
+
+  /** Mutation: check `plan_doc` against the spec — the card with only a spec would pass. */
+  it("refuses planning → building with no plan, naming plan_doc, and lets it through once one is posted", async () => {
+    const task = await inPlanning();
+    const refused = await refusal((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: task.revision,
+        to: "building",
+        actor: LUKAS,
+      }),
+    );
+    expect(refused).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: "plan_doc",
+    });
+    expect((await withService((s) => s.get(task.id))).revision).toBe(
+      task.revision,
+    );
+    const card = await withService((s) =>
+      s.declarePlan({ taskId: task.id, actor: RUN, ...PLAN }),
+    );
+    const moved = await withService((s) =>
+      s.move({
+        taskId: task.id,
+        expectedRevision: card.revision,
+        to: "building",
+        actor: LUKAS,
+      }),
+    );
+    expect(moved.column).toBe("building");
+  });
+});
+
 describe("TaskService — what needs a person (LOB-77)", () => {
   /** A card walked by a person from `intake` along `path`, one declared move at a time. */
   const cardIn = async (
@@ -1833,6 +1989,11 @@ describe("TaskService — what needs a person (LOB-77)", () => {
       if (to === "planning") {
         const specifying = task;
         task = await withService((s) => specified(s, specifying));
+      }
+      // `planning`'s exit needs a plan (D10), which these cases are not about either.
+      if (to === "building") {
+        const planning = task;
+        task = await withService((s) => planned(s, planning));
       }
       const at = task;
       // `building`'s exit needs a branch and a PR (LOB-240), which these cases are not about.
@@ -1967,6 +2128,8 @@ describe("TaskService — what needs a person (LOB-77)", () => {
       "specifying",
       "planning",
     ]);
+    // The plan is posted, so the gate is the approval itself (D10); `planless` below has none.
+    await withService((s) => planned(s, gated));
     const merge = await cardIn(boardId, "merge waits", [
       "specifying",
       "planning",
@@ -2003,6 +2166,10 @@ describe("TaskService — what needs a person (LOB-77)", () => {
       "specifying",
     ]);
     const planAsks = await cardIn(boardId, "plan run waits on an approval", [
+      "specifying",
+      "planning",
+    ]);
+    const planless = await cardIn(boardId, "no plan yet", [
       "specifying",
       "planning",
     ]);
@@ -2045,6 +2212,7 @@ describe("TaskService — what needs a person (LOB-77)", () => {
     const approvalRun = newSession();
     const capabilityRun = newSession();
     const planAskRun = newSession();
+    const planlessRun = newSession();
     const [onBoard, everywhere, clean] = await attentionWith(
       {
         runs: [
@@ -2087,6 +2255,14 @@ describe("TaskService — what needs a person (LOB-77)", () => {
             ago: 15,
             sessionId: planAskRun,
           },
+          // Settled without a plan (D10): still a gate row, naming what the approval needs first.
+          {
+            taskId: planless.id,
+            column: "planning",
+            status: "idle",
+            ago: 3,
+            sessionId: planlessRun,
+          },
         ],
         approvals: [
           {
@@ -2127,6 +2303,7 @@ describe("TaskService — what needs a person (LOB-77)", () => {
       ["question", "blocked needs_input by hand"],
       ["gate", "plan waits"],
       ["gate", "merge waits"],
+      ["gate", "no plan yet"],
     ]);
     const listed = new Set((onBoard ?? []).map((item) => item.task?.id));
     for (const absent of [resting, busy, noRun, waiting, building]) {
@@ -2168,6 +2345,15 @@ describe("TaskService — what needs a person (LOB-77)", () => {
       _tag: "gate",
       gate: "merge",
       to: "done",
+    });
+    // Mutation: build gate rows without judging the exit — this row invites an approval `move`
+    // refuses naming `plan_doc`.
+    expect(reasons[7]).toEqual({
+      _tag: "gate",
+      gate: "plan approval",
+      to: "building",
+      sessionId: planlessRun,
+      unmet: ["plan_doc"],
     });
     expect(
       (onBoard ?? []).every(
@@ -2750,6 +2936,7 @@ describe("TaskService — exit requirements", () => {
             });
             for (const to of ["specifying", "planning", "building"]) {
               if (to === "planning") task = yield* specified(s, task);
+              if (to === "building") task = yield* planned(s, task);
               task = yield* s.move({
                 taskId: task.id,
                 expectedRevision: task.revision,
@@ -3207,6 +3394,7 @@ describe("TaskService — exit requirements", () => {
           });
           for (const to of ["specifying", "planning", "building"]) {
             if (to === "planning") task = yield* specified(s, task);
+            if (to === "building") task = yield* planned(s, task);
             task = yield* s.move({
               taskId: task.id,
               expectedRevision: task.revision,
@@ -3465,18 +3653,27 @@ describe("TaskService — exit requirements", () => {
         actor: LUKAS,
       }),
     );
-    // `plan_doc` and the human-gate label have no checker, so they are listed, not judged.
-    const unchecked = await withService((s) => s.exit(created.id));
-    expect(unchecked.revision).toBe(planning.revision);
+    // `plan_doc` is judged (D10): unmet with the move's own reason until a plan is posted, then met.
+    // The human-gate label has no checker, so it is listed, not judged.
+    const unplanned = await withService((s) => s.exit(created.id));
+    expect(unplanned.revision).toBe(planning.revision);
     expect(
-      unchecked.requirements.map(({ key, status }) => [key, status]),
+      unplanned.requirements.map(({ key, status }) => [key, status]),
     ).toEqual([
-      ["plan_doc", "unchecked"],
+      ["plan_doc", "unmet"],
       ["human_move", "unchecked"],
     ]);
-    expect(unchecked.requirements.every((r) => r.reason === undefined)).toBe(
-      true,
-    );
+    expect(unplanned.requirements[0]?.reason).toContain("the card has no plan");
+    expect(unplanned.requirements[1]?.reason).toBeUndefined();
+    const withPlan = await withService((s) => planned(s, created));
+    const planDone = await withService((s) => s.exit(created.id));
+    expect(planDone.revision).toBe(withPlan.revision);
+    expect(
+      planDone.requirements.map(({ key, status }) => [key, status]),
+    ).toEqual([
+      ["plan_doc", "met"],
+      ["human_move", "unchecked"],
+    ]);
     const missing = await refusal((s) => s.exit(`tsk_${hex(13)}`));
     expect(missing._tag).toBe("TaskNotFound");
   }, 60_000);

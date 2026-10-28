@@ -6,19 +6,28 @@ intake  resting
   skills    —
   requires  —
   exits     specifying, canceled
+  asks      —
+  writes    its worktree
+  pushes    its own branch
 specifying  working
   role      specifier
   model     faux/faux-1 (deployment)
   skills    specify
   requires  spec_doc (checked): a spec doc, gaps declared (explicitly [] when there are none)
   exits     planning, canceled
+  asks      —
+  writes    nothing (read-only)
+  pushes    its own branch
 planning  working
   role      planner
-  model     faux/faux-1 (deployment)
+  model     faux/planner (role)
   skills    —
-  requires  plan_doc (unchecked): a plan doc
+  requires  plan_doc (checked): a plan doc
             human_move (unchecked): a human move (B5's plan approval gate)
   exits     building [human gate: plan approval], canceled
+  asks      —
+  writes    nothing (read-only)
+  pushes    its own branch
 building  working
   role      builder
   model     faux/builder (role)
@@ -27,6 +36,9 @@ building  working
             non_empty_diff (checked): a non-empty diff
             pr_link (checked): a PR link
   exits     review, canceled
+  asks      —
+  writes    its worktree
+  pushes    its own branch
 review  working
   role      reviewer
   model     faux/reviewer (role)
@@ -35,15 +47,24 @@ review  working
             review_verdict (checked): a review verdict
             human_merge (unchecked): a human merge (B5's merge gate)
   exits     done [human gate: merge], canceled
+  asks      —
+  writes    its worktree
+  pushes    its own branch
 done  terminal
   role      —
   model     faux/faux-1 (deployment)
   skills    —
   requires  —
   exits     —
+  asks      —
+  writes    its worktree
+  pushes    its own branch
 canceled  terminal
   role      —
   model     faux/faux-1 (deployment)
   skills    —
   requires  —
   exits     —
+  asks      —
+  writes    its worktree
+  pushes    its own branch

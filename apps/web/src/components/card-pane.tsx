@@ -33,6 +33,7 @@ import {
   taskExitAtom,
   taskRunsAtom,
   taskSpecAtom,
+  taskPlanAtom,
 } from "@/lib/atoms/board-atom";
 import {
   awaitingMove,
@@ -63,6 +64,7 @@ import {
 import { DASHBOARD_ACTOR } from "@/lib/approvals-view";
 import { currentExit, exitStatusLabel, moveWarning } from "@/lib/exit-view";
 import { specLists } from "@/lib/spec-view";
+import { planLists } from "@/lib/plan-view";
 import { startBudget, startPrompt, startSendable } from "@/lib/run-start-view";
 import { RunApprovals } from "@/components/approvals";
 import { BlockControl, CardHeading } from "@/components/card-state";
@@ -1122,6 +1124,86 @@ const Spec = ({ task }: { readonly task: Task }) => {
 };
 
 /**
+ * The card's plan (D10): what its newest planning run declared with the `plan` tool — the summary,
+ * the steps in order, the surfaces and the risks — and which run declared it. This is what a person
+ * approves when they move the card past the plan approval gate, so it sits beside the spec.
+ *
+ * A card no run has planned says so, as the spec does. The last answer stays on screen through a
+ * failed poll.
+ */
+const Plan = ({ task }: { readonly task: Task }) => {
+  const result = useAtomValue(taskPlanAtom(task.id));
+  const loaded = AsyncResult.value(result);
+  return (
+    <section aria-label="Plan" className="flex flex-col gap-2">
+      <h2 className="text-[11px] font-medium text-muted-foreground uppercase">
+        Plan
+      </h2>
+      {Option.isNone(loaded) ? (
+        AsyncResult.isFailure(result) ? (
+          <p className="text-xs text-destructive">
+            The plan did not load: {Cause.pretty(result.cause)}
+          </p>
+        ) : (
+          <Spinner className="size-3.5 text-muted-foreground" />
+        )
+      ) : loaded.value === null ? (
+        <p className="text-xs text-muted-foreground" data-no-plan>
+          No run has declared a plan for this card.
+        </p>
+      ) : (
+        <div
+          className="flex flex-col gap-2"
+          data-plan={loaded.value.sessionId}
+          data-plan-revision={loaded.value.revision}
+        >
+          <p className="text-xs break-words" data-plan-summary>
+            {loaded.value.summary}
+          </p>
+          {planLists(loaded.value).map((list) => (
+            <div
+              key={list.key}
+              className="flex flex-col gap-1"
+              data-plan-list={list.key}
+              data-plan-count={list.items.length}
+            >
+              <h3 className="text-[10px] font-medium text-muted-foreground uppercase">
+                {list.title}
+              </h3>
+              {list.items.length === 0 ? (
+                <p className="text-[11px] text-muted-foreground">
+                  {list.empty}
+                </p>
+              ) : list.ordered ? (
+                <ol className="flex list-decimal flex-col gap-0.5 pl-4 text-[11px]">
+                  {list.items.map((item, index) => (
+                    <li key={index} data-plan-item className="break-words">
+                      {item}
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <ul className="flex list-disc flex-col gap-0.5 pl-4 text-[11px]">
+                  {list.items.map((item, index) => (
+                    <li key={index} data-plan-item className="break-words">
+                      {item}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ))}
+          <p className="font-mono text-[10px] text-muted-foreground">
+            declared by {loaded.value.sessionId} in {loaded.value.column}, r
+            {loaded.value.revision}
+          </p>
+        </div>
+      )}
+    </section>
+  );
+};
+
+/**
  * The selected run, as panes inside the card (LOB-76): its transcript and steering (the session
  * pane, composer included), its approvals, and its sandbox. `/sandboxes` and `/approvals` left the
  * rail for here, because each only means something for one run of one card.
@@ -1270,6 +1352,7 @@ export const CardPane = ({
           runStarter={runStarter}
         />
         <Spec task={task} />
+        <Plan task={task} />
         <Runs
           boardId={boardId}
           task={task}

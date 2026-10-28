@@ -44,6 +44,8 @@ export const INBOX_DOC = "pi.inbox";
 export const SESSION_DOC_KIND = "factory.session";
 export const TASK_DOC_KIND = "factory.task";
 export const SPEC_DOC_KIND = "factory.spec";
+/** The planning run's plan (D10, `./docs`' `PlanDoc`). */
+export const PLAN_DOC_KIND = "factory.plan";
 export const CRITERIA_DOC_KIND = "factory.criteria";
 export const PR_DOC_KIND = "factory.pr";
 export const RETRY_DOC_KIND = "factory.retry";

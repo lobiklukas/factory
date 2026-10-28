@@ -133,6 +133,9 @@ import {
   readPromptSections,
   readSkillPins,
   readSessionLog,
+  readOfferedTools,
+  FAUX_MODEL_ID,
+  parseFauxModelScripts,
   readVerifyRecords,
   resolveDefaultModel,
   resolveRoleModels,
@@ -12987,6 +12990,208 @@ describe("the specifying run's spec", () => {
     expect(outcome.seeded).toBeDefined();
     expect(outcome.spec).toEqual(outcome.seeded);
     expect(outcome.stored).toBeUndefined();
+  }, 120_000);
+});
+
+/**
+ * The planning run's plan (D10): a run in `planning` — the column that declares the `planner` role —
+ * is a read-only stage offered the `plan` tool and none of `write`, `edit` or `verify`, and what it
+ * declares is committed to its log and recorded on its card, readable through `TaskService.plan`
+ * (the `getTaskPlan` RPC's answer) and what `plan_doc` is checked against.
+ *
+ * The faux model's script comes from a `FAUX_MODEL_SCRIPTS` row, as the board drive's does: it reads
+ * (`ls`), sends a plan without `risks`, reads the refusal, and retries with the field.
+ */
+describe("the planning run's plan", () => {
+  const planRoot = mkdtempSync(join(tmpdir(), "factory-core-plan-"));
+  const PERSON = "person:lukas";
+  const PLAN = {
+    summary: "Export the card count",
+    steps: ["add apps/web/src/card.ts exporting the count", "verify web"],
+    surfaces: ["web"],
+    risks: ["the count is read before the board loads"],
+  };
+  const { risks: _risks, ...WITHOUT_RISKS } = PLAN;
+
+  const planRuntime = () =>
+    ManagedRuntime.make(
+      Layer.mergeAll(
+        SessionServiceLive({
+          model: createFauxModelAccess({
+            fauxModelScripts: Effect.runSync(
+              parseFauxModelScripts(
+                JSON.stringify({
+                  [FAUX_MODEL_ID]: {
+                    command: "ls",
+                    plan: [WITHOUT_RISKS, PLAN],
+                  },
+                }),
+                [FAUX_MODEL_ID],
+              ),
+            ),
+          }).access,
+          sessionRoot: planRoot,
+        }),
+        TaskServiceLive,
+      ).pipe(Layer.provideMerge(DatabaseLayer)),
+    );
+
+  /** A card walked by a person into `column`, its spec declared on the way out of specifying. */
+  const cardIn = (column: "specifying" | "planning") =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const tasks = yield* TaskService;
+      const boardId = `brd_${randomBytes(13).toString("hex")}`;
+      yield* sql`
+        INSERT INTO board_instances (id, repo, definition_id, definition_version)
+        VALUES (${boardId}, ${`factory-test/${randomBytes(6).toString("hex")}`}, 'default', 1)
+      `;
+      let card = yield* tasks.create({
+        boardId,
+        title: "a card",
+        actor: PERSON,
+      });
+      for (const to of ["specifying", "planning"]) {
+        if (to === "planning") {
+          if (column === "specifying") break;
+          card = yield* tasks.declareSpec({
+            taskId: card.id,
+            actor: `ses_${"0".repeat(26)}`,
+            goal: "walk the card on",
+            acceptance: ["it reaches planning"],
+            gaps: [],
+            openQuestions: [],
+          });
+        }
+        card = yield* tasks.move({
+          taskId: card.id,
+          expectedRevision: card.revision,
+          to,
+          actor: PERSON,
+        });
+      }
+      return card;
+    });
+
+  /** Start a run on `card` and wait for its turn to settle. */
+  const runOn = (card: {
+    readonly id: string;
+    readonly title: string;
+    readonly column: string;
+  }) =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      const run = yield* sessions.create({
+        title: card.title,
+        taskId: card.id,
+        taskColumn: card.column,
+      });
+      yield* sessions.send({ sessionId: run.id, content: "plan it" });
+      yield* waitUntil(
+        Effect.map(
+          sessions.get(run.id),
+          (snapshot) =>
+            !snapshot.live.busy &&
+            snapshot.entries.at(-1)?.kind === "assistant" &&
+            snapshot.entries.at(-1)?.toolCalls.length === 0,
+        ),
+        "the run to settle on its own answer",
+      );
+      const sql = yield* SqlClient;
+      const offered = yield* Effect.acquireUseRelease(
+        Effect.promise(() => PostgresStorage.reader(sql, run.id)),
+        (storage) => readOfferedTools(storage),
+        (storage) => Effect.promise(() => storage.dispose()),
+      );
+      return { runId: run.id, snapshot: yield* sessions.get(run.id), offered };
+    });
+
+  it("is offered plan and no write tool, commits the plan to the card after a refusal naming `risks`, and opens the plan approval", async () => {
+    const runtime = planRuntime();
+    const outcome = await runtime
+      .runPromise(
+        Effect.gen(function* () {
+          const tasks = yield* TaskService;
+          const card = yield* cardIn("planning");
+          // Before the plan, the person's approval is refused naming `plan_doc`.
+          const refused = yield* Effect.flip(
+            tasks.move({
+              taskId: card.id,
+              expectedRevision: card.revision,
+              to: "building",
+              actor: PERSON,
+            }),
+          );
+          const ran = yield* runOn(card);
+          const planned = yield* tasks.get(card.id);
+          const moved = yield* tasks.move({
+            taskId: card.id,
+            expectedRevision: planned.revision,
+            to: "building",
+            actor: PERSON,
+          });
+          return {
+            card,
+            refused,
+            ...ran,
+            plan: yield* tasks.plan(card.id),
+            planned,
+            moved,
+          };
+        }),
+      )
+      .finally(() => runtime.dispose());
+
+    expect(outcome.refused).toMatchObject({
+      _tag: "RequirementUnmet",
+      requirement: "plan_doc",
+    });
+    expect(outcome.offered).toContain("plan");
+    for (const tool of ["write", "edit", "verify"]) {
+      expect(outcome.offered).not.toContain(tool);
+    }
+    const results = outcome.snapshot.entries.filter(
+      (entry) => entry.kind === "toolResult" && entry.toolName === "plan",
+    );
+    expect(results.map((entry) => entry.isError === true)).toEqual([
+      true,
+      false,
+    ]);
+    expect(results[0]?.text).toContain(
+      "plan refused: `risks` is missing — declare the risks, `[]` when there are none",
+    );
+    expect(outcome.plan).toEqual({
+      taskId: outcome.card.id,
+      sessionId: outcome.runId,
+      column: "planning",
+      ...PLAN,
+      revision: outcome.card.revision,
+      createdAt: outcome.plan?.createdAt,
+    });
+    // The plan moved the card one revision, and the run did not move it on: a person did.
+    expect(outcome.planned.revision).toBe(outcome.card.revision + 1);
+    expect(outcome.planned.column).toBe("planning");
+    expect(outcome.moved.column).toBe("building");
+  }, 120_000);
+
+  it("offers no plan tool to a run outside the planning role", async () => {
+    const runtime = planRuntime();
+    const outcome = await runtime
+      .runPromise(
+        Effect.gen(function* () {
+          const tasks = yield* TaskService;
+          const card = yield* cardIn("specifying");
+          const ran = yield* runOn(card);
+          return { ...ran, plan: yield* tasks.plan(card.id) };
+        }),
+      )
+      .finally(() => runtime.dispose());
+
+    expect(outcome.offered).not.toContain("plan");
+    expect(
+      outcome.snapshot.entries.some((entry) => entry.toolName === "plan"),
+    ).toBe(false);
+    expect(outcome.plan).toBeUndefined();
   }, 120_000);
 });
 

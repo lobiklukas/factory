@@ -19,13 +19,13 @@ import {
   autonomyPolicy,
   decideStageCall,
   DEFAULT_AUTONOMY,
-  READ_ONLY_ROLES,
   readOnlyStageOf,
   readOnlyStagePolicy,
   stageRefusalOf,
   type PolicyDecision,
   type ReadOnlyStage,
 } from "./policy";
+import { DEFAULT_ROLE_POLICIES, rolesWhere } from "./rolePolicy";
 
 const call = (name: string, args: JsonObject): ToolCall => ({
   type: "toolCall",
@@ -53,7 +53,10 @@ const refusalOf = (toolCall: ToolCall, stage = SPECIFYING) => {
 
 describe("which runs are a read-only stage", () => {
   it("is the specifier's column, named by the role rather than by the column", () => {
-    expect([...READ_ONLY_ROLES]).toEqual([["specifier", "specifying"]]);
+    expect(rolesWhere(DEFAULT_ROLE_POLICIES, "readOnly")).toEqual([
+      "specifier",
+      "planner",
+    ]);
     expect(
       readOnlyStageOf({ column: "specifying", role: "specifier" }),
     ).toEqual(SPECIFYING);
@@ -63,6 +66,34 @@ describe("which runs are a read-only stage", () => {
       column: "scoping",
       role: "specifier",
     });
+  });
+
+  /** Mutation: drop the planner's `readOnly` row — the planning column would write (D10). */
+  it("is the planner's column too, as the planning stage whatever the column is called (D10)", () => {
+    expect(readOnlyStageOf({ column: "planning", role: "planner" })).toEqual({
+      stage: "planning",
+      column: "planning",
+      role: "planner",
+    });
+    expect(readOnlyStageOf({ column: "design", role: "planner" })).toEqual({
+      stage: "planning",
+      column: "design",
+      role: "planner",
+    });
+  });
+
+  /** Mutation: read the default table whatever is passed — a deployment's row would not hold. */
+  it("is a deployment's read-only role, named after its column when its row names no stage", () => {
+    const extended = new Map([
+      ...DEFAULT_ROLE_POLICIES,
+      ["auditor", { readOnly: true }],
+    ]);
+    expect(
+      readOnlyStageOf({ column: "audit", role: "auditor" }, extended),
+    ).toEqual({ stage: "audit", column: "audit", role: "auditor" });
+    expect(
+      readOnlyStageOf({ column: "audit", role: "auditor" }),
+    ).toBeUndefined();
   });
 
   it.each([

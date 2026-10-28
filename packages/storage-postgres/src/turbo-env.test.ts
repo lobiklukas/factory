@@ -276,6 +276,7 @@ describe("the dev tasks' environment", () => {
     "FAUX_EVERY_TURN",
     "APPROVAL_REQUIRED",
     "ROLE_MODELS",
+    "ROLE_POLICIES",
     "FAUX_ASK",
     "FAUX_SPEC",
     "FAUX_REVIEW",

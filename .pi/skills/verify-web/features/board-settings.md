@@ -72,7 +72,7 @@ requires:
    words, and the comparison to cover non-empty skills and requirements;
 3. `planning → building` to carry the human gate `plan approval`, `specifying`'s role to be
    `specifier` on `faux/faux-spec` (source `role`), and some column to run the deployment's model;
-4. `plan_doc` (unchecked) to read `not yet checked`, and a checked requirement to read `checked`;
+4. `human_move` (unchecked; `plan_doc` is checked since D10) to read `not yet checked`, and a checked requirement to read `checked`;
 5. the newest board to say it is the newest and claim no newer version;
 6. the v2 board to name exactly the newer versions `listDefinitions` holds, including v3, and its
    columns to equal `getDefinition` for v2 — which differs from the newest;
