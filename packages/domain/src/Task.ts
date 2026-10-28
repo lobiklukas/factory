@@ -23,6 +23,7 @@ import { Schema } from "effect";
 // consumer in the repo (`packages/core`, `packages/harness`) already imports the subpath.
 import {
   RepoSlug,
+  SessionActor,
   SessionId,
   SessionStatus,
   Timestamp,
@@ -364,6 +365,50 @@ export const initialColumnOf = (
   definition.initialColumn ?? definition.columns[0]?.name;
 
 /**
+ * A version as a card on it behaves, spelled out (D6, F8): every column with the moves
+ * `columnTransitions` gives it, and the initial column `initialColumnOf` resolves. Default versions
+ * 1–3 declare neither (they are read through the default pipeline's table), and an authored version
+ * must declare both, so the editor's draft and `definition show --json` start from what its cards
+ * meet. A version that already declares them comes back as it was.
+ */
+export const materializeDefinition = (
+  definition: BoardDefinition,
+): BoardDefinition => {
+  const initial = initialColumnOf(definition);
+  return {
+    ...definition,
+    ...(initial === undefined ? {} : { initialColumn: initial }),
+    columns: definition.columns.map((column) => ({
+      ...column,
+      transitions: columnTransitions(definition, column.name),
+    })),
+  };
+};
+
+/**
+ * The file `factory board define` accepts for a version (F8): its name, caps, columns and initial
+ * column — nothing the version does not declare, so no `version`, no `author`. A version that
+ * declares its own moves is emitted as stored, a column with none staying without the key, so the file
+ * is the version byte for byte and `define` answers it `unchanged`; only a legacy version (default
+ * 1–3, read through the default pipeline's table) is materialized, its moves spelled out.
+ */
+export const definitionSourceOf = (
+  definition: BoardDefinition,
+): DefinitionSource => {
+  const { id, name, columns, caps } = declaresTransitions(definition)
+    ? definition
+    : materializeDefinition(definition);
+  const initialColumn = initialColumnOf(definition);
+  return {
+    id,
+    name,
+    ...(initialColumn === undefined ? {} : { initialColumn }),
+    ...(caps === undefined ? {} : { caps }),
+    columns,
+  };
+};
+
+/**
  * One reason a definition cannot be used as written (LOB-267, D4): the field at fault, as a path into
  * the definition (`columns[2].transitions[0].to`, `initialColumn`), and the sentence that says why.
  * The path is what an author edits; the sentence names the column, so it reads without the file.
@@ -465,6 +510,12 @@ export const BoardDefinition = Schema.Struct({
    * a version written before the field existed (default versions 1–4): no board, task or repo cap.
    */
   caps: Schema.optional(BoardCaps),
+  /**
+   * The control-plane actor that wrote the version (F7): the credential's actor over `defineBoard`.
+   * Absent on a seeded version and on one written without an attributed caller — not part of what
+   * the version declares, so it is never in a definition file and never compared.
+   */
+  author: Schema.optional(Schema.String),
 });
 export type BoardDefinition = typeof BoardDefinition.Type;
 
@@ -565,6 +616,8 @@ export const DefinitionVersionSummary = Schema.Struct({
   version: Schema.Int,
   name: Schema.String,
   createdAt: Timestamp,
+  /** Who wrote the version (F7); absent for a seeded version. */
+  author: Schema.optional(Schema.String),
 });
 export type DefinitionVersionSummary = typeof DefinitionVersionSummary.Type;
 
@@ -690,6 +743,8 @@ export const DefinitionConfig = Schema.Struct({
   initialColumn: Schema.optional(Schema.String),
   /** The version's run caps (LOB-71), as declared; absent on a version that declares none. */
   caps: Schema.optional(BoardCaps),
+  /** Who wrote the version (F7); absent for a seeded version or one written unattributed. */
+  author: Schema.optional(Schema.String),
   columns: Schema.Array(ColumnConfig),
 });
 export type DefinitionConfig = typeof DefinitionConfig.Type;
@@ -789,6 +844,20 @@ export const UpgradedBoard = Schema.Struct({
 export type UpgradedBoard = typeof UpgradedBoard.Type;
 
 /**
+ * What a definition file declares (D4, F8): `defineBoard`'s payload less the caller's — the flag
+ * `dryRun`, and the `actor` the control plane sets. `factory board define --file` reads exactly this,
+ * and `factory board definition show --json` writes it, so a version round-trips through a file.
+ */
+export const DefinitionSource = Schema.Struct({
+  id: DefinitionId,
+  name: Schema.String,
+  columns: Schema.Array(BoardColumn),
+  initialColumn: Schema.optional(Schema.String),
+  caps: Schema.optional(BoardCaps),
+});
+export type DefinitionSource = typeof DefinitionSource.Type;
+
+/**
  * A new version of a definition, authored (D4): what `defineBoard` and `factory board define --file`
  * take. The shape is `BoardDefinition`'s less the version, which the server assigns (newest + 1, or 1
  * for an id it does not hold) — an author never names one, so no two authors can write the same
@@ -801,12 +870,10 @@ export type UpgradedBoard = typeof UpgradedBoard.Type;
  * nothing.
  */
 export const DefineBoardInput = Schema.Struct({
-  id: DefinitionId,
-  name: Schema.String,
-  columns: Schema.Array(BoardColumn),
-  initialColumn: Schema.optional(Schema.String),
-  caps: Schema.optional(BoardCaps),
+  ...DefinitionSource.fields,
   dryRun: Schema.optional(Schema.Boolean),
+  /** Set by the control plane from the caller's credential (LOB-20), as a card write's actor is. */
+  actor: Schema.optional(SessionActor),
 });
 export type DefineBoardInput = typeof DefineBoardInput.Type;
 
