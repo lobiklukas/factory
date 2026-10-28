@@ -168,6 +168,8 @@ import {
   projectApprovals,
   projectBudgetDoc,
   projectEntry,
+  runEndingOf,
+  type RunEnding,
   projectMergeDoc,
   projectPrDoc,
   projectPages,
@@ -1463,6 +1465,31 @@ export const writePullRequestNotOpened = (
       )
       .then((entry) => entry.id),
   );
+
+/** Entries per round trip while reading back to a run's start; most runs fit in one page. */
+const RUN_ENDING_PAGE = 50;
+
+/**
+ * How the root's newest run ended (C18, `runEndingOf`), read newest first and only as far back as
+ * that run's newest user input, so a long session costs a page, not its whole transcript.
+ */
+export const readRunEnding = (
+  conversation: Conversation,
+): Effect.Effect<RunEnding, SessionError> =>
+  Effect.gen(function* () {
+    const read: EntryRecord[] = [];
+    let cursor: Cursor | undefined;
+    for (;;) {
+      const page = yield* attempt("scan the run's entries", () =>
+        conversation.entries({}, RUN_ENDING_PAGE, cursor, BACKGROUND_CONTEXT),
+      );
+      read.push(...page.items);
+      cursor = page.next;
+      if (cursor === undefined) break;
+      if (page.items.some((entry) => entry.kind === "pi.user")) break;
+    }
+    return runEndingOf(read);
+  });
 
 /**
  * A cited knowledge page, announced in the transcript (LOB-204).

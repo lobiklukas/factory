@@ -766,37 +766,48 @@ const HttpLive = Effect.gen(function* () {
     sandbox: Option.getOrElse(sandboxChoice, () => DEFAULT_SANDBOX_RUNTIME),
   });
 
-  // The PR step a settled run takes with no operator call (C18) reaches the forge through the same
-  // pair the RPC member is handed: the credential provider and a client on `GITHUB_API_URL`.
-  const pullRequestOnSettle = yield* Effect.context<
-    CredentialProvider | HttpClient.HttpClient
-  >().pipe(Effect.provide(PullRequestStepDeps));
-
   // Sessions own one log, one working directory, and (locally) the harness that drives them. The PR
   // step's exit is mirrored on the Linear issue a session was delegated from, when a key is set
   // (LOB-15).
-  const SessionDeps = SessionServiceLive({
-    pullRequestOnSettle,
-    reviewPoster,
-    repoMirror,
-    repoRemote,
-    model: modelAccess,
-    roleModels,
-    sessionRoot: model.sessionRoot,
-    sandbox,
-    idleTimeoutMs: model.idleTimeoutMs,
-    ...Option.match(maxConcurrent, {
-      onNone: () => ({}),
-      onSome: (limit) => ({ maxConcurrentSessions: limit }),
-    }),
-    prCap,
-    autonomy,
-    ...Option.match(defaultBudget, {
-      onNone: () => ({}),
-      onSome: (budget) => ({ defaultBudget: budget }),
-    }),
-  }).pipe(
-    Layer.provide(Layer.mergeAll(SessionWriteBacksLive, ProposalTrackerLive)),
+  //
+  // The PR step a settled run takes with no operator call (C18) reaches the forge through the pair
+  // the RPC member is handed — the credential provider and a client on `GITHUB_API_URL` — read
+  // inside the layer graph from `PullRequestStepDeps`, the same layer the routes are given: one
+  // build of it, so one provider (and one App-token cache) answers a settle, a call and the boot log.
+  const SessionDeps = Layer.unwrap(
+    Effect.map(
+      Effect.context<CredentialProvider | HttpClient.HttpClient>(),
+      (pullRequestOnSettle) =>
+        SessionServiceLive({
+          pullRequestOnSettle,
+          reviewPoster,
+          repoMirror,
+          repoRemote,
+          model: modelAccess,
+          roleModels,
+          sessionRoot: model.sessionRoot,
+          sandbox,
+          idleTimeoutMs: model.idleTimeoutMs,
+          ...Option.match(maxConcurrent, {
+            onNone: () => ({}),
+            onSome: (limit) => ({ maxConcurrentSessions: limit }),
+          }),
+          prCap,
+          autonomy,
+          ...Option.match(defaultBudget, {
+            onNone: () => ({}),
+            onSome: (budget) => ({ defaultBudget: budget }),
+          }),
+        }),
+    ),
+  ).pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        SessionWriteBacksLive,
+        ProposalTrackerLive,
+        PullRequestStepDeps,
+      ),
+    ),
   );
 
   // The database pool is lazy (`PgClient` opens a connection on first query), so this graph builds

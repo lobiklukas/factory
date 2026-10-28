@@ -183,6 +183,7 @@ import {
   readTranscriptPage,
   readVerifyRecords,
   writePullRequestNotOpened,
+  readRunEnding,
   readCurationUsage,
   compareReplay,
   mirrorComparison,
@@ -284,8 +285,9 @@ import { DEFAULT_DIFF_CAP } from "./pr";
 import { openPullRequest, type OpenPullRequestInput } from "./prStep";
 import {
   notOpenedText,
-  opensPullRequestOnSettle,
+  settleDeclarationOf,
   type NotOpened,
+  type SettleDecision,
   type SettledRun,
 } from "./prOnSettle";
 import {
@@ -308,6 +310,7 @@ import {
   checkoutDefaultBranch,
   inspectCheckout,
   refExists,
+  resolveCommit,
   workTreeRoot,
 } from "./repos";
 import {
@@ -816,6 +819,15 @@ export type SessionServiceOptions = {
   readonly pullRequestOnSettle?: Context.Context<
     CredentialProvider | HttpClient.HttpClient
   >;
+  /**
+   * Told what each settled run's PR step came to (C18, `SettleDecision`), once its bookkeeping is
+   * done — the step's own observer, so a test waits on the decision rather than on a clock. Absent:
+   * nobody is told; the process's log still carries it.
+   */
+  readonly onPullRequestSettled?: (
+    sessionId: SessionId,
+    decision: SettleDecision,
+  ) => Effect.Effect<void>;
   /**
    * How long the PR step waits for its write-back before it answers anyway (LOB-15). Absent:
    * `SESSION_WRITE_BACK_BUDGET`. A test shortens it.
@@ -3525,7 +3537,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
-       * What `opensPullRequestOnSettle` decides from (C18), in one statement: the session's index row,
+       * What `settleDeclarationOf` decides from (C18), in one statement: the session's index row,
        * and — for a card's run — the requirement keys of the column it was started in, under the
        * definition version the card pins (as `runColumnFor` reads the column's role). `undefined` for
        * a session with no row.
@@ -3547,6 +3559,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             sql<{
               title: string;
               repo: string | null;
+              requestId: string | null;
               prUrl: string | null;
               actor: string | null;
               forkedFrom: string | null;
@@ -3556,7 +3569,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               column: string | null;
               columns: string | null;
             }>`
-              SELECT s.title, s.repo, s.pr_url, s.actor, s.forked_from,
+              SELECT s.title, s.repo, s.request_id, s.pr_url, s.actor, s.forked_from,
                      s.workspace_released_at IS NOT NULL AS released,
                      (COALESCE(t.blocked_reason IS NOT NULL, false) OR EXISTS (
                        SELECT 1 FROM session_approvals sa
@@ -3593,6 +3606,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             taskId: row.taskId ?? undefined,
             run: {
               repo: row.repo,
+              requestId: row.requestId,
               prUrl: row.prUrl,
               actor: row.actor,
               forkedFrom: row.forkedFrom,
@@ -3613,9 +3627,13 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * Say on the run's card why its PR step opened nothing (C18): a note in the card's thread, by
        * the run itself, so a person reading the card sees it and the card's next run is told it
        * (the thread is quoted into its prompt, B7). The same sentence twice in a row from the same run
-       * — a run that settles again with the branch still even — is posted once. A card that moved on
-       * between the read and the write is read again; one that keeps moving gets no note, which the
-       * transcript entry and the process's log still carry.
+       * — a run that settles again with the branch still even — is posted once.
+       *
+       * The card's revision is read *before* its thread, and the note is written at that revision: a
+       * comment bumps it, so a note another settle posted after this one read the thread fails the
+       * write as `StaleRevision` instead of landing beside it, and the retry reads both again — so
+       * two settles close together post one note, not two. A card that keeps moving gets no note,
+       * which the transcript entry and the process's log still carry.
        */
       const noteOnCard = (
         taskId: string,
@@ -3623,26 +3641,33 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         body: string,
       ): Effect.Effect<void, TaskError> =>
         Effect.gen(function* () {
+          const card = yield* tasks.get(taskId);
           const thread = yield* tasks.comments(taskId);
           const last = thread
             .filter((comment) => comment.actor === sessionId)
             .at(-1);
           if (last?.body === body) return;
-          yield* tasks.get(taskId).pipe(
-            Effect.flatMap((card) =>
-              tasks.comment({
-                taskId,
-                expectedRevision: card.revision,
-                body,
-                actor: sessionId,
-              }),
-            ),
-            Effect.retry({
-              times: 3,
-              while: (error) => error._tag === "StaleRevision",
-            }),
-          );
-        });
+          yield* tasks.comment({
+            taskId,
+            expectedRevision: card.revision,
+            body,
+            actor: sessionId,
+          });
+        }).pipe(
+          Effect.retry({
+            times: 3,
+            while: (error) => error._tag === "StaleRevision",
+          }),
+        );
+
+      /**
+       * The commit each session's branch was at when its settle last found no change (C18): a later
+       * settle at the same commit has nothing new to measure, so it skips the step rather than adding
+       * one more "nothing to publish" line per turn of a conversation that changes no code. In memory,
+       * so a restart costs one repeated line, and held only while this process owns the session:
+       * `releaseOwner` drops its entry, so the map is bounded by the live owners.
+       */
+      const unchangedAt = new Map<SessionId, string>();
 
       /**
        * The PR step a settled run takes with no operator (C18, `./prOnSettle`): run when this process
@@ -3662,58 +3687,88 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const settlePullRequest = (
         sessionId: SessionId,
         forge: Context.Context<CredentialProvider | HttpClient.HttpClient>,
-      ): Effect.Effect<void> =>
-        Effect.gen(function* () {
+      ): Effect.Effect<void> => {
+        const decide = Effect.gen(function* () {
           const settled = yield* settledRunOf(sessionId);
-          if (settled === undefined || !opensPullRequestOnSettle(settled.run))
-            return;
+          const declaration =
+            settled === undefined
+              ? "undeclared"
+              : settleDeclarationOf(settled.run);
+          if (settled === undefined || declaration === "undeclared")
+            return "undeclared" as const;
+          if (declaration === "parked") {
+            // Said in the log, not the transcript or the card: the card already carries the
+            // question or approval it waits on, and a later run that settles done opens the PR.
+            yield* Effect.logInfo(
+              `session ${sessionId}: its run settled waiting on a person (an undecided approval or a blocked card), so its PR is held until a run settles done`,
+            );
+            return "parked" as const;
+          }
           const owned = HashMap.get(yield* Ref.get(live), sessionId);
-          if (Option.isNone(owned)) return;
+          if (Option.isNone(owned)) return "not-owned" as const;
+          const worktree = owned.value.workspace.path;
           const checkout = yield* fs
-            .exists(path.join(owned.value.workspace.path, ".git"))
+            .exists(path.join(worktree, ".git"))
             .pipe(Effect.orElseSucceed(() => false));
           if (!checkout) {
             yield* Effect.logInfo(
               `session ${sessionId}: its run settled, but its working directory is not a checkout of its own, so no PR is opened for it`,
             );
-            return;
+            return "not-checkout" as const;
           }
-          const stepped = yield* openPr({
-            sessionId,
-            // As `factory pr` titles a PR it names no title for: after the session.
-            title: settled.title,
-          }).pipe(Effect.provideContext(forge), Effect.exit);
+          const tip = yield* resolveCommit(worktree, "HEAD");
+          if (tip !== undefined && unchangedAt.get(sessionId) === tip) {
+            yield* Effect.logDebug(
+              `session ${sessionId}: its run settled on the commit its last settle found no change at, so the PR step is not run again`,
+            );
+            return "unchanged" as const;
+          }
+          const ending = yield* readRunEnding(owned.value.root);
           let reason: NotOpened;
-          if (Exit.isSuccess(stepped)) {
-            const answer = stepped.value;
-            // The two outcomes that carry a link are one shape (`OpenedPullRequest`), so the link is
-            // what narrows the answer.
-            if ("url" in answer) {
-              yield* Effect.logInfo(
-                `session ${sessionId}: its run settled and the PR step opened ${answer.url} (${answer.outcome})`,
-              );
-              return;
-            }
-            reason = answer;
+          if (ending !== "finished") {
+            reason = { outcome: "stopped", ending };
           } else {
-            const failure = Cause.findErrorOption(stepped.cause);
-            if (Option.isNone(failure)) {
-              yield* Effect.logError(
-                `session ${sessionId}: the settled run's PR step died: ${Cause.pretty(stepped.cause)}`,
-              );
-              return;
+            const stepped = yield* openPr({
+              sessionId,
+              // As `factory pr` titles a PR it names no title for: after the session.
+              title: settled.title,
+            }).pipe(Effect.provideContext(forge), Effect.exit);
+            if (Exit.isSuccess(stepped)) {
+              const answer = stepped.value;
+              // The two outcomes that carry a link are one shape (`OpenedPullRequest`), so the link
+              // is what narrows the answer.
+              if ("url" in answer) {
+                unchangedAt.delete(sessionId);
+                yield* Effect.logInfo(
+                  `session ${sessionId}: its run settled and the PR step opened ${answer.url} (${answer.outcome})`,
+                );
+                return "opened" as const;
+              }
+              reason = answer;
+            } else {
+              const failure = Cause.findErrorOption(stepped.cause);
+              if (Option.isNone(failure)) {
+                yield* Effect.logError(
+                  `session ${sessionId}: the settled run's PR step died: ${Cause.pretty(stepped.cause)}`,
+                );
+                return "died" as const;
+              }
+              reason = {
+                outcome: "failed",
+                tag: failure.value._tag,
+                message: failure.value.message,
+              };
             }
-            reason = {
-              outcome: "failed",
-              tag: failure.value._tag,
-              message: failure.value.message,
-            };
           }
           const text = notOpenedText(reason);
-          yield* Effect.logWarning(`session ${sessionId}: ${text}`);
-          // The step wrote the no-change line itself (LOB-196); every other reason is written here,
-          // on the owner that holds the log now.
-          if (reason.outcome !== "no-change") {
+          if (reason.outcome === "no-change") {
+            // An even branch is the ordinary answer of a run that changed no code, not a fault.
+            yield* Effect.logInfo(`session ${sessionId}: ${text}`);
+            if (tip !== undefined) unchangedAt.set(sessionId, tip);
+          } else {
+            yield* Effect.logWarning(`session ${sessionId}: ${text}`);
+            // The step wrote the no-change line itself (LOB-196); every other reason is written
+            // here, on the owner that holds the log now.
             const owner = HashMap.get(yield* Ref.get(live), sessionId);
             if (Option.isSome(owner)) {
               yield* writePullRequestNotOpened(owner.value.root, text);
@@ -3722,13 +3777,21 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           if (settled.taskId !== undefined) {
             yield* noteOnCard(settled.taskId, sessionId, text);
           }
-        }).pipe(
+          return reason.outcome;
+        });
+        return decide.pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning(
               `session ${sessionId}: the settled run's PR step could not finish its bookkeeping: ${Cause.pretty(cause)}`,
-            ),
+            ).pipe(Effect.as("bookkeeping-failed" as const)),
+          ),
+          Effect.flatMap((decision) =>
+            options.onPullRequestSettled === undefined
+              ? Effect.void
+              : options.onPullRequestSettled(sessionId, decision),
           ),
         );
+      };
 
       /**
        * Fork a session at one of its entries (LOB-180, D7).
@@ -5954,6 +6017,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* FiberMap.remove(projectors, sessionId);
           // A run the release cuts short has no end to measure, so it is not recorded.
           runStarts.delete(sessionId);
+          // Nor is the commit its last settle found no change at kept for a session this process no
+          // longer holds (C18): a reopen settles at most once more over the same commit.
+          unchangedAt.delete(sessionId);
           yield* shiftSessionsActive(-1);
           yield* closeHarness(owner.harness).pipe(Effect.ignore);
           // Then its sandboxes, which nothing runs in once the harness is closed; never the

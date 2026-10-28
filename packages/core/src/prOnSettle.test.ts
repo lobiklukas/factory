@@ -8,11 +8,15 @@ import { describe, expect, it } from "vitest";
 import {
   notOpenedText,
   opensPullRequestOnSettle,
+  settleDeclarationOf,
+  TRIGGER_PREFIX,
   type SettledRun,
 } from "./prOnSettle";
+import { sessionRequestIdOf, triggerActorOf } from "./TriggerService";
 
 const trigger: SettledRun = {
   repo: "acme/widgets",
+  requestId: "trigger:delivery-1",
   prUrl: null,
   actor: "trigger:linear",
   forkedFrom: null,
@@ -27,6 +31,22 @@ describe("opensPullRequestOnSettle", () => {
     expect(
       opensPullRequestOnSettle({ ...trigger, actor: "trigger:sentry" }),
     ).toBe(true);
+  });
+
+  it("spells the trigger prefix as the trigger seam writes it", () => {
+    expect(sessionRequestIdOf("d-1").startsWith(TRIGGER_PREFIX)).toBe(true);
+    expect(triggerActorOf("linear").startsWith(TRIGGER_PREFIX)).toBe(true);
+  });
+
+  it("reads a trigger's session from its delivery: a replay keeps the actor and has none", () => {
+    // A replay of a trigger's session: its source's actor, no request id, no fork lineage.
+    expect(opensPullRequestOnSettle({ ...trigger, requestId: null })).toBe(
+      false,
+    );
+    // A client's own request id is not a delivery.
+    expect(
+      opensPullRequestOnSettle({ ...trigger, requestId: "cli-retry-1" }),
+    ).toBe(false);
   });
 
   it("leaves a person's session, and one attributed to nobody, to the person", () => {
@@ -81,6 +101,33 @@ describe("opensPullRequestOnSettle", () => {
     ).toBe(false);
   });
 
+  it("tells a declared run that ended parked from a session that declares none", () => {
+    expect(settleDeclarationOf(trigger)).toBe("declared");
+    expect(settleDeclarationOf({ ...trigger, waiting: true })).toBe("parked");
+    expect(
+      settleDeclarationOf({
+        ...trigger,
+        actor: "person:lukas",
+        waiting: true,
+        columnRequires: ["pr_link"],
+      }),
+    ).toBe("parked");
+    // Waiting says nothing about a session that never declared a PR, or has none left to open.
+    expect(
+      settleDeclarationOf({ ...trigger, actor: "person:lukas", waiting: true }),
+    ).toBe("undeclared");
+    expect(
+      settleDeclarationOf({
+        ...trigger,
+        waiting: true,
+        columnRequires: ["verified", "review_verdict"],
+      }),
+    ).toBe("undeclared");
+    expect(
+      settleDeclarationOf({ ...trigger, waiting: true, released: true }),
+    ).toBe("undeclared");
+  });
+
   it("leaves a fork's or a replay's PR to whoever forked it", () => {
     expect(
       opensPullRequestOnSettle({
@@ -119,6 +166,19 @@ describe("notOpenedText", () => {
       notOpenedText({ outcome: "non-fast-forward", head: "factory/ses_x" }),
     ).toBe(
       `${head}: the remote's factory/ses_x has commits this branch does not, and the push is never forced; integrate them, then open the PR`,
+    );
+  });
+
+  it("says a stopped run opened nothing over its branch, and how its PR still opens", () => {
+    const tail = "a run that finishes opens it, or `factory pr` does";
+    expect(notOpenedText({ outcome: "stopped", ending: "interrupted" })).toBe(
+      `the run settled without finishing, so no PR was opened over its branch: it was interrupted; ${tail}`,
+    );
+    expect(notOpenedText({ outcome: "stopped", ending: "budget" })).toContain(
+      "its budget stopped it",
+    );
+    expect(notOpenedText({ outcome: "stopped", ending: "failed" })).toContain(
+      "its model answer failed",
     );
   });
 
