@@ -42,6 +42,19 @@ a hang: every wait is bounded, and the drive's waits end early once the page's p
 the browser did not approve the plan, the drive approves it from the terminal so the build phase
 still proves what it proves — the drive has failed already.
 
+### A new card, both ways (LOB-275)
+
+The same equivalence for a card being made: after the plan approval, `drive.sh` runs
+`card-create.sh`, again two halves taking turns through signal files (`.verify/run/card-create/`).
+`card-create.mjs` opens the board in one page that is never reloaded and makes a card with the header's
+**New card** — on the way, a title of spaces refused inline with nothing sent, and a base ref no run can
+start from refused by the server in a toast carrying `createTask`'s message verbatim. Its one landed
+`createTask` must be the dashboard's, with the form's inputs and no repo. The terminal then requires
+`factory board ls` to list that card under `intake` and `factory board show` to print it as filed, makes
+its twin with the same inputs (`factory board add`, LOB-261), and requires the still-open page to show the twin in `intake`.
+Last, `listTasks` must hold the two with the same title, body, repo (the board's), priority and base
+ref. See `.pi/skills/verify-web/features/card-create.md` for the form itself.
+
 ### The phase: `equivalence.sh`
 
 ```sh

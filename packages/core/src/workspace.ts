@@ -3,11 +3,12 @@
  * What a session's working directory is, and what its repo says about itself
  * (docs/features.md §3 A1).
  *
- * Two things this module deliberately does not do: clone, and guess. Until M6 a session's
- * directory is an empty one under `SESSION_ROOT`, and the commands come from a `.factory/config`
- * that a checkout put there — the local registry path when the repo has one, the session's own
- * directory otherwise. A repo with no config resolves to no commands and says so
- * (`commandsSource: "none"`), rather than failing or inventing a build.
+ * Two things this module deliberately does not do: clone, and guess. It cuts a worktree from a
+ * checkout it is handed — the registered local path, or the factory's own mirror of a URL-only repo
+ * (`./RepoMirror`, LOB-265), which the caller fetches and this module only cuts from — and the
+ * commands come from a `.factory/config` that checkout put there: the local registry path when the
+ * repo has one, the session's own directory otherwise. A repo with no config resolves to no commands
+ * and says so (`commandsSource: "none"`), rather than failing or inventing a build.
  *
  * The filesystem and path services arrive as values, the way the storage adapter takes its
  * `SqlClient`: that keeps `Effect`'s shape types free of the services this module merely uses.
@@ -17,6 +18,7 @@ import { Effect, Option, Schema } from "effect";
 import { execFileSync, execSync } from "node:child_process";
 import type { FileSystem, Path } from "effect";
 import type {
+  RepoCloneFailed,
   RepoCommands,
   RepoSlug,
   SessionWorkspace,
@@ -70,6 +72,18 @@ export type WorkspaceInput = {
   /** A checkout to read `.factory/config` from, when the session's own directory has none. */
   readonly localPath?: string | undefined;
   /**
+   * The factory's bare mirror of the repo, to cut from when it has no `localPath` (LOB-265). `path`
+   * is where it lives, cloned or not; `sync` clones or fetches the base ref into it and answers the
+   * ref to cut the worktree at. It runs only when a worktree is about to be cut, so a session whose
+   * directory is already a workspace — an idle owner reopening — makes no network call.
+   */
+  readonly mirror?:
+    | {
+        readonly path: string;
+        readonly sync: Effect.Effect<string, RepoCloneFailed>;
+      }
+    | undefined;
+  /**
    * Whether a missing worktree is cut (LOB-268). Absent means yes. A session whose workspace was
    * torn down resolves with `false`, so reading it never cuts a fresh worktree on a fresh branch at
    * the base — which is what a read would otherwise do, because the directory is gone.
@@ -122,7 +136,7 @@ const commandsIn = (
 export const resolveWorkspace = (
   input: WorkspaceInput,
   deps: WorkspaceDeps,
-): Effect.Effect<SessionWorkspace, Error> =>
+): Effect.Effect<SessionWorkspace, Error | RepoCloneFailed> =>
   Effect.gen(function* () {
     const directory = sessionDirectory(
       deps.path,
@@ -134,28 +148,15 @@ export const resolveWorkspace = (
       input.repo === undefined
         ? undefined
         : (input.branch ?? `factory/${input.sessionId}`);
-    // M6: cut a linked worktree at the base ref off the registered repo's local_path.
+    // M6: cut a linked worktree at the base ref off the registered repo's local_path, or off the
+    // factory's mirror of it when the repo has only a URL (LOB-265).
+    const baseRef = input.baseRef ?? "main";
+    let mirrorUsed = false;
     if (
       input.repo !== undefined &&
-      input.localPath !== undefined &&
+      (input.localPath !== undefined || input.mirror !== undefined) &&
       input.cut !== false
     ) {
-      const isGit = yield* Effect.try({
-        try: () =>
-          execSync("git rev-parse --is-inside-work-tree", {
-            cwd: input.localPath,
-            stdio: "ignore",
-          }),
-        // oxlint-disable-next-line global-error-in-effect-catch
-        catch: () =>
-          new Error(
-            `repo ${input.repo} local_path is not a git repository: ${input.localPath}`,
-          ),
-      });
-      void isGit;
-      const baseRef = input.baseRef ?? "main";
-      // Set whenever there is a repo (above); narrowed here so it can be an argv entry.
-      const worktreeBranch = branch ?? `factory/${input.sessionId}`;
       // An empty directory is not a workspace yet (LOB-263): a session opened while its repo had no
       // checkout holds one (the owner makes the directory), and the worktree is cut into it once a
       // path is registered, so the fix the warning names reaches the sessions it was raised for.
@@ -165,7 +166,32 @@ export const resolveWorkspace = (
         Effect.map((entries) => entries.length > 0),
         Effect.orElseSucceed(() => false),
       );
-      if (!occupied) {
+      // Only a worktree about to be cut needs the mirror's tip: fetching it for one that exists
+      // would put the network under every reopened session.
+      const mirror = input.localPath === undefined ? input.mirror : undefined;
+      let startPoint = baseRef;
+      if (mirror !== undefined && !occupied) {
+        startPoint = yield* mirror.sync;
+        mirrorUsed = true;
+      }
+      const checkout = input.localPath ?? input.mirror?.path;
+      if (checkout !== undefined && (mirror === undefined || !occupied)) {
+        yield* Effect.try({
+          try: () =>
+            execSync("git rev-parse --is-inside-work-tree", {
+              cwd: checkout,
+              stdio: "ignore",
+            }),
+          // oxlint-disable-next-line global-error-in-effect-catch
+          catch: () =>
+            new Error(
+              `repo ${input.repo} ${mirror === undefined ? "local_path" : "mirror"} is not a git repository: ${checkout}`,
+            ),
+        });
+      }
+      // Set whenever there is a repo (above); narrowed here so it can be an argv entry.
+      const worktreeBranch = branch ?? `factory/${input.sessionId}`;
+      if (!occupied && checkout !== undefined) {
         yield* Effect.try({
           try: () => {
             const parent = deps.path.dirname(directory);
@@ -180,7 +206,7 @@ export const resolveWorkspace = (
               execFileSync(
                 "git",
                 ["worktree", "remove", "--force", directory],
-                { cwd: input.localPath, stdio: "ignore" },
+                { cwd: checkout, stdio: "ignore" },
               );
             } catch {
               // not registered: nothing to clear
@@ -193,7 +219,7 @@ export const resolveWorkspace = (
                 "git",
                 ["worktree", "add", directory, worktreeBranch],
                 {
-                  cwd: input.localPath,
+                  cwd: checkout,
                   stdio: "ignore",
                 },
               );
@@ -204,8 +230,18 @@ export const resolveWorkspace = (
             if (!created) {
               execFileSync(
                 "git",
-                ["worktree", "add", "-b", worktreeBranch, directory, baseRef],
-                { cwd: input.localPath, stdio: "ignore" },
+                [
+                  "worktree",
+                  "add",
+                  // The mirror's start point is a remote-tracking ref of a remote it does not have:
+                  // tracking it would write an upstream into its config for nothing.
+                  ...(mirror === undefined ? [] : ["--no-track"]),
+                  "-b",
+                  worktreeBranch,
+                  directory,
+                  startPoint,
+                ],
+                { cwd: checkout, stdio: "ignore" },
               );
             }
           },
@@ -223,6 +259,14 @@ export const resolveWorkspace = (
         ? Option.none<RepoCommands>()
         : yield* commandsIn(input.localPath, deps);
     const found = Option.isSome(fromSession) ? fromSession : fromRepo;
+    // A mirror that is not cloned yet is no checkout: a read of such a session warns as before.
+    const hasCheckout =
+      input.localPath !== undefined ||
+      mirrorUsed ||
+      (input.mirror !== undefined &&
+        (yield* deps.fs
+          .exists(deps.path.join(input.mirror.path, "HEAD"))
+          .pipe(Effect.orElseSucceed(() => false))));
     return {
       path: directory,
       ...(input.repo === undefined ? {} : { repo: input.repo }),
@@ -232,7 +276,7 @@ export const resolveWorkspace = (
       ...(input.repo === undefined ? {} : { branch }),
       commands: Option.getOrElse(found, () => NO_COMMANDS),
       commandsSource: Option.isSome(found) ? "repo" : "none",
-      ...(input.repo !== undefined && input.localPath === undefined
+      ...(input.repo !== undefined && !hasCheckout
         ? { warning: noCheckoutWarning(input.repo) }
         : {}),
     };

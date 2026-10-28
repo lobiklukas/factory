@@ -2,6 +2,7 @@ import type {
   BoardDefinition,
   BoardInstanceId,
   CommentTaskInput,
+  CreateTaskInput,
   MoveTaskInput,
   Task,
   TaskId,
@@ -112,6 +113,21 @@ export const boardAtom = Atom.family((boardId: BoardInstanceId) =>
       }),
     )
     .pipe(Atom.withReactivity([BOARD_KEY]), Atom.withRefresh(BOARD_POLL)),
+);
+
+/**
+ * Puts a card on a board from the "New card" form (LOB-275): `createTask`, as `factory board add`
+ * (LOB-261) and a trigger call it, so the card opens in the board's initial column on the board's
+ * repository (LOB-255, LOB-267). The answer is the server's card or its typed refusal; the lanes show
+ * the card when the board read that `BOARD_KEY` re-runs says it is there, not from this answer.
+ */
+export const createTaskAtom = runtime.fn(
+  (input: CreateTaskInput) =>
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.createTask(input);
+    }),
+  { reactivityKeys: [BOARD_KEY] },
 );
 
 /**

@@ -59,9 +59,18 @@ describe("repoState", () => {
     );
   });
 
-  it("names the missing checkout for a repo with a URL but no path", () => {
+  it("says a repo with a URL but no path is not cloned yet", () => {
     const urlOnly = summary({ localPath: undefined, localPathIsGit: false });
-    expect(repoState(urlOnly)).toBe("no local checkout");
+    expect(repoState(urlOnly)).toBe("not cloned yet");
+  });
+
+  it("is ready for a URL-only repo the factory has cloned into its cache (LOB-265)", () => {
+    const cloned = summary({
+      localPath: undefined,
+      localPathIsGit: false,
+      mirrorPath: "/sessions/.cache/acme/x.git",
+    });
+    expect(repoState(cloned)).toBe("ready");
   });
 
   it("says a registered path is no longer a work tree", () => {
@@ -106,6 +115,31 @@ describe("repoLines", () => {
     expect(lines).toContain("state       no clone URL / no local checkout");
     expect(lines).toContain(
       "remedy      factory repo add acme/auto --path <dir>",
+    );
+  });
+});
+
+describe("a URL-only repo", () => {
+  const urlOnly = (extra: Partial<typeof RepoSummary.Encoded> = {}) =>
+    summary({ localPath: undefined, localPathIsGit: false, ...extra });
+
+  it("names the clone as the remedy, not a path", () => {
+    const lines = repoLines(urlOnly());
+    expect(lines).toContain("state       not cloned yet");
+    expect(lines).toContain("remedy      factory repo sync acme/x");
+    expect(lines).toContain(`cache       ${NONE}`);
+  });
+
+  it("prints its cache and no remedy once cloned", () => {
+    const lines = repoLines(urlOnly({ mirrorPath: "/s/.cache/acme/x.git" }));
+    expect(lines).toContain("cache       /s/.cache/acme/x.git");
+    expect(lines).toContain("state       ready");
+    expect(lines.some((line) => line.startsWith("remedy"))).toBe(false);
+  });
+
+  it("carries the sync remedy in the ls state column", () => {
+    expect(column(repoRow(urlOnly()), "state")).toBe(
+      "not cloned yet (factory repo sync acme/x)",
     );
   });
 });

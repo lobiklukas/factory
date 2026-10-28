@@ -113,6 +113,13 @@ export const RepoSummary = Schema.Struct({
    * unrelated repository). Present exactly when `localPathIsGit`.
    */
   workTree: Schema.optional(Schema.String),
+  /**
+   * The factory's own bare clone of `url`, when one exists on the API's disk (LOB-265): a repo with
+   * no `localPath` and a `url` is cloned there on registration, and a session's worktree is cut from
+   * it. Read from the disk each time the row is answered, like the checkout's facts. Absent for a
+   * repo that has a `localPath`, has no `url`, or has not been cloned yet.
+   */
+  mirrorPath: Schema.optional(Schema.String),
 });
 export type RepoSummary = typeof RepoSummary.Type;
 
@@ -136,6 +143,32 @@ export type GetRepoInput = typeof GetRepoInput.Type;
 export class RepoNotFound extends Schema.TaggedError<RepoNotFound>()(
   "RepoNotFound",
   { repo: Schema.String, message: Schema.String },
+) {}
+
+/**
+ * Why the factory could not clone or fetch a repo into its own cache (LOB-265): `auth` is a token
+ * the remote refused, `credential` is no token to send, `missing-ref` is a base ref the remote does
+ * not have, `refused` is a URL or ref outside what a token may be sent to, `timeout` and `failed`
+ * are the network and everything else. A tag of its own rather than a `SessionError`, so
+ * `factory repo add` and `factory doctor` name the repo and the reason (`repo_clone_failed`).
+ */
+export const RepoCloneFailureReason = Schema.Literals([
+  "auth",
+  "credential",
+  "missing-ref",
+  "refused",
+  "timeout",
+  "failed",
+]);
+export type RepoCloneFailureReason = typeof RepoCloneFailureReason.Type;
+
+export class RepoCloneFailed extends Schema.TaggedError<RepoCloneFailed>()(
+  "RepoCloneFailed",
+  {
+    repo: Schema.String,
+    reason: RepoCloneFailureReason,
+    message: Schema.String,
+  },
 ) {}
 
 export const SessionSummary = Schema.Struct({
@@ -751,6 +784,14 @@ export const RegisterRepoInput = Schema.Struct({
 });
 export type RegisterRepoInput = typeof RegisterRepoInput.Type;
 
+/**
+ * Clone or fetch a registered repo into the factory's cache now (LOB-265), instead of at the next
+ * session: what `factory doctor` runs to say whether a URL-only repo can run. The answer is the
+ * row, with its `mirrorPath`.
+ */
+export const SyncRepoInput = Schema.Struct({ repo: RepoSlug });
+export type SyncRepoInput = typeof SyncRepoInput.Type;
+
 /** One row of `listSessions`: what the index remembers without folding a single log (R6). */
 export const SessionListEntry = Schema.Struct({
   id: SessionId,
@@ -937,6 +978,8 @@ export type CompactSessionResult = typeof CompactSessionResult.Type;
  *   malformed repo slug, an unreadable list cursor.
  * - `storage` — the log could not be read or appended.
  * - `harness` — Pi Durable rejected the operation (bad input, closed harness, failed submit).
+ * - `repo_clone_failed` — a session's worktree could not be cut because the factory's clone of its
+ *   repo could not be made or brought up to date (LOB-265); the message names the repo and the reason.
  */
 export const SessionErrorCode = Schema.Literals([
   "not_found",
@@ -944,6 +987,7 @@ export const SessionErrorCode = Schema.Literals([
   "invalid_input",
   "storage",
   "harness",
+  "repo_clone_failed",
 ]);
 export type SessionErrorCode = typeof SessionErrorCode.Type;
 
