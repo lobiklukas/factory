@@ -6,7 +6,7 @@ wherever they would reach the log, and refused at the push.
 
 - **Stored write-only, encrypted.** `factory secret set <repo> <NAME>` (the value on stdin or
   `--file`, never an argument), the Repositories page's Secrets form, or `setSecret` over RPC. The
-  `secrets` table (migration `0044_create_secrets.ts`) holds AES-256-GCM ciphertext under
+  `secrets` table (migration `0045_create_secrets.ts`) holds AES-256-GCM ciphertext under
   `FACTORY_SECRETS_KEY` (32 bytes, base64 or hex; `openssl rand -base64 32`), bound to its repo and
   name. No RPC answers a value: `setSecret`, `listSecrets` and `deleteSecret` answer summaries (repo,
   name, when, who). Without a key nothing is stored (`secrets_unconfigured`); a value under eight
@@ -27,7 +27,7 @@ stored)`).
   body's excerpt never hold a value.
 - **Declared at a pinned base.** The base the declaration is read at is resolved once, at the
   session's first open, and pinned in `session_secret_bases` (migration
-  `0045_create_session_secret_bases.ts`): a ref the agent's shell moves afterwards grants nothing.
+  `0046_create_session_secret_bases.ts`): a ref the agent's shell moves afterwards grants nothing.
 - **Scanned before the push.** The PR step scans every line the branch's commits add
   (`git log -p`, not only the net diff; every file read as text whatever its `.gitattributes`; a
   merge as a dense combined diff) and every commit's message, author, committer and paths, for any
