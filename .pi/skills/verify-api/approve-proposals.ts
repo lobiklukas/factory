@@ -247,9 +247,10 @@ const program = Effect.gen(function* () {
       afterFourth.children.length === afterThird.children.length &&
       afterFourth.relations.length === afterThird.relations.length &&
       snapshotFourth.proposedIssues?.proposals.every(
-        (proposal, index) =>
-          proposal.created?.id ===
-          afterFourth.children[index === 2 ? 1 : index === 1 ? 2 : 0]?.id,
+        (proposal) =>
+          proposal.created !== undefined &&
+          afterFourth.children.find((child) => child.title === proposal.title)
+            ?.id === proposal.created.id,
       ) === true,
     `diff=${JSON.stringify(rerun.diff)} created=${JSON.stringify(fourth.created)} writes=${writesOf(afterThird)}->${writesOf(afterFourth)}`,
   );

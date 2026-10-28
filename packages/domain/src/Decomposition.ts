@@ -406,7 +406,7 @@ export const ProposalDiff = Schema.Struct({
 export type ProposalDiff = typeof ProposalDiff.Type;
 
 /**
- * The most removed proposals that never became a tracker issue a stored set keeps (LOB-203), newest
+ * The most removed proposals that never became a tracker issue a stored set keeps (LOB-203), oldest
  * first out. A removed proposal that was created is never dropped — its `created` is the only
  * record of the issue — so only drafts nothing was made for age out, which keeps a document a
  * model rewrites on every run from growing without bound.

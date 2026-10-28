@@ -11,6 +11,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import {
   MAX_PROPOSALS,
@@ -30,6 +31,7 @@ import {
   requestDecomposition,
   writeProposedIssues,
 } from "./decompose";
+import { ProposedIssuesDoc } from "./docs";
 import { createFauxModelAccess, fauxAnswer, isFauxTurnStep } from "./models";
 import {
   closeHarness,
@@ -510,6 +512,73 @@ describe("a decomposition reconciled into the set before it (LOB-203)", () => {
       expect(outcome.revived.diff.removed).toEqual(["C"]);
       expect(outcome.afterRevive?.proposals[1]?.created).toEqual(created);
       expect(outcome.afterRevive?.removed?.map((p) => p.title)).toEqual(["C"]);
+    } finally {
+      await Effect.runPromise(closeHarness(harness));
+    }
+  });
+});
+
+const stored = (title: string) => {
+  const { goal, change, acceptance, blockedBy } = proposal(title);
+  return {
+    title,
+    goal,
+    change,
+    acceptance: [...acceptance],
+    blockedBy: [...blockedBy],
+  };
+};
+
+describe("a stored set the validator refuses (LOB-203)", () => {
+  it("still keeps every recorded tracker id through the next decomposition, by title", async () => {
+    const storage = new MemoryStorage();
+    const cwd = mkdtempSync(join(tmpdir(), "factory-decompose-salvage-"));
+    const { harness, root } = await Effect.runPromise(
+      openSession({ storage, model: createFauxModelAccess().access, cwd }),
+    );
+    try {
+      const kept = { id: "uuid-1", identifier: "ENG-101" };
+      const gone = { id: "uuid-2", identifier: "ENG-102" };
+      // A set the rules refuse: the removed entry has no acceptance lines. Both ids are still recorded.
+      await root.commit(
+        (tx) =>
+          tx.doc(ProposedIssuesDoc, root.id).then((doc) => {
+            doc.proposals = [
+              { ...stored("A"), created: { ...kept } },
+              stored("B"),
+            ];
+            doc.removed = [
+              {
+                title: "Gone",
+                goal: "g",
+                change: "c",
+                created: { ...gone },
+              } as never,
+            ];
+          }),
+        BACKGROUND_CONTEXT,
+      );
+      const unreadable = await Effect.runPromise(
+        readProposedIssues(harness, root),
+      );
+      expect(unreadable).toBeUndefined();
+      const result = await Effect.runPromise(
+        writeProposedIssues(root, {
+          proposals: [proposal("a"), proposal("Gone"), proposal("C")],
+        }),
+      );
+      expect(result.proposals.map((p) => p.created)).toEqual([
+        kept,
+        gone,
+        undefined,
+      ]);
+      expect(result.removed).toEqual([expect.objectContaining({ title: "B" })]);
+      const after = await Effect.runPromise(readProposedIssues(harness, root));
+      expect(after?.proposals.map((p) => p.created)).toEqual([
+        kept,
+        gone,
+        undefined,
+      ]);
     } finally {
       await Effect.runPromise(closeHarness(harness));
     }

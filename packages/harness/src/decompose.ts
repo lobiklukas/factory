@@ -234,11 +234,14 @@ export const commitProposedIssues = (
   issues: ProposedIssues,
 ): Promise<ProposeDecompositionResult> =>
   tx.doc(ProposedIssuesDoc, conversationId).then((doc) => {
-    // Read through the same projection the snapshot uses: a stored value the rules refuse is none.
-    const previous = projectProposedIssues({
-      proposals: doc.proposals,
-      ...(doc.removed === undefined ? {} : { removed: doc.removed }),
-    });
+    // Read through the same projection the snapshot uses; a stored value the rules refuse (a rule
+    // tightened after it was written, one bad entry) must not take the recorded tracker ids with it,
+    // so the commit then falls back to what the raw document still names.
+    const previous =
+      projectProposedIssues({
+        proposals: doc.proposals,
+        ...(doc.removed === undefined ? {} : { removed: doc.removed }),
+      }) ?? salvageStored(doc);
     const result = reconcileProposals(previous, issues);
     // Assigned unconditionally: Pi Durable commits only what differs from the stored value, so a
     // set the session already holds is no commit at all.
@@ -252,6 +255,57 @@ export const commitProposedIssues = (
       diff: result.diff,
     };
   });
+
+/**
+ * The previous set read from the raw document when the validator refuses it: every entry with a
+ * title, kept with its `created` and nothing else the rules would have to vouch for. Reconciling
+ * against it keeps each recorded tracker id by title; a seed document salvages to nothing.
+ */
+const salvageStored = (doc: {
+  readonly proposals: unknown;
+  readonly removed?: unknown;
+}): ProposedIssues | undefined => {
+  const entries = (value: unknown): readonly Record<string, unknown>[] =>
+    Array.isArray(value)
+      ? value.filter(
+          (entry): entry is Record<string, unknown> =>
+            typeof entry === "object" &&
+            entry !== null &&
+            typeof (entry as { title?: unknown }).title === "string",
+        )
+      : [];
+  const text = (value: unknown): string =>
+    typeof value === "string" ? value : "";
+  const lines = (value: unknown): string[] =>
+    Array.isArray(value)
+      ? value.filter((line): line is string => typeof line === "string")
+      : [];
+  const created = (value: unknown) => {
+    const record = value as { id?: unknown; identifier?: unknown } | null;
+    return typeof record?.id === "string" &&
+      typeof record.identifier === "string"
+      ? { created: { id: record.id, identifier: record.identifier } }
+      : {};
+  };
+  const proposals = entries(doc.proposals).map((entry) => ({
+    title: text(entry["title"]),
+    goal: text(entry["goal"]),
+    change: text(entry["change"]),
+    acceptance: lines(entry["acceptance"]),
+    blockedBy: [] as number[],
+    ...created(entry["created"]),
+  }));
+  const removed = entries(doc.removed).map((entry) => ({
+    title: text(entry["title"]),
+    goal: text(entry["goal"]),
+    change: text(entry["change"]),
+    acceptance: lines(entry["acceptance"]),
+    ...created(entry["created"]),
+  }));
+  return proposals.length === 0 && removed.length === 0
+    ? undefined
+    : { proposals, removed };
+};
 
 const storedProposal = (proposal: ProposedIssue): StoredProposal => ({
   title: proposal.title,
