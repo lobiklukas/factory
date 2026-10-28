@@ -37,7 +37,9 @@ Built (LOB-270): definitions and a board's configuration are readable over RPC (
 config`). Each column is described with its declared exits and human gates (what `TaskService`
 refuses by), each requirement marked checked or unchecked (`CHECKED_REQUIREMENTS`), and
 its role's model as the deployment's `ROLE_MODELS` resolves it (B6) — read-only, joined by
-`describeDefinition` in `packages/core`.
+`describeDefinition` in `packages/core`. The dashboard renders the same `getBoardConfig` answer
+read-only at `/boards/<id>/settings` and in each lane header's disclosure, and says when a version
+newer than the board's pin exists (`.pi/skills/verify-web/features/board-settings.md`).
 
 Built (D4): a new definition version is authored without a migration — `defineBoard` over RPC and
 `factory board define --file def.json [--dry-run]`. It is written as the id's newest version + 1, never
