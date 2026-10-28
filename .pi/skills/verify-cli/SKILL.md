@@ -32,6 +32,7 @@ own instance of `apps/api` and record it in `.verify/run/api.pid`, so run them o
 | `factory withdraw` (LOB-166)                              | `./withdraw.sh`: a queued follow-up leaves the queue and the transcript       | withdrawing is a write, not a hidden row                     |
 | `--when-busy steer` (LOB-167)                             | `./steer.sh`: the steer joins the running run, which answers it once          | a steer is not a follow-up with a different label            |
 | `--when-busy reject` (LOB-167)                            | `./steer.sh`: `error: busy`, non-zero, nothing queued; idle → `run`           | a script can refuse to queue behind a running run            |
+| `factory interrupt` (C8)                                  | `./interrupt.sh`: a busy run stops, no `faux-ok`; idle → `not running`, 0     | an operator stops a run going wrong without killing the API  |
 | `factory repo` (LOB-253)                                  | `./repo.sh`, run by `drive.sh`: add, re-add, refusals, `ls`, `show`           | an operator binds a checkout without writing code            |
 | `factory skill` (D7)                                      | `./skill.sh`, run by `drive.sh`: `ls`, `show`, two puts, refusals             | a skill is edited without a migration, as a new version      |
 | `factory approve` (LOB-53)                                | `./approve.sh`, run by `drive.sh`: a parked approval decided, resumed         | the answer reaches the run, not only the row                 |
@@ -61,6 +62,7 @@ Every check is required: `drive.sh` exits non-zero when one fails.
 ./repo.sh        # needs ./up.sh's instance (API_URL/API_PORT); drive.sh runs it before approve.sh
 ./skill.sh       # needs ./up.sh's instance (API_URL/API_PORT); drive.sh runs it after repo.sh
 ./model.sh       # self-contained: its own API on :9370 (MODEL_PORT) and a refused boot on :9371
+./interrupt.sh   # self-contained: its own API on :9380 (INTERRUPT_PORT) with the sleeping faux script
 ```
 
 `model.sh` is separate because the models a server serves are deployment settings: it boots its own
@@ -88,6 +90,11 @@ session root and tmux server under `.verify/run/cli-withdraw/`, and stops all of
 of a sleeping command: `FAUX_SLEEP_MS=8000` (`STEER_SLEEP_MS`) makes the model nap before each step
 of a turn, so the steer and the refused reject both land before the tool round, whatever the tool
 does. Its state is under `.verify/run/cli-steer/`. See `features/steer.md`.
+
+`interrupt.sh` is separate for the same reason: an interrupt only lands while a run is in flight.
+It boots its API with `FAUX_SLEEP_MS=15000` (`INTERRUPT_SLEEP_MS`), so `factory interrupt` lands in
+the nap before `bash`, then runs it again on the idle session and on an unknown id, and sends a
+follow-up. Its state is under `.verify/run/cli-interrupt/`. See `features/interrupt.md`.
 
 `discard.sh` is separate because a discard removes a linked worktree and a branch, and the instance
 `up.sh` started registers no checkout to cut one from: it creates a repository under

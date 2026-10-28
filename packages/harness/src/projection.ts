@@ -166,6 +166,14 @@ export const BUDGET_DOC_KIND = "factory.budget";
  * merely went quiet.
  */
 export const BUDGET_STOPPED_ENTRY_KIND = "factory.budget.stopped";
+/**
+ * The entry an operator's interrupt is announced with (C8): the run was stopped before it finished.
+ * An entry for the reason a budget stop is one: Pi Durable settles the aborted run `unanswered` and
+ * writes nothing a reader would see, so without it an interrupted turn reads as one that went quiet.
+ */
+export const INTERRUPTED_ENTRY_KIND = "factory.run.interrupted";
+/** Which work an interrupt already marked (C8), so an overlapping or retried one marks it once. */
+export const INTERRUPT_DOC_KIND = "factory.interrupt";
 export const APPROVAL_REQUESTED_KIND = "factory.approval.requested";
 export const APPROVAL_DECIDED_KIND = "factory.approval.decided";
 /**
@@ -386,6 +394,8 @@ const entryKind = (kind: string): TranscriptEntryKind => {
       return "title";
     case BUDGET_STOPPED_ENTRY_KIND:
       return "budget";
+    case INTERRUPTED_ENTRY_KIND:
+      return "interrupted";
     case PR_INHERITED_ENTRY_KIND:
       return "inherited";
     default:
@@ -398,14 +408,15 @@ export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
   const toolName =
     message?.role === "toolResult" ? message.toolName : undefined;
   const isError = message?.role === "toolResult" ? message.isError : undefined;
-  // The title, no-change, budget and inherited-PR entries carry no model content, so their text comes
-  // from their data — which is what makes a no-op PR step or a budget stop a readable line, not an
-  // empty entry.
+  // The title, no-change, budget, interrupted and inherited-PR entries carry no model content, so
+  // their text comes from their data — which is what makes a no-op PR step or a budget stop a
+  // readable line, not an empty entry.
   const text =
     entry.kind === TITLE_ENTRY_KIND
       ? (stringAt(asObject(entry.data), "title") ?? "")
       : entry.kind === NO_CHANGE_ENTRY_KIND ||
-          entry.kind === BUDGET_STOPPED_ENTRY_KIND
+          entry.kind === BUDGET_STOPPED_ENTRY_KIND ||
+          entry.kind === INTERRUPTED_ENTRY_KIND
         ? (stringAt(asObject(entry.data), "text") ?? "")
         : entry.kind === PR_INHERITED_ENTRY_KIND
           ? inheritedPrText(stringAt(asObject(entry.data), "url") ?? "")
