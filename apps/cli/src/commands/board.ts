@@ -1,4 +1,4 @@
-import { Console, Effect, Option, Schema } from "effect";
+import { Console, Effect, FileSystem, Option, Schema } from "effect";
 import { Command, Flag } from "effect/cli";
 import {
   RepoSlug,
@@ -12,11 +12,15 @@ import {
   BoardInstanceId,
   DEFAULT_DEFINITION_ID,
   DefinitionId,
+  MAX_TASK_BODY_CHARS,
+  MAX_TASK_REF_CHARS,
   TaskId,
+  TaskPriority,
 } from "@repo/domain/Task";
 import type {
   AttentionItem,
   CreatedBoard,
+  CreateTaskInput,
   Task,
   TaskComment,
   TaskRun,
@@ -34,7 +38,7 @@ import { boardConfigCommands } from "./boardConfig";
  * The verbs are the ones a person needs to work a card from a terminal: make the board a repository's
  * cards live on (`create`, LOB-208), read the lanes and what sits in them (`ls`), read one card, its
  * spec and its thread (`show`), move it (`move`), answer what a parked run asked (`comment`, LOB-73),
- * start the run that advances it (`start`), and, for triage (LOB-264), park or free a card (`block`,
+ * start the run that advances it (`start`), put a card on it (`add`, LOB-261), and, for triage (LOB-264), park or free a card (`block`,
  * `unblock`), list what needs a person (`attention`) and list a card's runs (`runs`). Nothing here
  * reads the database, and nothing but `runs` reads a session snapshot (see `runsLines`); every
  * answer is the server's, which is what keeps `factory board ls` and the RPC list in agreement.
@@ -243,6 +247,216 @@ const lsCommand = Command.make(
     {
       command: "factory board ls --board brd_0123456789abcdefghjkmnpqrs",
       description: "Every lane in definition order",
+    },
+  ]),
+);
+
+/**
+ * The slice of the RPC client `factory board add` needs, so what the command validates and prints is
+ * a function of a client a test can fake — as `BlockClient` is for `block`.
+ */
+export interface AddClient<E> {
+  readonly createTask: (input: CreateTaskInput) => Effect.Effect<Task, E>;
+}
+
+/** What the flags of `factory board add` carry, before any of them is checked. */
+export interface AddCardFlags {
+  readonly boardId: BoardInstanceId;
+  readonly title: string;
+  readonly repo: RepoSlug | undefined;
+  readonly priority: TaskPriority | undefined;
+  readonly body: string | undefined;
+  readonly baseRef: string | undefined;
+  readonly actor: string;
+}
+
+const invalidInput = (message: string) =>
+  new SessionError({ code: "invalid_input", message });
+
+/**
+ * The `createTask` input a card made at the terminal sends, or `invalid_input` and no request.
+ *
+ * The same input the dashboard's 'New card' form sends (LOB-275): the one `createTask` takes, with
+ * each field present only when it was given, so the server's defaults (the board's repo, `normal`,
+ * no body) are the same whichever door the card came through. The title is trimmed — a title is a
+ * label, and one with stray shell whitespace is never the one meant — and a blank one is refused,
+ * since a card with no name cannot be told from another on a lane. The body is sent as typed, its
+ * lines and trailing newline untouched: the server owns what an empty body means. A body or a base
+ * ref over the card's limit is refused here with the limit named, rather than as a payload that
+ * fails to encode.
+ */
+export const addCardInput = (
+  flags: AddCardFlags,
+): Effect.Effect<CreateTaskInput, SessionError> =>
+  Effect.gen(function* () {
+    const title = flags.title.trim();
+    if (title === "") {
+      return yield* invalidInput("--title is empty: a card needs a title");
+    }
+    if (flags.body !== undefined && flags.body.length > MAX_TASK_BODY_CHARS) {
+      return yield* invalidInput(
+        `the body is ${flags.body.length} characters; a card takes at most ${MAX_TASK_BODY_CHARS} (a longer spec belongs in a file in the repository)`,
+      );
+    }
+    if (
+      flags.baseRef !== undefined &&
+      flags.baseRef.length > MAX_TASK_REF_CHARS
+    ) {
+      return yield* invalidInput(
+        `--base-ref takes at most ${MAX_TASK_REF_CHARS} characters`,
+      );
+    }
+    return {
+      boardId: flags.boardId,
+      title,
+      ...(flags.repo === undefined ? {} : { repo: flags.repo }),
+      ...(flags.priority === undefined ? {} : { priority: flags.priority }),
+      ...(flags.body === undefined ? {} : { body: flags.body }),
+      ...(flags.baseRef === undefined ? {} : { baseRef: flags.baseRef }),
+      actor: flags.actor,
+    };
+  });
+
+/**
+ * Put a card on a board (B3) and say what the board made of it: its id, its revision and the column
+ * it opened in — the three things the next command (`board show`, `board move --expect-revision`)
+ * needs. A refusal (`BoardNotFound`, `BoardRepoMismatch`, `InvalidTaskInput`) is the server's, and
+ * stays typed for `reportFailures` to print verbatim.
+ */
+export const addCard = Effect.fnUntraced(function* <E>(
+  client: AddClient<E>,
+  flags: AddCardFlags,
+) {
+  const input = yield* addCardInput(flags);
+  const card = yield* client.createTask(input);
+  return [`task ${card.id} revision ${card.revision} column ${card.column}`];
+});
+
+/**
+ * Read a body from a file, or from stdin for `-`: a spec is a document, and a shell argument is the
+ * wrong place for one. Unreadable is `invalid_input` naming the path, and nothing is sent.
+ */
+const readBodyFile = (path: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    return yield* fs.readFileString(path === "-" ? "/dev/stdin" : path);
+  }).pipe(
+    Effect.mapError((cause) =>
+      invalidInput(`--body-file "${path}" cannot be read: ${cause.message}`),
+    ),
+  );
+
+/**
+ * `factory board add` — a card on a board, from the terminal (B3, LOB-261).
+ *
+ * `--repo` defaults to the board's (LOB-255) and may only name it; the server answers
+ * `board_repo_mismatch` for another. `--body` and `--body-file` are two ways to write the same field,
+ * so naming both is `invalid_input`. The actor defaults to a person (`cli`), as `move`'s does. The
+ * flags are decoded here, so a malformed id, repo or priority is `invalid_input` and nothing is sent;
+ * an unknown board is the server's `board_not_found`, printed verbatim with a non-zero exit.
+ */
+const addCommand = Command.make(
+  "add",
+  {
+    board: Flag.String("board").pipe(
+      Flag.withDescription("Board instance id (brd_…)"),
+    ),
+    title: Flag.String("title").pipe(
+      Flag.withDescription("The card's title (one line)"),
+    ),
+    body: Flag.String("body").pipe(
+      Flag.withDescription("What the card asks for, in markdown"),
+      Flag.optional,
+    ),
+    bodyFile: Flag.String("body-file").pipe(
+      Flag.withDescription("Read the body from a file (- for stdin)"),
+      Flag.optional,
+    ),
+    repo: Flag.String("repo").pipe(
+      Flag.withDescription("The card's repository (defaults to the board's)"),
+      Flag.optional,
+    ),
+    priority: Flag.Literals("priority", TaskPriority.literals).pipe(
+      Flag.withDescription(
+        `The card's priority: ${TaskPriority.literals.join(", ")} (defaults to normal)`,
+      ),
+      Flag.optional,
+    ),
+    baseRef: Flag.String("base-ref").pipe(
+      Flag.withDescription(
+        "The ref its runs cut their worktree from (defaults to the repository's)",
+      ),
+      Flag.optional,
+    ),
+    actor: actorFlag,
+    api: apiFlag,
+  },
+  Effect.fnUntraced(function* ({
+    board,
+    title,
+    body,
+    bodyFile,
+    repo,
+    priority,
+    baseRef,
+    actor,
+    api,
+  }) {
+    const apiUrl = yield* resolveApiUrl(api);
+
+    const program = Effect.gen(function* () {
+      const boardId = decodeId(BoardInstanceId, board);
+      if (boardId === undefined) {
+        return yield* reportFailure(
+          "invalid_input",
+          `--board "${board}" is not a board id (brd_…)`,
+        );
+      }
+      const repoSlug = Option.isSome(repo)
+        ? decodeId(RepoSlug, repo.value)
+        : undefined;
+      if (Option.isSome(repo) && repoSlug === undefined) {
+        return yield* reportFailure(
+          "invalid_input",
+          `--repo "${repo.value}" is not a repository (owner/name)`,
+        );
+      }
+      if (Option.isSome(body) && Option.isSome(bodyFile)) {
+        return yield* reportFailure(
+          "invalid_input",
+          "--body and --body-file are two ways to write the body: name one",
+        );
+      }
+      const text = Option.isSome(bodyFile)
+        ? yield* readBodyFile(bodyFile.value)
+        : Option.getOrUndefined(body);
+      const { client } = yield* BoardClient;
+      const lines = yield* addCard(client, {
+        boardId,
+        title,
+        repo: repoSlug,
+        priority: Option.getOrUndefined(priority),
+        body: text,
+        baseRef: Option.getOrUndefined(baseRef),
+        actor,
+      });
+      for (const line of lines) yield* Console.log(line);
+    });
+
+    yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
+  }),
+).pipe(
+  Command.withDescription("Put a card on a board"),
+  Command.withExamples([
+    {
+      command:
+        'factory board add --board brd_… --title "Pin the Postgres major" --body "Compose names one major."',
+      description: "A card in the board's initial column, on the board's repo",
+    },
+    {
+      command:
+        "factory board add --board brd_… --title Release --body-file spec.md --priority urgent --base-ref release",
+      description: "A body from a file, urgent, cut from the release branch",
     },
   ]),
 );
@@ -994,10 +1208,11 @@ const runsCommand = Command.make(
 
 export const boardCommand = Command.make("board").pipe(
   Command.withDescription(
-    "Create a board, read its configuration, then read and move its cards: lanes, one card, a move, a comment, a run, a block, what needs a person",
+    "Create a board, read its configuration, add cards, then read and move them: lanes, one card, a move, a comment, a run, a block, what needs a person",
   ),
   Command.withSubcommands([
     createCommand,
+    addCommand,
     lsCommand,
     showCommand,
     moveCommand,

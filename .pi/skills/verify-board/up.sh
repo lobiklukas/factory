@@ -206,7 +206,7 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 # One board, through the service rather than SQL string-building, on the newest pipeline and over
-# the fixture checkout. The drive creates its own card through the API (create.ts), so the seed
+# the fixture checkout. The drive adds its own card with `factory board add`, so the seed
 # makes none.
 if ! SEED_CARD=0 SEED_DEFINITION_VERSION=newest SEED_REPO_ROOT="$BOARD_REPO" \
     API_URL="http://localhost:$API_PORT" \
