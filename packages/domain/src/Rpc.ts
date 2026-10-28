@@ -99,6 +99,7 @@ import {
   RegisterRepoInput,
   ReleaseWorkspaceResult,
   ReplaySessionInput,
+  RepoCloneFailed,
   RepoNotFound,
   RepoSummary,
   ResetSessionInput,
@@ -111,6 +112,7 @@ import {
   SessionSnapshot,
   SessionSummary,
   SpendReport,
+  SyncRepoInput,
   WithdrawMessageInput,
   WithdrawMessageResult,
 } from "@repo/domain/Session";
@@ -232,10 +234,18 @@ export class SessionRpc extends RpcGroup.make(
     success: ApproveProposalsResult,
     error: Schema.Union([SessionError, ApproveProposalsError]),
   }),
+  // A registration that names a URL and no checkout clones the repo into the factory's cache (LOB-265):
+  // a clone that fails is `RepoCloneFailed`, naming the repo and the reason, with the row still
+  // registered so `syncRepo` can try again.
   Rpc.make("registerRepo", {
     payload: RegisterRepoInput,
     success: RepoSummary,
-    error: SessionError,
+    error: Schema.Union([SessionError, RepoCloneFailed]),
+  }),
+  Rpc.make("syncRepo", {
+    payload: SyncRepoInput,
+    success: RepoSummary,
+    error: Schema.Union([SessionError, RepoNotFound, RepoCloneFailed]),
   }),
   // The registry read every repo picker needs (LOB-253): each row carries what its checkout says
   // about itself, read when it is answered. An unknown slug is `RepoNotFound`, not a session's

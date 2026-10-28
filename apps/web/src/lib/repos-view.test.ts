@@ -53,9 +53,35 @@ describe("runnability", () => {
     expect(state.fix).toContain("local path");
   });
 
-  it("does not take a clone URL for a checkout", () => {
+  it("does not take a clone URL alone for a checkout: the factory has not cloned it yet", () => {
     const state = runnability(row({ url: "https://github.com/acme/widgets" }));
     expect(state).toMatchObject({ runnable: false, cause: "no_checkout" });
+    if (state.runnable) return;
+    // The row already has a URL, so the fix is to retry the clone, not to register a URL.
+    expect(state.fix).toContain("factory repo sync");
+    expect(state.fix).not.toContain("Register a clone URL");
+  });
+
+  it("is runnable once the factory has cloned a URL-only repo into its cache (LOB-265)", () => {
+    expect(
+      runnability(
+        row({
+          url: "https://github.com/acme/widgets",
+          mirrorPath: "/sessions/.cache/acme/widgets.git",
+        }),
+      ),
+    ).toEqual({ runnable: true });
+  });
+
+  it("still flags a registered path that is not a work tree when a cache exists too", () => {
+    const state = runnability(
+      row({
+        localPath: "/gone/widgets",
+        localPathIsGit: false,
+        mirrorPath: "/sessions/.cache/acme/widgets.git",
+      }),
+    );
+    expect(state).toMatchObject({ runnable: false, cause: "not_a_work_tree" });
   });
 
   it("flags a checkout that is no longer a work tree, naming the path", () => {

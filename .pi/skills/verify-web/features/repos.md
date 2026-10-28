@@ -18,8 +18,9 @@ add|ls|show` is the CLI's ([verify-cli's repo.md](../../verify-cli/features/repo
 - **Not runnable** is a row with no local checkout, or whose checkout is no longer inside a git work
   tree (moved or deleted since it was registered: the server reads that from the disk each time).
   The row says why (`[data-repo-reason]`) and what to do (`[data-repo-fix]`). The rule is
-  `apps/web/src/lib/repos-view.ts#runnability`. A clone URL alone does not make a repo runnable:
-  nothing clones it into a factory cache yet (LOB-265), so a URL-only repo is flagged until it does.
+  `apps/web/src/lib/repos-view.ts#runnability`. A clone URL alone does not make a repo runnable: it
+  is once the API has cloned it into its own cache (`mirrorPath`, LOB-265), which `registerRepo` does
+  when it is given a URL and no path, so a URL-only repo is flagged only until that clone exists.
   The header (`[data-repos-count]`, `data-repos-not-runnable`) counts them.
 - **The form** (`[data-repo-form]`) takes slug, local path, default base ref and clone URL and calls
   `registerRepo`, so a slug that exists is updated and a blank field keeps the row's value (blank

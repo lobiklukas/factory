@@ -6,6 +6,7 @@ import {
   CredentialProviderLive,
   DEFAULT_DIFF_CAP,
   githubReviewPoster,
+  gitRepoMirror,
   ReviewerCredentialConfig,
   selectReviewerCredentialProvider,
   runDocsSchedule,
@@ -578,6 +579,12 @@ const HttpLive = Effect.gen(function* () {
     `reviewer identity: ${reviewerIdentity === "github-app" ? "its own GitHub App (GITHUB_REVIEWER_APP_ID)" : reviewerIdentity === "token" ? "its own token (GITHUB_REVIEWER_TOKEN)" : "none, so reviews are recorded and not posted"}`,
   );
 
+  // A repo registered with only a URL is cloned into `<SESSION_ROOT>/.cache` with the worker's read
+  // credential, and its sessions' worktrees are cut from that clone (LOB-265).
+  const repoMirror = yield* gitRepoMirror({ root: model.sessionRoot }).pipe(
+    Effect.provide(Layer.mergeAll(CredentialProviderLive, BunServices.layer)),
+  );
+
   // What `getServerInfo` answers (LOB-269): the values resolved above, as they were resolved, so the
   // RPC and the boot lines say the same thing. Names and modes only — no credential is in here.
   const ServerFactsLive = Layer.succeed(ServerFacts, {
@@ -602,6 +609,7 @@ const HttpLive = Effect.gen(function* () {
   // (LOB-15).
   const SessionDeps = SessionServiceLive({
     reviewPoster,
+    repoMirror,
     model: modelAccess,
     roleModels,
     sessionRoot: model.sessionRoot,
