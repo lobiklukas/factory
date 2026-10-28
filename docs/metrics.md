@@ -56,3 +56,52 @@ Admission control's refusal (LOB-70) is `factory.refusals{reason="at_capacity"}`
 server makes on its own behalf (a replay's comparison commit) is refused at capacity without being
 counted, and a boot's resume of a run or mission is never refused. The board's queue depth (LOB-71)
 joins this set when it lands.
+
+## Outcome metrics (LOB-44)
+
+The metrics above are what the process is doing now. **Outcome metrics** ask whether the factory is
+accelerating delivery, over a window, and are not exported: they are one read of the index tables,
+`getOutcomes` over RPC and `factory outcomes` on the CLI (`--since`, `--until`, `--repo`, `--json`).
+The definitions are `packages/core/src/outcomes.ts`'s module comment; `outcomes.test.ts` proves each
+one against a hand-computed oracle over a seeded fixture.
+
+**Every value states its window `[since, until)`, its denominator (a count and what it counts) and
+its source.** A share or a median of an empty population is `null`, never `0`. The default window is
+the thirty days before now.
+
+| Metric            | Values                                                                                  | Denominator                                                  | Source                                                                     |
+| ----------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------- |
+| `lead_time`       | `card.median`, `card.mean`: card `created` → first move into `done`                     | cards that first reached `done` in the window                | `task_events`                                                              |
+|                   | `card.factory_share`: the union of the card's run intervals over its summed lead time   | the same cards, time-weighted                                | `task_runs.started_at` → `finished_at` (else the session's last activity)  |
+|                   | `delegation.median`, `delegation.mean`: Linear delegation → first merge (re-runs too)   | Linear issues whose delegation first merged in the window    | `sessions.request_id`, `forked_from`, `pr_merged_at`                       |
+| `cycle_time`      | `card.median`, `card.mean`: first move out of the filed column → first move into `done` | cards that reached `done` in the window after moving         | `task_events`                                                              |
+| `defect_pressure` | `merges.reverted`, `merges.followed_up`, `follow_up_sessions`, `rate`                   | PRs the factory opened that merged in the window             | `sessions.pr_merged_at`, `pr_reverted_at`, `forked_from`, `task_runs`      |
+| `recovery`        | `reruns.recovered`, `reruns.median_to_merge`; `approvals.approved_rate`, `denied_rate`  | re-runs created in the window; decisions taken in the window | `sessions.forked_from`, `pr_merged_at`; `session_approvals`                |
+| `adoption`        | `sessions.<trigger>` (linear … direct); `actors.repeat`                                 | sessions created in the window; people who started one in it | `sessions.request_id`, `task_runs`, `sessions.actor`                       |
+| `cost`            | `total`, `per_session`                                                                  | sessions created in the window                               | `session_activity.cost_total` (LOB-17), so it reconciles with `factory ls` |
+
+A merge is the factory's own record, not a read of GitHub: the `pull_request` webhook commits
+`factory.merge` to each session whose PR merged, and to the sessions of a PR a later merged PR says it
+reverts (`Reverts owner/repo#N`, GitHub's revert wording); `sessions.pr_merged_at` and
+`pr_reverted_at` are its index, refolded by `rebuildIndexes`. A merge before this was recorded is in
+no number. A run's end (`task_runs.finished_at`) is written where its session goes idle.
+
+A card-mode rule's card (LOB-254) carries its source into the numbers: its runs count under that
+source in `adoption` (the card's `created` event names `trigger:<source>`), and a Linear card's
+delegation runs from the card's filing to the first merge of its runs. A card that went from its
+filed column straight into `done` has a lead time and no cycle time.
+
+Known limits:
+
+- **`card.factory_share` does not fully survive a rebuild from scratch.** `task_runs.finished_at` is
+  in no log (docs/design.md D7, "As built (LOB-44)"): a run row `rebuildIndexes` re-creates starts at
+  its session's first commit and reads as ending at the session's last activity, which a later
+  commit stretches, so the share is an upper bound for those runs.
+- **The read scans every session created before `until`**, in the repo when one is named: a merge,
+  revert or follow-up in the window can belong to a session created long before it. Its cost grows
+  with the deployment's history, not with the window; a bound to the sessions related to the window
+  is the next step if it shows up in the read's latency.
+
+Not here yet: the share of all merged PRs the factory authored and of issues it closed (their
+denominators are outside the factory's records), a policy `block`'s refusal rate (indexed nowhere),
+emission over OTLP, and a board view.

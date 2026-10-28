@@ -54,6 +54,7 @@ const SessionRpcHandlers = SessionRpc.toLayer(
       startMission: (input) => sessions.startMission(input),
       listSessions: (input) => sessions.list(input),
       listSpend: () => sessions.spend,
+      getOutcomes: (input) => sessions.outcomes(input),
       predictCost: (input) => sessions.predictCost(input),
       backtestCost: (input) => sessions.backtestCost(input),
       listPages: (input) => sessions.listPages(input),
