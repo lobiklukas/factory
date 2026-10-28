@@ -12,6 +12,7 @@
 // Uses the locally installed Chrome (channel: "chrome") instead of a downloaded
 // Playwright browser, so this runs without a browser download.
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1883,10 +1884,46 @@ if ((await sessionLink.count()) > 0) {
 // caught below, because the API then does not hold the board.
 const boardObserved = {};
 let boardSeed = null;
+
+// The board is made the way an operator makes one (C5): the **New board** form on `/boards`, on a
+// repository slug of this run's own and version 1 of the default definition (the version the seed
+// has always pinned, so the card-pane checks below read the same pipeline). Only the card is seeded
+// through `TaskService`, onto the board the form made. A form that did not land on a board leaves
+// `formBoardId` empty, and the seed check below fails with the reason.
+const BOARD_REPO = `verify-web/${randomBytes(6).toString("hex")}`;
+let formBoardId = "";
+try {
+  await page.goto(`${WEB_URL}/boards`, { waitUntil: "domcontentloaded" });
+  await page.locator("[data-new-board]").first().click({ timeout: 20_000 });
+  await page.waitForSelector("[data-board-form]", { timeout: 20_000 });
+  // With repositories registered (the session checks above register some) the repository is a
+  // select with "Another repository…" last; with none it is the slug's own input.
+  const picker = page.locator("select#new-board-repo");
+  if ((await picker.count()) > 0) {
+    await picker.selectOption("");
+    await page.locator("#new-board-repo-text").fill(BOARD_REPO);
+  } else {
+    await page.locator("input#new-board-repo").fill(BOARD_REPO);
+  }
+  await page.locator("#new-board-version").selectOption("1");
+  await page.locator("[data-board-submit]").click();
+  await page.waitForFunction(
+    () => /^\/boards\/brd_[0-9a-z]{26}$/.test(window.location.pathname),
+    null,
+    { timeout: 20_000 },
+  );
+  formBoardId = new URL(page.url()).pathname.split("/").pop() ?? "";
+} catch (error) {
+  boardObserved.formError = String(error).slice(0, 300);
+}
 const seed = spawnSync(
   "bun",
   ["run", path.join(ROOT, ".pi/skills/verify-board/seed.ts")],
-  { encoding: "utf8", timeout: 60_000 },
+  {
+    encoding: "utf8",
+    timeout: 60_000,
+    env: { ...process.env, SEED_BOARD_ID: formBoardId },
+  },
 );
 boardObserved.seed = {
   status: seed.status,
@@ -1913,6 +1950,17 @@ assert(
     : truth.exit === "Success"
       ? JSON.stringify(boardSeed)
       : `seeded ${boardId}, but the API's getBoard says ${String(truth.exit)} — is DATABASE_URL the one ./up.sh started the API with?`,
+);
+
+assert(
+  "the board was made through the New board form",
+  formBoardId.startsWith("brd_") &&
+    boardId === formBoardId &&
+    truth.value?.instance?.repo === BOARD_REPO &&
+    truth.value?.instance?.definitionVersion === 1,
+  formBoardId === ""
+    ? `the form did not land on a board: ${boardObserved.formError ?? "no error"}`
+    : `${formBoardId} for ${BOARD_REPO}, seeded ${boardId}, getBoard repo ${String(truth.value?.instance?.repo)} v${String(truth.value?.instance?.definitionVersion)}`,
 );
 
 const definitionOrder = (truth.value?.definition?.columns ?? []).map(
@@ -1943,6 +1991,8 @@ const BOARD_READS = new Set([
   "listAttention",
   // The shell's faux banner (LOB-272) reads it on every page.
   "getServerInfo",
+  // The New session form's cost estimate (LOB-38), on the sessions page the walk starts from.
+  "predictCost",
 ]);
 const boardRpcTags = [];
 const recordRpcTags = (request) => {

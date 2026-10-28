@@ -2,6 +2,7 @@ import type {
   BoardDefinition,
   BoardInstanceId,
   CommentTaskInput,
+  CreateBoardInput,
   CreateTaskInput,
   MoveTaskInput,
   Task,
@@ -47,12 +48,14 @@ export const BOARD_POLL = Duration.seconds(2);
  * A server read and nothing else. There is no local copy to fall back on, so a reload always shows
  * what the server has — which is the whole point of the route.
  */
-export const boardsAtom = runtime.atom(
-  Effect.gen(function* () {
-    const rpc = yield* RpcClient;
-    return yield* rpc.client.listBoards({});
-  }),
-);
+export const boardsAtom = runtime
+  .atom(
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.listBoards({});
+    }),
+  )
+  .pipe(Atom.withReactivity([BOARD_KEY]));
 
 /**
  * One board as the lanes need it: the instance with the definition version it binds, and its cards.
@@ -277,4 +280,31 @@ export const decideApprovalAtom = runtime.fn(
       return yield* rpc.client.decideApproval(input);
     }),
   { reactivityKeys: [APPROVALS_KEY] },
+);
+
+/**
+ * Which definitions exist and the versions each holds (LOB-270): what the "New board" form's
+ * pickers offer. Read once per opening of the form — definitions are written by migrations, so a
+ * poll would only re-ask a fixed answer.
+ */
+export const definitionsAtom = runtime.atom(
+  Effect.gen(function* () {
+    const rpc = yield* RpcClient;
+    return yield* rpc.client.listDefinitions({});
+  }),
+);
+
+/**
+ * Makes a board from the "New board" form (C5): `createBoard`, exactly as `factory board create`
+ * calls it, so a repository gets one board, pinned to the version the server resolves (B2). The
+ * answer is the server's board or its typed refusal (`BoardExists`, `DefinitionNotFound`); `/boards`
+ * shows the board when the list read that `BOARD_KEY` re-runs says it is there.
+ */
+export const createBoardAtom = runtime.fn(
+  (input: CreateBoardInput) =>
+    Effect.gen(function* () {
+      const rpc = yield* RpcClient;
+      return yield* rpc.client.createBoard(input);
+    }),
+  { reactivityKeys: [BOARD_KEY] },
 );

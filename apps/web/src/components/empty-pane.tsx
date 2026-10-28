@@ -23,12 +23,15 @@ export const EmptyPane = ({
   detail,
   icon,
   visible,
+  action,
   children,
 }: {
   readonly title: string;
   readonly detail: string;
   readonly icon?: ReactNode;
   readonly visible: boolean;
+  /** What the person can do about the emptiness; shown under the detail. */
+  readonly action?: ReactNode;
   readonly children?: ReactNode;
 }) => (
   <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -39,6 +42,7 @@ export const EmptyPane = ({
         )}
         <EmptyTitle>{title}</EmptyTitle>
         <EmptyDescription>{detail}</EmptyDescription>
+        {action === undefined ? null : action}
       </Empty>
     ) : (
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">{children}</div>
