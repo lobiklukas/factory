@@ -3,7 +3,7 @@
  *
  * The RPC it calls is proven over the wire by `apps/api/src/Rpc/Session.test.ts`, the raise itself
  * by `packages/harness/src/budget.test.ts`, and the command in a terminal by
- * `.pi/skills/verify-cli/budget.sh`.
+ * `.pi/skills/verify-board/budget.sh` and `.pi/skills/verify-api/budget.sh`.
  */
 import { SessionId, type SessionSummary } from "@repo/domain/Session";
 import { describe, expect, it } from "vitest";

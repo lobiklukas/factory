@@ -16,6 +16,7 @@ import type {
 import { Cause, Effect, Exit, Option, Stream } from "effect";
 import { Atom } from "effect/reactivity";
 import { runtime } from "../atom";
+import { hasTranscriptRow } from "../transcript-view";
 import { RpcClient } from "../rpc-client";
 import { SESSIONS_KEY } from "./session-list";
 
@@ -47,10 +48,39 @@ export type SessionView = {
   readonly workspaceWarning?: string;
   /**
    * The session's cap as the snapshot reported it (C23), absent for a session with none. It is what
-   * the "Raise cap" field's suggestion is made from; the stream does not update it, so it is the
-   * cap at attach, and a stop's own cap is what the transcript's line says.
+   * the "Raise cap" field's suggestion and spend floor are made from; the stream does not update it,
+   * so it is the cap and spend at attach, and a stop's own cap is what the transcript's line says.
    */
   readonly budget?: SessionBudget;
+  /**
+   * The budget stop the snapshot already shows as moved past (C23): the stop is the newest row of a
+   * capped session whose budget reports no stop, so the cap was raised before this attach (here
+   * earlier, elsewhere, or by the CLI). The stop and the document are committed together, so a
+   * snapshot that holds the entry and no `stopped` is a raise, never a lag. "Raise cap" is not
+   * offered on it.
+   */
+  readonly settledStop?: string;
+};
+
+/** The id of the snapshot's newest row when it is a budget stop whose cap was already raised. */
+const settledStopOf = (event: {
+  readonly entries: readonly TranscriptEntry[];
+  readonly budget?: SessionBudget | undefined;
+}): string | undefined => {
+  if (event.budget === undefined || event.budget.stopped !== undefined) {
+    return undefined;
+  }
+  const newest = event.entries.findLast(hasTranscriptRow);
+  return newest !== undefined && newest.kind === "budget"
+    ? newest.id
+    : undefined;
+};
+
+const settledStopField = (
+  event: Parameters<typeof settledStopOf>[0],
+): { readonly settledStop?: string } => {
+  const settledStop = settledStopOf(event);
+  return settledStop === undefined ? {} : { settledStop };
 };
 
 const emptyView = (summary: SessionSummary): SessionView => ({
@@ -88,6 +118,7 @@ export const foldSessionEvent = (
           ? {}
           : { workspaceWarning: event.workspace.warning }),
         ...(event.budget === undefined ? {} : { budget: event.budget }),
+        ...settledStopField(event),
       };
     case "entry":
       return { ...state, entries: [...state.entries, event.entry] };

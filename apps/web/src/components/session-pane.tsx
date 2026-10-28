@@ -224,13 +224,21 @@ export const SessionPane = ({
 
   /**
    * The stop "Raise cap" sits on (C23): the newest row, when it is a budget stop this pane has not
-   * raised the cap for. The field opens at twice the cap the stop was held to — the cap this pane
-   * last set, else the one the snapshot reported — and the spend floor is the live usage total.
+   * raised the cap for, and not one the attach snapshot already showed as raised. The field opens
+   * at twice the cap the stop was held to — the cap this pane last set, else the one the snapshot
+   * reported — and the spend floor is what the cap measures: the snapshot's spend (a fork's carried
+   * spend included) or the live usage total, whichever is higher.
    */
   const raiseStop =
     view === null
       ? undefined
-      : raiseCapOffer(view.entries, raisedHere?.stops ?? new Set());
+      : raiseCapOffer(
+          view.entries,
+          new Set([
+            ...(raisedHere?.stops ?? []),
+            ...(view.settledStop === undefined ? [] : [view.settledStop]),
+          ]),
+        );
   const raiseControl =
     view === null || raiseStop === undefined ? undefined : (
       <RaiseCap
@@ -238,7 +246,7 @@ export const SessionPane = ({
         initial={suggestedCap(
           raisedHere === null ? view.budget?.cap : raisedHere.cap,
         )}
-        spent={spendOf(view.usage).costTotal}
+        spent={Math.max(view.budget?.spent ?? 0, spendOf(view.usage).costTotal)}
         calling={raising}
         onRaise={(budget) => {
           setRaising(true);
@@ -252,7 +260,14 @@ export const SessionPane = ({
                 ]),
                 cap: answer.budget.cap,
               }));
-              toast.success("Cap raised", { description: answer.message });
+              // A cap the spend already reaches is committed but stops the next run at once.
+              if (answer.budget.spent >= answer.budget.cap) {
+                toast.warning("The cap is already reached", {
+                  description: answer.message,
+                });
+              } else {
+                toast.success("Cap raised", { description: answer.message });
+              }
             })
             .catch((cause: unknown) => {
               toast.error("The cap was not raised", {

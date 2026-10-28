@@ -1,6 +1,6 @@
 /**
  * The "Raise cap" action's decisions (C23): which stop it sits on, what it opens with, and which
- * caps it will send. The press against a real server is `.pi/skills/verify-web/raise-cap.sh`.
+ * caps it will send. The press against a real server is `.pi/skills/verify-board/budget.sh`.
  */
 import type { TranscriptEntry } from "@repo/domain/Session";
 import { describe, expect, it } from "vitest";

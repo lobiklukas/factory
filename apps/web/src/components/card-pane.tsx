@@ -720,9 +720,8 @@ const Runs = ({
   const listed = Option.getOrUndefined(AsyncResult.value(runs));
 
   const send = () => {
-    if (draft === null || !sendable || starting) return;
+    if (draft === null || !sendable || !budget.ok || starting) return;
     setStarting(true);
-    if (!budget.ok) return;
     void start({ task, prompt: draft, budget: budget.budget })
       .then((exit) => {
         if (Exit.isSuccess(exit)) {

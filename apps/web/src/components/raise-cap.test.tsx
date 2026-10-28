@@ -1,6 +1,6 @@
 /**
  * The Raise cap control (C23): it opens at the suggested cap and is unavailable while its call is in
- * flight; which caps it sends is `budget-view.test.ts`. The press in a real browser is `.pi/skills/verify-web/raise-cap.sh`.
+ * flight; which caps it sends is `budget-view.test.ts`. The press in a real browser is `.pi/skills/verify-board/budget.sh`.
  */
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";

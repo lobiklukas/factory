@@ -10,9 +10,12 @@ import { hasTranscriptRow } from "./transcript-view";
 /**
  * The budget stop entry the action sits on, or `undefined` when none is offered.
  *
- * The stream carries the stop as a `budget` transcript entry and does not carry the session's cap
- * document, so the action is offered where the transcript says the cap is what the session is
- * waiting on: the newest row is a stop. A message sent after the stop is a run that was either let
+ * The stream carries the stop as a `budget` transcript entry and does not update the session's cap
+ * document after the attach snapshot, so the action is offered where the transcript says the cap is
+ * what the session is waiting on: the newest row is a stop. A stop the attach snapshot already shows
+ * as raised (its budget reports no stop) arrives in `raised` as the view's `settledStop`; a raise made
+ * elsewhere after the attach is the one case the pane cannot see, and the server then answers a
+ * second raise harmlessly. A message sent after the stop is a run that was either let
  * through (the cap was raised, here or elsewhere) or stopped again with a stop of its own, so a stop
  * with anything after it is history. `raised` is the stop this pane already raised the cap for: a raise
  * leaves the stop in the transcript, and the action must not offer to do it twice.

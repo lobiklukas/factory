@@ -7,7 +7,7 @@
 // first answer and the run must stop before the second. What is read is the server's: `getSession`'s
 // budget, spend and transcript, and `listTaskRuns`. The page is read only for what it shows and sends.
 //
-//   cli      `factory board start --budget 0.05 --idle` records the cap on the run's session; `--budget 0`
+//   cli      `factory board start --budget 0.05` records the cap on the run's session; `--budget 0`
 //            is refused with no run opened; no `--budget` records none (this instance has no default)
 //   browser  the card pane's Start run has a Budget field: text that is not an amount is refused on the
 //            spot and sends nothing; 0.01 is sent on `createSession` and recorded
