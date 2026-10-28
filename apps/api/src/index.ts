@@ -44,7 +44,12 @@ import {
   Redacted,
   Schema,
 } from "effect";
-import { FetchHttpClient, HttpRouter, HttpServer } from "effect/http";
+import {
+  FetchHttpClient,
+  HttpClient,
+  HttpRouter,
+  HttpServer,
+} from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
 import { webhookLiveFor } from "./Api/Webhook";
@@ -761,10 +766,17 @@ const HttpLive = Effect.gen(function* () {
     sandbox: Option.getOrElse(sandboxChoice, () => DEFAULT_SANDBOX_RUNTIME),
   });
 
+  // The PR step a settled run takes with no operator call (C18) reaches the forge through the same
+  // pair the RPC member is handed: the credential provider and a client on `GITHUB_API_URL`.
+  const pullRequestOnSettle = yield* Effect.context<
+    CredentialProvider | HttpClient.HttpClient
+  >().pipe(Effect.provide(PullRequestStepDeps));
+
   // Sessions own one log, one working directory, and (locally) the harness that drives them. The PR
   // step's exit is mirrored on the Linear issue a session was delegated from, when a key is set
   // (LOB-15).
   const SessionDeps = SessionServiceLive({
+    pullRequestOnSettle,
     reviewPoster,
     repoMirror,
     repoRemote,
@@ -869,6 +881,9 @@ const HttpLive = Effect.gen(function* () {
   );
   yield* Effect.logInfo(
     `  - a session's PR step refuses a diff over ${prCap.maxFiles} files / ${prCap.maxLines} lines`,
+  );
+  yield* Effect.logInfo(
+    "  - a settled run opens its PR with no operator call when a trigger opened its session or its card's column requires a PR",
   );
 
   const CorsRouters = Layer.mergeAll(

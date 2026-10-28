@@ -235,6 +235,17 @@ change or no PR. Only keys with a recorded artifact are checked (`packages/core/
 lists why the others are not yet); the logs are read, and the branch measured, before the card is
 locked, at the revision the move expected.
 
+Built (C18): a run whose column requires `pr_link` opens its PR itself. When this process sees the run
+settle (its session goes idle), the control plane runs the same PR step `factory pr` and the
+dashboard's Open pull request call — measured, capped, pushed with the provider's token and recorded
+as `factory.pr` — with no operator call (`packages/core/src/prOnSettle.ts`). A session a trigger opened
+with no card (`trigger:<source>`: Linear, Jira, GitHub, Slack, Sentry, the generic webhook, docs) does
+the same. Every other run's PR stays a person's call: a card's run in a column that requires no PR
+(the specifier, the reviewer), a person's own session, a fork or a replay, and a working directory
+that is not its own checkout. A settled run whose step opened nothing — no change, a diff over the cap,
+a remote branch the push may not overwrite, a failure — says so in its transcript (no-change's line,
+or `factory.pr.not-opened`) and as a note by the run on its card, which the card's next run is told.
+
 A board that gates on `verified` needs every surface its changes touch to be verifiable: the repo
 declares its verify command (`commands.verify` in `.factory/config`, which covers every surface), or
 carries a `verify-<surface>` skill for each one. A surface with neither — or a path outside every

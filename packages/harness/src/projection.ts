@@ -155,6 +155,13 @@ export const PAGE_ENTRY_KIND = "factory.page.written";
  */
 export const NO_CHANGE_ENTRY_KIND = "factory.pr.no-change";
 /**
+ * The entry a settled run's PR step announces when it opened no PR for a reason other than an
+ * unchanged branch (C18): the diff over the cap, a remote branch the push may not overwrite, or a
+ * failure. The step's operator-driven caller answers those to the person who asked; a run that
+ * settled has nobody waiting on the answer, so the transcript is where a reader finds it.
+ */
+export const PR_NOT_OPENED_ENTRY_KIND = "factory.pr.not-opened";
+/**
  * A session's spend ceiling and its last stop (LOB-163, `./budget`). A document because the cap is
  * state a hook reads before every request, and the stop beside it is what a snapshot reports.
  */
@@ -408,13 +415,14 @@ export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
   const toolName =
     message?.role === "toolResult" ? message.toolName : undefined;
   const isError = message?.role === "toolResult" ? message.isError : undefined;
-  // The title, no-change, budget, interrupted and inherited-PR entries carry no model content, so
-  // their text comes from their data — which is what makes a no-op PR step or a budget stop a
-  // readable line, not an empty entry.
+  // The title, no-change, not-opened, budget, interrupted and inherited-PR entries carry no model
+  // content, so their text comes from their data — which is what makes a no-op PR step or a budget
+  // stop a readable line, not an empty entry.
   const text =
     entry.kind === TITLE_ENTRY_KIND
       ? (stringAt(asObject(entry.data), "title") ?? "")
       : entry.kind === NO_CHANGE_ENTRY_KIND ||
+          entry.kind === PR_NOT_OPENED_ENTRY_KIND ||
           entry.kind === BUDGET_STOPPED_ENTRY_KIND ||
           entry.kind === INTERRUPTED_ENTRY_KIND
         ? (stringAt(asObject(entry.data), "text") ?? "")

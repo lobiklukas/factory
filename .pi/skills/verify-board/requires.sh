@@ -9,9 +9,9 @@
 # `building` the way a person does, then proves both gates from the terminal:
 #
 #   0. building        with no run, `board move --to review` is refused naming "non_empty_diff"; a
-#                      builder run commits a change on its branch, and the same move is refused
-#                      naming "pr_link"; `factory pr` opens the run's PR on a loopback GitHub fake,
-#                      and the move goes through
+#                      builder run commits a change on its branch and settles, and its PR is opened
+#                      on a loopback GitHub fake with no call (C18) — `factory pr` answers it
+#                      `already-open` — and the move goes through
 #   1. no evidence     `board move --to done` is refused: `requirement_unmet`, the words name
 #                      "verified", the exit is non-zero, and the card is still in `review`
 #   2. web, passing    a run (`board start`) changes apps/web and verifies it with the fixture's
@@ -258,20 +258,28 @@ check "the builder run's branch carries its committed change" \
   "$(grep -qE '^[0-9]+[[:space:]]+[0-9]+[[:space:]]+apps/web/src/built.ts$' "$EVIDENCE_DIR/requires-build-diff.txt" && echo 0 || echo 1)" \
   "$(head -1 "$EVIDENCE_DIR/requires-build-diff.txt" | tr '\t' ' ')"
 
-rc="$(cli requires-building-no-pr.txt board move --task "$TASK_ID" --to review --expect-revision "$REVISION" --actor "${BUILD_SESSION:-ses_missing}")"
-check "with the change but no PR, building → review is refused naming pr_link" \
-  "$([ "$rc" != "0" ] && grep -qF 'error: requirement_unmet: the move building → review needs "pr_link" (a PR link), which is not met: the card'"'"'s latest run '"${BUILD_SESSION:-ses_missing}"' recorded no PR' "$EVIDENCE_DIR/requires-building-no-pr.txt" && echo 0 || echo 1)" \
-  "exit=$rc"
+# The builder run's PR is the settled run's own (C18): `building` requires one, so the run that
+# settled with its change took the PR step with no call from here. The drive only reads it back
+# (`build.ts MODE=settled`), and `factory pr` then answers that same PR, `already-open`, without
+# asking the forge again. The refusal of a move with the change but no PR is now a window this
+# script cannot hold open; it is drive.sh's with BOARD_GITHUB=off, and `TaskService.test.ts`'s.
+MODE=settled API_URL="$API_URL" SESSION_ID="${BUILD_SESSION:-}" TASK_ID="$TASK_ID" \
+  EVIDENCE_DIR="$EVIDENCE_DIR" bun "$ROOT/.pi/skills/verify-board/build.ts" > "$EVIDENCE_DIR/requires-settled.txt" 2>&1
+settled_rc=$?
+cat "$EVIDENCE_DIR/requires-settled.txt"
+PR_URL="$(sed -n 's/^pr       \(https:\/\/[^ ]*\)$/\1/p' "$EVIDENCE_DIR/requires-settled.txt" | head -1)"
+check "the builder run's PR is opened on the fake forge when its run settles, with no factory pr" \
+  "$([ "$settled_rc" = "0" ] && [ -n "$PR_URL" ] && grep -qF "\"url\": \"$PR_URL\"" "$LEDGER" && echo 0 || echo 1)" \
+  "exit=$settled_rc ${PR_URL:-no link}"
 rc="$(cli requires-show-building.txt board show --task "$TASK_ID")"
-check "the refused card is still in building at the same revision" \
+check "the card is still in building at the same revision: the PR is not a move" \
   "$([ "$rc" = "0" ] && grep -qx "column    building" "$EVIDENCE_DIR/requires-show-building.txt" && grep -qx "revision  $REVISION" "$EVIDENCE_DIR/requires-show-building.txt" && echo 0 || echo 1)" \
   "exit=$rc"
 
 rc="$(cli requires-pr.txt pr "${BUILD_SESSION:-ses_missing}")"
-PR_URL="$(sed -n 's/^pr       \(https:\/\/[^ ]*\)$/\1/p' "$EVIDENCE_DIR/requires-pr.txt" | head -1)"
-check "factory pr opens the builder run's PR on the fake forge" \
-  "$([ "$rc" = "0" ] && [ -n "$PR_URL" ] && grep -qF "\"url\": \"$PR_URL\"" "$LEDGER" && echo 0 || echo 1)" \
-  "exit=$rc ${PR_URL:-no link}"
+check "factory pr answers the PR the settled run opened, already-open" \
+  "$([ "$rc" = "0" ] && [ -n "$PR_URL" ] && grep -qx "pr       $PR_URL" "$EVIDENCE_DIR/requires-pr.txt" && grep -qx "outcome  already-open" "$EVIDENCE_DIR/requires-pr.txt" && echo 0 || echo 1)" \
+  "exit=$rc $(head -3 "$EVIDENCE_DIR/requires-pr.txt" | tr '\n' ' ')"
 
 rc="$(cli requires-move-review.txt board move --task "$TASK_ID" --to review --expect-revision "$REVISION" --actor "${BUILD_SESSION:-ses_missing}")"
 if [ "$rc" = "0" ] && grep -q "moved $TASK_ID to review (revision $((REVISION + 1)))" "$EVIDENCE_DIR/requires-move-review.txt"; then

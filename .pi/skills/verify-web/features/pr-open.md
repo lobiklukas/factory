@@ -68,8 +68,13 @@ request the fake saw and every PR it holds), `api.log`, and the screenshots `pr-
 `pr-header-opened.png`, `pr-header-empty.png`, `pr-header-cap.png`, `pr-card-offered.png`,
 `pr-card-opened.png`, `pr-card-refused.png`, `pr-header-credential.png`, `pr-card-credential.png`.
 
-Also driven by verify-board's build phase: the build run's PR is opened by `pr-browser.mjs` from its row
-in the card pane, with no `factory pr` ([build.md](../../verify-board/features/build.md)).
+Since C18 a card's run in a column that requires a PR (`building`), and a session a trigger opened,
+open their PR themselves when the run settles, so the control is offered to them only when that step
+opened nothing (and the run says why, in its transcript and on its card). verify-board's build phase
+now proves the card pane _showing_ the settled run's PR with no control (`pr-browser.mjs`,
+`PR_MODE=recorded`, [build.md](../../verify-board/features/build.md)); this drive's card runs are in
+`intake`, which requires no PR, so the press is still theirs. Re-run green on 2026-10-28 from
+`agent/C18` (API `:9507`, web `:3507`, the fake on `:9508`): 22/22.
 
 Last verified 2026-10-28 from the `agent/C7` worktree (API `:9570`, web `:3570`, the fake on `:9571`):
 `pr.sh` passed 22/22 required checks (fake 19, off 3 — see `observed.json` in each).

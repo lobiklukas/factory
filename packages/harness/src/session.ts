@@ -191,6 +191,7 @@ import {
   PR_OPENED_ENTRY_KIND,
   PR_INHERITED_ENTRY_KIND,
   NO_CHANGE_ENTRY_KIND,
+  PR_NOT_OPENED_ENTRY_KIND,
   INTERRUPTED_ENTRY_KIND,
   INTERRUPT_DOC_KIND,
   LIVE_DOC,
@@ -1431,6 +1432,32 @@ export const writeNoDocumentationChange = (
         (tx) =>
           tx.appendEntry(NoDocumentationChangeEntry, conversation.id, {
             data: { text: noDocumentationChange(base) },
+          }),
+        BACKGROUND_CONTEXT,
+      )
+      .then((entry) => entry.id),
+  );
+
+/**
+ * A settled run whose PR step opened no PR, announced in the transcript (C18). Like the no-change
+ * entry it carries no model content, so the agent never reads it as a turn, and nothing else is
+ * written: the next settle (or an operator's call) runs the step afresh.
+ */
+export const PullRequestNotOpenedEntry = defineEntry<{
+  readonly text: string;
+}>(PR_NOT_OPENED_ENTRY_KIND);
+
+/** Announce why a settled run's PR step opened nothing; `text` is the control plane's sentence. */
+export const writePullRequestNotOpened = (
+  conversation: Conversation,
+  text: string,
+): Effect.Effect<EntryId, SessionError> =>
+  attempt("write PR not opened", () =>
+    conversation
+      .commit(
+        (tx) =>
+          tx.appendEntry(PullRequestNotOpenedEntry, conversation.id, {
+            data: { text },
           }),
         BACKGROUND_CONTEXT,
       )

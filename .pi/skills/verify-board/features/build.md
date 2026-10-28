@@ -11,8 +11,12 @@ verifies it, the run's PR is opened on the forge with the verification in its bo
 on the PR's head, not a person's note), the run is refused the merge, and the person's merge takes the
 card to `done` (docs/board.md B4, B5, B8).
 
-Since C7 the drive opens the run's PR **in the browser** (the card pane's run row, `pr-browser.mjs`),
-not with `factory pr`; the command is unchanged and `requires.sh` still uses it.
+Since C18 nobody opens the run's PR: `building` requires one (`pr_link`), so the build run takes the
+PR step itself when it settles with its change (`packages/core/src/prOnSettle.ts`), and the drive only
+reads the link back — `build.ts MODE=settled`, then the card pane showing it with no control to press
+(`pr-browser.mjs`, `PR_MODE=recorded`). C7's press is still the dashboard's way for a session that has
+no PR (verify-web's `pr.sh`), and `factory pr` the terminal's; `requires.sh` runs it on the settled
+run's PR and reads `already-open`.
 
 Three things are new beside the drive:
 
@@ -44,9 +48,8 @@ Three things are new beside the drive:
 ```sh
 factory board move --task tsk_… --to building --expect-revision 7 --actor person:…   # plan approval
 factory board start --task tsk_… --prompt "build this card"                          # ses_… makes the change
-factory board move --task tsk_… --to review --expect-revision 8 --actor ses_…        # refused: needs "pr_link"
-# the run's row in the card pane: Open pull request                                  # PR #N, on the row and in the run pane
-factory pr ses_…                                                                     # the terminal's equivalent: pr https://github.com/…/pull/N
+# the run settles with its change: its PR is opened by the PR step, with no call     # PR #N, on the row and in the run pane
+factory pr ses_…                                                                     # answers it: pr https://github.com/…/pull/N, already-open
 factory ls                                                                           # the run's row carries the link
 factory board move --task tsk_… --to review --expect-revision 8 --actor ses_…        # the run moves its card on
 factory board move --task tsk_… --to done --expect-revision 9 --actor person:reviewer  # refused: needs "review_verdict"
@@ -72,21 +75,22 @@ After the dashboard phase, in the same tmux pane, each command followed by the e
    `packages/core/src/TaskService.test.ts`), so which client started the run does not change it.
 3. **A non-empty diff.** `git diff --numstat main...factory/<run>` in the fixture checkout lists the
    changed path — git's own answer, not the factory's.
-4. **The building gate, before the PR** (LOB-240). The run's `building → review` is refused with
-   `requirement_unmet: the move building → review needs "pr_link" (a PR link), which is not met: the
-card's latest run ses_… recorded no PR` and a non-zero exit. It names `pr_link`, not
-   `non_empty_diff`: the branch's change is the one step 3 read, and the service measured it the same
-   way (`git diff --numstat main...factory/<run>`, the PR step's `diffSize`). The refusal writes
-   nothing, so the move after the PR is made at the same revision.
-5. **The PR.** The page that holds the card open (`pr-browser.mjs`) waits for the build run's row to
-   offer **Open pull request**, presses it, and requires the forge's link on the row _and_ in the run
-   pane's header, the same one, without a reload; it prints the `pr` line `factory pr` would, which the
-   phases after it read. With no GitHub path the control is disabled with the server's reason
-   (`credential_error`'s words), the script prints `error: <reason>` and exits 1, and the drive fails
-   naming it. The link is the `pr` line. `build.ts MODE=pr`
-   then reads the fake's ledger: exactly one create request for the run's branch
-   (`factory/<run> → main`), the PR the fake answered has the printed link, the body it was sent
-   lists the path under `## Changed files`, names `faux/builder` as the model, and its
+4. **The PR, opened when the run settled** (C18). Nothing asks for it: `build.ts MODE=settled` polls
+   `getSession` until the build run's link is recorded (or the run's line saying why there is none)
+   and prints the `pr` line `factory pr` would, which the phases after it read. The page that holds
+   the card open (`pr-browser.mjs`, `PR_MODE=recorded`) then requires that link on the run's row _and_
+   in the run pane's header, and no Open pull request control on either. With no GitHub path the step
+   fails on the missing credential: the probe prints `error: the run settled and the PR step opened no
+PR: CredentialError: …`, requires that sentence in the run's transcript (`factory.pr.not-opened`)
+   and as the run's note on the card, and the drive fails naming it. The card's revision is read back
+   afterwards (`show-settled.txt`): a note is a revision, so the moves below are made at the one the
+   card is at. Before C18 this phase also proved `building → review` refused naming `pr_link` while
+   the change was there and the PR not yet; with the PR opened on settle that window is not one a
+   drive can hold open, so `pr_link` is proven here under `BOARD_GITHUB=off` (below) and in
+   `TaskService.test.ts`.
+5. **The PR's contents.** `build.ts MODE=pr` reads the fake's ledger: exactly one create request for
+   the run's branch (`factory/<run> → main`), the PR the fake answered has the printed link, the body
+   it was sent lists the path under `## Changed files`, names `faux/builder` as the model, and its
    `## Verification` section says ``### `verify-web`: exit 0`` and `- Exit code: 0`; `getSession`
    reads the same link back. `factory ls` shows it in the run's row.
 6. **Review** (LOB-241). The run's own `building → review` (no gate on it; with the PR recorded the
@@ -102,14 +106,22 @@ review → done needs "review_verdict" (a review verdict), which is not met: no 
    and a non-zero exit; the person's move at the same revision goes through, and `board show` says
    `column    done`.
 
-The PR is never assumed. With no PR path the command fails, the drive prints
-`drive: the PR path is missing — <the command's error line>` and records it as the failing check's
+The PR is never assumed. With no PR path the settled run's step fails, the drive prints
+`drive: the PR path is missing — <the run's own line>` and records it as the failing check's
 detail; the phases after it still run, with the link empty, so every check that needs a link fails on
 its own rather than being skipped. No check accepts a link the ledger does not hold. And the board
 does not assume it either: the run's `building → review` is refused naming `pr_link`, so the card
 stays in `building` (a check that passes only when there is no link says so).
 
 ## What proves it works
+
+C18 (2026-10-28, `agent/C18`, API `:9500`, web `:3500`, the fake on `:9503`): `./drive.sh` exit 0, **150**
+PASS, with the PR opened when the build run settled — no `factory pr`, nothing pressed (`pr.txt`,
+`build-settled.json`, `pr-browser.json` in recorded mode). Under `BOARD_GITHUB=off` exit 1: `pr.txt` says
+`error: the run settled and the PR step opened no PR: CredentialError: no GITHUB_TOKEN configured; …`,
+the same sentence is in the run's transcript and on the card ("with no PR path, the settled run says
+why in its transcript and on its card" passed), and the card stayed in `building` naming `pr_link`.
+`./requires.sh` exit 0, 57 PASS: the builder's PR opened on settle, `factory pr` answered `already-open`.
 
 C7 (2026-10-28, `agent/C7`, API `:9572`, web `:3572`, the fake on `:9573`): `./drive.sh` passed with the PR
 opened in the browser from the card pane's run row (`pr-browser.json`: the row offered the control, the

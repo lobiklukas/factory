@@ -212,6 +212,9 @@ the commit it measured, never forced; a remote branch that moved past it is the 
 into the checkout's `refs/remotes/factory/<base>` and cuts there. The agent's own push stays
 allowed once it has a credential of its own; what is rejected above is pushes that are _only_ the
 control plane's.
+_Refined (C18):_ nobody has to ask for it. A run that settles in a session that declares its PR — a
+card's run in a column that requires one, a session a trigger opened — runs the PR step with no
+operator call; a person's session keeps `factory pr` and the dashboard's control.
 
 ### D11 — Autonomy: the branch is the boundary
 

@@ -30,6 +30,7 @@ import {
   Effect,
   Exit,
   FiberMap,
+  FiberSet,
   FileSystem,
   HashMap,
   Layer,
@@ -181,6 +182,7 @@ import {
   readSkillPins,
   readTranscriptPage,
   readVerifyRecords,
+  writePullRequestNotOpened,
   readCurationUsage,
   compareReplay,
   mirrorComparison,
@@ -234,7 +236,7 @@ import { readOutcomes } from "./outcomes";
 import type { CredentialError, CredentialProvider } from "./credentials";
 import { NO_REVIEWER_IDENTITY, type ReviewPoster } from "./GitHubReview";
 import { BoardColumn, type ResolvedModel } from "@repo/domain/Task";
-import { TaskService, TaskServiceLive } from "./TaskService";
+import { TaskService, TaskServiceLive, type TaskError } from "./TaskService";
 import type {
   CurateSessionInput,
   CurateSessionResult,
@@ -280,6 +282,12 @@ import {
 import type { DiffCap, PrError, PullRequestStep } from "./pr";
 import { DEFAULT_DIFF_CAP } from "./pr";
 import { openPullRequest, type OpenPullRequestInput } from "./prStep";
+import {
+  notOpenedText,
+  opensPullRequestOnSettle,
+  type NotOpened,
+  type SettledRun,
+} from "./prOnSettle";
 import {
   backtestCost,
   predictCost,
@@ -797,6 +805,18 @@ export type SessionServiceOptions = {
    */
   readonly prCap?: DiffCap;
   /**
+   * The forge client and the credential the PR step reaches when a run settles (C18,
+   * `./prOnSettle`): with them, a run that settles in a session that declares it — a card's run in a
+   * column that requires a PR, a session a trigger opened — runs the PR step with no operator call,
+   * and a run that opened nothing says why in its transcript and on its card. They are the same pair
+   * the RPC member is handed (`openPullRequest`'s requirements), passed as a value because the step
+   * runs on this layer's own fibers, past any request. Absent: no PR opens unless someone asks, as
+   * before.
+   */
+  readonly pullRequestOnSettle?: Context.Context<
+    CredentialProvider | HttpClient.HttpClient
+  >;
+  /**
    * How long the PR step waits for its write-back before it answers anyway (LOB-15). Absent:
    * `SESSION_WRITE_BACK_BUDGET`. A test shortens it.
    */
@@ -1257,6 +1277,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * close, a restart) is armed again by the next owner or fold of that replay.
        */
       const comparisons = yield* FiberMap.make<SessionId, void, never>();
+      /**
+       * The PR steps settled runs are taking (C18), in the layer's scope: forked off the activity
+       * projection that saw the run settle, so a step that waits on GitHub never holds up the
+       * projection, and a release that interrupts the projection does not cut a step short.
+       */
+      const settling = yield* FiberSet.make<void, never>();
 
       const toSessionId = (
         raw: string,
@@ -3499,6 +3525,212 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
+       * What `opensPullRequestOnSettle` decides from (C18), in one statement: the session's index row,
+       * and — for a card's run — the requirement keys of the column it was started in, under the
+       * definition version the card pins (as `runColumnFor` reads the column's role). `undefined` for
+       * a session with no row.
+       */
+      const settledRunOf = (
+        sessionId: SessionId,
+      ): Effect.Effect<
+        | {
+            readonly title: string;
+            readonly taskId: string | undefined;
+            readonly run: SettledRun;
+          }
+        | undefined,
+        SessionError
+      > =>
+        Effect.gen(function* () {
+          const rows = yield* paper(
+            "read settled run",
+            sql<{
+              title: string;
+              repo: string | null;
+              prUrl: string | null;
+              actor: string | null;
+              forkedFrom: string | null;
+              released: boolean;
+              waiting: boolean;
+              taskId: string | null;
+              column: string | null;
+              columns: string | null;
+            }>`
+              SELECT s.title, s.repo, s.pr_url, s.actor, s.forked_from,
+                     s.workspace_released_at IS NOT NULL AS released,
+                     (COALESCE(t.blocked_reason IS NOT NULL, false) OR EXISTS (
+                       SELECT 1 FROM session_approvals sa
+                       WHERE sa.session_id = s.id AND sa.decision IS NULL
+                     )) AS waiting,
+                     tr.task_id, tr."column", bd.columns::text AS columns
+              FROM sessions s
+              LEFT JOIN task_runs tr ON tr.session_id = s.id
+              LEFT JOIN tasks t ON t.id = tr.task_id
+              LEFT JOIN board_instances bi ON bi.id = t.board_id
+              LEFT JOIN board_definitions bd
+                ON bd.id = bi.definition_id AND bd.version = t.definition_version
+              WHERE s.id = ${sessionId}
+            `,
+          );
+          const row = rows[0];
+          if (row === undefined) return undefined;
+          const columns =
+            row.taskId === null
+              ? undefined
+              : yield* Schema.decodeEffect(
+                  Schema.fromJsonString(Schema.Array(BoardColumn)),
+                )(row.columns ?? "[]").pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new SessionErrorClass({
+                        code: "storage",
+                        message: `the board definition holds an invalid column set: ${String(cause)}`,
+                      }),
+                  ),
+                );
+          return {
+            title: row.title,
+            taskId: row.taskId ?? undefined,
+            run: {
+              repo: row.repo,
+              prUrl: row.prUrl,
+              actor: row.actor,
+              forkedFrom: row.forkedFrom,
+              released: row.released,
+              waiting: row.waiting,
+              // A card's run whose column the pinned version no longer declares requires nothing.
+              columnRequires:
+                columns === undefined
+                  ? undefined
+                  : (columns
+                      .find((column) => column.name === row.column)
+                      ?.requires.map((requirement) => requirement.key) ?? []),
+            },
+          };
+        });
+
+      /**
+       * Say on the run's card why its PR step opened nothing (C18): a note in the card's thread, by
+       * the run itself, so a person reading the card sees it and the card's next run is told it
+       * (the thread is quoted into its prompt, B7). The same sentence twice in a row from the same run
+       * — a run that settles again with the branch still even — is posted once. A card that moved on
+       * between the read and the write is read again; one that keeps moving gets no note, which the
+       * transcript entry and the process's log still carry.
+       */
+      const noteOnCard = (
+        taskId: string,
+        sessionId: SessionId,
+        body: string,
+      ): Effect.Effect<void, TaskError> =>
+        Effect.gen(function* () {
+          const thread = yield* tasks.comments(taskId);
+          const last = thread
+            .filter((comment) => comment.actor === sessionId)
+            .at(-1);
+          if (last?.body === body) return;
+          yield* tasks.get(taskId).pipe(
+            Effect.flatMap((card) =>
+              tasks.comment({
+                taskId,
+                expectedRevision: card.revision,
+                body,
+                actor: sessionId,
+              }),
+            ),
+            Effect.retry({
+              times: 3,
+              while: (error) => error._tag === "StaleRevision",
+            }),
+          );
+        });
+
+      /**
+       * The PR step a settled run takes with no operator (C18, `./prOnSettle`): run when this process
+       * sees a session's run go idle, for a session that declares it, through the same `openPr` an
+       * operator's call takes — the gate, the cap, the push, the record and the write-back are the
+       * step's own, so a settled run and `factory pr` cannot open two PRs or two different ones.
+       *
+       * Only a working directory that is its own checkout is stepped: a plain directory has no branch
+       * the step could measure, and a PR over a change nobody measured is one only a person asks for.
+       *
+       * An answer that opened nothing is said where a person looks: an unchanged branch already
+       * writes its transcript line in the step; an over-cap diff, a remote the push may not overwrite
+       * and a typed failure write `factory.pr.not-opened`; and each is a note on the run's card. Best
+       * effort throughout — nothing here may fail the run that already settled — so a failure of the
+       * step's own bookkeeping is a warning in the process's log.
+       */
+      const settlePullRequest = (
+        sessionId: SessionId,
+        forge: Context.Context<CredentialProvider | HttpClient.HttpClient>,
+      ): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          const settled = yield* settledRunOf(sessionId);
+          if (settled === undefined || !opensPullRequestOnSettle(settled.run))
+            return;
+          const owned = HashMap.get(yield* Ref.get(live), sessionId);
+          if (Option.isNone(owned)) return;
+          const checkout = yield* fs
+            .exists(path.join(owned.value.workspace.path, ".git"))
+            .pipe(Effect.orElseSucceed(() => false));
+          if (!checkout) {
+            yield* Effect.logInfo(
+              `session ${sessionId}: its run settled, but its working directory is not a checkout of its own, so no PR is opened for it`,
+            );
+            return;
+          }
+          const stepped = yield* openPr({
+            sessionId,
+            // As `factory pr` titles a PR it names no title for: after the session.
+            title: settled.title,
+          }).pipe(Effect.provideContext(forge), Effect.exit);
+          let reason: NotOpened;
+          if (Exit.isSuccess(stepped)) {
+            const answer = stepped.value;
+            // The two outcomes that carry a link are one shape (`OpenedPullRequest`), so the link is
+            // what narrows the answer.
+            if ("url" in answer) {
+              yield* Effect.logInfo(
+                `session ${sessionId}: its run settled and the PR step opened ${answer.url} (${answer.outcome})`,
+              );
+              return;
+            }
+            reason = answer;
+          } else {
+            const failure = Cause.findErrorOption(stepped.cause);
+            if (Option.isNone(failure)) {
+              yield* Effect.logError(
+                `session ${sessionId}: the settled run's PR step died: ${Cause.pretty(stepped.cause)}`,
+              );
+              return;
+            }
+            reason = {
+              outcome: "failed",
+              tag: failure.value._tag,
+              message: failure.value.message,
+            };
+          }
+          const text = notOpenedText(reason);
+          yield* Effect.logWarning(`session ${sessionId}: ${text}`);
+          // The step wrote the no-change line itself (LOB-196); every other reason is written here,
+          // on the owner that holds the log now.
+          if (reason.outcome !== "no-change") {
+            const owner = HashMap.get(yield* Ref.get(live), sessionId);
+            if (Option.isSome(owner)) {
+              yield* writePullRequestNotOpened(owner.value.root, text);
+            }
+          }
+          if (settled.taskId !== undefined) {
+            yield* noteOnCard(settled.taskId, sessionId, text);
+          }
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning(
+              `session ${sessionId}: the settled run's PR step could not finish its bookkeeping: ${Cause.pretty(cause)}`,
+            ),
+          ),
+        );
+
+      /**
        * Fork a session at one of its entries (LOB-180, D7).
        *
        * A session *is* a log, so the fork is a second log with the parent's entries copied into it
@@ -4526,6 +4758,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               WHERE session_id = ${sessionId}
             `,
           ).pipe(Effect.ignore);
+          // A run that settled may owe its PR (C18). Forked, so the projection reads on.
+          const forge = options.pullRequestOnSettle;
+          if (forge !== undefined) {
+            yield* FiberSet.run(settling, settlePullRequest(sessionId, forge));
+          }
         });
 
       /**
