@@ -1,0 +1,458 @@
+// Drive the Repositories page (LOB-262) the way an operator uses it, against the instance
+// `repos.sh` starts, and capture evidence.
+//
+//   node repos.mjs      (via ./repos.sh, which owns the instance and the checkouts this drives)
+//
+// The drive seeds what an operator finds on a fresh install, then requires the page to say so:
+//
+//   seed      a repo a session registered by naming a slug (`createSession({ repo })`): no clone URL,
+//             no checkout. A throwaway git repository (one commit on main) to register, and a plain
+//             directory that is not one.
+//   reach     the rail's **Repositories** opens `/repos` and is marked `aria-current`
+//   flag      the seeded repo is listed `not runnable`, cause `no_checkout`, with the reason and the fix
+//   refuse    a bad slug is stopped in the form (nothing sent, nothing written); a path that is not a
+//             git work tree is refused by the server, and the page shows the server's own message,
+//             character for character, inline, with the slug still unregistered and the form kept
+//   add       the form registers the throwaway checkout: the row appears without a reload, runnable,
+//             and equals `listRepos`' row (base ref, URL, path, work tree); the form is cleared
+//   fix       the same form, naming the flagged repo's slug and a path, turns it runnable in place
+//   run       a session created on a registered repo has `factory/<session-id>` as its branch, a real
+//             worktree on disk and the branch in the checkout; one opened on the repo while it had no checkout has a directory but no worktree
+//   follow    the checkout moved away behind the registry's back: the open page flips the row to
+//             `not runnable`, cause `not_a_work_tree`, on its next poll, without a reload
+//
+// Env: WEB_URL, API_URL, EVIDENCE_DIR, RUN_DIR.
+import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { chromium } from "@playwright/test";
+
+const WEB_URL = process.env["WEB_URL"] ?? "http://localhost:3441";
+const API_URL = process.env["API_URL"] ?? "http://localhost:9441";
+const EVIDENCE_DIR =
+  process.env["EVIDENCE_DIR"] ?? ".verify/evidence/latest/repos";
+const RUN_DIR = path.resolve(process.env["RUN_DIR"] ?? ".verify/run/repos");
+
+const TAG = randomBytes(4).toString("hex");
+const NOPATH = `verify-repos-${TAG}/nopath`;
+const WIDGETS = `verify-repos-${TAG}/widgets`;
+const BAD = `verify-repos-${TAG}/refused`;
+const CHECKOUTS = path.join(RUN_DIR, "checkouts", TAG);
+const WIDGETS_DIR = path.join(CHECKOUTS, "widgets");
+const NOPATH_DIR = path.join(CHECKOUTS, "nopath");
+// Outside this repository on purpose: `registerRepo` accepts a directory *inside* a git work tree
+// (a monorepo package), so a plain directory under the checkout the drive runs from is not refused.
+const PLAIN_DIR = await mkdtemp(path.join(os.tmpdir(), `verify-repos-${TAG}-`));
+const WIDGETS_URL = `https://example.invalid/${TAG}/widgets.git`;
+
+await mkdir(EVIDENCE_DIR, { recursive: true });
+for (const dir of [WIDGETS_DIR, NOPATH_DIR]) {
+  const init = spawnSync("git", ["init", "-q", "-b", "main", dir], {
+    encoding: "utf8",
+  });
+  if (init.status !== 0) throw new Error(`git init ${dir}: ${init.stderr}`);
+  const commit = spawnSync(
+    "git",
+    [
+      "-C",
+      dir,
+      "-c",
+      "user.email=verify-repos@localhost",
+      "-c",
+      "user.name=verify-repos",
+      "commit",
+      "-q",
+      "--allow-empty",
+      "-m",
+      "seed",
+    ],
+    { encoding: "utf8" },
+  );
+  if (commit.status !== 0) throw new Error(`git commit: ${commit.stderr}`);
+}
+// The server reports the path it was given; macOS's /var is a link to /private/var, so a checkout
+// under a symlinked directory is compared by the path registered, not by its real path.
+const WIDGETS_REAL = await realpath(WIDGETS_DIR);
+
+const observed = {
+  webUrl: WEB_URL,
+  apiUrl: API_URL,
+  tag: TAG,
+  slugs: { NOPATH, WIDGETS, BAD },
+  checks: {},
+};
+const assert = (name, condition, detail) => {
+  observed.checks[name] = { passed: Boolean(condition), detail };
+  console.log(`${condition ? "PASS" : "FAIL"}  ${name}  ${detail}`);
+  return Boolean(condition);
+};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** One unary RPC call over the NDJSON envelope, from this process: the oracle, never the page. */
+const rpcExit = async (tag, payload) => {
+  const requestId = `repos-${tag}-${Date.now()}-${Math.random()}`;
+  const response = await fetch(`${API_URL}/rpc`, {
+    method: "POST",
+    headers: { "content-type": "application/ndjson" },
+    body: `${JSON.stringify({ _tag: "Request", id: requestId, tag, payload, headers: [] })}\n`,
+  });
+  const text = await response.text();
+  const envelope = text
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .find((message) => message?.requestId === requestId);
+  return envelope?.exit ?? { _tag: "Missing", text: text.slice(0, 400) };
+};
+const rpc = async (tag, payload) => {
+  const exit = await rpcExit(tag, payload);
+  if (exit._tag !== "Success") {
+    throw new Error(`${tag} failed: ${JSON.stringify(exit).slice(0, 400)}`);
+  }
+  return exit.value;
+};
+/** The typed error of a failed call: the server's own words, as the page is expected to show them. */
+const rpcFailure = async (tag, payload) => {
+  const exit = await rpcExit(tag, payload);
+  const failure = JSON.stringify(exit);
+  const message = /"message":"((?:[^"\\]|\\.)*)"/.exec(failure)?.[1];
+  return {
+    exit,
+    message: message === undefined ? undefined : JSON.parse(`"${message}"`),
+  };
+};
+const listed = async (slug) =>
+  (await rpc("listRepos", {})).repos.find((row) => row.repo === slug);
+
+const browser = await chromium.launch({ channel: "chrome", headless: true });
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+const consoleErrors = [];
+page.on("console", (message) => {
+  if (message.type() === "error") consoleErrors.push(message.text());
+});
+page.on("pageerror", (error) =>
+  consoleErrors.push(`pageerror: ${String(error)}`),
+);
+
+const rowSel = (slug) => `[data-repo-row='${slug}']`;
+const readRow = (slug) =>
+  page.$eval(rowSel(slug), (node) => ({
+    runnable: node.getAttribute("data-repo-runnable"),
+    cause: node.getAttribute("data-repo-cause"),
+    state: node.querySelector("[data-repo-state]")?.textContent?.trim() ?? null,
+    path: node.querySelector("[data-repo-path]")?.textContent?.trim() ?? null,
+    reason:
+      node.querySelector("[data-repo-reason]")?.textContent?.trim() ?? null,
+    text: node.innerText.replaceAll("\n", " ").trim(),
+  }));
+const waitRow = (slug, timeout = 20_000) =>
+  page.waitForSelector(rowSel(slug), { timeout });
+const fill = async (fields) => {
+  for (const [name, value] of Object.entries(fields)) {
+    await page.locator(`[data-repo-form] input[name='${name}']`).fill(value);
+  }
+};
+const submit = () =>
+  page
+    .locator("[data-repo-form]")
+    .getByRole("button", { name: "Add repository" })
+    .click();
+
+let exitCode = 0;
+try {
+  // --- seed: a repo a session registered by naming it ------------------------------------------
+  const scratch = await rpc("createSession", { repo: NOPATH });
+  observed.seed = { noPathSession: scratch.id };
+  const seeded = await listed(NOPATH);
+  assert(
+    "a session that names a new slug registers it with no checkout",
+    seeded !== undefined &&
+      seeded.localPath === undefined &&
+      seeded.url === "" &&
+      seeded.localPathIsGit === false,
+    JSON.stringify(seeded ?? null),
+  );
+
+  // --- reach: the rail's Repositories ----------------------------------------------------------
+  await page.goto(`${WEB_URL}/sessions`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("nav[aria-label='Sections']", { timeout: 15_000 });
+  await page
+    .locator("nav[aria-label='Sections']")
+    .getByRole("link", { name: "Repositories", exact: true })
+    .click();
+  await page.waitForFunction(() => window.location.pathname === "/repos");
+  await waitRow(NOPATH);
+  await page.evaluate(() => {
+    window.__reposNoReload = true;
+  });
+  const current = await page.$$eval(
+    "nav[aria-label='Sections'] [aria-current='page']",
+    (nodes) => nodes.map((node) => node.getAttribute("href")),
+  );
+  assert(
+    "the rail marks Repositories as the current section",
+    current.length === 1 && current[0] === "/repos",
+    `aria-current on ${JSON.stringify(current)}`,
+  );
+
+  // --- flag: no checkout means not runnable, with the reason and the fix -----------------------
+  const flagged = await readRow(NOPATH);
+  observed.flagged = flagged;
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "repos-flagged.png"),
+    fullPage: true,
+  });
+  assert(
+    "an auto-registered repo with no local path is flagged not runnable",
+    flagged.runnable === "false" &&
+      flagged.cause === "no_checkout" &&
+      flagged.state === "not runnable" &&
+      flagged.path === "none registered",
+    JSON.stringify(flagged),
+  );
+  assert(
+    "the flag carries the reason and the fix",
+    (flagged.reason ?? "").includes("No local checkout") &&
+      (flagged.reason ?? "").includes("no worktree is cut") &&
+      (flagged.reason ?? "").includes("local path"),
+    flagged.reason ?? "none",
+  );
+  const headerCount = await page.$eval("[data-repos-count]", (node) => ({
+    total: Number(node.getAttribute("data-repos-count")),
+    notRunnable: Number(node.getAttribute("data-repos-not-runnable")),
+    text: node.textContent ?? "",
+  }));
+  const allRepos = (await rpc("listRepos", {})).repos;
+  assert(
+    "the header counts every repo and the ones that cannot run",
+    headerCount.total === allRepos.length &&
+      headerCount.notRunnable ===
+        allRepos.filter((row) => !row.localPathIsGit).length &&
+      headerCount.notRunnable >= 1 &&
+      headerCount.text.includes("cannot run"),
+    JSON.stringify(headerCount),
+  );
+
+  // --- refuse: a bad slug is stopped in the form, nothing is written ---------------------------
+  await fill({ repo: "Not A Slug", localPath: WIDGETS_DIR });
+  await submit();
+  const problem = await page
+    .locator("[data-repo-problem]")
+    .textContent({ timeout: 10_000 });
+  const unknownBad = await rpcFailure("getRepo", { repo: BAD });
+  assert(
+    "a bad slug is refused inline, quoting the slug and the rule",
+    (problem ?? "").includes('"Not A Slug"') &&
+      (problem ?? "").includes("owner/name"),
+    problem ?? "none",
+  );
+  assert(
+    "a bad slug writes nothing",
+    (await listed(BAD)) === undefined &&
+      (await page.locator("[data-repo-refusal]").count()) === 0 &&
+      unknownBad.message !== undefined,
+    `listed=${JSON.stringify((await listed(BAD)) ?? null)}`,
+  );
+
+  // --- refuse: the server's refusal of a path that is not a git work tree ---------------------
+  await fill({ repo: BAD, localPath: PLAIN_DIR });
+  await submit();
+  const refusal = page.locator("[data-repo-refusal]");
+  await refusal.waitFor({ timeout: 15_000 });
+  const shown = await refusal.textContent();
+  const tag = await refusal.getAttribute("data-repo-refusal");
+  const server = await rpcFailure("registerRepo", {
+    repo: BAD,
+    localPath: PLAIN_DIR,
+  });
+  observed.refusal = { shown, tag, server: server.message };
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "repos-refused.png"),
+    fullPage: true,
+  });
+  assert(
+    "a path that is not a git work tree is refused in the server's own words",
+    server.message !== undefined &&
+      server.message.includes("not a git work tree") &&
+      server.message.includes(PLAIN_DIR) &&
+      (shown ?? "").includes(server.message),
+    `shown=${JSON.stringify(shown)} server=${JSON.stringify(server.message ?? null)}`,
+  );
+  assert(
+    "the refusal registered nothing and the form kept what was typed",
+    (await listed(BAD)) === undefined &&
+      (await page.locator(rowSel(BAD)).count()) === 0 &&
+      (await page.locator("input[name='repo']").inputValue()) === BAD &&
+      (await page.locator("input[name='localPath']").inputValue()) ===
+        PLAIN_DIR,
+    `listed=${JSON.stringify((await listed(BAD)) ?? null)}`,
+  );
+
+  // --- add: the form registers the throwaway checkout, and the list shows it without a reload ---
+  await fill({
+    repo: WIDGETS,
+    localPath: WIDGETS_DIR,
+    defaultBaseRef: "main",
+    url: WIDGETS_URL,
+  });
+  await submit();
+  await waitRow(WIDGETS, 15_000);
+  const added = await readRow(WIDGETS);
+  const oracle = await listed(WIDGETS);
+  observed.added = { row: added, oracle };
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "repos-added.png"),
+    fullPage: true,
+  });
+  assert(
+    "registering a throwaway checkout through the form lists it, runnable, without a reload",
+    added.runnable === "true" &&
+      added.state === "runnable" &&
+      added.path === WIDGETS_DIR &&
+      (await page.evaluate(() => window.__reposNoReload === true)),
+    JSON.stringify(added),
+  );
+  assert(
+    "the row is what listRepos holds: path, URL, base ref and work tree",
+    oracle !== undefined &&
+      oracle.localPath === WIDGETS_DIR &&
+      oracle.url === WIDGETS_URL &&
+      oracle.defaultBaseRef === "main" &&
+      oracle.localPathIsGit === true &&
+      oracle.workTree === WIDGETS_REAL &&
+      added.text.includes(WIDGETS_URL) &&
+      added.text.includes("base main"),
+    JSON.stringify(oracle ?? null),
+  );
+  assert(
+    "a landed registration clears the form, says so, and drops the refusal",
+    (await page.locator("input[name='repo']").inputValue()) === "" &&
+      (await page.locator("input[name='localPath']").inputValue()) === "" &&
+      (await page.locator(`[data-repo-registered='${WIDGETS}']`).count()) ===
+        1 &&
+      (await page.locator("[data-repo-refusal]").count()) === 0,
+    "form fields empty, status shown",
+  );
+
+  // --- fix: register a checkout for the flagged repo and it turns runnable in place -------------
+  await fill({ repo: NOPATH, localPath: NOPATH_DIR });
+  await submit();
+  await page.waitForSelector(`${rowSel(NOPATH)}[data-repo-runnable='true']`, {
+    timeout: 15_000,
+  });
+  const fixed = await readRow(NOPATH);
+  const fixedOracle = await listed(NOPATH);
+  assert(
+    "giving a flagged repo a checkout turns it runnable in place, keeping its other fields",
+    fixed.runnable === "true" &&
+      fixed.reason === null &&
+      fixedOracle?.localPath === NOPATH_DIR &&
+      fixedOracle?.defaultBaseRef === "main" &&
+      (await page.evaluate(() => window.__reposNoReload === true)),
+    JSON.stringify({ fixed, fixedOracle: fixedOracle ?? null }),
+  );
+
+  // --- run: a session on a registered checkout is cut a worktree ------------------------------
+  const run = await rpc("createSession", { repo: WIDGETS });
+  const snapshot = await rpc("getSession", { sessionId: run.id });
+  const workspace = snapshot.workspace;
+  const branch = `factory/${run.id}`;
+  const branchInCheckout = spawnSync(
+    "git",
+    ["-C", WIDGETS_DIR, "rev-parse", "--verify", "--quiet", branch],
+    { encoding: "utf8" },
+  );
+  observed.run = { session: run.id, workspace };
+  assert(
+    "a session created on the registered repo gets a factory/<session-id> worktree",
+    workspace.repo === WIDGETS &&
+      workspace.branch === branch &&
+      existsSync(path.join(workspace.path, ".git")) &&
+      branchInCheckout.status === 0,
+    `branch=${workspace.branch} path=${workspace.path} branchInCheckout=${branchInCheckout.status}`,
+  );
+  // The contrast: the snapshot names `factory/<id>` as the branch for any repo-bound session, so the
+  // name alone proves nothing. What the repo with no checkout lacks is the worktree itself.
+  const bare = (await rpc("getSession", { sessionId: scratch.id })).workspace;
+  observed.bare = bare;
+  assert(
+    "a session opened on the repo while it had no checkout was cut no worktree",
+    bare.repo === NOPATH && !existsSync(path.join(bare.path, ".git")),
+    `path=${bare.path} hasGit=${existsSync(path.join(bare.path, ".git"))}`,
+  );
+
+  // --- follow: the checkout moves away; the open page notices on its poll -----------------------
+  await rename(WIDGETS_DIR, `${WIDGETS_DIR}.moved`);
+  await page.waitForSelector(
+    `${rowSel(WIDGETS)}[data-repo-cause='not_a_work_tree']`,
+    { timeout: 20_000 },
+  );
+  const moved = await readRow(WIDGETS);
+  const movedOracle = await listed(WIDGETS);
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "repos-moved.png"),
+    fullPage: true,
+  });
+  assert(
+    "a checkout that moved away flips its row to not runnable on the poll, naming the path",
+    moved.runnable === "false" &&
+      (moved.reason ?? "").includes(WIDGETS_DIR) &&
+      movedOracle?.localPathIsGit === false &&
+      (await page.evaluate(() => window.__reposNoReload === true)),
+    JSON.stringify(moved),
+  );
+
+  // A reload shows the server's truth, not what this browser remembers.
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await waitRow(WIDGETS);
+  const reloaded = await readRow(WIDGETS);
+  assert(
+    "a reload shows the same rows",
+    reloaded.runnable === "false" &&
+      (await readRow(NOPATH)).runnable === "true" &&
+      (await page.locator(rowSel(BAD)).count()) === 0,
+    JSON.stringify(reloaded),
+  );
+
+  assert(
+    "the page logged no console error",
+    consoleErrors.length === 0,
+    JSON.stringify(consoleErrors.slice(0, 5)),
+  );
+} catch (error) {
+  assert("the drive ran to the end", false, String(error));
+  await page
+    .screenshot({
+      path: path.join(EVIDENCE_DIR, "repos-failure.png"),
+      fullPage: true,
+    })
+    .catch(() => {});
+} finally {
+  observed.consoleErrors = consoleErrors;
+  await writeFile(
+    path.join(EVIDENCE_DIR, "observed.json"),
+    `${JSON.stringify(observed, null, 2)}\n`,
+  );
+  await browser.close();
+  await rm(PLAIN_DIR, { recursive: true, force: true });
+  exitCode = Object.values(observed.checks).every((check) => check.passed)
+    ? 0
+    : 1;
+}
+process.exit(exitCode);

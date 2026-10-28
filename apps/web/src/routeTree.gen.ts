@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ApprovalsRouteImport } from './routes/approvals'
 import { Route as AttentionRouteImport } from './routes/attention'
+import { Route as ReposRouteImport } from './routes/repos'
 import { Route as SandboxesRouteImport } from './routes/sandboxes'
 import { Route as SessionsRouteImport } from './routes/sessions'
 import { Route as SpendRouteImport } from './routes/spend'
@@ -33,6 +34,11 @@ const ApprovalsRoute = ApprovalsRouteImport.update({
 const AttentionRoute = AttentionRouteImport.update({
   id: '/attention',
   path: '/attention',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ReposRoute = ReposRouteImport.update({
+  id: '/repos',
+  path: '/repos',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SandboxesRoute = SandboxesRouteImport.update({
@@ -75,6 +81,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/approvals': typeof ApprovalsRoute
   '/attention': typeof AttentionRoute
+  '/repos': typeof ReposRoute
   '/sandboxes': typeof SandboxesRoute
   '/sessions': typeof SessionsRouteWithChildren
   '/spend': typeof SpendRoute
@@ -87,6 +94,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/approvals': typeof ApprovalsRoute
   '/attention': typeof AttentionRoute
+  '/repos': typeof ReposRoute
   '/sandboxes': typeof SandboxesRoute
   '/spend': typeof SpendRoute
   '/boards/$boardId': typeof BoardsBoardIdRoute
@@ -99,6 +107,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/approvals': typeof ApprovalsRoute
   '/attention': typeof AttentionRoute
+  '/repos': typeof ReposRoute
   '/sandboxes': typeof SandboxesRoute
   '/sessions': typeof SessionsRouteWithChildren
   '/spend': typeof SpendRoute
@@ -113,6 +122,7 @@ export interface FileRouteTypes {
     | '/'
     | '/approvals'
     | '/attention'
+    | '/repos'
     | '/sandboxes'
     | '/sessions'
     | '/spend'
@@ -125,6 +135,7 @@ export interface FileRouteTypes {
     | '/'
     | '/approvals'
     | '/attention'
+    | '/repos'
     | '/sandboxes'
     | '/spend'
     | '/boards/$boardId'
@@ -136,6 +147,7 @@ export interface FileRouteTypes {
     | '/'
     | '/approvals'
     | '/attention'
+    | '/repos'
     | '/sandboxes'
     | '/sessions'
     | '/spend'
@@ -149,6 +161,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ApprovalsRoute: typeof ApprovalsRoute
   AttentionRoute: typeof AttentionRoute
+  ReposRoute: typeof ReposRoute
   SandboxesRoute: typeof SandboxesRoute
   SessionsRoute: typeof SessionsRouteWithChildren
   SpendRoute: typeof SpendRoute
@@ -177,6 +190,13 @@ declare module '@tanstack/react-router' {
       path: '/attention'
       fullPath: '/attention'
       preLoaderRoute: typeof AttentionRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/repos': {
+      id: '/repos'
+      path: '/repos'
+      fullPath: '/repos'
+      preLoaderRoute: typeof ReposRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/sandboxes': {
@@ -249,6 +269,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ApprovalsRoute: ApprovalsRoute,
   AttentionRoute: AttentionRoute,
+  ReposRoute: ReposRoute,
   SandboxesRoute: SandboxesRoute,
   SessionsRoute: SessionsRouteWithChildren,
   SpendRoute: SpendRoute,
