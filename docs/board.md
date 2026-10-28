@@ -161,7 +161,10 @@ Built (D7): skills are versioned and edited without a migration. The table is ke
 version)` (`0037_version_skills`, which kept every existing row as version 1); `putSkill` adds
 version `newest + 1` and never rewrites a row. `listSkills`, `getSkill(name, version?)` and `putSkill`
 are the `SkillsRpc` group, and `factory skill ls|show|put --file SKILL.md` drives them (`ls` names the
-default definition's columns that bind each skill). A run's version is pinned like its model: the open
+default definition's columns that bind each skill). The dashboard authors them too (D8): `/skills` lists them,
+`/skills/<name>` shows a version's body, the columns that bind it and its history (`listSkillVersions`,
+newest first, no bodies), and its Edit form publishes the next version with `putSkill`; the board
+settings view links each column's skills there. A run's version is pinned like its model: the open
 that first resolves its column's skills records `name@version` in the run's log (`factory.skills`), and
 every later open resolves from those pins (`loadRun`'s `pinned`), so a put reaches the next run and a
 reopened run keeps the body it opened with. A pinned version the table no longer holds refuses the open

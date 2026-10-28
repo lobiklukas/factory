@@ -60,6 +60,10 @@ from the `agent/C10` worktree, API `:9581` / web `:3581`, `FAUX_SLEEP_MS=5000`. 
 `definition-edit.sh` (edit a board definition as a new version, D6) last passed **18/18** on 2026-10-28
 from the `agent/D6` worktree, API `:9512` / web `:3512`; `board-settings.sh` re-passed there beside it.
 
+`skills.sh` (the skill pages, D8) last passed **21/21** on 2026-10-28 from the `agent/D8` worktree,
+API `:9541` / web `:3541`, on a throwaway database; `board-settings.sh` re-passed there (23/23, API `:9541` /
+web `:3541`) with each column's skills now links.
+
 `cost.sh` (cost prediction on the New session form and `/spend`, LOB-38) last passed **12/12** on
 2026-10-28 from the `agent/LOB-38` worktree, API `:9552` / web `:3552`; `spend.sh` and `model.sh`
 re-passed there beside it, as the strip and the form sit on their pages.
@@ -78,6 +82,7 @@ re-passed there beside it, as the strip and the form sit on their pages.
 | Board lanes                  | passing | [board.md](board.md)                                                          |
 | Board settings               | passing | [board-settings.md](board-settings.md) (`board-settings.sh`)                  |
 | Definition editor            | passing | [definition-edit.md](definition-edit.md) (`definition-edit.sh`)               |
+| Skill pages                  | passing | [skills.md](skills.md) (`skills.sh`)                                          |
 | Card pane (write path)       | passing | [card-pane.md](card-pane.md)                                                  |
 | What needs a person          | passing | [attention.md](attention.md)                                                  |
 | The card's thread            | passing | [thread.md](thread.md) (`thread.sh`)                                          |

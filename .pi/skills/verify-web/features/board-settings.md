@@ -34,7 +34,8 @@ facts for its column (LOB-245, the board-configuration umbrella).
   proves it: the page (`[data-board-settings-page]`) holds no form, input or button, and every RPC
   the browser sends while on it is `getBoardConfig`, `listDefinitions` or one of the shell's own
   reads (the board page's getting-started checklist, C9, among them, as its poll can land after
-  the click). Skill names are plain text until a skills page exists to link them to.
+  the click). Each skill name is a link (`[data-column-skill-link=<name>]`) to its skill page (D8,
+  [skills.md](skills.md)).
 - `/boards/not-a-board/settings` is refused by the route's decode; a well-formed id the server does
   not hold reads `No such board`.
 
