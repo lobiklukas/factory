@@ -131,6 +131,7 @@ import type {
   OpenSession,
   PlanOptions,
   RoleModels,
+  RoleFallbacks,
   RolePolicies,
   RunColumn,
   RepoContext,
@@ -884,6 +885,12 @@ export type SessionServiceOptions = {
    * fails the boot rather than a run. Absent: every run talks to `model`.
    */
   readonly roleModels?: RoleModels;
+  /**
+   * The deployment's role → fallback chain table (S-model-provider-breadth, `@repo/harness`'s
+   * `resolveRoleFallbacks` over `ROLE_FALLBACKS`): a run whose role has a row moves onto the next
+   * model of its chain when its own answers overloaded or unavailable. Absent: no run falls back.
+   */
+  readonly roleFallbacks?: RoleFallbacks;
   /**
    * What each role may do (D10): the factory's role policy table with the deployment's rows added
    * (`@repo/harness`'s `extendRolePolicies` over `ROLE_POLICIES`). Absent: the factory's own.
@@ -3692,6 +3699,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ...(options.roleModels === undefined
                 ? {}
                 : { roles: options.roleModels }),
+              // And moves onto its role's next model when its own is down (S-model-provider-breadth).
+              ...(options.roleFallbacks === undefined
+                ? {}
+                : { fallbacks: options.roleFallbacks }),
               // What the run's role may do (D10): the factory's table, with the deployment's rows.
               ...(options.rolePolicies === undefined
                 ? {}
@@ -6637,7 +6648,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         sessionId: SessionId,
         entry: TranscriptEntry,
       ): Effect.Effect<void> =>
-        entry.kind === "budget"
+        entry.kind === "modelSwitch"
+          ? Effect.logWarning(`session ${sessionId}: ${entry.text}`).pipe(
+              Effect.andThen(refreshSessionModel(sessionId)),
+              Effect.andThen(touchActivity(sessionId)),
+            )
+          : entry.kind === "budget"
           ? Effect.logWarning(
               `session ${sessionId} stopped by its budget: ${entry.text}`,
             ).pipe(
@@ -6648,6 +6664,28 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               Effect.andThen(touchActivity(sessionId)),
             )
           : touchActivity(sessionId);
+
+      /**
+       * The index row's model after a recorded model switch (S-model-provider-breadth): the log's
+       * `pi.agent` moved onto the fallback, so the row is written from it, as an open writes it.
+       * Best-effort: a stale row is a display field the next open (or a rebuild) repairs.
+       */
+      const refreshSessionModel = (sessionId: SessionId): Effect.Effect<void> =>
+        withReader(sessionId, readPinnedModelKey).pipe(
+          Effect.flatMap((model) =>
+            model === undefined
+              ? Effect.void
+              : paper(
+                  "write session model",
+                  sql`UPDATE sessions SET model = ${model} WHERE id = ${sessionId}`,
+                ).pipe(Effect.asVoid),
+          ),
+          Effect.catch((error) =>
+            Effect.logWarning(
+              `session ${sessionId}: the index row's model was not written after a model switch: ${error.message}`,
+            ),
+          ),
+        );
 
       /**
        * One failed run, indexed for the notifier (`run_failures`, S-notifications): keyed by the entry

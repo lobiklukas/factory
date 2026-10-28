@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import type { TranscriptEntry } from "@repo/domain/Session";
 import {
+  ArrowRightLeftIcon,
   ChevronRightIcon,
   CircleStopIcon,
   GitPullRequestIcon,
@@ -153,6 +154,25 @@ export const TranscriptRow = ({
       >
         <MarkerIcon>
           <SquareIcon strokeWidth={1.75} />
+        </MarkerIcon>
+        <MarkerContent>{entry.text}</MarkerContent>
+      </Marker>
+    );
+  }
+
+  // A model switch (S-model-provider-breadth) is the control plane moving the run
+  // onto its role's fallback after its model answered overloaded: a marker with the
+  // line it recorded, so the answers below it read as another model's, and why.
+  if (entry.kind === "modelSwitch") {
+    return (
+      <Marker
+        variant="border"
+        className="text-muted-foreground"
+        role="status"
+        data-entry-kind="modelSwitch"
+      >
+        <MarkerIcon>
+          <ArrowRightLeftIcon strokeWidth={1.75} />
         </MarkerIcon>
         <MarkerContent>{entry.text}</MarkerContent>
       </Marker>

@@ -212,3 +212,16 @@ export const openAICompatibleProvider = (
     })),
     api: openAICompletionsApi(),
   });
+
+/**
+ * The endpoint as a log line may name it: scheme, host and path, never a `user:password@` part or a
+ * query string, which is where a gateway that takes its key in the URL would carry it.
+ */
+export const describeEndpoint = (baseUrl: string): string => {
+  try {
+    const url = new URL(baseUrl);
+    return `${url.protocol}//${url.host}${url.pathname}`;
+  } catch {
+    return "(an unreadable URL)";
+  }
+};

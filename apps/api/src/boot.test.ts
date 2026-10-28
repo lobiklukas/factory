@@ -345,6 +345,69 @@ describe("getServerInfo on a booted API (LOB-269)", () => {
     );
   }, 60_000);
 
+  it("serves an OpenAI-compatible endpoint's models beside the backend's, and the ROLE_FALLBACKS chains, without reading its key (S-model-provider-breadth)", async () => {
+    const COMPAT_KEY = "dummy-compat-key-boot-s-model-provider-breadth";
+    const { code, output, asked } = await boot(
+      {
+        MODEL_BACKEND: "faux",
+        OPENAI_COMPATIBLE_BASE_URL: "http://user:pw@127.0.0.1:1/v1?key=q",
+        OPENAI_COMPATIBLE_MODELS: "compat-1,compat-2",
+        OPENAI_COMPATIBLE_API_KEY: COMPAT_KEY,
+        ROLE_MODELS: "builder=openai-compatible/compat-1",
+        ROLE_FALLBACKS:
+          "builder=faux/faux-backup|openai-compatible/compat-2,reviewer=openai-compatible/compat-1",
+      },
+      getServerInfo,
+    );
+    expect(code, output).toBeNull();
+    if (asked === undefined) throw new Error("the boot never answered");
+    expect(asked.info.models).toEqual([
+      "faux/faux-1",
+      "faux/faux-backup",
+      "openai-compatible/compat-1",
+      "openai-compatible/compat-2",
+    ]);
+    expect(asked.info.roleModels).toEqual([
+      { role: "builder", model: "openai-compatible/compat-1" },
+    ]);
+    expect(asked.info.roleFallbacks).toEqual([
+      {
+        role: "builder",
+        models: ["faux/faux-backup", "openai-compatible/compat-2"],
+      },
+      { role: "reviewer", models: ["openai-compatible/compat-1"] },
+    ]);
+    // The boot names the endpoint without its userinfo or query, and the key by its variable.
+    expect(output).toContain(
+      "second provider: openai-compatible at http://127.0.0.1:1/v1 serving compat-1, compat-2 (OPENAI_COMPATIBLE_BASE_URL; auth: OPENAI_COMPATIBLE_API_KEY)",
+    );
+    expect(output).toContain(
+      "role fallbacks: builder → faux/faux-backup | openai-compatible/compat-2, reviewer → openai-compatible/compat-1",
+    );
+    for (const text of [output, asked.wire]) {
+      expect(text).not.toContain(COMPAT_KEY);
+      expect(text).not.toContain("user:pw");
+    }
+  }, 30_000);
+
+  it("refuses to boot on a fallback chain outside the catalog, or half an endpoint (S-model-provider-breadth)", async () => {
+    for (const [env, says] of [
+      [
+        { MODEL_BACKEND: "faux", ROLE_FALLBACKS: "builder=openai-compatible/x" },
+        "builder's fallback chain names model openai-compatible/x",
+      ],
+      [
+        { MODEL_BACKEND: "faux", OPENAI_COMPATIBLE_MODELS: "compat-1" },
+        "OPENAI_COMPATIBLE_BASE_URL is not",
+      ],
+    ] as const) {
+      const { code, output } = await boot(env);
+      expect(code, output).not.toBe(0);
+      expect(code, output).not.toBeNull();
+      expect(output).toContain(says);
+    }
+  }, 60_000);
+
   it("refuses to boot on a DEFAULT_MODEL outside the catalog, naming it", async () => {
     for (const [env, key] of [
       [

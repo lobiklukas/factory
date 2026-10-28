@@ -34,6 +34,9 @@
         "ROLE_MODELS",
         "ROLE_POLICIES",
         "DEFAULT_MODEL",
+        "ROLE_FALLBACKS",
+        "OPENAI_COMPATIBLE_BASE_URL",
+        "OPENAI_COMPATIBLE_MODELS",
         "FAUX_VERIFY",
         "FAUX_SLEEP_MS",
         "FAUX_FAIL",
@@ -110,6 +113,9 @@
         "ANTHROPIC_SERVICE_ACCOUNT_ID",
         "ANTHROPIC_WORKSPACE_ID",
         "CLAUDE_CODE_OAUTH_TOKEN",
+        // The OpenAI-compatible endpoint's key (S-model-provider-breadth), read by pi-ai through the
+        // provider's auth, never by `Config`, so the scanning guard cannot see it either.
+        "OPENAI_COMPATIBLE_API_KEY",
         "GITHUB_TOKEN",
         "GITHUB_APP_PRIVATE_KEY",
         "GITHUB_REVIEWER_TOKEN",
