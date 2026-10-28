@@ -25,11 +25,13 @@ import type {
   RunningTask,
   TaskId,
   TaskRuntime,
+  Tx,
 } from "@earendil-works/pi-durable";
 import { defineTask } from "@earendil-works/pi-durable";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { Effect, Option, Schema } from "effect";
-import { MissionWorker } from "@repo/domain/Mission";
+import { MissionWorker, readMissionWorkers } from "@repo/domain/Mission";
+import { MissionDoc, missionKey } from "./docs";
 import { attempt } from "./session";
 
 /** The task kind a mission's worker registers under. */
@@ -158,6 +160,36 @@ export const runCommand = (
     return { _tag: "exited", exitCode: ran.success.value.exitCode } as const;
   });
 
+/**
+ * Record the conversation a worker opened in its mission's roster (LOB-194), in the worker's own
+ * commit. The fan-out wrote the worker's entry with no conversation; this fills it in. A mission
+ * whose document has no entry for the worker — one that fanned out on a build before the roster
+ * existed — is left alone: adding the workers that open after an upgrade would list only some of
+ * them, a partial roster that neither reads as "no workers" nor reconciles. A worker with no owner
+ * has no mission to name it to.
+ */
+const nameConversation = (
+  tx: Tx,
+  owner: TaskId | undefined,
+  runtime: WorkerRuntime,
+  worker: string,
+  conversationId: ConversationId,
+): Promise<void> => {
+  if (owner === undefined) return Promise.resolve();
+  const key = missionKey(owner);
+  return tx.doc(MissionDoc, runtime.conversationId, key, key).then((doc) => {
+    const taskId = String(runtime.taskId);
+    const roster = readMissionWorkers(doc);
+    const entry = {
+      id: worker,
+      taskId,
+      conversationId: String(conversationId),
+    };
+    if (!roster.some((each) => each.taskId === taskId)) return;
+    doc.workers = roster.map((each) => (each.taskId === taskId ? entry : each));
+  });
+};
+
 /** A worker that settled `failed`, with its reason in the committed detail. */
 const failed = (
   message: string,
@@ -254,21 +286,31 @@ export const MissionWorkerTask = defineTask<
   initial: () => ({ phase: "open" }),
   phases: {
     // The conversation and the checkpoint that names it are one commit, so a worker never owns a
-    // conversation it cannot find again, and a rerun of this phase after a crash creates none.
-    open: (_task, runtime, context) =>
+    // conversation it cannot find again, and a rerun of this phase after a crash creates none. The
+    // mission's roster names the conversation in the same commit (LOB-194): it is how a read of the
+    // log finds the ledger this worker's spend is in, with nothing held in a process.
+    open: (task, runtime, context) =>
       runtime.commit(
         (tx) =>
           tx
             .createConversation({
               ownership: { kind: "task", taskId: runtime.taskId },
             })
-            .then((conversation): WorkerNext => ({
-              status: "running",
-              checkpoint: {
-                phase: "converse",
-                conversationId: conversation.id,
-              },
-            })),
+            .then((conversation) =>
+              nameConversation(
+                tx,
+                task.owner,
+                runtime,
+                task.input.worker.id,
+                conversation.id,
+              ).then((): WorkerNext => ({
+                status: "running",
+                checkpoint: {
+                  phase: "converse",
+                  conversationId: conversation.id,
+                },
+              })),
+            ),
         context,
       ),
     converse: (task, runtime, context) => {

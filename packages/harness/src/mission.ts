@@ -45,9 +45,10 @@ import {
   MissionJoin,
   MissionPhase,
   readMissionDoc,
+  type MissionWorkerEntry,
 } from "@repo/domain/Mission";
 import { SessionWorkspace, type SessionError } from "@repo/domain/Session";
-import { MissionBindingDoc, MissionDoc } from "./docs";
+import { MissionBindingDoc, MissionDoc, missionKey } from "./docs";
 import {
   MissionWorker,
   MissionWorkerTask,
@@ -80,11 +81,7 @@ export { MISSION_VERSION };
 /** The task kind a mission registers under: one mission is one task. */
 export const MISSION_TASK_NAME = "factory.mission";
 
-/**
- * The document a mission owns, keyed by its task id: a conversation holds several missions, and each
- * one's phase record is its own.
- */
-export const missionKey = (taskId: TaskId): string => String(taskId);
+export { missionKey };
 
 /**
  * What a mission is started with: the feature it takes through the phases, and the workspace the
@@ -269,18 +266,22 @@ const failed = (
  *
  * `change` is the next state, or a function that writes what the phase creates — the fan-out's
  * worker tasks — in the same transaction and answers the next state, so the workers, the wait on
- * them and the document are one commit too.
+ * them and the document are one commit too. The fan-out also answers the roster of workers it
+ * created, which the document records (`FanOut`).
  */
 const enterPhase = (
   runtime: MissionRuntime,
   phase: MissionPhase,
-  change: MissionNext | ((tx: Tx) => Promise<MissionNext>),
+  change: MissionNext | ((tx: Tx) => Promise<FanOut>),
   context: Context,
 ): Promise<void> =>
   runtime.commit(
     (tx) =>
-      (typeof change === "function" ? change(tx) : Promise.resolve(change))
-        .then((next) =>
+      (typeof change === "function"
+        ? change(tx)
+        : Promise.resolve<FanOut>({ next: change })
+      )
+        .then(({ next, workers }) =>
           tx
             .doc(
               MissionDoc,
@@ -288,9 +289,12 @@ const enterPhase = (
               missionKey(runtime.taskId),
               missionKey(runtime.taskId),
             )
-            .then((doc) => ({ next, doc })),
+            .then((doc) => ({ next, workers, doc })),
         )
-        .then(({ next, doc }) => {
+        .then(({ next, workers, doc }) => {
+          // The roster is the fan-out's: each worker's task, named in the commit that creates it,
+          // before its conversation exists (`MissionWorkerEntry`).
+          if (workers !== undefined) doc.workers = [...workers];
           const entering =
             next.status === "terminal" ? phase : next.checkpoint.phase;
           // Re-entering the phase the mission is already in is the same entry, not a second one: a
@@ -307,6 +311,12 @@ const enterPhase = (
         }),
     context,
   );
+
+/** What the fan-out answers: the state the mission waits in, and the workers it created for the document. */
+type FanOut = {
+  readonly next: MissionNext;
+  readonly workers?: readonly MissionWorkerEntry[];
+};
 
 /**
  * The verify phase's work: run the workspace's `verify` command, or settle `failed` with the reason
@@ -402,7 +412,7 @@ const fanOut =
     input: MissionInput,
     workers: readonly MissionWorker[],
   ) =>
-  (tx: Tx): Promise<MissionNext> =>
+  (tx: Tx): Promise<FanOut> =>
     Effect.runPromise(
       Effect.gen(function* () {
         const ids: TaskId<MissionWorkerResult>[] = [];
@@ -423,7 +433,14 @@ const fanOut =
           on: ids,
           policy: input.join ?? DEFAULT_MISSION_JOIN,
         };
-        return next;
+        return {
+          next,
+          workers: ids.map((taskId, index) => ({
+            id: workers[index]?.id ?? String(taskId),
+            taskId: String(taskId),
+            conversationId: "",
+          })),
+        };
       }),
     );
 

@@ -35,6 +35,7 @@ import {
   Harness as HarnessRuntime,
   LiveDoc,
   ROOT_CONVERSATION_ID,
+  UsageDoc,
 } from "@earendil-works/pi-durable";
 import { createRegistry } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
@@ -60,7 +61,10 @@ import type { ApprovalRequest, ApprovalVerdict } from "@repo/domain/Approval";
 import {
   MISSION_VERSION,
   missionSnapshot,
+  readMissionWorkers,
   type MissionSnapshot,
+  type MissionWorkerEntry,
+  type MissionWorkerSpend,
 } from "@repo/domain/Mission";
 import type { Page as CitedPage } from "@repo/domain/Page";
 import {
@@ -160,6 +164,7 @@ import {
   projectUsageDoc,
   projectView,
   sameTasks,
+  totalSpend,
   usageCostTotal,
   SESSION_DOC_KIND,
   ACTOR_DOC_KIND,
@@ -2501,6 +2506,43 @@ export const missionCheckpoint = (
       ).pipe(Effect.map((task) => task?.state.checkpoint))
     : Effect.void;
 
+/** A conversation id as the roster stores it; `undefined` for an empty one (the worker has none yet) or a stray one. */
+const conversationIdOf = (stored: string): ConversationId | undefined =>
+  /^[0-9]+$/.test(stored) ? (Number(stored) as ConversationId) : undefined;
+
+/**
+ * Each worker of a mission with what it spent (LOB-194): the mission document's roster, each entry
+ * priced from the `pi.usage` of the conversation it names. `readLedger` reads one conversation's
+ * ledger from whichever source the caller has — a live harness or a reader-mode storage — so a
+ * live read and a fold attribute through one function.
+ *
+ * A worker with no conversation yet, or one whose ledger holds nothing, is listed with zero
+ * counters, never left out.
+ */
+const workerSpends = (
+  roster: readonly MissionWorkerEntry[],
+  readLedger: (
+    conversationId: ConversationId,
+  ) => Effect.Effect<SessionUsage, SessionError>,
+): Effect.Effect<readonly MissionWorkerSpend[], SessionError> =>
+  Effect.forEach(roster, (entry) =>
+    Effect.gen(function* () {
+      const conversationId = conversationIdOf(entry.conversationId);
+      const usage =
+        conversationId === undefined
+          ? totalSpend({ models: [], tools: [] })
+          : totalSpend(yield* readLedger(conversationId));
+      return {
+        id: entry.id,
+        taskId: entry.taskId,
+        ...(conversationId === undefined
+          ? {}
+          : { conversationId: entry.conversationId }),
+        usage,
+      };
+    }),
+  );
+
 /**
  * The mission a session is running, read off the two documents a start commits (LOB-230): the
  * binding names the mission's task id, and the mission's own document names the phase it reached.
@@ -2533,7 +2575,13 @@ const readMissionSnapshot = (
           doc.definitionVersion,
         )
       : undefined;
-    return missionSnapshot(taskId, doc, checkpoint);
+    // Each worker's own ledger, from the harness this process owns (LOB-194).
+    const workers = yield* workerSpends(readMissionWorkers(doc), (id) =>
+      attempt("read worker usage", () =>
+        harness.snapshot(UsageDoc, id, BACKGROUND_CONTEXT),
+      ).pipe(Effect.map((state) => projectUsageDoc(state))),
+    );
+    return missionSnapshot(taskId, doc, checkpoint, workers);
   });
 
 /** `readMissionSnapshot` for a session nobody owns: the same two documents, folded from its log. */
@@ -2545,7 +2593,15 @@ const readFoldedMission = (
     const taskId = bindingString(binding, "taskId");
     if (taskId === "") return undefined;
     const doc = yield* readDocument(storage, MISSION_DOC_KIND, taskId);
-    return doc === undefined ? undefined : missionSnapshot(taskId, doc);
+    if (doc === undefined) return undefined;
+    // The same roster, priced from the log's own ledgers: a released session reports the spend a
+    // live one did (LOB-194).
+    const workers = yield* workerSpends(readMissionWorkers(doc), (id) =>
+      readDocument(storage, USAGE_DOC, undefined, id).pipe(
+        Effect.map(projectUsageDoc),
+      ),
+    );
+    return missionSnapshot(taskId, doc, undefined, workers);
   });
 
 /** A live session's current state, read without subscribing to anything. */
