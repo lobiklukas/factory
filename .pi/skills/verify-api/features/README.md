@@ -235,6 +235,16 @@ With the boot's resume query made to find nothing, the verify phase times out wa
 resumed workers and four checks fail, in `.verify/evidence/lob-231/mutation-no-boot-resume/`. See
 [mission.md](mission.md).
 
+The run-restart checks (LOB-25) were run from the `agent/LOB-25` worktree on 2026-10-28 (faux, a
+scratch database minted on the worktree's own server on 5442): `./run-restart.sh` **17/17** under
+`SIGKILL` (`RUN_RESTART_PORT=9511`, evidence `.verify/evidence/lob-25/api/`) and **17/17** under
+`KILL_SIGNAL=TERM` (`RUN_RESTART_PORT=9512`, evidence `.verify/evidence/lob-25-term/api/`): the
+run on its tool call, the signal, no shutdown line under `SIGKILL`, the row the next boot reads, the
+same submission resumed at boot with its call settled as interrupted, and the boot's and the
+reopen's resume lines. Re-run after review scoped the reopen's resume to the root conversation's
+submissions. No drive mutation was run; the root scoping is mutation-checked in `packages/harness`'s
+`resume.test.ts`. See [lifecycle.md](lifecycle.md).
+
 | Feature                  | Status  | File                                         |
 | ------------------------ | ------- | -------------------------------------------- |
 | Create a session         | passing | [create.md](create.md)                       |

@@ -454,7 +454,7 @@ const resumeAtBoot = (
  * and for the same reason — the boot binds first. Built on `SessionShutdown`, like the docs
  * schedule, so a resume still in progress is interrupted before the owners are released.
  */
-const MissionResumeDaemon = Layer.effectDiscard(
+const BootResumeDaemon = Layer.effectDiscard(
   Effect.gen(function* () {
     const sessions = yield* SessionService;
     yield* Effect.forkScoped(
@@ -712,7 +712,7 @@ const HttpLive = Effect.gen(function* () {
   // The mission resume (LOB-231) sits there too, for the same reason: a resume that is still
   // reopening owners when the signal lands is interrupted before `close` releases them.
   const MissionResume = missionResume
-    ? MissionResumeDaemon
+    ? BootResumeDaemon
     : Layer.effectDiscard(
         Effect.logInfo(
           "missions: resume at boot off (MISSION_RESUME=false); a mission or a run in flight waits for its next caller",

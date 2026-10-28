@@ -140,6 +140,7 @@ import {
 } from "@repo/harness";
 import {
   closeHarness,
+  resumePending,
   clampCurationPages,
   compactSession,
   curationProposals,
@@ -1802,6 +1803,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       type OwnerAcquisition = {
         readonly reviewing?: boolean;
         readonly starts?: boolean;
+        /**
+         * `false` for a caller that takes the owner only to stop or withdraw work (`interrupt`,
+         * `withdraw`): an owner it opens does not first continue the run a dead process left in
+         * the log (LOB-25), so the stop lands on a paused run rather than racing a resumed one and
+         * its model request. The caller continues what is left once it has acted
+         * (`continueRemaining`). No effect on an owner already open.
+         */
+        readonly resume?: false;
       };
 
       /** The part of an acquisition that is serialized: everything but the network (below). */
@@ -1875,7 +1884,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             const opened = yield* open({
               storage,
               cwd: workspace.path,
-              resume: released === undefined,
+              resume: released === undefined && acquisition.resume !== false,
               policy: policy.forWorktree(workspace.path, id),
               run,
               pages,
@@ -2310,14 +2319,37 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           };
         });
 
+      /**
+       * Continue what the root still holds unsettled once a caller that took the owner paused
+       * (`resume: false`) has acted (LOB-25): the stop or the withdrawal lands first, and whatever it
+       * left — a message queued behind the one withdrawn — runs as it would have in a live process.
+       * Never on a released session, whose run has no directory; harmless on an owner that was
+       * already running, whose scheduler is on.
+       */
+      const continueRemaining = (
+        sessionId: SessionId,
+        owner: LiveOwner,
+      ): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          if (owner.workspace.released !== undefined) return;
+          const resumed = yield* resumePending(owner.harness, owner.root);
+          if (resumed.length > 0) {
+            yield* Effect.logInfo(
+              `session ${sessionId}: continued ${resumed.length} unsettled submission(s): ${resumed.join(", ")}`,
+            );
+          }
+        });
+
       const interrupt = (
         sessionId: SessionId,
       ): Effect.Effect<SessionSummary, SessionError> =>
         Effect.gen(function* () {
           const row = yield* requireSession(sessionId);
           // Steering wakes the session first (D8): acquiring the owner is what waking means here.
-          const owner = yield* acquireOwner(sessionId, row);
+          // Paused (LOB-25): a run a dead process left behind is stopped, not first continued.
+          const owner = yield* acquireOwner(sessionId, row, { resume: false });
           yield* interruptConversation(owner.root);
+          yield* continueRemaining(sessionId, owner);
           yield* touchActivity(sessionId);
           return yield* describe(sessionId, row);
         });
@@ -2350,12 +2382,17 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               };
             }
           }
-          const owner = yield* acquireOwner(input.sessionId, row);
+          // Paused (LOB-25): the withdrawal lands before anything a dead process left is continued,
+          // so a queued message is withdrawn rather than placed by the resumed run first.
+          const owner = yield* acquireOwner(input.sessionId, row, {
+            resume: false,
+          });
           const outcome = yield* withdrawMessage(
             owner,
             owner.storage,
             input.submissionId,
           );
+          yield* continueRemaining(input.sessionId, owner);
           yield* touchActivity(input.sessionId);
           return {
             session: yield* describe(input.sessionId, row),

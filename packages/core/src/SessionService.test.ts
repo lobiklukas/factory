@@ -10034,6 +10034,118 @@ describe("a run across a kill", () => {
     }
   }, 120_000);
 
+  /**
+   * Start a run whose tool call holds in a process that then shuts down the way the API's SIGTERM
+   * finalizer stops one, with `queued` sent behind it as a follow-up when given.
+   */
+  const stoppedMidRun = (
+    before: ReturnType<typeof processOver>,
+    hold: string,
+    queued?: string,
+  ) =>
+    before.runtime
+      .runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({ title: "a run to stop" });
+          const sent = yield* sessions.send({
+            sessionId: created.id,
+            content: prompt,
+          });
+          const worktree = (yield* sessions.get(created.id)).workspace.path;
+          yield* waitUntil(
+            Effect.sync(() => runsIn(worktree) === 1),
+            "the tool call to start",
+          );
+          const behind =
+            queued === undefined
+              ? undefined
+              : yield* sessions.send({
+                  sessionId: created.id,
+                  content: queued,
+                  whenBusy: "followUp",
+                });
+          yield* sessions.close;
+          return {
+            sessionId: created.id,
+            submissionId: sent.submissionId,
+            queuedId: behind?.submissionId,
+            worktree,
+          };
+        }),
+      )
+      .finally(() => before.runtime.dispose());
+
+  it("stops a run the shutdown interrupted on an interrupt, without continuing it first", async () => {
+    const hold = mkdtempSync(join(tmpdir(), "factory-run-interrupt-hold-"));
+    const before = processOver(holding(hold));
+    const after = processOver();
+    try {
+      const armed = await stoppedMidRun(before, hold);
+      const outcome = await after.runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          // The interrupt takes the owner paused: the stop lands on the run where the shutdown left
+          // it, rather than racing a resumed run and its next model request.
+          yield* sessions.interrupt(armed.sessionId);
+          const settled = yield* standing(armed.sessionId, armed.submissionId);
+          // Long enough for a resumed faux run to have made its request many times over.
+          yield* Effect.sleep(1_000);
+          const stopped = yield* sessions.get(armed.sessionId);
+          yield* sessions.close;
+          return { settled, stopped };
+        }),
+      );
+
+      expect(outcome.settled).toBe("settled");
+      expect(outcome.stopped.live.busy).toBe(false);
+      expect(outcome.stopped.entries.at(-1)?.kind).not.toBe("assistant");
+      expect(runsIn(armed.worktree)).toBe(1);
+      expect(after.calls()).toBe(0);
+    } finally {
+      writeFileSync(join(hold, "release"), "");
+      await after.runtime.dispose();
+    }
+  }, 120_000);
+
+  it("withdraws a message queued behind an interrupted run, then continues the run", async () => {
+    const hold = mkdtempSync(join(tmpdir(), "factory-run-withdraw-hold-"));
+    const before = processOver(holding(hold));
+    const after = processOver();
+    try {
+      const armed = await stoppedMidRun(before, hold, "never mind");
+      const outcome = await after.runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          // The withdrawal takes the owner paused and lands first; what it leaves — the run — is
+          // continued afterwards, as a live process would have carried on with it.
+          const withdrawn = yield* sessions.withdraw({
+            sessionId: armed.sessionId,
+            submissionId: armed.queuedId ?? "",
+          });
+          yield* settledLive(sessions, armed.sessionId);
+          const reopened = yield* sessions.get(armed.sessionId);
+          const settled = yield* standing(armed.sessionId, armed.submissionId);
+          yield* sessions.close;
+          return { withdrawn, reopened, settled };
+        }),
+      );
+
+      expect(outcome.withdrawn.outcome).toBe("withdrawn");
+      expect(outcome.settled).toBe("settled");
+      expect(usersIn(outcome.reopened).map((entry) => entry.text)).toEqual([
+        prompt,
+      ]);
+      expect(outcome.reopened.entries.at(-1)?.kind).toBe("assistant");
+      expect(runsIn(armed.worktree)).toBe(1);
+      // The resumed run's one request; the withdrawn message made none.
+      expect(after.calls()).toBe(1);
+    } finally {
+      writeFileSync(join(hold, "release"), "");
+      await after.runtime.dispose();
+    }
+  }, 120_000);
+
   it("leaves a released session's interrupted run where it stopped, and the boot leaves it too", async () => {
     const hold = mkdtempSync(join(tmpdir(), "factory-run-release-hold-"));
     const before = processOver(holding(hold));

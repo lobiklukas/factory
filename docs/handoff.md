@@ -80,7 +80,9 @@ passes ten.
 - **A run across a kill** (LOB-25). A run whose process died — SIGTERM's close or a `SIGKILL` that
   ran no finalizer — continues when its session is reopened, as the same submission in the same
   conversation, with nothing submitted twice and no manual `Harness.resume()`: `openSession` resumes
-  what the log holds unsettled (`resumePending`), and the boot's `resumeRuns` reopens the sessions
+  what the log's root holds unsettled (`resumePending`) — and with it, Pi Durable having one
+  scheduler per harness, everything else pending in that log, a mission included — while
+  `interrupt` and `withdraw` open paused and act first; the boot's `resumeRuns` reopens the sessions
   whose row says a run was in flight under its own root (`sessions.run_session_root`), so nobody has
   to send the session anything. The tool call the death cut short settles as interrupted rather than
   running twice, and the model answers after it; a client retrying the same request id gets the same
@@ -122,7 +124,8 @@ passes ten.
 - **A kill that runs no finalizer — the rest.** LOB-25 proved the run continues (see _Proven_). Not
   proven: a released session's interrupted run is left placed and never resumed (it has no
   directory to run in), and two processes on one database _and_ one root would both resume it —
-  `MISSION_RESUME=false` turns the boot's resume off for the second, as for missions (D12). The
+  `MISSION_RESUME=false` turns the boot's sweeps off for the second, as for missions (D12), but not
+  the resume an owner that process opens later does. The
   tool call the death cut short is settled as interrupted, never rerun, by design.
 - **The readiness probe's middle branch.** `/readyz` names a missing migration in principle; only
   the database-down branch is driven (`degraded.sh`), because dropping a migration row would corrupt

@@ -403,10 +403,12 @@ export type OpenSessionOptions = {
    */
   readonly review?: ReviewOptions;
   /**
-   * Whether the open continues the submissions the log left unsettled (LOB-25, `resumePending`).
-   * Absent or `true`: it does, so a run a dead process left behind carries on in this one. `false`:
-   * the harness opens paused, and nothing in the log runs until a caller asks for progress — the
-   * control plane's choice for a session whose workspace is gone, where a run has no directory.
+   * Whether the open continues the submissions the log's root left unsettled (LOB-25,
+   * `resumePending`). Absent or `true`: it does, so a run a dead process left behind carries on in
+   * this one — and, Pi Durable's scheduler being one per harness, so does every other pending task
+   * in the log. `false`: the harness opens paused, and nothing in the log runs until a caller asks
+   * for progress — the control plane's choice for a session whose workspace is gone, where a run
+   * has no directory, and for a caller that opens only to stop or withdraw work.
    */
   readonly resume?: boolean;
 };
@@ -428,35 +430,46 @@ export type OpenSession = {
    */
   readonly model: ModelAccess;
   /**
-   * The submissions this open continued (LOB-25): the ids of the inputs the log held queued or
-   * placed — a run a previous process was in the middle of, or queued behind — in id order. Empty
-   * when the log held none, and when the open was asked not to resume.
+   * The submissions this open continued (LOB-25): the ids of the inputs the root conversation held
+   * queued or placed — a run a previous process was in the middle of, or queued behind — in id
+   * order. A mission worker's submission in its own conversation is not one. Empty when the root
+   * held none, and when the open was asked not to resume.
    */
   readonly resumed: readonly string[];
 };
 
 /**
- * Continue what a reopened log left unsettled (LOB-25), and answer the submissions that is.
+ * Continue what a reopened log left unsettled in its root conversation (LOB-25), and answer the
+ * submissions that is.
  *
  * Pi Durable reconciles a dead process's `running` tasks to `pending` when a harness opens, but it
  * schedules nothing until something asks for progress (`Harness.resume()`, or a submit or a wait).
  * A run whose process died — a SIGTERM's close or a SIGKILL that ran no finalizer at all — would
  * otherwise sit, placed and unanswered, until somebody happened to send the session something. So
- * a log that holds a queued or placed submission is resumed here, deliberately: the run continues
- * as the same submission in the same conversation, with the tool call the death interrupted settled
- * as interrupted rather than run twice, and nothing is submitted again.
+ * a log whose root holds a queued or placed submission is resumed here, deliberately: the run
+ * continues as the same submission in the same conversation, with the tool call the death
+ * interrupted settled as interrupted rather than run twice, and nothing is submitted again.
  *
- * A log with no such submission is left paused: nothing a reopen did not need to schedule is. Read
- * through `inspect`, which writes nothing and runs no task code.
+ * Only the root's submissions decide it: a mission worker's conversation (`mission-worker.ts`)
+ * holds a placed submission of its own while it talks to the model, and that is the mission's work,
+ * which LOB-231's `resumeMissions` decides about — a log that holds only that is left paused. What
+ * the decision turns on is the whole harness, though: Pi Durable has one scheduler per harness, so
+ * resuming continues every pending task in the log, a mission's included — as any submit or wait
+ * on that log already does. A log with no root submission unsettled is left paused: nothing a
+ * reopen did not need to schedule is. Read through `inspect`, which writes nothing and runs no task
+ * code.
  */
 export const resumePending = (
   harness: Harness,
+  root: Conversation,
 ): Effect.Effect<readonly string[], SessionError> =>
   Effect.gen(function* () {
     const inspection = yield* attempt("inspect pending work", () =>
       harness.inspect(BACKGROUND_CONTEXT),
     );
-    const pending = inspection.submissions.map((record) => String(record.id));
+    const pending = inspection.submissions
+      .filter((record) => record.conversationId === root.id)
+      .map((record) => String(record.id));
     if (pending.length > 0) yield* Effect.sync(() => harness.resume());
     return pending;
   });
@@ -614,57 +627,62 @@ const openSessionIn = (
       ),
     );
 
-    // The tools the role is not offered, as the registrations the registry holds: Pi Durable's
-    // filter takes tools, and stores their names in the conversation's `pi.agent`.
-    const withheld = registry
-      .snapshot()
-      .tools()
-      .map(({ tool }) => tool)
-      .filter((tool) => role.withheldTools.has(tool.name));
-    // The agent is written when the root is created, and only then: the role's model and its tool
-    // filter are pinned to the run when its session first opens, so a change to the deployment's
-    // role table reaches the next run rather than one in flight, and a replay keeps the model it
-    // was replayed onto. (Under the faux backend the catalog is only the ids the process was booted
-    // with, so a run pinned to a `faux/*` id the current `ROLE_MODELS` no longer names finds no
-    // model to send to: docs/board.md B6.)
-    const root = yield* attempt("open root conversation", () =>
-      harness.root(BACKGROUND_CONTEXT, {
-        agent: {
-          model: {
-            provider: model.provider,
-            modelId: model.modelId,
+    // Everything after the open can fail, and a harness that opened owns a scheduler: one that
+    // fails here closes it rather than leaving it running with no owner. `openSession` then releases
+    // the environment, and the caller disposes the storage.
+    return yield* Effect.gen(function* () {
+      // The tools the role is not offered, as the registrations the registry holds: Pi Durable's
+      // filter takes tools, and stores their names in the conversation's `pi.agent`.
+      const withheld = registry
+        .snapshot()
+        .tools()
+        .map(({ tool }) => tool)
+        .filter((tool) => role.withheldTools.has(tool.name));
+      // The agent is written when the root is created, and only then: the role's model and its tool
+      // filter are pinned to the run when its session first opens, so a change to the deployment's
+      // role table reaches the next run rather than one in flight, and a replay keeps the model it
+      // was replayed onto. (Under the faux backend the catalog is only the ids the process was booted
+      // with, so a run pinned to a `faux/*` id the current `ROLE_MODELS` no longer names finds no
+      // model to send to: docs/board.md B6.)
+      const root = yield* attempt("open root conversation", () =>
+        harness.root(BACKGROUND_CONTEXT, {
+          agent: {
+            model: {
+              provider: model.provider,
+              modelId: model.modelId,
+            },
+            ...(withheld.length === 0 ? {} : { tools: { remove: withheld } }),
+            cwd: options.cwd,
           },
-          ...(withheld.length === 0 ? {} : { tools: { remove: withheld } }),
-          cwd: options.cwd,
-        },
-      }),
-    );
-    opened = { root, harness };
+        }),
+      );
+      opened = { root, harness };
 
-    // What the section came to, committed beside it: a page the budget dropped is a fact about this
-    // open, and a fact about a prompt that is not in the log is not a fact anyone can check later.
-    // Written on every open, an empty page set included, so a session that was told pages once and
-    // holds none now records the absence instead of leaving the last answer standing.
-    yield* writePagePrompt(root, {
-      cap: PAGES_TOKEN_CAP,
-      tokens: pagesPrompt.tokens,
-      held: pages.length,
-      included: pagesPrompt.included,
-      dropped: pagesPrompt.dropped,
-    });
+      // What the section came to, committed beside it: a page the budget dropped is a fact about this
+      // open, and a fact about a prompt that is not in the log is not a fact anyone can check later.
+      // Written on every open, an empty page set included, so a session that was told pages once and
+      // holds none now records the absence instead of leaving the last answer standing.
+      yield* writePagePrompt(root, {
+        cap: PAGES_TOKEN_CAP,
+        tokens: pagesPrompt.tokens,
+        held: pages.length,
+        included: pagesPrompt.included,
+        dropped: pagesPrompt.dropped,
+      });
 
-    // Last, once the harness is fully set up (LOB-25): a run a dead process left in the log carries
-    // on here rather than waiting for the next message.
-    const resumed =
-      options.resume === false ? [] : yield* resumePending(harness);
+      // Last, once the harness is fully set up (LOB-25): a run a dead process left in the log carries
+      // on here rather than waiting for the next message.
+      const resumed =
+        options.resume === false ? [] : yield* resumePending(harness, root);
 
-    return {
-      harness,
-      root,
-      model,
-      releaseEnvironment: environment.release,
-      resumed,
-    };
+      return {
+        harness,
+        root,
+        model,
+        releaseEnvironment: environment.release,
+        resumed,
+      };
+    }).pipe(Effect.onError(() => Effect.exit(closeHarness(harness))));
   });
 
 /**

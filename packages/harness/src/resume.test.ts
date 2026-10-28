@@ -209,7 +209,9 @@ describe("a reopen after a kill", () => {
         await Effect.runPromise(isBusy(reopened.harness, reopened.root)),
       ).toBe(true);
 
-      const resumed = await Effect.runPromise(resumePending(reopened.harness));
+      const resumed = await Effect.runPromise(
+        resumePending(reopened.harness, reopened.root),
+      );
       expect(resumed).toEqual([submitted.submissionId]);
       await eventually(
         "the resumed run to settle",
@@ -219,6 +221,63 @@ describe("a reopen after a kill", () => {
       expect((await reopened.harness.inspect(context)).submissions).toEqual([]);
       await Effect.runPromise(closeHarness(reopened.harness));
       await Effect.runPromise(reopened.releaseEnvironment);
+    } finally {
+      await bury(cwd, first);
+    }
+  }, 60_000);
+
+  it("leaves a log paused whose only unsettled submission is another conversation's", async () => {
+    // A mission worker's shape (`mission-worker.ts`): a conversation of its own, whose submission is
+    // placed while it talks to the model. That is the mission's work, which the boot's
+    // `resumeMissions` decides about, so a reopen of the session does not resume it.
+    const inner = new MemoryStorage();
+    const cwd = mkdtempSync(join(tmpdir(), "factory-resume-other-"));
+    let dead = false;
+    const holds = `echo run >> ${join(cwd, "runs")}; while [ ! -f ${join(cwd, "release")} ]; do sleep 0.01; done`;
+    const first = await Effect.runPromise(
+      openSession({
+        storage: dying(inner, () => dead),
+        model: createFauxModelAccess({ fauxCommand: holds }).access,
+        cwd,
+      }),
+    );
+    try {
+      const worker = await first.harness.createConversation(
+        {
+          ownership: { kind: "ownerless" },
+          agent: {
+            model: {
+              provider: first.model.provider,
+              modelId: first.model.modelId,
+            },
+            cwd,
+          },
+        },
+        context,
+      );
+      const submission = await worker.submit(
+        { type: "input", content: "go", requestId: "the-worker" },
+        context,
+      );
+      await eventually("the tool call to start", () => runsIn(cwd) === 1);
+      dead = true;
+
+      const reopened = await Effect.runPromise(
+        openSession({
+          storage: inner,
+          model: createFauxModelAccess({ fauxCommand: "echo second" }).access,
+          cwd,
+        }),
+      );
+      const inspection = await reopened.harness.inspect(context);
+      await Effect.runPromise(closeHarness(reopened.harness));
+      await Effect.runPromise(reopened.releaseEnvironment);
+      expect(reopened.resumed).toEqual([]);
+      expect(inspection.scheduling).toBe("paused");
+      // Still there for whoever does resume the log: the paused open neither settles nor drops it.
+      expect(inspection.submissions.map((record) => record.id)).toEqual([
+        submission.id,
+      ]);
     } finally {
       await bury(cwd, first);
     }

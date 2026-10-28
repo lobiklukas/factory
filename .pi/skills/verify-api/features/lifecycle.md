@@ -43,7 +43,9 @@ verify-cli's `./discard.sh`.
 **A kill that runs no finalizer (LOB-25).** `SIGKILL` releases nothing and commits nothing on its
 way out: the run's submission stays placed in the log, its tool task is reconciled to `pending` by
 the next harness that opens it, and the activity index still says `busy`. Any owner that opens the
-log continues it — `openSession` resumes the submissions a log holds unsettled (`resumePending`), so
+log continues it — `openSession` resumes the submissions the log's root holds unsettled
+(`resumePending`; a mission worker's own conversation does not count, though once the root does the
+whole log's scheduler runs, a pending mission included), so
 the run carries on as the same submission in the same conversation, the tool call the kill cut short
 settles as `interrupted` rather than running twice, and the model answers after it. The boot is what
 opens it: the owner's projection marks the row while a run is in flight
