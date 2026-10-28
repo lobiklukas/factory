@@ -1,5 +1,12 @@
 /** A column's settings (LOB-245): what the settings page and a lane's disclosure say about one column. */
-import { renderToStaticMarkup } from "react-dom/server";
+import type { ReactNode } from "react";
+import { renderToStaticMarkup as renderStatic } from "react-dom/server";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterContextProvider,
+} from "@tanstack/react-router";
 import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import { ColumnConfig } from "@repo/domain/Task";
@@ -47,6 +54,17 @@ const intake = column({
   exits: [],
 });
 
+/** A router for the skill links (D8) to resolve against: a bare root, so a link's href is its path. */
+const router = createRouter({
+  routeTree: createRootRoute(),
+  history: createMemoryHistory(),
+});
+
+const renderToStaticMarkup = (node: ReactNode): string =>
+  renderStatic(
+    <RouterContextProvider router={router}>{node}</RouterContextProvider>,
+  );
+
 /** The markup between an element's opening tag carrying `hook` and its first closing tag. */
 const textAt = (markup: string, hook: string): ReadonlyArray<string> =>
   [...markup.matchAll(new RegExp(`${hook}[^>]*>([^<]*)<`, "g"))].map(
@@ -88,11 +106,17 @@ describe("ColumnSettings", () => {
     expect(markup).toContain('data-exit="building"');
   });
 
-  it("lists the skills by name and the WIP limit", () => {
+  /** Mutation: render the names as plain text again, or link every skill to one page. */
+  it("lists the skills by name, each a link to its page, and the WIP limit", () => {
     expect(textAt(markup, "data-column-skill")).toEqual([
       "planning",
       "plan-freshness",
     ]);
+    expect(
+      [...markup.matchAll(/<a [^>]*data-column-skill-link[^>]*>/g)].map(
+        (match) => /href="([^"]*)"/.exec(match[0])?.[1],
+      ),
+    ).toEqual(["/skills/planning", "/skills/plan-freshness"]);
     expect(textAt(markup, 'data-column-wip="2"')).toEqual([
       "at most 2 runs in flight",
     ]);

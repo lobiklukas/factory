@@ -58,6 +58,10 @@ from the `agent/C10` worktree, API `:9581` / web `:3581`, `FAUX_SLEEP_MS=5000`. 
 shown and a run in a gated column parked on its approval (C22). Before it, 23/23 from `agent/D3`, where
 `drive.mjs` re-passed (API `:9541` / web `:3541`), its lane-control count leaving the settings disclosure out.
 
+`skills.sh` (the skill pages, D8) last passed **21/21** on 2026-10-28 from the `agent/D8` worktree,
+API `:9541` / web `:3541`, on a throwaway database; `board-settings.sh` re-passed there (23/23, API `:9541` /
+web `:3541`) with each column's skills now links.
+
 `cost.sh` (cost prediction on the New session form and `/spend`, LOB-38) last passed **12/12** on
 2026-10-28 from the `agent/LOB-38` worktree, API `:9552` / web `:3552`; `spend.sh` and `model.sh`
 re-passed there beside it, as the strip and the form sit on their pages.
@@ -75,6 +79,7 @@ re-passed there beside it, as the strip and the form sit on their pages.
 | Compaction from the pane     | passing | [compaction.md](compaction.md)                                                |
 | Board lanes                  | passing | [board.md](board.md)                                                          |
 | Board settings               | passing | [board-settings.md](board-settings.md) (`board-settings.sh`)                  |
+| Skill pages                  | passing | [skills.md](skills.md) (`skills.sh`)                                          |
 | Card pane (write path)       | passing | [card-pane.md](card-pane.md)                                                  |
 | What needs a person          | passing | [attention.md](attention.md)                                                  |
 | The card's thread            | passing | [thread.md](thread.md) (`thread.sh`)                                          |
@@ -82,6 +87,7 @@ re-passed there beside it, as the strip and the form sit on their pages.
 | Open pull request            | passing | [pr-open.md](pr-open.md) (`pr.sh`)                                            |
 | Spend by repo and actor      | passing | [spend.md](spend.md) (`spend.sh`)                                             |
 | Repositories                 | passing | [repos.md](repos.md) (`repos.sh`)                                             |
+| Triggers                     | passing | [triggers.md](triggers.md) (`triggers.sh`)                                    |
 | New board (boards page)      | passing | [board-create.md](board-create.md) (`board-create.sh`)                        |
 | First run (checklist, `/`)   | passing | [first-run.md](first-run.md) (`first-run.sh`)                                 |
 | New card (board page)        | passing | [card-create.md](card-create.md) (verify-board's `card-create.sh`)            |

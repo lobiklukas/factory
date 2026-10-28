@@ -84,16 +84,21 @@ import {
 import {
   GetSkillInput,
   ListSkillsInput,
+  ListSkillVersionsInput,
   PutSkillInput,
   SkillErrorSchema,
   SkillRecord,
   SkillSummary,
+  SkillVersionSummary,
 } from "@repo/domain/Skill";
 import {
   AddTriggerRouteInput,
+  ListTriggerDeliveriesInput,
+  ListTriggerDeliveriesOutput,
   ListTriggerRoutesInput,
   ListTriggerRoutesOutput,
   RemoveTriggerRouteInput,
+  TriggerDeliveryError,
   TriggerRoute,
   TriggerRouteError,
   TriggerRouteNotFound,
@@ -566,6 +571,13 @@ export class TriggerRoutesRpc extends RpcGroup.make(
     success: TriggerRoute,
     error: Schema.Union([TriggerRouteError, TriggerRouteNotFound]),
   }),
+  // The deliveries the seam recorded (T4), newest first, each with its outcome and the reason
+  // verbatim, so "why did my labelled issue start nothing" is a read, not a log search.
+  Rpc.make("listTriggerDeliveries", {
+    payload: ListTriggerDeliveriesInput,
+    success: ListTriggerDeliveriesOutput,
+    error: TriggerDeliveryError,
+  }),
 ).middleware(ControlPlaneAuth) {}
 
 /**
@@ -617,6 +629,13 @@ export class SkillsRpc extends RpcGroup.make(
   Rpc.make("getSkill", {
     payload: GetSkillInput,
     success: SkillRecord,
+    error: SkillErrorSchema,
+  }),
+  // Every version of one skill, newest first, without the bodies (D8): the dashboard's history. An
+  // unknown name is `SkillNotFound`.
+  Rpc.make("listSkillVersions", {
+    payload: ListSkillVersionsInput,
+    success: Schema.Array(SkillVersionSummary),
     error: SkillErrorSchema,
   }),
   // Version newest + 1 (1 for a new name), attributed to the caller's credential. A blank body is

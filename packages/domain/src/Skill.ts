@@ -65,6 +65,21 @@ export const SkillSummary = Schema.Struct({
 });
 export type SkillSummary = typeof SkillSummary.Type;
 
+/**
+ * One version of a skill as its history lists it (D8): who put it, when, and what it described
+ * itself as — everything `SkillRecord` holds except the body, so a skill with many versions is one
+ * small read. A version's body is `getSkill` with that version.
+ */
+export const SkillVersionSummary = Schema.Struct({
+  name: Schema.String,
+  version: SkillVersion,
+  description: Schema.String,
+  createdAt: Timestamp,
+  /** The control-plane actor that put it (LOB-20); empty for a seed or an unattributed put. */
+  author: Schema.String,
+});
+export type SkillVersionSummary = typeof SkillVersionSummary.Type;
+
 export const ListSkillsInput = Schema.Struct({});
 export type ListSkillsInput = typeof ListSkillsInput.Type;
 
@@ -74,6 +89,12 @@ export const GetSkillInput = Schema.Struct({
   version: Schema.optional(SkillVersion),
 });
 export type GetSkillInput = typeof GetSkillInput.Type;
+
+/** Every version of one skill, newest first: its history. A name the factory lacks is `SkillNotFound`. */
+export const ListSkillVersionsInput = Schema.Struct({
+  name: Schema.String,
+});
+export type ListSkillVersionsInput = typeof ListSkillVersionsInput.Type;
 
 /**
  * A new version of a skill: written as `newest + 1`, or as version 1 for a name the factory does not

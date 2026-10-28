@@ -4,10 +4,12 @@ import { Option } from "effect";
 import { AsyncResult } from "effect/reactivity";
 import {
   BellIcon,
+  BookOpenTextIcon,
   CoinsIcon,
   GitBranchIcon,
   KanbanSquareIcon,
   TerminalIcon,
+  WebhookIcon,
 } from "lucide-react";
 import { cn } from "cn";
 import { FactoryMark } from "@/components/factory-mark";
@@ -40,6 +42,10 @@ const SECTIONS = [
   { to: "/spend", label: "Spend", icon: CoinsIcon },
   // The repositories sessions are cut worktrees from, and the form that registers one (LOB-262).
   { to: "/repos", label: "Repositories", icon: GitBranchIcon },
+  // What the trigger seam did with each delivery, and why it skipped the ones it did (T4).
+  { to: "/triggers", label: "Triggers", icon: WebhookIcon },
+  // The prompt text a column's runs are told, and the form that publishes a new version of it (D8).
+  { to: "/skills", label: "Skills", icon: BookOpenTextIcon },
 ] as const;
 
 /**
