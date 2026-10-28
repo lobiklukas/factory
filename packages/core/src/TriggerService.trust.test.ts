@@ -175,7 +175,9 @@ const withSeam = async (
   } finally {
     for (const id of added) {
       await runtime
-        .runPromise(Effect.ignore(Effect.flatMap(TriggerRoutes, (r) => r.remove(id))))
+        .runPromise(
+          Effect.ignore(Effect.flatMap(TriggerRoutes, (r) => r.remove(id))),
+        )
         .catch(() => undefined);
     }
     await runtime.dispose();
@@ -201,6 +203,11 @@ const recorded = (requestId: string) =>
 
 const label = (name: string) => ({ id: `lbl-${name}`, name });
 
+/** An instant relative to a route's stored creation, as Linear writes one. */
+const isoAt = (ms: number): string =>
+  // oxlint-disable-next-line effecttsgo/global-date -- a payload's instant, formatted, read from no clock.
+  new Date(ms).toISOString();
+
 /** A Linear `Issue` webhook body, shaped from Linear's docs: `actor` is who did it. */
 const linearIssue = (over: {
   readonly id: string;
@@ -216,7 +223,8 @@ const linearIssue = (over: {
     action: over.action ?? "create",
     type: "Issue",
     actor: { type: "user", ...over.actor },
-    createdAt: new Date().toISOString(),
+    // The delivery's own time, not the issue's; nothing here reads it.
+    createdAt: "2026-10-28T09:00:00.000Z",
     data: {
       id: over.id,
       identifier: "ENG-1",
@@ -224,10 +232,10 @@ const linearIssue = (over: {
       description: over.description ?? "It wobbles.",
       labelIds: labels.map((entry) => entry.id),
       labels,
-      createdAt: over.createdAt ?? new Date().toISOString(),
+      ...(over.createdAt === undefined ? {} : { createdAt: over.createdAt }),
     },
     ...(over.action === "update" ? { updatedFrom: { labelIds: [] } } : {}),
-    webhookTimestamp: Date.now(),
+    webhookTimestamp: 1_761_559_200_000,
   };
 };
 
@@ -312,7 +320,7 @@ describe("the trust gate", () => {
         trust: { createdAfter: "enabled" },
       });
       const enabled = Date.parse(route.createdAt);
-      const before = new Date(enabled - 86_400_000).toISOString();
+      const before = isoAt(enabled - 86_400_000);
       const old = await harness.deliver(
         await linear(
           harness,
@@ -339,7 +347,7 @@ describe("the trust gate", () => {
             id: `lin-${runId}-fresh`,
             labelName: name,
             actor: { id: "user-ada" },
-            createdAt: new Date(enabled + 1_000).toISOString(),
+            createdAt: isoAt(enabled + 1_000),
           }),
         ),
       );
@@ -412,7 +420,7 @@ const githubIssue = (number: number, labelName: string, sender: string) => ({
     title: `GitHub issue ${number}`,
     body: "Please fix.",
     labels: [{ name: labelName }],
-    created_at: new Date().toISOString(),
+    created_at: "2026-10-28T09:00:00Z",
   },
   sender: { login: sender, id: number * 10, type: "User" },
   repository: { full_name: ghRepo },

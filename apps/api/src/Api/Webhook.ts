@@ -217,7 +217,8 @@ const labelNames = (value: unknown): ReadonlyArray<string> => {
  * checks the name against its allowlist like any other source's.
  */
 const genericAuthor = (value: unknown): TriggerAuthor | undefined => {
-  if (typeof value === "string") return value === "" ? undefined : { id: value };
+  if (typeof value === "string")
+    return value === "" ? undefined : { id: value };
   const record = asRecord(value);
   const id = stringField(record, "id");
   if (id === undefined || id === "") return undefined;

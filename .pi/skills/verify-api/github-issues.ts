@@ -148,7 +148,13 @@ const issuePayload = (over: {
   action: over.action ?? "opened",
   ...(over.sender === undefined
     ? {}
-    : { sender: { login: over.sender, id: 9_000 + (over.number ?? 7), type: "User" } }),
+    : {
+        sender: {
+          login: over.sender,
+          id: 9_000 + (over.number ?? 7),
+          type: "User",
+        },
+      }),
   issue: {
     number: over.number ?? 7,
     title: "The widget wobbles",
@@ -540,7 +546,11 @@ const program = Effect.gen(function* () {
     post(
       "labelled by a reader",
       "issues",
-      issuePayload({ number: 20, labels: [trustedLabel], sender: "verify-reader" }),
+      issuePayload({
+        number: 20,
+        labels: [trustedLabel],
+        sender: "verify-reader",
+      }),
     ),
   );
   const afterReader = yield* sessionCount;
@@ -548,7 +558,11 @@ const program = Effect.gen(function* () {
     post(
       "labelled by a writer",
       "issues",
-      issuePayload({ number: 21, labels: [trustedLabel], sender: "verify-writer" }),
+      issuePayload({
+        number: 21,
+        labels: [trustedLabel],
+        sender: "verify-writer",
+      }),
     ),
   );
   const asked = ledger().requests.filter((request) =>
@@ -566,7 +580,9 @@ const program = Effect.gen(function* () {
       (yield* sessionCount) === beforeTrust + 1 &&
       asked.map((request) => request.path).join(" ") ===
         `/repos/${REPO}/collaborators/verify-reader/permission /repos/${REPO}/collaborators/verify-writer/permission` &&
-      asked.every((request) => request.authorization === "Bearer ghs-drive-token"),
+      asked.every(
+        (request) => request.authorization === "Bearer ghs-drive-token",
+      ),
     `reader=${JSON.stringify(byReader.body)} writer=${JSON.stringify(byWriter.body)} asked=${JSON.stringify(asked)}`,
   );
   yield* routes.removeTriggerRoute({ id: trustRoute.id });

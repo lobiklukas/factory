@@ -1028,7 +1028,8 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
                   : { ...resolved, prompt: prompt.text };
               const note = sanitizedNote({
                 hidden: title.hidden + body.hidden + (prompt?.hidden ?? 0),
-                comments: title.comments + body.comments + (prompt?.comments ?? 0),
+                comments:
+                  title.comments + body.comments + (prompt?.comments ?? 0),
               });
               if (matched === undefined || mapping === undefined) {
                 return yield* skip(
@@ -1044,7 +1045,11 @@ export const TriggerServiceLive = (options: TriggerServiceOptions) =>
               // The rule's trust gate: who may start work through it, and which items. A refusal is a
               // recorded skip naming the author or the item's age; a lookup that cannot answer fails
               // the delivery (`author-check`), so the claim is given back and the sender retries.
-              const untrusted = yield* trustRefusal(matched, event, permissions);
+              const untrusted = yield* trustRefusal(
+                matched,
+                event,
+                permissions,
+              );
               if (untrusted !== undefined) {
                 return yield* skip(requestId, untrusted);
               }

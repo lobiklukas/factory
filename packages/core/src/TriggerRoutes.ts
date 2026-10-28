@@ -99,7 +99,8 @@ const toRoute = (
   });
 
 /** The columns every read of a route selects, `trust` as text so it decodes the same everywhere. */
-const ROUTE_COLUMNS = "id, label, team, repo, base_ref, prompt, starts_work_for, mode, trust::text AS trust, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at";
+const ROUTE_COLUMNS =
+  "id, label, team, repo, base_ref, prompt, starts_work_for, mode, trust::text AS trust, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at";
 
 /**
  * Every stored route in the order the seam consults them: a route naming a label and a team first

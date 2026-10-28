@@ -11,7 +11,11 @@ import { Effect, Layer, Option, Redacted, Schema } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { describe, expect, it } from "vitest";
 import type { RepoSlug } from "@repo/domain/Session";
-import type { TriggerEvent, TriggerRule } from "@repo/domain/Trigger";
+import type {
+  TriggerError,
+  TriggerEvent,
+  TriggerRule,
+} from "@repo/domain/Trigger";
 import { CredentialProvider, staticTokenProvider } from "./credentials";
 import { GitHubAuthorPermissions } from "./GitHub";
 import type { RoutedRule } from "./TriggerRoutes";
@@ -89,7 +93,10 @@ describe("the allowlist", () => {
 describe("created after enable", () => {
   it("refuses an item created before the rule was enabled, naming both instants", () => {
     const reason = createdAfterRefusal(
-      routed({ createdAfter: "enabled" }, { enabledAt: "2026-10-27T00:00:00.000Z" }),
+      routed(
+        { createdAfter: "enabled" },
+        { enabledAt: "2026-10-27T00:00:00.000Z" },
+      ),
       event({ createdAt: "2026-10-20T00:00:00Z" }),
     );
     expect(reason).toBe(
@@ -112,14 +119,20 @@ describe("created after enable", () => {
       ),
     ).toBeUndefined();
     expect(
-      createdAfterRefusal(routed(undefined), event({ createdAt: "1999-01-01T00:00:00Z" })),
+      createdAfterRefusal(
+        routed(undefined),
+        event({ createdAt: "1999-01-01T00:00:00Z" }),
+      ),
     ).toBeUndefined();
   });
 
   it("refuses an item the source gives no creation time for: it cannot be told apart from an old one", () => {
     const { createdAt: _createdAt, ...undated } = event();
     expect(
-      createdAfterRefusal(routed({ createdAfter: "2026-10-27T00:00:00Z" }), undated),
+      createdAfterRefusal(
+        routed({ createdAfter: "2026-10-27T00:00:00Z" }),
+        undated,
+      ),
     ).toMatch(/^created before the rule was enabled, or cannot be told apart/);
   });
 
@@ -156,7 +169,7 @@ describe("GitHub roles", () => {
 });
 
 describe("trustRefusal", () => {
-  const run = (effect: Effect.Effect<string | undefined, unknown>) =>
+  const run = (effect: Effect.Effect<string | undefined, TriggerError>) =>
     Effect.runPromise(effect);
 
   it("admits every author through a rule with no gate", async () => {
@@ -230,7 +243,10 @@ describe("trustRefusal", () => {
     const roles = rolesBy({ writer: "write" });
     const reason = await run(
       trustRefusal(
-        routed({ githubPermission: "write", createdAfter: "2026-10-27T00:00:00Z" }),
+        routed({
+          githubPermission: "write",
+          createdAfter: "2026-10-27T00:00:00Z",
+        }),
         event({ author: { id: "2", login: "writer" } }),
         roles.port,
       ),
@@ -253,7 +269,11 @@ describe("trustRefusal", () => {
 
   it("fails rather than admits when the rule needs a GitHub role and no port is wired", async () => {
     const exit = await Effect.runPromiseExit(
-      trustRefusal(routed({ githubPermission: "write" }), event(), Option.none()),
+      trustRefusal(
+        routed({ githubPermission: "write" }),
+        event(),
+        Option.none(),
+      ),
     );
     expect(exit._tag).toBe("Failure");
     expect(JSON.stringify(exit)).toContain("author-check");
@@ -323,7 +343,9 @@ describe("GitHubAuthorPermissions", () => {
   });
 
   it("reads a 404 as no role: GitHub knows no such collaborator", async () => {
-    expect(await fakeGitHub(404, { message: "Not Found" }).roleOf("ghost")).toMatchObject({
+    expect(
+      await fakeGitHub(404, { message: "Not Found" }).roleOf("ghost"),
+    ).toMatchObject({
       _tag: "Success",
       value: "none",
     });

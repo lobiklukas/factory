@@ -848,7 +848,8 @@ const program = Effect.gen(function* () {
       : yield* waitUntil(
           Effect.map(
             client.getSession({ sessionId: hiddenSession }),
-            (snapshot) => snapshot.entries.find((entry) => entry.kind === "user"),
+            (snapshot) =>
+              snapshot.entries.find((entry) => entry.kind === "user"),
           ),
           "the trusted issue's first message",
         );

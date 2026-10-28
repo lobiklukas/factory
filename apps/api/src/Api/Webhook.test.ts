@@ -441,7 +441,11 @@ describe("the generic webhook's author (S-trigger-trust-gating)", () => {
     );
     await post(
       "/webhooks/generic",
-      { requestId: "trust-generic-3", label: "factory", author: { name: "no id" } },
+      {
+        requestId: "trust-generic-3",
+        label: "factory",
+        author: { name: "no id" },
+      },
       "generic-secret",
     );
     const events = delivered.map((delivery) => delivery.event);
