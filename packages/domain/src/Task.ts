@@ -83,6 +83,36 @@ export const ColumnTransition = Schema.Struct({
 export type ColumnTransition = typeof ColumnTransition.Type;
 
 /**
+ * A run cap's limit (B9, LOB-71): a whole number of runs, at least one. A cap of zero would be a
+ * board, task, repository or column no run can ever start on, which is a column that should not be
+ * declared rather than a limit.
+ */
+export const RunCap = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThanOrEqualTo(1)),
+);
+export type RunCap = typeof RunCap.Type;
+
+/**
+ * A definition version's run caps (B9, LOB-71): how many runs may be in flight at once on one
+ * board, on one task, and in one repository across every board over it. Each is optional — absent
+ * is no cap of that kind — and the whole is absent on a version written before caps existed
+ * (default versions 1–4), which caps nothing. A card's start is checked against the caps of the
+ * version it pins, so a new version with other caps changes the threshold for its cards only.
+ *
+ * A run is in flight from its start until its session first goes idle (`task_runs.finished_at`,
+ * the end LOB-44 measures), unless its card is finished or its workspace was released first.
+ */
+export const BoardCaps = Schema.Struct({
+  board: Schema.optional(RunCap),
+  task: Schema.optional(RunCap),
+  repo: Schema.optional(RunCap),
+});
+export type BoardCaps = typeof BoardCaps.Type;
+
+/** B9's settled numbers (docs/board.md): 2 runs in flight per board, 1 per task, 2 per repo. */
+export const DEFAULT_BOARD_CAPS: BoardCaps = { board: 2, task: 1, repo: 2 };
+
+/**
  * One column of a board definition (B4, B6).
  *
  * `role` resolves to model and tool policy in one place, so changing a model is one edit rather
@@ -103,6 +133,12 @@ export const BoardColumn = Schema.Struct({
   skills: Schema.Array(Schema.String),
   requires: Schema.Array(ColumnRequirement),
   transitions: Schema.optional(Schema.Array(ColumnTransition)),
+  /**
+   * The column's WIP limit (B9, LOB-71): at most this many runs started in it may be in flight on
+   * one board at once, and a start past it is refused `at_capacity` naming the column. Absent is no
+   * limit — every version written before the field existed, and a column that declares none.
+   */
+  wipLimit: Schema.optional(RunCap),
 });
 export type BoardColumn = typeof BoardColumn.Type;
 
@@ -312,6 +348,11 @@ export const BoardDefinition = Schema.Struct({
    * existed (default versions 1–3), which starts a card in its first column (`initialColumnOf`).
    */
   initialColumn: Schema.optional(Schema.String),
+  /**
+   * The version's run caps (B9, LOB-71), checked where a run on one of its cards starts. Absent on
+   * a version written before the field existed (default versions 1–4): no board, task or repo cap.
+   */
+  caps: Schema.optional(BoardCaps),
 });
 export type BoardDefinition = typeof BoardDefinition.Type;
 
@@ -454,6 +495,8 @@ export const ColumnConfig = Schema.Struct({
   skills: Schema.Array(Schema.String),
   requires: Schema.Array(RequirementConfig),
   exits: Schema.Array(ColumnExit),
+  /** The column's WIP limit (LOB-71), as declared; absent is none. */
+  wipLimit: Schema.optional(RunCap),
 });
 export type ColumnConfig = typeof ColumnConfig.Type;
 
@@ -471,6 +514,8 @@ export const DefinitionConfig = Schema.Struct({
    * Absent only for a version that declares no columns, on which `createTask` refuses to make a card.
    */
   initialColumn: Schema.optional(Schema.String),
+  /** The version's run caps (LOB-71), as declared; absent on a version that declares none. */
+  caps: Schema.optional(BoardCaps),
   columns: Schema.Array(ColumnConfig),
 });
 export type DefinitionConfig = typeof DefinitionConfig.Type;

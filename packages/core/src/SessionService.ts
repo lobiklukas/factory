@@ -262,7 +262,8 @@ import type { RepoMirror } from "./RepoMirror";
 import { mintSessionId } from "./ids";
 import { homeOf, makePresence, type Lease } from "./Presence";
 import { SessionBus, SessionBusPostgres } from "./SessionBus";
-import { atCapacity, SESSION_MAX_CONCURRENT } from "./admission";
+import { atCapacity, runCapReached, SESSION_MAX_CONCURRENT } from "./admission";
+import { checkRunCaps } from "./boardCaps";
 import {
   countRefusal,
   countSessionCreate,
@@ -2529,6 +2530,59 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* acquireOwner(id, row, { ...acquisition, model });
         });
 
+      /**
+       * Write a new session's rows (`write`) as one start of a run on a card, admitted by its board
+       * definition's run caps (B9, LOB-71, `./boardCaps`): in one transaction, the caps are checked
+       * under the card's repository lock and the rows written, so two starts cannot both take the
+       * last slot, and a refusal — `at_capacity`, naming the cap — rolls back everything `write` did:
+       * no session row, no `task_runs` row, no repository registered. A session with no card is
+       * written as before, outside any transaction.
+       *
+       * A review run (`reviewing`, LOB-36) is written under the same lock and counts as in flight,
+       * but is never refused by a cap: the PR's event starts it, not a person, while the card's change
+       * run may still hold the card's one slot, and a refused delivery is a review lost — the card's
+       * `review_verdict` gate would then refuse its merge until someone redelivered the event. The
+       * server's own cap (LOB-70) still bounds it.
+       */
+      const withRunAdmitted = <A>(
+        taskId: string | undefined,
+        column: string | undefined,
+        reviewing: boolean,
+        write: Effect.Effect<A, SessionError>,
+      ): Effect.Effect<A, SessionError> =>
+        taskId === undefined || column === undefined
+          ? write
+          : sql
+              .withTransaction(
+                Effect.gen(function* () {
+                  const hit = yield* checkRunCaps(taskId, column).pipe(
+                    Effect.provideService(SqlClient, sql),
+                    Effect.mapError(
+                      (cause) =>
+                        new SessionErrorClass({
+                          code: "storage",
+                          message: `check the run caps of task ${taskId}: ${cause.message}`,
+                        }),
+                    ),
+                  );
+                  if (hit !== undefined && !reviewing) {
+                    yield* countRefusal("at_capacity");
+                    return yield* runCapReached(hit);
+                  }
+                  return yield* write;
+                }),
+              )
+              .pipe(
+                Effect.catchTag("SqlError", (cause) =>
+                  Effect.fail(
+                    new SessionErrorClass({
+                      code: "storage",
+                      message: `start a run on task ${taskId}: ${String(cause)}`,
+                    }),
+                  ),
+                ),
+              );
+
       const create = (
         input: CreateSessionInput = {},
       ): Effect.Effect<SessionSummary, SessionError> =>
@@ -2568,19 +2622,46 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // repo, writes no row and takes no request id, so its retry is a fresh attempt. Held until
           // the owner below is open, which takes it over; given back on any other exit.
           const slot = yield* admitted;
-          const binding = yield* resolveBinding(input);
           const id = yield* mintSessionId;
           const title = (input.title ?? "").trim().slice(0, TITLE_MAX);
-          const inserted = yield* paper(
-            "create session",
-            insertSession(
-              id,
-              title,
-              input.requestId,
-              binding,
-              null,
-              input.actor ?? null,
-            ),
+          // The index row is written before the log because it carries the request-id dedupe key.
+          // A failure between the two leaves a row whose log has no binding; `rebuildIndexes`
+          // re-derives the truth from the log rather than trusting the row.
+          const column =
+            input.taskId === undefined
+              ? undefined
+              : (input.taskColumn ?? "building");
+          const { binding, inserted } = yield* withRunAdmitted(
+            input.taskId,
+            column,
+            input.review !== undefined,
+            Effect.gen(function* () {
+              const binding = yield* resolveBinding(input);
+              const inserted = yield* paper(
+                "create session",
+                insertSession(
+                  id,
+                  title,
+                  input.requestId,
+                  binding,
+                  null,
+                  input.actor ?? null,
+                ),
+              );
+              if (input.taskId !== undefined && column !== undefined) {
+                // The run row is written before the harness opens, because it is where
+                // `acquireOwner` reads the run's column from (B6) — the prompt this session is told
+                // is resolved from it. `ON CONFLICT DO NOTHING` keeps a retried create from writing
+                // a second run.
+                yield* paper(
+                  "write task run",
+                  sql`INSERT INTO task_runs (id, task_id, session_id, "column")
+                      VALUES (${id}, ${input.taskId}, ${id}, ${column})
+                      ON CONFLICT (session_id) DO NOTHING`,
+                );
+              }
+              return { binding, inserted };
+            }),
           );
           const row = inserted[0] ?? {
             id,
@@ -2596,24 +2677,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             workspaceReleaseReason: null,
             model: null,
           };
-          // The index row is written before the log because it carries the request-id dedupe key.
-          // A failure between the two leaves a row whose log has no binding; `rebuildIndexes`
-          // re-derives the truth from the log rather than trusting the row.
-          const column =
-            input.taskId === undefined
-              ? undefined
-              : (input.taskColumn ?? "building");
-          if (input.taskId !== undefined && column !== undefined) {
-            // The run row is written before the harness opens, because it is where `acquireOwner`
-            // reads the run's column from (B6) — the prompt this session is told is resolved from
-            // it. `ON CONFLICT DO NOTHING` keeps a retried create from writing a second run.
-            yield* paper(
-              "write task run",
-              sql`INSERT INTO task_runs (id, task_id, session_id, "column")
-                  VALUES (${id}, ${input.taskId}, ${id}, ${column})
-                  ON CONFLICT (session_id) DO NOTHING`,
-            );
-          }
           const owner = yield* acquireOwner(id, row, {
             reviewing: input.review !== undefined,
             ...(model === undefined ? {} : { model }),

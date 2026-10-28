@@ -49,8 +49,9 @@ instance of `apps/api` and record it in `.verify/run/api.pid`, so run them one a
 | a new card, both ways (LOB-275)  | `card-create.sh`: the board page's New card is what `ls`/`show` list; `board add`'s twin shows  | a card made in either surface is the same card in the other          |
 | the surfaces' drives (LOB-87)    | `equivalence.sh`: verify-cli, verify-web, then this drive, one at a time                        | the equivalence holds with both surfaces' own drives green           |
 | definitions and config (LOB-270) | `definitions.sh`: `definitions`, `definition show`, `list`, `config`; v3 against a golden       | an operator sees what a board will do before trusting it             |
+| caps and WIP limits (LOB-71)     | `caps.sh`: task, board, repo and column caps refused by name, nothing written; v2's threshold   | a definition's caps bound the runs in flight, per pinned version     |
 
-Every check is required: `drive.sh`, `ask.sh`, `requires.sh`, `board-create.sh`, `definitions.sh`, `triage.sh`, `start-body.sh`,
+Every check is required: `drive.sh`, `ask.sh`, `requires.sh`, `board-create.sh`, `definitions.sh`, `triage.sh`, `start-body.sh`, `caps.sh`,
 `card-create.sh` and `equivalence.sh` each exit non-zero when one fails, and `drive.sh` folds `add.ts`'s, `ask.ts`'s and `spec.ts`'s (its
 specify phase), `spec-pane.mjs`'s, `web.mjs`'s, `both-ways.mjs`'s, `card-create.sh`'s (itself folding
 `card-create.mjs`'s) and `build.ts`'s (its build phase) exit codes into its own.
@@ -139,6 +140,7 @@ runs the real script against a closed port and an answering one.
 ./definitions.sh   # requires the instance from ./up.sh, and DATABASE_URL naming its database
 ./triage.sh      # requires the instance from ./up.sh: attention's question and gate rows, block/unblock refusals
 ./start-body.sh  # requires the instance from ./up.sh, and DATABASE_URL naming its database: a card's body and base ref in its run
+./caps.sh        # requires the instance from ./up.sh, and DATABASE_URL naming its database: board caps and WIP limits (LOB-71)
 ./card-create.sh # requires the instance from ./up.sh (API and web): the New card form ⇄ `board ls|show|add`; drive.sh runs it too
 ./equivalence.sh   # standalone, no instance up: verify-cli, verify-web, then up/drive/down here
 ```
@@ -165,6 +167,16 @@ exits with the human gates marked), compared whole with the hand-written `defini
 and once more as a tmux pane, the newest by default, `factory board list` and `factory board config`,
 and the `definition_not_found`, `board_not_found` and `invalid_input` refusals. The expected models
 are `up.sh`'s `ROLE_MODELS`. See `features/definitions.md`.
+
+`caps.sh` (LOB-71) proves the board caps and WIP limits from the terminal on boards of its own, over
+a definition `caps.ts` writes with two versions (v1 caps 2/1/2 and gives `review` a WIP limit of 1;
+v2 caps 3/1/3): a second start on one card refused naming the task cap, a third on a board naming
+the board cap, one on a second board over the same repository naming the repo cap, a second in
+`review` naming the column, each writing no run, session or log (`caps.ts MODE=writes`); the v2
+board takes three and refuses its fourth while the v1 board still refuses its third; and a canceled
+card's run frees its slot. Its runs get no prompt, so every one stays in flight. The shared board
+`up.sh` seeds pins the newest default version, which caps 2/1/2 since LOB-71, so `triage.sh` cancels
+the card whose run it leaves idle. See `features/caps.md`.
 
 `triage.sh` (LOB-264) proves `factory board attention` and the by-hand `block`/`unblock` on two cards of
 its own: one blocked `needs_input` with a note (a `question` row) and one with an idle run in

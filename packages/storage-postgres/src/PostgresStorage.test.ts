@@ -1644,6 +1644,70 @@ describe("the board's tables and seed", () => {
     },
   );
 
+  /**
+   * 0037 (LOB-71): run caps as definition data. Version 5 is version 4 with B9's caps — 2 per board,
+   * 1 per task, 2 per repository — and no column WIP limit; versions 1–4 keep no caps (B2), and a
+   * second pass writes no second row. Read through `BoardDefinition`, so a seed the contract
+   * rejects fails here.
+   *
+   * Mutation: seed `{ board: 2, task: 2, repo: 2 }` — the caps differ. Mutation: update version 4
+   * in place instead of inserting — version 4 carries caps. Mutation: copy no columns — v5's differ.
+   */
+  it(
+    "seeds version 5 with B9's caps over version 4's columns, and only ever once",
+    { timeout: 30_000 },
+    async () => {
+      const read = (version: number) =>
+        Effect.runPromise(
+          sql<{
+            id: string;
+            version: number;
+            name: string;
+            columns: unknown;
+            initialColumn: string | null;
+            caps: unknown;
+          }>`
+            SELECT id, version, name, columns, initial_column, caps FROM board_definitions
+            WHERE id = 'default' AND version = ${version}
+          `,
+        );
+
+      const [row5] = await read(5);
+      const [row4] = await read(4);
+      expect(row5).toBeDefined();
+      expect(row4).toBeDefined();
+      if (row5 === undefined || row4 === undefined) return;
+      const v5 = Schema.decodeUnknownSync(BoardDefinition)({
+        ...row5,
+        initialColumn: row5.initialColumn ?? undefined,
+      });
+      const v4 = Schema.decodeUnknownSync(BoardDefinition)({
+        ...row4,
+        initialColumn: row4.initialColumn ?? undefined,
+        caps: undefined,
+      });
+      expect(v5.caps).toEqual({ board: 2, task: 1, repo: 2 });
+      expect(v5.columns).toEqual(v4.columns);
+      expect(v5.initialColumn).toBe("intake");
+      expect(v5.name).toBe(v4.name);
+      expect(v5.columns.every((column) => column.wipLimit === undefined)).toBe(
+        true,
+      );
+
+      for (const version of [1, 2, 3, 4]) {
+        const [row] = await read(version);
+        expect(row?.caps).toBeNull();
+      }
+
+      const migration = (await import("./migrations/0037_seed_definition_caps"))
+        .default;
+      await Effect.runPromise(
+        migration.pipe(Effect.provideService(SqlClient, sql)),
+      );
+      expect(await read(5)).toHaveLength(1);
+    },
+  );
+
   it(
     "refuses a card that is blocked without the column it blocked from",
     { timeout: 30_000 },

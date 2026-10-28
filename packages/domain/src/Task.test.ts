@@ -22,6 +22,7 @@ import {
   BoardColumn,
   BoardDefinition,
   BoardInstance,
+  DEFAULT_BOARD_CAPS,
   BlockReason,
   ColumnKind,
   ColumnRequirement,
@@ -957,5 +958,31 @@ describe("isWebLink (LOB-254)", () => {
     ]) {
       expect(isWebLink(notLink), notLink).toBe(false);
     }
+  });
+});
+
+describe("run caps and WIP limits (LOB-71)", () => {
+  const definition = {
+    id: "default",
+    version: 5,
+    name: "Default pipeline",
+    columns: [{ name: "building", kind: "working", skills: [], requires: [] }],
+  };
+
+  /** Mutation: drop the `>= 1` check on `RunCap` — a zero cap and a zero WIP limit decode. */
+  it("takes a whole number of runs, at least one, for every cap and a column's WIP limit", () => {
+    expect(
+      refuses(BoardDefinition, { ...definition, caps: DEFAULT_BOARD_CAPS }),
+    ).toBe(false);
+    expect(refuses(BoardDefinition, { ...definition, caps: {} })).toBe(false);
+    for (const caps of [{ board: 0 }, { task: 1.5 }, { repo: -2 }])
+      expect(refuses(BoardDefinition, { ...definition, caps })).toBe(true);
+    const column = definition.columns[0];
+    expect(refuses(BoardColumn, { ...column, wipLimit: 3 })).toBe(false);
+    expect(refuses(BoardColumn, { ...column, wipLimit: 0 })).toBe(true);
+  });
+
+  it("is B9's 2 per board, 1 per task, 2 per repo by default", () => {
+    expect(DEFAULT_BOARD_CAPS).toEqual({ board: 2, task: 1, repo: 2 });
   });
 });

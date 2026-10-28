@@ -1,4 +1,5 @@
 import {
+  type CapacityCapKind,
   type SessionError,
   SessionError as SessionErrorClass,
 } from "@repo/domain/Session";
@@ -12,8 +13,9 @@ import type { GitHubWebhookAnswer } from "./LinearSync";
  * webhook route.
  *
  * The cap itself is counted by `SessionService` (`maxConcurrentSessions`), in open owners. A cap is
- * a limit and the name an operator changes it by, so a later cap with another source (a board's, in
- * its definition — LOB-71) refuses with the same code and says where its own limit lives.
+ * a limit and the name an operator changes it by, so a cap with another source — a board
+ * definition's run caps (B9, LOB-71, counted by `./boardCaps`) — refuses with the same code and says
+ * where its own limit lives (`runCapReached`).
  */
 
 /** The configuration key the server's own cap is read from (`apps/api`). */
@@ -26,11 +28,57 @@ export type AdmissionCap = {
   readonly source: string;
 };
 
+/**
+ * One of a board definition's run caps (B9, LOB-71), as a refusal names it: which kind, what it
+ * counted (the board, task or repository, or the column and its board), and the runs that hold it —
+ * the sessions an operator finishes, or whose cards they finish, to free a slot.
+ */
+export type RunCapHit = AdmissionCap & {
+  readonly kind: Exclude<CapacityCapKind, "server">;
+  /** The board, task or repository counted; for a column, the column's name. */
+  readonly scope: string;
+  /** The board the runs were counted on: the column's, for a column cap. */
+  readonly board: string;
+  readonly holders: ReadonlyArray<string>;
+};
+
+/** How a run cap's scope reads in a sentence: "on board brd_…", "in column building of board brd_…". */
+const scopePhrase = (hit: RunCapHit): string => {
+  switch (hit.kind) {
+    case "board":
+      return `on board ${hit.scope}`;
+    case "task":
+      return `on task ${hit.scope}`;
+    case "repo":
+      return `in repository ${hit.scope}`;
+    case "column":
+      return `in column ${hit.scope} of board ${hit.board}`;
+  }
+};
+
 /** The refusal past a cap: `at_capacity`, naming the limit and where it is configured. */
 export const atCapacity = (cap: AdmissionCap): SessionError =>
   new SessionErrorClass({
     code: "at_capacity",
     message: `at capacity: at most ${cap.limit} session${cap.limit === 1 ? "" : "s"} may be open at once (${cap.source}=${cap.limit}), and that many are; retry once one is released`,
+    cap: { kind: "server", limit: cap.limit, source: cap.source },
+  });
+
+/**
+ * The refusal past a board definition's run cap (LOB-71): the same `at_capacity` as the server's,
+ * built the same way from a limit and its source, and naming what it counted and the runs holding
+ * it. Nothing was written: a retry succeeds once one of them ends its turn or its card is finished.
+ */
+export const runCapReached = (hit: RunCapHit): SessionError =>
+  new SessionErrorClass({
+    code: "at_capacity",
+    message: `at capacity: at most ${hit.limit} run${hit.limit === 1 ? "" : "s"} may be in flight ${scopePhrase(hit)} at once (${hit.source}=${hit.limit}), and ${hit.holders.length} ${hit.holders.length === 1 ? "is" : "are"}: ${hit.holders.join(", ")}; retry once one ends its turn or its card is done or canceled`,
+    cap: {
+      kind: hit.kind,
+      limit: hit.limit,
+      source: hit.source,
+      scope: hit.scope,
+    },
   });
 
 /**

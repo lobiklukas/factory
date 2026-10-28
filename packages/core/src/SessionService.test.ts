@@ -79,6 +79,7 @@ import {
   SessionId as SessionIdSchema,
 } from "@repo/domain/Session";
 import {
+  BoardInstanceId as BoardInstanceIdSchema,
   DEFAULT_DEFINITION_ID,
   DefinitionId as DefinitionIdSchema,
 } from "@repo/domain/Task";
@@ -13693,4 +13694,471 @@ describe("a session's workspace outlives its owner (LOB-268)", () => {
       await runtime.dispose();
     }
   }, 120_000);
+});
+
+describe("board caps and WIP limits (LOB-71)", () => {
+  /**
+   * The columns every definition here declares: a resting intake, two working columns, and the
+   * terminal two, with the moves a card needs to be canceled. `wip` sets the WIP limit of a column
+   * by name; the rest declare none.
+   */
+  const columnsWith = (wip: Readonly<Record<string, number>> = {}) =>
+    [
+      {
+        name: "intake",
+        kind: "resting",
+        skills: [],
+        requires: [],
+        transitions: [{ to: "building" }, { to: "canceled" }],
+      },
+      {
+        name: "building",
+        kind: "working",
+        role: "builder",
+        skills: [],
+        requires: [],
+        transitions: [{ to: "review" }, { to: "canceled" }],
+      },
+      {
+        name: "review",
+        kind: "working",
+        role: "reviewer",
+        skills: [],
+        requires: [],
+        transitions: [{ to: "done" }, { to: "canceled" }],
+      },
+      { name: "done", kind: "terminal", skills: [], requires: [] },
+      { name: "canceled", kind: "terminal", skills: [], requires: [] },
+    ].map((column) =>
+      wip[column.name] === undefined
+        ? column
+        : { ...column, wipLimit: wip[column.name] },
+    );
+
+  /**
+   * A definition of this case's own, one version per entry, written as a migration writes one
+   * (definitions are migration data; there is no authoring path yet). Its id is fresh, so a case
+   * never reads another's caps.
+   */
+  const newDefinition = (
+    versions: ReadonlyArray<{
+      readonly caps?: Readonly<Record<string, number>>;
+      readonly wip?: Readonly<Record<string, number>>;
+    }>,
+  ) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const id = DefinitionIdSchema.make(
+        `caps-${randomBytes(4).toString("hex")}`,
+      );
+      for (const [index, version] of versions.entries()) {
+        const columns = JSON.stringify(columnsWith(version.wip));
+        const caps =
+          version.caps === undefined ? null : JSON.stringify(version.caps);
+        yield* sql`
+          INSERT INTO board_definitions (id, version, name, columns, initial_column, caps)
+          VALUES (${id}, ${index + 1}, ${`caps case v${index + 1}`}, ${columns}::jsonb,
+                  'intake', ${caps}::jsonb)
+        `;
+      }
+      return id;
+    });
+
+  const newRepo = () =>
+    RepoSlugSchema.make(`factory-caps/${randomBytes(4).toString("hex")}`);
+
+  /** A board over `version` of `definitionId`, made by `createBoard`, the production writer. */
+  const newBoard = (
+    definitionId: DefinitionIdSchema,
+    version: number,
+    repo = newRepo(),
+  ) =>
+    Effect.gen(function* () {
+      const tasks = yield* TaskService;
+      return yield* tasks.createBoard({
+        repo,
+        definitionId,
+        definitionVersion: version,
+      });
+    }).pipe(Effect.provide(TaskServiceLive));
+
+  /**
+   * A second board over a repository that already has one. `createBoard` makes one board per
+   * repository (more is deferred board customization), and the repo cap is what holds the line
+   * across boards once there are more, so the second is written as an insert.
+   */
+  const secondBoardOver = (
+    repo: string,
+    definitionId: string,
+    version: number,
+  ) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const id = `brd_${randomBytes(13).toString("hex")}`;
+      yield* sql`
+        INSERT INTO board_instances (id, repo, definition_id, definition_version)
+        VALUES (${id}, ${repo}, ${definitionId}, ${version})
+      `;
+      return id;
+    });
+
+  /** A card on `boardId`, through `TaskService.create`, so it pins the board's version. */
+  const newCard = (boardId: string, title = "a capped card") =>
+    Effect.gen(function* () {
+      const tasks = yield* TaskService;
+      return yield* tasks.create({
+        boardId: BoardInstanceIdSchema.make(boardId),
+        title,
+        actor: "person:lukas",
+      });
+    }).pipe(Effect.provide(TaskServiceLive));
+
+  /** A start on a card, left open with no prompt: in flight until its card is finished. */
+  const start = (taskId: string, column = "building", requestId?: string) =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionService;
+      return yield* Effect.exit(
+        sessions.create({
+          taskId,
+          taskColumn: column,
+          ...(requestId === undefined ? {} : { requestId }),
+        }),
+      );
+    });
+
+  /** The `SessionError` a refused start failed with, or `undefined` when it was let through. */
+  const refusalOf = (
+    exit: Exit.Exit<unknown, SessionError>,
+  ): SessionError | undefined => {
+    if (Exit.isSuccess(exit)) return undefined;
+    const failure = Exit.findErrorOption(exit);
+    if (failure._tag !== "Some") throw new Error("a defect, not a refusal");
+    return failure.value;
+  };
+
+  /**
+   * What a refused start must not have written: its card's runs, sessions in total, its request id,
+   * and session logs — an opened session is a log with a commit, so none means none was opened.
+   */
+  const writes = (taskId: string, requestId: string) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const rows = yield* sql<{
+        runs: number;
+        sessions: number;
+        asked: number;
+        logs: number;
+      }>`
+        SELECT
+          (SELECT count(*)::int FROM task_runs WHERE task_id = ${taskId}) AS runs,
+          (SELECT count(*)::int FROM sessions) AS sessions,
+          (SELECT count(*)::int FROM sessions WHERE request_id = ${requestId}) AS asked,
+          (SELECT count(DISTINCT log_id)::int FROM commits) AS logs
+      `;
+      return rows[0];
+    });
+
+  /**
+   * Mutation: drop the board cap from `firstRunCapHit` — the third start is let through. Mutation:
+   * check the caps after the rows are written (outside the transaction) — the refused start leaves
+   * its session and `task_runs` rows behind. Mutation: count runs per board without the task filter
+   * for the task cap — the second start on one card names the board.
+   */
+  it("refuses the third start on a 2/1/2 board naming the board cap, and the second on one card naming the task cap, writing nothing", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const definitionId = yield* newDefinition([
+          { caps: { board: 2, task: 1, repo: 2 } },
+        ]);
+        const board = yield* newBoard(definitionId, 1);
+        const one = yield* newCard(board.id, "one");
+        const two = yield* newCard(board.id, "two");
+        const three = yield* newCard(board.id, "three");
+        const first = yield* start(one.id);
+        const again = yield* start(one.id, "building", "lob-71-again");
+        const second = yield* start(two.id);
+        const before = yield* writes(three.id, "lob-71-third");
+        const third = yield* start(three.id, "building", "lob-71-third");
+        const after = yield* writes(three.id, "lob-71-third");
+        return {
+          board,
+          first,
+          again,
+          second,
+          third,
+          before,
+          after,
+        };
+      }),
+    );
+    expect(Exit.isSuccess(outcome.first)).toBe(true);
+    expect(Exit.isSuccess(outcome.second)).toBe(true);
+
+    const task = refusalOf(outcome.again);
+    expect(task?.code).toBe("at_capacity");
+    expect(task?.cap?.kind).toBe("task");
+    expect(task?.cap?.limit).toBe(1);
+    expect(task?.message).toContain("caps.task=1");
+
+    const board = refusalOf(outcome.third);
+    expect(board?.code).toBe("at_capacity");
+    expect(board?.cap).toMatchObject({
+      kind: "board",
+      limit: 2,
+      scope: outcome.board.id,
+    });
+    expect(board?.message).toContain(
+      `at most 2 runs may be in flight on board ${outcome.board.id}`,
+    );
+    expect(board?.message).toContain("caps.board=2");
+    // The runs holding the board are named, so a person knows which to finish.
+    if (Exit.isSuccess(outcome.first) && Exit.isSuccess(outcome.second)) {
+      expect(board?.message).toContain(outcome.first.value.id);
+      expect(board?.message).toContain(outcome.second.value.id);
+    }
+    // Nothing written and nothing opened for the refused start.
+    expect(outcome.after).toEqual(outcome.before);
+    expect(outcome.after?.runs).toBe(0);
+    expect(outcome.after?.asked).toBe(0);
+  }, 60_000);
+
+  /** Mutation: count the repo cap over the start's board only — the third start is let through. */
+  it("refuses a third start in one repository across two boards, naming the repo cap", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const definitionId = yield* newDefinition([
+          { caps: { board: 2, task: 1, repo: 2 } },
+        ]);
+        const repo = newRepo();
+        const left = yield* newBoard(definitionId, 1, repo);
+        const right = yield* secondBoardOver(repo, definitionId, 1);
+        const a = yield* newCard(left.id, "left a");
+        const b = yield* newCard(right, "right b");
+        const c = yield* newCard(left.id, "left c");
+        const first = yield* start(a.id);
+        const second = yield* start(b.id);
+        const third = yield* start(c.id);
+        return { repo, first, second, third };
+      }),
+    );
+    expect(Exit.isSuccess(outcome.first)).toBe(true);
+    expect(Exit.isSuccess(outcome.second)).toBe(true);
+    const refused = refusalOf(outcome.third);
+    expect(refused?.code).toBe("at_capacity");
+    expect(refused?.cap).toMatchObject({
+      kind: "repo",
+      limit: 2,
+      scope: outcome.repo,
+    });
+    expect(refused?.message).toContain(`in repository ${outcome.repo}`);
+  }, 60_000);
+
+  /**
+   * Mutation: read the WIP limit from another column than the run's — a `review` run is refused, or
+   * the third `building` run is let through.
+   */
+  it("refuses the N+1th in-flight run in a column with a WIP limit of N, naming the column, and leaves other columns alone", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const definitionId = yield* newDefinition([{ wip: { building: 2 } }]);
+        const board = yield* newBoard(definitionId, 1);
+        const a = yield* newCard(board.id, "a");
+        const b = yield* newCard(board.id, "b");
+        const c = yield* newCard(board.id, "c");
+        const d = yield* newCard(board.id, "d");
+        const first = yield* start(a.id, "building");
+        const second = yield* start(b.id, "building");
+        const third = yield* start(c.id, "building");
+        const elsewhere = yield* start(d.id, "review");
+        return { board, first, second, third, elsewhere };
+      }),
+    );
+    expect(Exit.isSuccess(outcome.first)).toBe(true);
+    expect(Exit.isSuccess(outcome.second)).toBe(true);
+    expect(Exit.isSuccess(outcome.elsewhere)).toBe(true);
+    const refused = refusalOf(outcome.third);
+    expect(refused?.code).toBe("at_capacity");
+    expect(refused?.cap).toMatchObject({
+      kind: "column",
+      limit: 2,
+      scope: "building",
+    });
+    expect(refused?.message).toContain(
+      `in column building of board ${outcome.board.id}`,
+    );
+    expect(refused?.message).toContain("columns.building.wipLimit=2");
+  }, 60_000);
+
+  /**
+   * The threshold is the pinned version's: a card pinned to version 1 (task cap 2) takes a second
+   * run where a card pinned to version 2 (task cap 1) on the same board does not.
+   *
+   * Mutation: read the caps of the board's version instead of the card's — the old card's second
+   * start is refused. Mutation: read the newest version's — likewise.
+   */
+  it("reads the caps of the version a card pins, so a new version changes the threshold for its cards only", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const definitionId = yield* newDefinition([
+          { caps: { task: 2 } },
+          { caps: { task: 1 } },
+        ]);
+        const board = yield* newBoard(definitionId, 2);
+        // A card that started under version 1 before the board moved on: the pin is the card's.
+        const old = yield* newCard(board.id, "pinned to v1");
+        yield* sql`UPDATE tasks SET definition_version = 1 WHERE id = ${old.id}`;
+        const fresh = yield* newCard(board.id, "pinned to v2");
+        return {
+          freshVersion: fresh.definitionVersion,
+          old: [
+            yield* start(old.id),
+            yield* start(old.id),
+            yield* start(old.id),
+          ],
+          fresh: [yield* start(fresh.id), yield* start(fresh.id)],
+          definitionId,
+        };
+      }),
+    );
+    expect(outcome.freshVersion).toBe(2);
+    expect(outcome.old.map((exit) => refusalOf(exit)?.cap?.kind)).toEqual([
+      undefined,
+      undefined,
+      "task",
+    ]);
+    expect(refusalOf(outcome.old[2] ?? Exit.void)?.cap?.source).toBe(
+      `definition ${outcome.definitionId} v1 caps.task`,
+    );
+    expect(outcome.fresh.map((exit) => refusalOf(exit)?.cap?.kind)).toEqual([
+      undefined,
+      "task",
+    ]);
+    expect(refusalOf(outcome.fresh[1] ?? Exit.void)?.cap?.source).toBe(
+      `definition ${outcome.definitionId} v2 caps.task`,
+    );
+  }, 60_000);
+
+  /** Mutation: drop the repository lock from `checkRunCaps` — more than two of the burst start. */
+  it("admits exactly the cap of a burst of concurrent starts, and the rest write no run", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const definitionId = yield* newDefinition([{ caps: { board: 2 } }]);
+        const board = yield* newBoard(definitionId, 1);
+        const cards = yield* Effect.forEach(
+          ["a", "b", "c", "d", "e"],
+          (title) => newCard(board.id, title),
+        );
+        const exits = yield* Effect.all(
+          cards.map((card) => start(card.id)),
+          { concurrency: "unbounded" },
+        );
+        const runs = yield* sql<{ count: number }>`
+          SELECT count(*)::int AS count FROM task_runs tr
+          JOIN tasks t ON t.id = tr.task_id WHERE t.board_id = ${board.id}
+        `;
+        return { exits, runs: runs[0]?.count };
+      }),
+    );
+    const codes = outcome.exits.map((exit) => refusalOf(exit)?.code ?? "ok");
+    expect(codes.filter((code) => code === "ok")).toHaveLength(2);
+    expect(codes.filter((code) => code === "at_capacity")).toHaveLength(3);
+    expect(outcome.runs).toBe(2);
+  }, 60_000);
+
+  /**
+   * A review run (LOB-36) is the PR's, not a person's: refusing it would lose the review the card's
+   * merge gate needs, so it is admitted past a full cap — and then holds a slot like any run.
+   *
+   * Mutation: refuse a review run like any other start — the review is refused naming the task.
+   * Mutation: leave the review run out of the count — the person's start after it goes through.
+   */
+  it("admits a review run past a full task cap, and counts it against the next start", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const definitionId = yield* newDefinition([{ caps: { task: 1 } }]);
+        const board = yield* newBoard(definitionId, 1);
+        const card = yield* newCard(board.id, "reviewed");
+        const change = yield* start(card.id);
+        const review = yield* Effect.exit(
+          sessions.create({
+            taskId: card.id,
+            taskColumn: "review",
+            repo: board.repo,
+            review: {
+              number: 7,
+              url: `https://github.com/${board.repo}/pull/7`,
+              base: "main",
+              head: "a".repeat(40),
+            },
+          }),
+        );
+        const person = yield* start(card.id);
+        return { change, review, person };
+      }),
+    );
+    expect(Exit.isSuccess(outcome.change)).toBe(true);
+    expect(Exit.isSuccess(outcome.review)).toBe(true);
+    const refused = refusalOf(outcome.person);
+    expect(refused?.cap?.kind).toBe("task");
+    if (Exit.isSuccess(outcome.review))
+      expect(refused?.message).toContain(outcome.review.value.id);
+  }, 60_000);
+
+  /**
+   * A run stops holding a slot when its session first goes idle, or when its card is finished.
+   *
+   * Mutation: count every `task_runs` row, finished or not — the start after the settled run is
+   * refused. Mutation: drop the terminal-column filter — the start after the cancel is refused.
+   */
+  it("frees a slot when a run ends its turn, and when its card is canceled", async () => {
+    const outcome = await program(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const sessions = yield* SessionService;
+        const definitionId = yield* newDefinition([{ caps: { board: 1 } }]);
+        const board = yield* newBoard(definitionId, 1);
+        const a = yield* newCard(board.id, "a");
+        const b = yield* newCard(board.id, "b");
+        const c = yield* newCard(board.id, "c");
+        const first = yield* start(a.id);
+        const blocked = yield* start(b.id);
+        if (Exit.isFailure(first)) throw new Error("the first start failed");
+        yield* sessions.send({
+          sessionId: first.value.id,
+          content: "do the work",
+        });
+        yield* waitUntil(
+          Effect.map(
+            sql<{ finished: boolean }>`
+              SELECT finished_at IS NOT NULL AS finished
+              FROM task_runs WHERE session_id = ${first.value.id}
+            `,
+            (rows) => rows[0]?.finished === true,
+          ),
+          "the first run to end its turn",
+        );
+        const afterTurn = yield* start(b.id);
+        const whileHeld = yield* start(c.id);
+        yield* Effect.gen(function* () {
+          const tasks = yield* TaskService;
+          const card = yield* tasks.get(b.id);
+          yield* tasks.move({
+            taskId: b.id,
+            expectedRevision: card.revision,
+            to: "canceled",
+            actor: "person:lukas",
+          });
+        }).pipe(Effect.provide(TaskServiceLive));
+        const afterCancel = yield* start(c.id);
+        return { blocked, afterTurn, whileHeld, afterCancel };
+      }),
+    );
+    expect(refusalOf(outcome.blocked)?.cap?.kind).toBe("board");
+    expect(Exit.isSuccess(outcome.afterTurn)).toBe(true);
+    expect(refusalOf(outcome.whileHeld)?.cap?.kind).toBe("board");
+    expect(Exit.isSuccess(outcome.afterCancel)).toBe(true);
+  }, 90_000);
 });

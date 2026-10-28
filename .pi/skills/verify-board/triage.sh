@@ -138,6 +138,14 @@ run empty-runs board runs --task "${ASKED:-tsk_missing}" --api "$API_URL"
 check "board runs on a card with no run says so" \
   "$([ "$rc" = "0" ] && has empty-runs "no runs" && echo 0 || echo 1)" "exit=$rc"
 
+# --- the gate card's run holds a slot: cancel the card to free it (LOB-71) -------------------------
+# The shared board pins the newest default version, which caps runs in flight (2 per board, 1 per
+# task). The gate run never gets a prompt, so it is in flight until its card is finished; left there,
+# two triage runs would fill the board and refuse every later drive's start on it.
+run gated-cancel board move --task "${GATED:-tsk_missing}" --to canceled --expect-revision 3 --api "$API_URL"
+check "the gate card is canceled, freeing its run's slot on the shared board" \
+  "$([ "$rc" = "0" ] && has gated-cancel "to canceled (revision 4)" && echo 0 || echo 1)" "exit=$rc"
+
 {
   printf '{\n  "apiUrl": "%s",\n  "askedTask": "%s",\n  "gatedTask": "%s",\n  "gateSession": "%s",\n  "checks": {\n' \
     "$API_URL" "${ASKED:-}" "${GATED:-}" "${GATE_SESSION:-}"

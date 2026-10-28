@@ -52,14 +52,18 @@ const hex = (bytes: number) => randomBytes(bytes).toString("hex");
 const run = <A, E>(effect: Effect.Effect<A, E, TaskService | SqlClient>) =>
   runtime.runPromise(effect);
 
-/** A board over a fresh repository, made the way a real one is (LOB-208). */
-const newBoard = () =>
+/**
+ * A board over a fresh repository, made the way a real one is (LOB-208): the newest version, or the
+ * one named.
+ */
+const newBoard = (definitionVersion?: number) =>
   run(
     Effect.gen(function* () {
       const tasks = yield* TaskService;
       return yield* tasks.createBoard({
         repo: RepoSlug.make(`factory-test/${hex(6)}`),
         definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
+        ...(definitionVersion === undefined ? {} : { definitionVersion }),
       });
     }),
   );
@@ -455,7 +459,9 @@ describe("a run on a card with a body and a base ref (LOB-260)", () => {
    */
   it("cuts the run's worktree from the card's base ref and tells the run the card's body", async () => {
     const repo = fixture();
-    const board = await newBoard();
+    // Three runs open on one card at once, which default version 5's task cap of 1 refuses (LOB-71):
+    // version 4 is the newest that caps nothing, and this case is about the binding, not the caps.
+    const board = await newBoard(4);
     const [card, bare] = await run(
       Effect.flatMap(TaskService, (tasks) =>
         Effect.all([

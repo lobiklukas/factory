@@ -236,6 +236,24 @@ manual drag ordering — a drag-ordered queue and an auto-claiming dispatcher ar
 about "what is next", and priority changes are recorded as events. Caps are board policy, extendable:
 2 runs in flight per board, 1 per task, 2 per repo, plus a per-column WIP limit.
 
+Built (LOB-71): the caps are definition data, enforced where a run starts. A version's `caps`
+(`board`, `task`, `repo`; `board_definitions.caps`, migration 0037) and a column's `wipLimit` (in
+`columns`) are read from the version the card **pins**, so a new version with other caps moves the
+threshold for its cards only; default version 5 carries 2/1/2 and no WIP limit, and versions 1–4 cap
+nothing. `SessionService.create` with a card checks them in the transaction that writes the run's
+session and `task_runs` rows, under an advisory lock on the card's repository, and refuses a start
+past one as LOB-70's `at_capacity` with the cap typed (`SessionError.cap`: kind, limit, the
+definition field it is configured in, and the board, task, repository or column it counted) and the
+runs holding it named — narrowest first (task, column, board, repository). A refused start writes no
+row and opens no session. A run is in flight from its start until its session first goes idle
+(`task_runs.finished_at`), unless its card reaches `done`/`canceled` or its workspace is released
+first; a run opened with no prompt is in flight while it waits, and a person frees it by sending it its
+message or finishing its card. The repo cap counts every board over the repository (`createBoard`
+still makes one per repository, so today it binds only once board customization makes more). A
+review run (LOB-36) is the PR's, not a person's: it counts, but no cap refuses it, because a refused
+delivery would lose the review the merge gate needs. No dispatcher, lease or auto-start comes with it —
+wave-2 item 1 still owns those, and will claim under these caps.
+
 ## B10 — Failure mapping (wave 2, recorded so the MVP does not contradict it)
 
 `orphaned` → resume the same run; `faulted` → breaker, cleared by a person; `failed` → a new run
@@ -265,7 +283,8 @@ beside a lingering old run) never share a working tree.
 ## MVP vs wave 2
 
 **MVP (milestone B)** is the board with **no autonomy**: a person starts every run. That deletes, from
-the first cut, the dispatcher, leases, claims, caps enforcement, breakers, attempt budgets, priority
+the first cut, the dispatcher, leases, claims, caps enforcement (since built ahead of the dispatcher, on
+a person's start — B9, LOB-71), breakers, attempt budgets, priority
 bands, dependency links, the skills authoring UI, sync maps, identity beyond an actor string, board
 customization, decomposition, and board metrics.
 
@@ -279,7 +298,8 @@ customization, decomposition, and board metrics.
 
 **Wave 2**, promoted when its trigger fires (recorded here rather than as speculative issues):
 
-1. **Dispatcher and claims** — auto-start per column, LOB-18's leases, caps/WIP, TTL reclaim, priority
+1. **Dispatcher and claims** — auto-start per column, LOB-18's leases, claiming under the caps/WIP
+   limits (enforced on every start since LOB-71), TTL reclaim, priority
    bands, trusted-actor and created-after-enable rules. Trigger: the first run you want started without
    you. Milestone **S** is satisfiable without it; this is what makes S self-driving.
 2. **Questions as durable objects** — dedup by question id, aging, resume after death, wake policy.

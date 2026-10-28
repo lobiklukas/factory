@@ -3,7 +3,12 @@
 One file per user-facing feature of the board's CLI surface. Each answers: what it is, how a user
 reaches it, how the skill drives it, and what observable end state proves it works.
 
-Status reflects the last verified runs: `factory board add` (LOB-261, 2026-10-28, `agent/LOB-261`), API on
+Status reflects the last verified runs: board caps and WIP limits (LOB-71, 2026-10-28, `agent/LOB-71`),
+API on `:9530`, web on `:3530`, the GitHub fake on `:9533`, the shared board on default v5 (capped
+2/1/2): `./caps.sh` exit 0, **25/25**, twice against one instance ([caps.md](caps.md)), and beside it
+`./drive.sh` exit 0 (147 checks), `./triage.sh` (its gate card canceled at the end), `./start-body.sh`,
+`./definitions.sh` and `./board-create.sh` all green, and `./requires.sh` exit 0 on its own instance
+(`:9534`). Before it, `factory board add` (LOB-261, 2026-10-28, `agent/LOB-261`), API on
 `:9650`, web on `:3650`, the GitHub fake on `:9653`: `./drive.sh` exit 0, **124/124** checks, its card
 made in the pane by `factory board add`, with `add.ts`'s **5/5** (`add.json`: the repo inherited, the
 body read back, another repo refused, the CLI's card and the form's `createTask` listing the same)
@@ -56,6 +61,7 @@ Evidence: `.verify/evidence/latest/board/`.
 | `factory board show`                    | passing | [show.md](show.md)               |
 | `factory board move` + refusals         | passing | [move.md](move.md)               |
 | `factory board start`                   | passing | [start.md](start.md)             |
+| board caps and WIP limits (LOB-71)      | passing | [caps.md](caps.md)               |
 | a card's body and base ref in its runs  | passing | [body.md](body.md)               |
 | `board block\|unblock\|attention\|runs` | passing | [triage.md](triage.md)           |
 | the board read back in the web          | passing | [dashboard.md](dashboard.md)     |
