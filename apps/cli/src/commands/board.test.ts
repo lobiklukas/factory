@@ -40,6 +40,7 @@ import {
   runsLines,
   specLines,
   startCard,
+  type StartClient,
   threadLines,
   unblockCard,
   warningLines,
@@ -913,6 +914,7 @@ describe("startCard (C6)", () => {
       readonly card?: Task;
       readonly board?: "unreadable";
       readonly warning?: string;
+      readonly refuse?: string;
     } = {},
   ) => {
     const calls: Array<string> = [];
@@ -952,10 +954,27 @@ describe("startCard (C6)", () => {
       sendMessage: (input: { sessionId: SessionId; content: string }) => {
         calls.push("sendMessage");
         sent.push(input.content);
-        return Effect.succeed({});
+        return over.refuse === undefined
+          ? Effect.succeed({})
+          : Effect.fail(
+              new SessionError({ code: "at_capacity", message: over.refuse }),
+            );
       },
     };
     return { client, calls, sent, opened };
+  };
+  /** `startCard`'s lines, in the order it emitted them — also when it fails after some were. */
+  const startLines = <B, S>(
+    client: StartClient<B, S>,
+    given: Parameters<typeof startCard>[1],
+  ) => {
+    const lines: Array<string> = [];
+    const run = startCard(client, given, (line) =>
+      Effect.sync(() => {
+        lines.push(line);
+      }),
+    );
+    return { lines, run };
   };
   const input = (
     over: Partial<Parameters<typeof startCard>[1]> = {},
@@ -976,7 +995,8 @@ describe("startCard (C6)", () => {
   it("sends the card's default prompt when none was given, after the session opens", async () => {
     const withBody = card({ body: "Compose names one major.\n" });
     const s = server({ card: withBody });
-    const lines = await Effect.runPromise(startCard(s.client, input()));
+    const { lines, run } = startLines(s.client, input());
+    await Effect.runPromise(run);
     expect(s.calls).toEqual(["createSession", "sendMessage"]);
     expect(s.sent).toEqual([runPrompt(withBody, columns[1])]);
     expect(s.sent[0]).toContain("Pin the Postgres major");
@@ -991,18 +1011,19 @@ describe("startCard (C6)", () => {
 
   it("sends a given prompt as typed, and none of the card's", async () => {
     const s = server({ card: card({ body: "B" }) });
-    const lines = await Effect.runPromise(
-      startCard(s.client, input({ prompt: "specify this card" })),
+    const { lines, run } = startLines(
+      s.client,
+      input({ prompt: "specify this card" }),
     );
+    await Effect.runPromise(run);
     expect(s.sent).toEqual(["specify this card"]);
     expect(lines.at(-1)).toBe("sent    specify this card");
   });
 
   it("sends nothing with --idle, and the session still opens", async () => {
     const s = server();
-    const lines = await Effect.runPromise(
-      startCard(s.client, input({ idle: true })),
-    );
+    const { lines, run } = startLines(s.client, input({ idle: true }));
+    await Effect.runPromise(run);
     expect(s.calls).toEqual(["createSession"]);
     expect(lines).toEqual([
       `session ${SESSION_A}`,
@@ -1013,7 +1034,7 @@ describe("startCard (C6)", () => {
   it("names the column the run starts in, which --column overrides", async () => {
     const s = server();
     await Effect.runPromise(
-      startCard(s.client, input({ column: "specifying" })),
+      startLines(s.client, input({ column: "specifying" })).run,
     );
     expect(s.opened).toEqual([{ taskColumn: "specifying", actor: "cli" }]);
     expect(s.sent[0]).toContain("Work this card in the specifying column.");
@@ -1023,7 +1044,7 @@ describe("startCard (C6)", () => {
   /** Mutation: read the board's current version for every card — a card pinned earlier is told another's exit. */
   it("reads the column from the version the card pinned, not the board's", async () => {
     const s = server({ card: card({ definitionVersion: 2 }) });
-    await Effect.runPromise(startCard(s.client, input()));
+    await Effect.runPromise(startLines(s.client, input()).run);
     expect(s.calls).toContain("getDefinition v2");
     expect(s.sent[0]).toContain("tests_pass: the tests pass");
     expect(s.sent[0]).not.toContain("non_empty_diff");
@@ -1032,17 +1053,36 @@ describe("startCard (C6)", () => {
   /** Mutation: let the definition read fail the start — a run is not refused for want of a sentence. */
   it("still starts the run, with the title and body, when the definition cannot be read", async () => {
     const s = server({ card: card({ body: "B" }), board: "unreadable" });
-    await Effect.runPromise(startCard(s.client, input()));
+    await Effect.runPromise(startLines(s.client, input()).run);
     expect(s.sent).toEqual(["Pin the Postgres major\n\nB"]);
   });
 
   it("prints the repo warning between the task line and the sent line", async () => {
     const s = server({ warning: "no checkout" });
-    const lines = await Effect.runPromise(startCard(s.client, input()));
+    const { lines, run } = startLines(s.client, input());
+    await Effect.runPromise(run);
     expect(lines.slice(0, 3)).toEqual([
       `session ${SESSION_A}`,
       `task    ${TASK} in building`,
       "warning no checkout",
     ]);
+  });
+
+  /**
+   * The run is open and bound to the card before the first message is sent, so a refused message must
+   * not take the session id (or the repo warning) with it. Mutation: collect the lines and return them
+   * at the end — the operator sees the refusal and no run to find.
+   */
+  it("reports the open session and warning before a refused first message fails the start", async () => {
+    const s = server({ warning: "no checkout", refuse: "at capacity" });
+    const { lines, run } = startLines(s.client, input());
+    const exit = await Effect.runPromiseExit(run);
+    expect(exit._tag).toBe("Failure");
+    expect(lines).toEqual([
+      `session ${SESSION_A}`,
+      `task    ${TASK} in building`,
+      "warning no checkout",
+    ]);
+    expect(lines.some((line) => line.startsWith("sent"))).toBe(false);
   });
 });

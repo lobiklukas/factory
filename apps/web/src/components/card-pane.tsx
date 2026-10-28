@@ -535,21 +535,30 @@ const Runs = ({
   const start = useAtomSet(startRunAtom, { mode: "promiseExit" });
   const navigate = useNavigate();
   const [starting, setStarting] = useState(false);
-  // The prompt field: `null` while closed, the text as typed while open. It opens with the card as
-  // it is now, so a card edited meanwhile is read again by closing and reopening it.
-  const [draft, setDraft] = useState<string | null>(null);
+  // The prompt field: `null` while closed, the text as typed while open, with the column it was
+  // built for. It opens with the card as it is now, so a card edited meanwhile is read again by
+  // closing and reopening it; a card that moves while it is open is not sent (`moved`).
+  const [open, setOpen] = useState<{
+    readonly text: string;
+    readonly column: string;
+  } | null>(null);
+  const draft = open === null ? null : open.text;
+  const setDraft = (text: string) =>
+    setOpen((current) => (current === null ? null : { ...current, text }));
   const allowed = runStart(task, definition);
+  const moved = open !== null && open.column !== task.column;
   const ready = startSendable(draft ?? "");
+  const sendable = ready.ok && allowed.allowed && !moved;
   // The last answer stays on screen through a failed refresh; only a first read that fails says so.
   const listed = Option.getOrUndefined(AsyncResult.value(runs));
 
   const send = () => {
-    if (draft === null || !ready.ok || starting) return;
+    if (draft === null || !sendable || starting) return;
     setStarting(true);
     void start({ task, prompt: draft })
       .then((exit) => {
         if (Exit.isSuccess(exit)) {
-          setDraft(null);
+          setOpen(null);
           if (exit.value.sendFailure !== undefined) {
             toast.warning("The run opened, but its first message was refused", {
               description: exit.value.sendFailure,
@@ -589,7 +598,12 @@ const Runs = ({
               : allowed.reason
           }
           aria-describedby={allowed.allowed ? undefined : "run-start-blocked"}
-          onClick={() => setDraft(startPrompt(task, definition))}
+          onClick={() =>
+            setOpen({
+              text: startPrompt(task, definition),
+              column: task.column,
+            })
+          }
         >
           <PlayIcon className="size-3.5" strokeWidth={1.75} />
           Start run
@@ -632,6 +646,12 @@ const Runs = ({
                   {ready.reason}.
                 </span>
               )}
+              {moved ? (
+                <span className="block text-destructive" data-start-moved>
+                  The card moved from {open.column} to {task.column} while this
+                  was open: cancel and start again.
+                </span>
+              ) : null}
             </p>
             <Button
               type="button"
@@ -639,7 +659,7 @@ const Runs = ({
               variant="ghost"
               data-start-cancel
               disabled={starting}
-              onClick={() => setDraft(null)}
+              onClick={() => setOpen(null)}
             >
               Cancel
             </Button>
@@ -647,7 +667,7 @@ const Runs = ({
               type="submit"
               size="sm"
               data-start-send
-              disabled={!ready.ok || starting}
+              disabled={!sendable || starting}
               aria-busy={starting}
             >
               {starting ? (

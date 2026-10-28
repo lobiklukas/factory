@@ -2967,7 +2967,7 @@ assert(
     : `seed exit ${String(attentionSeed.status)}: ${attentionSeed.stderr ?? ""}`,
 );
 
-/** `createSession` with the card named, as the card pane's Start run and `factory board start` do. */
+/** An idle run on the card (`createSession` with the card named, nothing sent), as `factory board start --idle` opens. */
 const startRunOn = async (taskId, column) => {
   const created = await rpcFromDrive("createSession", {
     title: `attention run ${column}`,

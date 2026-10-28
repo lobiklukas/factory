@@ -823,6 +823,10 @@ const runColumn = <B, S>(
  * The first message is `prompt` when one was given, and otherwise `runPrompt`'s — the same text the
  * card pane's Start run pre-fills (C6), built from the card and the column the run starts in — so a
  * run started with no words is put to work, not left idle. `idle` opts out: the run opens and waits.
+ *
+ * Each line is handed to `emit` the moment it is known, not returned at the end: the session id is
+ * what names an open run, so a first message the server refuses must not take it with it — the
+ * operator is told which run is open and bound to the card before the refusal is reported.
  */
 export const startCard = Effect.fnUntraced(function* <B, S>(
   client: StartClient<B, S>,
@@ -833,6 +837,7 @@ export const startCard = Effect.fnUntraced(function* <B, S>(
     readonly idle: boolean;
     readonly actor: string;
   },
+  emit: (line: string) => Effect.Effect<void>,
 ) {
   const card = yield* client.getTask({ taskId: input.taskId });
   const taskColumn = input.column ?? card.column;
@@ -843,24 +848,22 @@ export const startCard = Effect.fnUntraced(function* <B, S>(
     actor: input.actor,
     ...(card.repo === undefined ? {} : { repo: card.repo }),
   });
-  const lines = [
-    `session ${session.id}`,
-    `task    ${card.id} in ${taskColumn}`,
-  ];
+  yield* emit(`session ${session.id}`);
+  yield* emit(`task    ${card.id} in ${taskColumn}`);
   // The repo's checkout is the server's to read (LOB-263): the run's workspace says whether it
   // got a worktree, so a card on a repo with none is told so now, not when `non_empty_diff` fails.
   // Advisory: the run has started, so a failed read skips the warning and never fails the command.
   const opened = yield* client
     .getSession({ sessionId: session.id })
     .pipe(Effect.option);
-  lines.push(
-    ...warningLines(
-      Option.isSome(opened) ? opened.value.workspace.warning : undefined,
-      "warning ",
-    ),
-  );
+  for (const line of warningLines(
+    Option.isSome(opened) ? opened.value.workspace.warning : undefined,
+    "warning ",
+  )) {
+    yield* emit(line);
+  }
   if (input.idle) {
-    return lines;
+    return;
   }
   const content =
     input.prompt ?? runPrompt(card, yield* runColumn(client, card, taskColumn));
@@ -868,12 +871,11 @@ export const startCard = Effect.fnUntraced(function* <B, S>(
   // accepted, and the card — not this terminal — is where the run's outcome is read.
   yield* client.sendMessage({ sessionId: session.id, content });
   // The words typed are echoed as typed; the default's are a card's whole body, so only its title.
-  lines.push(
+  yield* emit(
     input.prompt === undefined
       ? `sent    ${card.title} (the card's default prompt)`
       : `sent    ${input.prompt}`,
   );
-  return lines;
 });
 
 const startCommand = Command.make(
@@ -919,16 +921,17 @@ const startCommand = Command.make(
         );
       }
       const { client } = yield* BoardClient;
-      const lines = yield* startCard(client, {
-        taskId,
-        column: Option.getOrUndefined(column),
-        prompt: Option.getOrUndefined(prompt),
-        idle,
-        actor,
-      });
-      for (const line of lines) {
-        yield* Console.log(line);
-      }
+      yield* startCard(
+        client,
+        {
+          taskId,
+          column: Option.getOrUndefined(column),
+          prompt: Option.getOrUndefined(prompt),
+          idle,
+          actor,
+        },
+        Console.log,
+      );
     });
 
     yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
