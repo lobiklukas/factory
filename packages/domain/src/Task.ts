@@ -950,6 +950,53 @@ export const MAX_TASK_REF_CHARS = 1_024;
 export const isWebLink = (value: string): boolean =>
   /^https?:\/\/[^\s/?#@]+(?:[/?#]\S*)?$/i.test(value);
 
+/** What `runPrompt` reads of a column: its name and the exit requirements the run must leave satisfied. */
+export type RunPromptColumn = {
+  readonly name: string;
+  readonly requires: ReadonlyArray<{
+    readonly key: string;
+    readonly description: string;
+  }>;
+};
+
+/**
+ * The first message a run is sent when nobody wrote one (C6): the card's title, its body when it has
+ * one, and the column's instruction — which column the run works in and what the card must satisfy to
+ * leave it (`requires[]`, B5), so the run starts knowing what "done" is checked against.
+ *
+ * One function for both starters: the card pane's Start run pre-fills its prompt field with this, and
+ * `factory board start` without `--prompt` sends it, so the same card started either way has the same
+ * first message. `column` is the definition's column the run starts in, or `undefined` when the
+ * definition does not name it (a `--column` override of a column that is not there); the instruction
+ * is then left out rather than invented. The body is the card's as filed, minus trailing whitespace;
+ * a body of only whitespace is no body.
+ */
+export const runPrompt = (
+  card: { readonly title: string; readonly body?: string | undefined },
+  column: RunPromptColumn | undefined,
+): string => {
+  const body = card.body?.trimEnd();
+  const instruction =
+    column === undefined
+      ? undefined
+      : column.requires.length === 0
+        ? `Work this card in the ${column.name} column.`
+        : [
+            `Work this card in the ${column.name} column. It leaves the column only when each of these holds:`,
+            ...column.requires.map(
+              (requirement) =>
+                `- ${requirement.key}: ${requirement.description}`,
+            ),
+          ].join("\n");
+  return [
+    card.title,
+    body === undefined || body.trim() === "" ? undefined : body,
+    instruction,
+  ]
+    .filter((part) => part !== undefined)
+    .join("\n\n");
+};
+
 /**
  * A new card (B3). `repo` defaults to the board instance's repository, which is the only one a card
  * on that board may name: another is `BoardRepoMismatch` (LOB-255).

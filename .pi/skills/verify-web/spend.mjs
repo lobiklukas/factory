@@ -281,6 +281,10 @@ try {
   );
   await startRun.waitFor({ timeout: 20_000 });
   await startRun.click();
+  // Start run opens the prompt field (C6); Send opens the run and sends its text.
+  await page
+    .locator(`[data-card-pane='${board.dashboard}'] [data-start-send]`)
+    .click();
   await page.waitForFunction(
     () =>
       /^ses_/.test(new URL(window.location.href).searchParams.get("run") ?? ""),

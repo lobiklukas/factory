@@ -129,6 +129,7 @@ import {
   MAX_DECOMPOSED_CRITERIA,
   PR_EVIDENCE_EXCERPT,
   readPromptSections,
+  readSkillPins,
   readSessionLog,
   readVerifyRecords,
   resolveDefaultModel,
@@ -7709,16 +7710,36 @@ describe("a run's prompt comes from its column", () => {
       );
     });
 
-  /** Edit the `specify` skill's body through the service that owns it, returning what it was. */
+  /**
+   * Edit the `specify` skill's body through the service that owns it — a put, so a new version —
+   * returning the version it was and the version the edit made.
+   */
   const editSpecifyBody = (body: string) =>
     runtime.runPromise(
       Effect.gen(function* () {
         const skills = yield* SkillService;
         const before = yield* skills.get("specify");
-        yield* skills.upsert({ ...before, body });
-        return before;
+        const after = yield* skills.put({
+          name: before.name,
+          description: before.description,
+          body,
+          attachments: before.attachments,
+        });
+        return { ...before, put: after.version };
       }).pipe(Effect.provide(SkillServiceLive)),
     );
+
+  /** The skill versions a run's own log pins (`factory.skills`, D7). */
+  const pinsOf = (sessionId: SessionId) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      const storage = yield* Effect.promise(() =>
+        PostgresStorage.reader(sql, sessionId),
+      );
+      return yield* readSkillPins(storage).pipe(
+        Effect.ensuring(Effect.promise(() => storage.dispose())),
+      );
+    });
 
   it("tells a specifying run the specify skill, and a building run nothing of it", async () => {
     const prompts = await program(
@@ -7879,6 +7900,98 @@ describe("a run's prompt comes from its column", () => {
     expect(before["skill_specify"]).not.toContain(marker);
     expect(after["skill_specify"]).toContain(marker);
   }, 120_000);
+
+  /**
+   * B2's "in-flight runs keep the version they opened with", end to end (D7): the real skills table,
+   * the real put, the real reopen after the owner is released. A specifying run opened before a put
+   * to `specify` is reopened after it and keeps the old body; a run opened after it carries the new
+   * one; and each run's log records the version it was told.
+   *
+   * Mutation: read no pins at acquisition (`runProfileFor(id, [])`) — the reopened run is told the
+   * new body. Mutation: `put` as an upsert — the old version is gone, and the reopen is refused.
+   */
+  it("keeps a run on the specify version it opened with through a put and a reopen", async () => {
+    const marker = `# Specify\n\nPinned-run probe ${randomBytes(4).toString("hex")}.`;
+
+    const opened = await program(
+      Effect.gen(function* () {
+        const boardId = yield* newBoard;
+        const cardId = yield* newCard(boardId, "specifying");
+        const sessionId = yield* startRun(cardId, "specifying");
+        return {
+          sessionId,
+          prompt: yield* promptSections(sessionId),
+          pins: yield* pinsOf(sessionId),
+        };
+      }),
+    );
+
+    const seeded = await editSpecifyBody(marker);
+    try {
+      const outcome = await program(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          // A new specifying run, after the put.
+          const boardId = yield* newBoard;
+          const cardId = yield* newCard(boardId, "specifying");
+          const fresh = yield* startRun(cardId, "specifying");
+          // The run opened before the put, reopened: its owner released as an idle sweep or a
+          // restart releases it, then woken by a message — a new acquisition, which re-resolves
+          // the column's skills.
+          yield* sessions.close;
+          expect((yield* sessions.get(opened.sessionId)).session.mode).toBe(
+            "historical",
+          );
+          yield* sessions.send({
+            sessionId: opened.sessionId,
+            content: "continue after the edit",
+          });
+          yield* waitUntil(
+            sessions
+              .get(opened.sessionId)
+              .pipe(Effect.map((snapshot) => !snapshot.live.busy)),
+            "the reopened run to settle",
+          );
+          return {
+            mode: (yield* sessions.get(opened.sessionId)).session.mode,
+            fresh: {
+              prompt: yield* promptSections(fresh),
+              pins: yield* pinsOf(fresh),
+            },
+            reopened: {
+              prompt: yield* promptSections(opened.sessionId),
+              pins: yield* pinsOf(opened.sessionId),
+            },
+          };
+        }),
+      );
+
+      // The run log records the version: the old run pinned the version that was newest when it
+      // opened, and the new run the version the put made.
+      expect(opened.pins).toEqual([
+        { name: "specify", version: seeded.version },
+      ]);
+      expect(outcome.fresh.pins).toEqual([
+        { name: "specify", version: seeded.put },
+      ]);
+      expect(seeded.put).toBe(seeded.version + 1);
+
+      // A new specifying run carries the new body.
+      expect(outcome.fresh.prompt["skill_specify"]).toContain(marker);
+
+      // The run opened before the put was reopened (live again) and keeps the old one.
+      expect(outcome.mode).toBe("live");
+      expect(opened.prompt["skill_specify"]).toContain(seeded.body.trim());
+      expect(outcome.reopened.prompt["skill_specify"]).toContain(
+        seeded.body.trim(),
+      );
+      expect(outcome.reopened.prompt["skill_specify"]).not.toContain(marker);
+      expect(outcome.reopened.pins).toEqual(opened.pins);
+    } finally {
+      // Put the old body back as the newest, so a later case reads what it expects.
+      await editSpecifyBody(seeded.body);
+    }
+  }, 180_000);
 
   it("refuses to open a run whose column names a skill the factory does not hold", async () => {
     const outcome = await program(
