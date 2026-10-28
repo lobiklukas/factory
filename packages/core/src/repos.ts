@@ -21,6 +21,7 @@
  * holds one fiber rather than the API's event loop, and `listRepos`'s probes do run side by side.
  */
 import { Effect } from "effect";
+import type { BaseRefCheck } from "@repo/domain/Server";
 // oxlint-disable-next-line effecttsgo/node-builtin-import -- the probe is the local git CLI, the same one `workspace.ts` cuts the worktree with.
 import { execFile } from "node:child_process";
 import { CONFIG_FILE, type WorkspaceDeps } from "./workspace";
@@ -217,4 +218,57 @@ export const checkoutDefaultBranch = (
     return head?.startsWith("refs/heads/")
       ? head.slice("refs/heads/".length)
       : undefined;
+  });
+
+/**
+ * Whether a repo's base ref names a commit in the place a session's worktree is cut from (E8): the
+ * checkout's work tree, or the factory's clone. A checkout answers a local branch or an `origin/`
+ * tracking one, as `git worktree add` does; the clone is fetched into `refs/remotes/origin/<base>`
+ * (`RepoMirror`), so that is the only name it is asked for. A repo with neither has nothing to ask,
+ * which is its own answer rather than a failure of the ref.
+ */
+export const checkBaseRef = (input: {
+  readonly ref: string;
+  /** `RepoSummary.workTree`: present exactly when the repo's checkout is inside a work tree. */
+  readonly workTree: string | undefined;
+  /** `RepoSummary.mirrorPath`: the factory's bare clone, when one exists. */
+  readonly mirrorPath: string | undefined;
+}): Effect.Effect<BaseRefCheck> =>
+  Effect.gen(function* () {
+    const { ref } = input;
+    const found = (sha: string): BaseRefCheck => ({
+      ref,
+      status: "ok",
+      message: `${ref} resolves to ${sha.slice(0, 7)}`,
+    });
+    if (input.workTree !== undefined) {
+      const sha =
+        (yield* resolveCommit(input.workTree, ref)) ??
+        (yield* resolveCommit(input.workTree, `refs/remotes/origin/${ref}`));
+      return sha === undefined
+        ? {
+            ref,
+            status: "unresolved",
+            message: `no commit named ${ref} in ${input.workTree}`,
+          }
+        : found(sha);
+    }
+    if (input.mirrorPath !== undefined) {
+      const sha = yield* resolveCommit(
+        input.mirrorPath,
+        `refs/remotes/origin/${ref}`,
+      );
+      return sha === undefined
+        ? {
+            ref,
+            status: "unresolved",
+            message: `the clone ${input.mirrorPath} has no ${ref}`,
+          }
+        : found(sha);
+    }
+    return {
+      ref,
+      status: "no_checkout",
+      message: `no git checkout or clone to resolve ${ref} in`,
+    };
   });
