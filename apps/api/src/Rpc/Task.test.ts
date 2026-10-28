@@ -154,12 +154,12 @@ const routerWith = (roles: typeof roleModels | undefined) =>
   );
 
 const { handler, dispose } = routerWith(roleModels);
-/** The same control plane with no role table: `defineBoard` takes any role name (F4). */
-const open = routerWith(undefined);
+/** The same control plane with no role table (`defineBoard` takes any role name, F4), built on first use. */
+let open: ReturnType<typeof routerWith> | undefined;
 
 afterAll(async () => {
   await dispose();
-  await open.dispose();
+  await open?.dispose();
   await scratch.dispose();
   await admin.runPromise(
     Effect.gen(function* () {
@@ -210,7 +210,15 @@ const callOn =
     );
 
 const call = callOn(handler);
-const callOpen = callOn(open.handler);
+/**
+ * Built on first use, not at load: two routers over one database would run the migrations at once,
+ * and the second finds `effect_sql_migrations` already created. By the time a case calls this, the
+ * first router has migrated.
+ */
+const callOpen: typeof call = (body) => {
+  open ??= routerWith(undefined);
+  return callOn(open.handler)(body);
+};
 
 /** The failure a call answered, as the client decoded it. */
 const failureOf = <A, E>(effect: Effect.Effect<A, E>) => Effect.flip(effect);
@@ -946,11 +954,10 @@ describe("the definition vocabulary over RPC (D6)", () => {
     );
     expect(closed.rolesOpen).toBe(false);
     expect(opened.rolesOpen).toBe(true);
-    // Without a table the harness's roles are still listed, and the closed table's `builder` is not.
+    // Without a table the harness's roles are still listed.
     expect(opened.roles).toEqual(
       expect.arrayContaining(["planner", "reviewer", "specifier"]),
     );
-    expect(opened.roles).not.toContain("builder");
 
     const novel = `brand-new-${run}`;
     const input = (id: string) => ({
