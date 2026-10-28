@@ -372,6 +372,19 @@ describe("attentionLines (LOB-264)", () => {
     );
   });
 
+  it("keeps a multi-line card title on the head row", () => {
+    const lines = attentionLines(
+      item(
+        { _tag: "question", since: "2026-10-27T11:00:00.000Z" },
+        { title: "Pin the\nPostgres  major" },
+      ),
+    );
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe(
+      `question  ${TASK}  verify-board/fixture  building  r3  Pin the Postgres major`,
+    );
+  });
+
   it("puts the card id second in every row, whatever the reason", () => {
     const rows = [
       item({

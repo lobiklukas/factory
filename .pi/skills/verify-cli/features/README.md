@@ -20,16 +20,17 @@ Status reflects the last verified run: **2026-10-27**, from the `agent/LOB-65` w
 `./drive.sh` in tmux — **20/20** required checks passed, including the PR column (LOB-65). A
 mutation run (the row always printing `-`) failed "ls shows the recorded PR URL" with `pr=-`.
 
-| Feature                                 | Status  | File                                                          |
-| --------------------------------------- | ------- | ------------------------------------------------------------- |
-| `factory run`                           | passing | [run.md](run.md)                                              |
-| `factory ls`                            | passing | [ls.md](ls.md)                                                |
-| `factory watch`                         | passing | [watch.md](watch.md)                                          |
-| Typed errors                            | passing | [errors.md](errors.md)                                        |
-| `factory send` / `factory withdraw`     | passing | [withdraw.md](withdraw.md)                                    |
-| `factory send --when-busy steer/reject` | passing | [steer.md](steer.md)                                          |
-| `factory approve` / `deny`              | passing | [approve.md](approve.md)                                      |
-| `factory pr`                            | passing | [verify-board build.md](../../verify-board/features/build.md) |
+| Feature                                         | Status  | File                                                            |
+| ----------------------------------------------- | ------- | --------------------------------------------------------------- |
+| `factory run`                                   | passing | [run.md](run.md)                                                |
+| `factory ls`                                    | passing | [ls.md](ls.md)                                                  |
+| `factory watch`                                 | passing | [watch.md](watch.md)                                            |
+| Typed errors                                    | passing | [errors.md](errors.md)                                          |
+| `factory send` / `factory withdraw`             | passing | [withdraw.md](withdraw.md)                                      |
+| `factory send --when-busy steer/reject`         | passing | [steer.md](steer.md)                                            |
+| `factory approve` / `deny`                      | passing | [approve.md](approve.md)                                        |
+| `factory pr`                                    | passing | [verify-board build.md](../../verify-board/features/build.md)   |
+| `factory board block\|unblock\|attention\|runs` | passing | [verify-board triage.md](../../verify-board/features/triage.md) |
 
 ## Deliberately absent
 

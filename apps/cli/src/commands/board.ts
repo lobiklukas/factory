@@ -31,8 +31,10 @@ import { BoardClient } from "../rpc";
  *
  * The verbs are the ones a person needs to work a card from a terminal: make the board a repository's
  * cards live on (`create`, LOB-208), read the lanes and what sits in them (`ls`), read one card, its
- * spec and its thread (`show`), move it (`move`), answer what a parked run asked (`comment`, LOB-73), and
- * start the run that advances it (`start`). Nothing here folds a log or reads the database; every
+ * spec and its thread (`show`), move it (`move`), answer what a parked run asked (`comment`, LOB-73),
+ * start the run that advances it (`start`), and, for triage (LOB-264), park or free a card (`block`,
+ * `unblock`), list what needs a person (`attention`) and list a card's runs (`runs`). Nothing here
+ * reads the database, and nothing but `runs` reads a session snapshot (see `runsLines`); every
  * answer is the server's, which is what keeps `factory board ls` and the RPC list in agreement.
  *
  * **Refusals are printed, not swallowed.** The board's refusals are typed values that name what
@@ -726,7 +728,7 @@ export const attentionLines = (item: AttentionItem): ReadonlyArray<string> => {
     item.repo,
     task.column,
     `r${task.revision}`,
-    task.title,
+    oneLine(task.title),
   ].join("  ");
   switch (reason._tag) {
     case "approval":
@@ -851,6 +853,10 @@ export interface RunsClient<EList, ESession> {
 
 /**
  * A card's runs, newest first as the server answered, each with its session's status and PR.
+ *
+ * It reads one full session snapshot per run (`getSession`), only for `status` and `prUrl`: the run
+ * index does not carry them yet, so the cost is one historical read per run and a live run's
+ * last-used time is touched (LOB-264 Follow-up: carry both on `listTaskRuns`).
  *
  * Only a session the server says does not exist reads as `missing`; any other failure — the server
  * stopped answering, say — fails the command, because a status invented for a read that failed is
