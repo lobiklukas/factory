@@ -108,14 +108,26 @@ export const inspectCheckout = (
         })),
       );
 
+/** How a `gitAnswer` reads git's answer; each defaults to what a short probe wants. */
+export type GitAnswerOptions = {
+  /** Trim the answer (default): a probe's one line. `false` keeps a file's bytes as they are. */
+  readonly trim?: boolean;
+  /** The most stdout git may print before it is killed and the answer is `undefined`. */
+  readonly maxBuffer?: number;
+  /** How long git may take before the answer is `undefined`, in milliseconds. */
+  readonly timeoutMs?: number;
+};
+
 /**
- * One hook-free `git` in `directory` that answers its trimmed stdout, or `undefined` when git
- * failed, could not run, or outlived the deadline. The probes below are read-only questions about a
- * checkout, and "git could not say" is an answer to each of them.
+ * One hook-free `git` in `directory` that answers its stdout (trimmed unless asked not to), or
+ * `undefined` when git failed, could not run, printed more than `maxBuffer`, or outlived the
+ * deadline. The probes below are read-only questions about a checkout, and "git could not say" is
+ * an answer to each of them.
  */
 export const gitAnswer = (
   directory: string,
   args: ReadonlyArray<string>,
+  options: GitAnswerOptions = {},
 ): Effect.Effect<string | undefined> =>
   Effect.callback<string | undefined>((resume, signal) => {
     execFile(
@@ -129,9 +141,24 @@ export const gitAnswer = (
         directory,
         ...args,
       ],
-      { encoding: "utf8", signal, timeout: GIT_TIMEOUT_MS },
+      {
+        encoding: "utf8",
+        signal,
+        timeout: options.timeoutMs ?? GIT_TIMEOUT_MS,
+        ...(options.maxBuffer === undefined
+          ? {}
+          : { maxBuffer: options.maxBuffer }),
+      },
       (error, stdout) =>
-        resume(Effect.succeed(error === null ? stdout.trim() : undefined)),
+        resume(
+          Effect.succeed(
+            error !== null
+              ? undefined
+              : options.trim === false
+                ? stdout
+                : stdout.trim(),
+          ),
+        ),
     );
   });
 
