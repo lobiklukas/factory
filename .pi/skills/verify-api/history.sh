@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Prove a long session's history over the wire (LOB-243): once its owner is released, a read
 # carries the newest HISTORY_WINDOW entries and says where they start, `readSessionHistory` pages
-# back through the rest to the first entry, and `factory watch` says the entries it printed are not
-# the first.
+# back through the rest to the first entry, `factory watch` says the entries it printed are not
+# the first, and `factory history --before <earlier> --all` prints the rest.
 #
 # This script owns its own API instance — its own port, session root, log and pid file — because it
 # needs a short idle timeout (the fold is the path under test) and a session grown past the window,
@@ -13,7 +13,8 @@
 #   HISTORY_PORT=9531 ./history.sh     # another port
 #
 # Evidence: .verify/evidence/latest/api/history.json (every check the driver made, the window and
-# each page), history-cli.txt (what `factory watch` printed) and history-process.json (this
+# each page), history-cli.txt (what `factory watch` printed), history-cli-earlier.txt (what
+# `factory history --all` printed) and history-process.json (this
 # script's checks) and history-api.log.
 set -uo pipefail
 
@@ -116,9 +117,25 @@ cp "$RUN_DIR/cli.txt" "$EVIDENCE_DIR/history-cli.txt"
 check "factory watch exits cleanly" "$([ "$CLI_RC" = "0" ] && echo 0 || echo 1)" "exit=$CLI_RC"
 check "factory watch reads the fold" \
   "$(grep -q '^mode: historical$' "$RUN_DIR/cli.txt" && echo 0 || echo 1)" "mode line"
-check "factory watch says the entries before the window are not shown" \
-  "$([ -n "$EARLIER" ] && grep -q "^\[earlier\] entries before $EARLIER are not shown$" "$RUN_DIR/cli.txt" && echo 0 || echo 1)" \
+check "factory watch says the entries before the window are not shown, and how to print them" \
+  "$([ -n "$EARLIER" ] && grep -q "^\[earlier\] entries before $EARLIER are not shown; factory history $SESSION --before $EARLIER prints them$" "$RUN_DIR/cli.txt" && echo 0 || echo 1)" \
   "earlier=$EARLIER"
+
+# --- the rest of it from the terminal: factory history --before <earlier> --all --------------------
+( cd "$ROOT/apps/cli" && bun run src/index.ts history "$SESSION" --before "$EARLIER" --all --api "$API_URL" ) \
+  > "$RUN_DIR/cli-history.txt" 2>&1
+HISTORY_RC=$?
+cp "$RUN_DIR/cli-history.txt" "$EVIDENCE_DIR/history-cli-earlier.txt"
+check "factory history exits cleanly" "$([ "$HISTORY_RC" = "0" ] && echo 0 || echo 1)" "exit=$HISTORY_RC"
+check "factory history --all reaches the first entry (no [earlier] line)" \
+  "$(grep -q '^\[earlier\]' "$RUN_DIR/cli-history.txt" && echo 1 || echo 0)" "lines=$(wc -l < "$RUN_DIR/cli-history.txt" | tr -d ' ')"
+# history's lines then watch's are the whole conversation: every turn's message once, in order.
+TURNS="$(sed -n 's/^  "turns": \([0-9]*\),$/\1/p' "$EVIDENCE_DIR/history.json")"
+cat "$RUN_DIR/cli-history.txt" "$RUN_DIR/cli.txt" | grep '^\[user\] history turn ' > "$RUN_DIR/cli-users.txt"
+seq 0 $(( ${TURNS:-1} - 1 )) | sed 's/^/[user] history turn /' > "$RUN_DIR/cli-users-expected.txt"
+check "factory history then factory watch print every turn's message once, in order" \
+  "$([ -n "$TURNS" ] && cmp -s "$RUN_DIR/cli-users.txt" "$RUN_DIR/cli-users-expected.txt" && echo 0 || echo 1)" \
+  "turns=$TURNS printed=$(wc -l < "$RUN_DIR/cli-users.txt" | tr -d ' ')"
 
 cp "$LOG" "$EVIDENCE_DIR/history-api.log"
 {

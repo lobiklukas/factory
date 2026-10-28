@@ -457,7 +457,12 @@ documents and the newest `HISTORY_WINDOW` (200) transcript entries — one scan 
 says where they start (`earlier`); `readSessionHistory` pages back through the rest on request, one
 page per call. The pending approvals it reports, which used to need the whole transcript, come from
 the root's approval ledger (`factory.approvals`), a document every approval entry's commit copies
-itself into and that the first open of an older log seeds once. Measured with
+itself into and that the first open of an older log seeds once. The ledger records the newest entry
+it accounts for (`through`), because a build from before it — a rollback, a mixed-version deploy,
+worktrees on different commits sharing one database — appends approval entries without the copy:
+this build's next approval write catches the ledger up from `through`, and a historical read that
+finds such an entry in its window folds the transcript instead. One such entry older than the
+window and newer than the ledger's last write is not seen until that next write. Measured with
 `packages/harness/scripts/bench-historical-read.ts` (median of 7, a loaded machine): at 2 500 and
 10 250 entries the read touched 200 entries both times, against 2 501 and 10 251 for the full
 projection it replaced, and the projection over the open took 6–9 ms against 11–47 ms. The board's

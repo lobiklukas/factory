@@ -22,8 +22,8 @@ import { Clock, Effect, ManagedRuntime, Random } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createModelAccess } from "./models";
+import { APPROVAL_DECIDED_KIND, APPROVAL_REQUESTED_KIND } from "./projection";
 import {
-  ApprovalRequestedEntry,
   closeHarness,
   forkSession,
   HISTORY_WINDOW,
@@ -77,6 +77,56 @@ const reader = (logId: string) =>
 
 /** A note the transcript projects as `other`: an entry with no model content, cheap to write. */
 const Note = defineEntry<{ readonly text: string }>("test.note");
+
+/**
+ * The approval entries as a build from before the ledger (LOB-243) appends them: the same kinds,
+ * with no copy in the ledger. The harness keeps its own definitions private so nothing in this
+ * build can do this; a test has to, to stand in for that build.
+ */
+const LegacyRequested = defineEntry<{
+  readonly requestId: string;
+  readonly action: string;
+  readonly detail: string;
+  readonly requestedAt: string;
+}>(APPROVAL_REQUESTED_KIND);
+const LegacyDecided = defineEntry<{
+  readonly requestId: string;
+  readonly decision: "approved" | "denied";
+  readonly actor: string;
+  readonly decidedAt: string;
+}>(APPROVAL_DECIDED_KIND);
+
+/**
+ * Write to `logId` as a build from before the ledger would: a harness that never ran `openSession`,
+ * appending approval entries with no ledger copy, then `notes` notes.
+ */
+const writeAsLegacyBuild = (
+  logId: string,
+  append: (
+    tx: Parameters<Parameters<Conversation["commit"]>[0]>[0],
+    root: Conversation,
+  ) => Promise<unknown>,
+  notes = 0,
+) =>
+  runtime.runPromise(
+    Effect.gen(function* () {
+      const storage = yield* Effect.promise(() => owner(logId));
+      const harness = yield* Effect.promise(() =>
+        HarnessRuntime.open(
+          storage,
+          { models: model.models, registry: createRegistry() },
+          context,
+        ),
+      );
+      const root = yield* Effect.promise(() => harness.root(context));
+      yield* Effect.promise(() =>
+        root.commit((tx) => append(tx, root), context),
+      );
+      yield* writeNotes(root, notes);
+      yield* closeHarness(harness);
+      yield* Effect.promise(() => storage.dispose());
+    }),
+  );
 
 /** Append `count` notes to `root`, `perCommit` to a commit. */
 const writeNotes = (root: Conversation, count: number, perCommit = 50) =>
@@ -264,35 +314,18 @@ describe("the approval ledger", () => {
     const logId = nextLogId();
     // A log as the control plane wrote it before LOB-243: an approval entry and no ledger, written
     // through a harness that never ran `openSession`.
-    await runtime.runPromise(
-      Effect.gen(function* () {
-        const storage = yield* Effect.promise(() => owner(logId));
-        const harness = yield* Effect.promise(() =>
-          HarnessRuntime.open(
-            storage,
-            { models: model.models, registry: createRegistry() },
-            context,
-          ),
-        );
-        const root = yield* Effect.promise(() => harness.root(context));
-        yield* Effect.promise(() =>
-          root.commit(
-            (tx) =>
-              tx.appendEntry(ApprovalRequestedEntry, root.id, {
-                data: {
-                  requestId: "apr-legacy",
-                  action: "push refs/heads/main",
-                  detail: "",
-                  requestedAt: "2026-01-01T00:00:01.000Z",
-                },
-              }),
-            context,
-          ),
-        );
-        yield* writeNotes(root, HISTORY_WINDOW + 10);
-        yield* closeHarness(harness);
-        yield* Effect.promise(() => storage.dispose());
-      }),
+    await writeAsLegacyBuild(
+      logId,
+      (tx, root) =>
+        tx.appendEntry(LegacyRequested, root.id, {
+          data: {
+            requestId: "apr-legacy",
+            action: "push refs/heads/main",
+            detail: "",
+            requestedAt: "2026-01-01T00:00:01.000Z",
+          },
+        }),
+      HISTORY_WINDOW + 10,
     );
     const pending = [
       {
@@ -334,9 +367,10 @@ describe("the approval ledger", () => {
     const childLog = nextLogId();
     await runtime.runPromise(
       Effect.gen(function* () {
+        const parent = yield* Effect.promise(() => reader(parentLog));
         const child = yield* Effect.promise(() => owner(childLog));
         const opened = yield* forkSession({
-          parent: yield* Effect.promise(() => reader(parentLog)),
+          parent,
           child,
           lineage: parentLog,
           model,
@@ -344,6 +378,7 @@ describe("the approval ledger", () => {
         });
         yield* closeHarness(opened.harness);
         yield* Effect.promise(() => child.dispose());
+        yield* Effect.promise(() => parent.dispose());
       }),
     );
     const log = await fullFold(childLog);
@@ -359,5 +394,77 @@ describe("the approval ledger", () => {
       ["apr-old"],
     );
     expect(read.touched).toBe(log.entries.length);
+  }, 120_000);
+
+  it("is not trusted past an approval entry a build without it appended in the window", async () => {
+    // Seeded by this build, then an older build decides the pending request with no ledger copy.
+    const logId = await seedSession(5);
+    await writeAsLegacyBuild(logId, (tx, root) =>
+      tx.appendEntry(LegacyDecided, root.id, {
+        data: {
+          requestId: "apr-old",
+          decision: "denied",
+          actor: "old-build@laptop",
+          decidedAt: "2026-01-02T00:00:00.000Z",
+        },
+      }),
+    );
+    const log = await fullFold(logId);
+    const read = await historicalRead(logId);
+    // The transcript says the request is decided, and so does the read: the stale ledger alone
+    // would still list it as pending.
+    expect(
+      log.approvals.filter((record) => record.decision === undefined),
+    ).toEqual([]);
+    expect(read.snapshot.approvals).toEqual([]);
+  }, 120_000);
+
+  it("catches up with entries a build without it appended, at this build's next approval write", async () => {
+    const logId = await seedSession(5);
+    // An older build asks for an approval with no ledger copy, and the log runs on well past it:
+    // the entry is outside any window a read serves.
+    await writeAsLegacyBuild(
+      logId,
+      (tx, root) =>
+        tx.appendEntry(LegacyRequested, root.id, {
+          data: {
+            requestId: "apr-ghost",
+            action: "delete branch",
+            detail: "",
+            requestedAt: "2026-01-02T00:00:00.000Z",
+          },
+        }),
+      HISTORY_WINDOW + 10,
+    );
+    // This build opens the log again and asks for an approval of its own.
+    await runtime.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() => owner(logId));
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+        });
+        yield* writeApprovalRequested(root, {
+          requestId: "apr-new",
+          action: "tag v2",
+          detail: "",
+          requestedAt: "2026-01-03T00:00:00.000Z",
+        });
+        yield* closeHarness(harness);
+        yield* Effect.promise(() => storage.dispose());
+      }),
+    );
+    const log = await fullFold(logId);
+    const read = await historicalRead(logId);
+    const pending = log.approvals
+      .filter((record) => record.decision === undefined)
+      .map((record) => record.requestId);
+    expect(pending).toEqual(["apr-old", "apr-ghost", "apr-new"]);
+    expect(read.snapshot.approvals.map((request) => request.requestId)).toEqual(
+      pending,
+    );
+    // The ledger caught up, so the read still costs only its window.
+    expect(read.touched).toBe(HISTORY_WINDOW);
   }, 120_000);
 });

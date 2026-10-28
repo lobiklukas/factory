@@ -679,8 +679,12 @@ export const readPagePrompt = (
 /**
  * An approval request, committed to the log the moment the session asks (D11). Like the title it
  * carries no model content, so the agent never sees it.
+ *
+ * The three approval entry definitions are module-private on purpose (LOB-243): an approval entry
+ * appended without its copy in the approval ledger is one a historical read cannot see, so the only
+ * way to append one is `writeApprovalRequested`, `writeApprovalDecided` or `writeApprovalUsed`.
  */
-export const ApprovalRequestedEntry = defineEntry<{
+const ApprovalRequestedEntry = defineEntry<{
   readonly requestId: string;
   readonly action: string;
   readonly detail: string;
@@ -688,52 +692,81 @@ export const ApprovalRequestedEntry = defineEntry<{
 }>(APPROVAL_REQUESTED_KIND);
 
 /** The answer to one approval request, committed beside it. */
-export const ApprovalDecidedEntry = defineEntry<{
+const ApprovalDecidedEntry = defineEntry<{
   readonly requestId: string;
   readonly decision: ApprovalVerdict;
   readonly actor: string;
   readonly decidedAt: string;
 }>(APPROVAL_DECIDED_KIND);
 
-/** Entries per transaction scan while seeding an approval ledger. */
+/** Entries per transaction scan while seeding or catching up an approval ledger. */
 const LEDGER_SEED_PAGE = 500;
 
 /**
  * The conversation's approval ledger (`ApprovalsDoc`, LOB-243), opened for writing in `tx` and
- * complete: a ledger that is not seeded yet is first given every approval entry the conversation
- * already holds, oldest first, and marked seeded. Every write that appends an approval entry opens
- * the ledger here first and then copies its entry in, so a seeded ledger holds exactly the
- * conversation's approval entries — the property a reader relies on when it folds the ledger
- * instead of the transcript.
+ * complete through the log's newest entry.
  *
- * The seed walks the transcript once per log, ever: a new log has nothing to walk, and a log written
+ * A ledger that is not seeded yet is rebuilt from every approval entry the conversation holds,
+ * oldest first. With `catchUp`, a seeded ledger is also given the approval entries appended after
+ * `through` without a copy — what a build from before the ledger writes into a log this build
+ * already seeded (a rollback, a mixed-version deploy, two worktrees on one database). Either way
+ * `through` moves to the newest entry scanned, so each entry is scanned at most once over the life
+ * of the log. Every write that appends an approval entry opens the ledger here first and then copies
+ * its entry in, so a seeded ledger holds exactly the conversation's approval entries up to `through`
+ * — the property a reader relies on when it folds the ledger instead of the transcript.
+ *
+ * The seed walks the transcript once per log: a new log has nothing to walk, and a log written
  * before the ledger existed pays it the first time it is opened (`writePagePrompt`, the open's own
- * commit).
+ * commit). An open does not catch up — it would cost every open the entries of the run before it —
+ * and an approval write does, which is human-paced and rare.
  */
-const approvalLedger = (tx: Tx, conversationId: ConversationId) => {
+const approvalLedger = (
+  tx: Tx,
+  conversationId: ConversationId,
+  options: { readonly catchUp: boolean } = { catchUp: false },
+) => {
   /** Every approval entry from `cursor` on, newest first, appended to `held`. */
   const scan = (
+    from: number,
     held: { kind: string; data: JsonValue }[],
+    newest: { id: number },
     cursor: Cursor | undefined,
   ): Promise<{ kind: string; data: JsonValue }[]> =>
     tx
-      .scanEntries({ conversationId }, LEDGER_SEED_PAGE, cursor)
+      .scanEntries(
+        from > 0
+          ? { conversationId, minEntryId: (from + 1) as EntryId }
+          : { conversationId },
+        LEDGER_SEED_PAGE,
+        cursor,
+      )
       .then((page) => {
-        for (const entry of page.items)
+        for (const entry of page.items) {
+          newest.id = Math.max(newest.id, Number(entry.id));
           if (APPROVAL_ENTRY_KINDS.has(entry.kind))
             held.push({ kind: entry.kind, data: entry.data ?? null });
-        return page.next === undefined ? held : scan(held, page.next);
+        }
+        return page.next === undefined
+          ? held
+          : scan(from, held, newest, page.next);
       });
-  return tx.doc(ApprovalsDoc, conversationId).then((ledger) =>
-    ledger.seeded
-      ? ledger
-      : scan([], undefined).then((held) => {
-          // Scans are newest first; the ledger is in log order, which is the order the fold reads.
-          for (const entry of held.reverse()) ledger.entries.push(entry);
-          ledger.seeded = true;
-          return ledger;
-        }),
-  );
+  return tx.doc(ApprovalsDoc, conversationId).then((ledger) => {
+    // A ledger without a numeric `through` predates it and is rebuilt like an unseeded one.
+    const through =
+      ledger.seeded && typeof ledger.through === "number"
+        ? ledger.through
+        : undefined;
+    if (through !== undefined && !options.catchUp) return ledger;
+    const newest = { id: through ?? 0 };
+    return scan(through ?? 0, [], newest, undefined).then((held) => {
+      if (through === undefined) ledger.entries.splice(0);
+      // Scans are newest first; the ledger is in log order, which is the order the fold reads.
+      for (const entry of held.reverse()) ledger.entries.push(entry);
+      ledger.seeded = true;
+      ledger.through = newest.id;
+      return ledger;
+    });
+  });
 };
 
 /**
@@ -752,9 +785,10 @@ const commitApprovalEntry = (
   attempt(label, () =>
     conversation.commit(
       (tx) =>
-        approvalLedger(tx, conversation.id).then((ledger) =>
+        approvalLedger(tx, conversation.id, { catchUp: true }).then((ledger) =>
           entry.append(tx).then((appended) => {
             ledger.entries.push({ kind: entry.kind, data: entry.data });
+            ledger.through = Math.max(ledger.through, Number(appended.id));
             return appended.id;
           }),
         ),
@@ -805,7 +839,7 @@ export const writeApprovalDecided = (
   );
 
 /** An approval spent: a gated call ran on it (LOB-52). Committed before the call runs. */
-export const ApprovalUsedEntry = defineEntry<{
+const ApprovalUsedEntry = defineEntry<{
   readonly requestId: string;
   readonly usedAt: string;
 }>(APPROVAL_USED_KIND);
@@ -1806,6 +1840,7 @@ const copyEntries = (
               .then((record) => {
                 copied.set(entry.id, record.id);
                 at = String(record.id);
+                ledger.through = Math.max(ledger.through, Number(record.id));
                 if (APPROVAL_ENTRY_KINDS.has(record.kind))
                   ledger.entries.push({
                     kind: record.kind,
@@ -2659,14 +2694,28 @@ export const readTranscriptPage = (
  * document bounded by the approvals asked for — when the ledger is seeded, and from the whole
  * transcript when it is not: a log written before the ledger existed and not opened since. Either
  * way it is `projectApprovals` over the same approval entries, so both answer alike.
+ *
+ * `recent` is entries the caller already read (a historical read's window). One of approval kind
+ * newer than the ledger's `through` was appended without its copy — by a build that predates the
+ * ledger — so the ledger is stale and the transcript is folded instead. The check costs no read.
  */
 export const readApprovalRecords = (
   storage: Storage,
+  recent: readonly EntryRecord[] = [],
 ): Effect.Effect<readonly ApprovalLogRecord[], SessionError> =>
   Effect.gen(function* () {
     const ledger = yield* readDocument(storage, APPROVALS_DOC_KIND);
     const entries = ledger?.["entries"];
-    if (ledger?.["seeded"] === true && Array.isArray(entries)) {
+    const through = ledger?.["through"];
+    const trusted =
+      ledger?.["seeded"] === true &&
+      Array.isArray(entries) &&
+      typeof through === "number" &&
+      !recent.some(
+        (record) =>
+          Number(record.id) > through && APPROVAL_ENTRY_KINDS.has(record.kind),
+      );
+    if (trusted) {
       return projectApprovals(
         entries.flatMap((value) => {
           const entry = asLedgerEntry(value);
@@ -2704,14 +2753,13 @@ const asLedgerEntry = (
 export const readHistoricalSnapshot = (
   storage: Storage,
   ref: SessionRef,
-  options: { readonly window?: number } = {},
 ): Effect.Effect<SessionSnapshot, SessionError> =>
   Effect.gen(function* () {
     const transcript = yield* readTranscriptRecords(storage, {
-      limit: Math.max(1, Math.trunc(options.window ?? HISTORY_WINDOW)),
+      limit: HISTORY_WINDOW,
     });
     const usage = yield* readLogUsage(storage);
-    const approvals = yield* readApprovalRecords(storage);
+    const approvals = yield* readApprovalRecords(storage, transcript.records);
     const replayComparisons = projectReplayComparisons(
       yield* readDocument(storage, REPLAY_DOC_KIND),
     );

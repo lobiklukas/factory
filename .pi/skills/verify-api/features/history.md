@@ -1,7 +1,7 @@
 # A long session's history
 
 **Status: passing** (2026-10-28, `agent/LOB-243` worktree, `./history.sh` on `:9531`, faux,
-Postgres on 5442): **14/14**, evidence `.verify/evidence/lob-243/api/`.
+Postgres on 5442): **17/17**, evidence `.verify/evidence/lob-243/api/`.
 
 ## What it is
 
@@ -16,7 +16,9 @@ snapshot still carries the whole transcript and no `earlier`.
 
 The dashboard's **Show earlier entries** above a long historical transcript
 ([verify-web history](../../verify-web/features/history.md)); `factory watch` prints
-`[earlier] entries before <id> are not shown` above the window.
+`[earlier] entries before <id> are not shown; factory history <session> --before <id> prints them`
+above the window, and `factory history <session> --before <id> [--limit n] [--all]` prints one page
+before that entry, or with `--all` every entry back to the first.
 
 ## What proves it
 
@@ -30,7 +32,9 @@ turns, waits read-free for the owner to go, then:
   exactly once and in order
 - a `before` that is not an entry id is `invalid_input`; an unknown session is `not_found`
 - `factory watch` on the session prints `mode: historical` and the `[earlier]` line naming the window's
-  first entry
+  first entry and the `factory history` command that prints the rest
+- `factory history <session> --before <earlier> --all` exits 0 with no `[earlier]` line, and its
+  lines followed by `watch`'s carry every turn's message once, in order
 
 The cost half — entries touched does not grow with the log — is asserted in
 `packages/harness/src/history.test.ts` and measured by

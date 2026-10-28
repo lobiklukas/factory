@@ -50,8 +50,41 @@ export const QUEUE_EMPTY = "[queued] (empty)";
  * entries only, so a terminal reader is told the transcript did not start here rather than left to
  * think the first entry printed was the first one said. `before` is the oldest entry printed.
  */
-export const formatEarlier = (before: string): string =>
-  `[earlier] entries before ${before} are not shown`;
+export const formatEarlier = (before: string, sessionId?: string): string =>
+  sessionId === undefined
+    ? `[earlier] entries before ${before} are not shown`
+    : `[earlier] entries before ${before} are not shown; factory history ${sessionId} --before ${before} prints them`;
+
+/** One page of earlier transcript as `readSessionHistory` answers it. */
+export type HistoryPage = {
+  readonly entries: readonly TranscriptEntry[];
+  readonly earlier?: string | undefined;
+};
+
+/**
+ * The transcript before entry `before`, oldest first: one page, or with `all` every page back to the
+ * first entry (LOB-243). `earlier` is where the next page back would start, absent once the first
+ * entry is in `entries`. `readPage` is `readSessionHistory` bound to one session.
+ */
+export const readEarlier = <E>(
+  readPage: (before: string) => Effect.Effect<HistoryPage, E>,
+  before: string,
+  options: { readonly all: boolean },
+): Effect.Effect<HistoryPage, E> =>
+  Effect.gen(function* () {
+    const pages: (readonly TranscriptEntry[])[] = [];
+    let cursor: string | undefined = before;
+    while (cursor !== undefined) {
+      const page: HistoryPage = yield* readPage(cursor);
+      pages.unshift(page.entries);
+      cursor = page.earlier;
+      if (!options.all) break;
+    }
+    return {
+      entries: pages.flat(),
+      ...(cursor === undefined ? {} : { earlier: cursor }),
+    };
+  });
 
 /**
  * Whether the run is over. `live.busy` is the same signal as `status`, and either arriving means
@@ -133,7 +166,7 @@ export const followSession = (
                 yield* Console.log(`mode: ${event.session.mode}`);
               }
               if (event.earlier !== undefined) {
-                yield* Console.log(formatEarlier(event.earlier));
+                yield* Console.log(formatEarlier(event.earlier, sessionId));
               }
               for (const entry of event.entries) {
                 yield* printEntry(state, entry);
