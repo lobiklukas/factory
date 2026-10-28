@@ -56,6 +56,7 @@ import {
   type SubmittedMessage,
 } from "./session";
 import type { VerifyOptions } from "./verify";
+import type { InjectedSecrets } from "./secrets";
 import { inheritBudget, setBudget, type BudgetSource } from "./budget";
 
 // The document lives with the other typed tokens (`./docs`), where the snapshot reads it too; it is
@@ -173,6 +174,8 @@ export type ReplaySessionOptions = {
   readonly repo?: RepoContext;
   /** What the replay's `verify` tool runs (LOB-78), as `OpenSessionOptions.verify`. */
   readonly verify?: VerifyOptions;
+  /** The values the replay's commands are given, masked in its log, as `OpenSessionOptions.secrets`. */
+  readonly secrets?: InjectedSecrets;
   /**
    * The cap a replay of an uncapped source gets (LOB-163): the server's default, as a create gets
    * it. A capped source's replay keeps its cap — the one thing a replay changes is the model — but
@@ -212,6 +215,7 @@ export const replaySession = (
       ...(options.run === undefined ? {} : { run: options.run }),
       ...(options.repo === undefined ? {} : { repo: options.repo }),
       ...(options.verify === undefined ? {} : { verify: options.verify }),
+      ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
     });
     // A failure that leaves the harness open would leave a lease nobody releases: close it where the
     // failure is, as the fork's copy does.

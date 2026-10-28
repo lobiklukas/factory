@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Prove the Repositories page (LOB-262): an operator registers the repository the factory works on
 # from the dashboard, a refusal is shown in the server's words, a repo that cannot run is flagged,
-# and a session on a registered checkout is cut a `factory/<session-id>` worktree.
+# and a session on a registered checkout is cut a `factory/<session-id>` worktree; and a repo's
+# secret is set from its row and never shown again (S-agent-secrets).
 #
 # This script owns its own API and dashboard (its own ports, session root, logs and pid files) and
 # its own throwaway git checkouts under .verify/run/repos/, so the instance ./up.sh starts is not
@@ -70,6 +71,7 @@ rm -rf "$RUN_DIR/sessions"
     ALLOWED_ORIGINS="http://localhost:$WEB_PORT" \
     MODEL_BACKEND=faux \
     FAUX_COMMAND="echo faux-ok" \
+    FACTORY_SECRETS_KEY="$(openssl rand -base64 32)" \
     SESSION_ROOT="$RUN_DIR/sessions" \
     SESSION_IDLE_TIMEOUT_MS=600000 \
     bun run src/index.ts ) > "$RUN_DIR/api.log" 2>&1 &

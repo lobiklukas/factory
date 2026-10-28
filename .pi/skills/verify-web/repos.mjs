@@ -569,6 +569,92 @@ try {
     JSON.stringify(note).slice(0, 200),
   );
 
+  {
+    // --- secrets: a repo's secret set from the page, never shown again (S-agent-secrets) ----------
+    // Every `/rpc` response body the page receives, as text: the value must be in none of them.
+    const rpcBodies = [];
+    page.on("response", (response) => {
+      if (!response.url().includes("/rpc")) return;
+      const read = response.text().then(
+        (text) => text,
+        () => "",
+      );
+      rpcBodies.push(read);
+    });
+    const SECRET_VALUE = `verify-repos-fake-secret-${TAG}`;
+    await page.goto(`${WEB_URL}/repos`, { waitUntil: "domcontentloaded" });
+    await waitRow(WIDGETS);
+    const secretForm = page.locator(`[data-secret-form='${WIDGETS}']`);
+    await secretForm.locator("input[name='name']").fill("TEST_API_KEY");
+    await secretForm.locator("input[name='value']").fill(SECRET_VALUE);
+    const valueType = await secretForm
+      .locator("input[name='value']")
+      .getAttribute("type");
+    await secretForm.getByRole("button", { name: "Save secret" }).click();
+    await page.waitForSelector(
+      `${rowSel(WIDGETS)} [data-secret-saved='TEST_API_KEY']`,
+      { timeout: 20_000 },
+    );
+    await page.waitForSelector(
+      `${rowSel(WIDGETS)} [data-secret-name='TEST_API_KEY']`,
+      { timeout: 20_000 },
+    );
+    const shown = await page.evaluate(() => ({
+      html: document.documentElement.outerHTML,
+      inputs: [...document.querySelectorAll("input")].map(
+        (input) => input.value,
+      ),
+    }));
+    await page.screenshot({
+      path: path.join(EVIDENCE_DIR, "repos-secret-saved.png"),
+      fullPage: true,
+    });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector(
+      `${rowSel(WIDGETS)} [data-secret-name='TEST_API_KEY']`,
+      { timeout: 20_000 },
+    );
+    const reloaded = await page.evaluate(
+      () => document.documentElement.outerHTML,
+    );
+    const stored = await rpc("listSecrets", { repo: WIDGETS });
+    await page
+      .locator(`${rowSel(WIDGETS)} [data-secret-delete='TEST_API_KEY']`)
+      .click();
+    await page.waitForSelector(`${rowSel(WIDGETS)} [data-secrets-empty]`, {
+      timeout: 20_000,
+    });
+    const afterDelete = await rpc("listSecrets", { repo: WIDGETS });
+    const bodies = await Promise.all(rpcBodies);
+    observed.secrets = {
+      valueType,
+      stored: stored.map((secret) => secret.name),
+      afterDelete: afterDelete.map((secret) => secret.name),
+      rpcResponses: bodies.length,
+    };
+    assert(
+      "secrets: the Secrets form stores the value, its field a password input cleared once saved",
+      valueType === "password" &&
+        stored.length === 1 &&
+        stored[0]?.name === "TEST_API_KEY" &&
+        shown.inputs.every((value) => value === "" || value !== SECRET_VALUE),
+      JSON.stringify(observed.secrets),
+    );
+    assert(
+      "secrets: neither the page nor any RPC answer it read holds the value, before or after a reload",
+      !shown.html.includes(SECRET_VALUE) &&
+        !reloaded.includes(SECRET_VALUE) &&
+        bodies.length > 0 &&
+        bodies.every((text) => !text.includes(SECRET_VALUE)),
+      `${bodies.length} rpc responses read`,
+    );
+    assert(
+      "secrets: the row's delete removes it",
+      afterDelete.length === 0,
+      JSON.stringify(afterDelete),
+    );
+  }
+
   assert(
     "the page logged no console error",
     consoleErrors.length === 0,

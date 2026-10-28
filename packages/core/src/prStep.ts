@@ -65,6 +65,13 @@
  * `non-fast-forward` outcome — nothing opened, nothing recorded — rather than a PR over commits the
  * run never saw. Any other push failure is a `PrError` naming the push.
  *
+ * The branch passes a secret scan before it is pushed (S-agent-secrets, `./secretScan`): every line
+ * its commits add — the history a push publishes, not only the net diff — is checked for a value the
+ * factory stores for the repo and for a well-known credential's shape. A finding answers
+ * `{outcome: "secret-found"}` naming where each is and never its text: no push, no GitHub call, no
+ * record. The caller hands the step the stored values; a stored value its key cannot read refuses the
+ * step as a `PrError`, so a branch is never pushed unscanned.
+ *
  * A card's later run adopts the card's PR rather than opening a second one (C19): it continues the
  * branch an earlier run of the card opened the PR from (`./cardBranch`), so the caller hands the step
  * that PR (`adopt`). The step then does everything an open does but the GitHub call — the same
@@ -90,12 +97,14 @@ import {
   readPullRequestDoc,
   writeNoDocumentationChange,
   writePullRequestDoc,
+  type InjectedSecrets,
   type PullRequestRecord,
 } from "@repo/harness";
 import type { CredentialError, CredentialProvider } from "./credentials";
 import type { GitError, PushedBranch } from "./git";
 import type { DiffCap, OverCapPullRequest, PullRequestStep } from "./pr";
 import { resolveCommit } from "./repos";
+import { scanBranchForSecrets } from "./secretScan";
 import {
   buildPrBody,
   createPullRequest,
@@ -131,6 +140,14 @@ export type OpenPullRequestInput = {
     commit: string | undefined,
   ) => Effect.Effect<PushedBranch, GitError | CredentialError>;
   /**
+   * The base's tip on the forge, fetched by the control plane when the step is about to push
+   * (S-agent-secrets): the commit the secret scan stops at. Given with `push`, because only a push
+   * the step makes is one the scan bounds by what the forge holds rather than by a local ref, which
+   * the agent's own shell shares in a local checkout and could move to hide a commit from the scan.
+   * A fetch that fails refuses the step as a `PrError`. Absent: the scan stops at `measureBase`.
+   */
+  readonly forgeBase?: Effect.Effect<string, GitError | CredentialError>;
+  /**
    * The PR the session's card already has on this head and base (C19), opened by an earlier run of
    * the card on the branch this one continues. With one, a session whose log records no PR yet takes
    * every step of an open — measured, capped, pushed — but asks GitHub for nothing: the PR exists,
@@ -140,6 +157,16 @@ export type OpenPullRequestInput = {
   readonly adopt?: PullRequestRecord;
   /** The configured limits; absent means `DEFAULT_DIFF_CAP`. */
   readonly cap?: DiffCap;
+  /**
+   * The repo's stored secrets, for the scan a branch passes before it is pushed (S-agent-secrets,
+   * `./secretScan`): `known` are the values a line may not hold, `unreadable` the names the store
+   * holds and this control plane's key cannot read — which refuses the step, because a branch
+   * cannot be scanned for a value nobody can read. Absent: no stored value, only the patterns.
+   */
+  readonly secrets?: {
+    readonly known: InjectedSecrets;
+    readonly unreadable: readonly string[];
+  };
   /** What the session was asked to do, and the model and spend behind it, for the body. */
   readonly prompt: string;
   readonly model?: string;
@@ -222,6 +249,51 @@ export const openPullRequest = (
     // Nothing is written on this path — no document, no row — so a session refused here has the
     // same index and log it had before the step, and reads as a session with no PR.
     if (Option.isSome(refused)) return refused.value;
+    // The scan before the push (S-agent-secrets): every line the branch's commits add, for a stored
+    // value or a credential's shape. Like the cap it writes nothing, so a refused session reads as
+    // one with no PR; unlike the cap it reads the history, because that is what a push publishes.
+    //
+    // What it stops at is what the forge already holds: the base's tip there, fetched now, when the
+    // step pushes — never a local ref name the agent's shell could have moved onto a commit it wants
+    // unscanned — and the commit an adopted card PR was published at (C19), which an earlier run's
+    // step scanned and pushed, so a later run is not refused for history the forge already has.
+    if (recorded === undefined && Option.isSome(measured)) {
+      const localBase = input.measureBase ?? input.base;
+      const unreadable = input.secrets?.unreadable ?? [];
+      if (unreadable.length > 0) {
+        return yield* new PrError({
+          operation: "secretScan",
+          ref: `${localBase}..${input.head}`,
+          message: `the repo's stored secret(s) ${unreadable.join(", ")} cannot be read with this control plane's FACTORY_SECRETS_KEY, so the branch cannot be scanned for them and nothing was pushed`,
+        });
+      }
+      const base =
+        input.push !== undefined && input.forgeBase !== undefined
+          ? yield* input.forgeBase.pipe(
+              Effect.mapError(
+                (error) =>
+                  new PrError({
+                    operation: "secretScan",
+                    ref: `${input.base}..${input.head}`,
+                    message: `the forge's ${input.base} could not be fetched to bound the branch's secret scan, so nothing was pushed: ${error.message}`,
+                  }),
+              ),
+            )
+          : localBase;
+      const adopted = input.adopt?.commit ?? "";
+      const published =
+        adopted === ""
+          ? undefined
+          : yield* resolveCommit(input.worktree, adopted);
+      const found = yield* scanBranchForSecrets({
+        checkout: input.worktree,
+        base,
+        head: measuredHead,
+        ...(published === undefined ? {} : { exclude: [published] }),
+        known: input.secrets?.known ?? [],
+      });
+      if (Option.isSome(found)) return found.value;
+    }
     // Published only when a PR is about to be asked for, and only a branch the step measured: a
     // directory that is not its own checkout has no branch to push. A rejected push writes nothing,
     // so the session reads as one with no PR, as a refusal above does.

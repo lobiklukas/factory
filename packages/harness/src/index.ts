@@ -25,3 +25,4 @@ export * from "./ask";
 export * from "./body";
 export * from "./budget";
 export * from "./follow";
+export * from "./secrets";

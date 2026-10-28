@@ -26,6 +26,7 @@ import {
   resetCommand,
 } from "./commands/sessionControl";
 import { spendCommand } from "./commands/spend";
+import { secretCommand } from "./commands/secret";
 import { skillCommand } from "./commands/skill";
 import { statusCommand } from "./commands/status";
 import { triggersCommand } from "./commands/triggers";
@@ -56,6 +57,7 @@ const root = Command.make("factory").pipe(
     boardCommand,
     repoCommand,
     skillCommand,
+    secretCommand,
     triggersCommand,
     replayCommand,
     costCommand,

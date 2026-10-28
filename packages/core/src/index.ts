@@ -44,3 +44,5 @@ export * from "./metrics";
 export * from "./outcomes";
 export * from "./admission";
 export * from "./Notifier";
+export * from "./SecretService";
+export * from "./secretScan";

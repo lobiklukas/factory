@@ -1,5 +1,8 @@
 import { SessionId } from "@repo/domain/Session";
-import type { PullRequestStep } from "@repo/domain/PullRequest";
+import {
+  secretFindingsText,
+  type PullRequestStep,
+} from "@repo/domain/PullRequest";
 import { Console, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/cli";
 import { resolveApiUrl } from "../api";
@@ -53,6 +56,12 @@ export const prAnswer = (
         _tag: "NotOpened",
         code: "non_fast_forward",
         message: `session ${sessionId}'s branch ${step.head} is behind the remote's: the remote has commits it does not, and the push is never forced; integrate them and run factory pr again. No PR was opened`,
+      };
+    case "secret-found":
+      return {
+        _tag: "NotOpened",
+        code: "secret_found",
+        message: `session ${sessionId}'s branch adds a secret — ${secretFindingsText(step)} — so nothing was pushed and no PR was opened; take it out of the branch's history and run factory pr again`,
       };
   }
 };

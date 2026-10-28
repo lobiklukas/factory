@@ -130,7 +130,10 @@
         // each the credential to post there, and an ntfy token is one outright.
         "NOTIFY_SLACK_WEBHOOK_URL",
         "NOTIFY_NTFY_TOPIC",
-        "NOTIFY_NTFY_TOKEN"
+        "NOTIFY_NTFY_TOKEN",
+        // The key the repos' secrets are encrypted under (S-agent-secrets, `@repo/core`'s
+        // SecretService): the one value that opens every stored secret.
+        "FACTORY_SECRETS_KEY"
       ]
     }
   }

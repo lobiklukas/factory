@@ -38,6 +38,13 @@ add|ls|show` is the CLI's ([verify-cli's repo.md](../../verify-cli/features/repo
   keeps what was typed, and nothing is written. A landed registration clears the form and says so
   (`[data-repo-registered=<slug>]`).
 
+- **Secrets** (`[data-repo-secrets=<slug>]`, S-agent-secrets) under each row: the names the repo
+  stores (`[data-secret-name]`, from `listSecrets`, which answers no value), a delete per name, and a
+  form (`[data-secret-form=<slug>]`) whose Value is a password input, sent once with `setSecret` and
+  cleared the moment the server answers (`[data-secret-saved=<name>]`, or the server's refusal in
+  `[data-secret-problem]`). No value is ever on the page after it is saved, and no RPC answer the
+  page reads holds one. `secrets-view.ts` holds the rules.
+
 ## How to get to it (user POV)
 
 Click the branch icon (**Repositories**) in the rail, or open `/repos`.
