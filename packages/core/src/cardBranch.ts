@@ -114,17 +114,3 @@ export const cardBranchOf = (
       .map((run) => run.sessionId),
   };
 };
-
-/**
- * The session D11's push rule names for a session bound to `branch` (C19): a card's later run is
- * bound to its first change run's `factory/<session-id>`, and that is the branch its worktree has
- * and its agent may push — not `factory/<its own id>`, which does not exist there. Any other binding
- * (none, a reviewer's `factory/review-…`, a caller-named branch) leaves the session's own id.
- */
-export const branchOwnerOf = (
-  sessionId: string,
-  branch: string | undefined,
-): string =>
-  (branch === undefined
-    ? undefined
-    : /^factory\/(ses_[0-9a-z]+)$/.exec(branch)?.[1]) ?? sessionId;

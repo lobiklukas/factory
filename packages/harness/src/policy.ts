@@ -125,10 +125,19 @@ export type AutonomyRules = {
   readonly worktree: string;
   /**
    * The session this policy belongs to. Set, a push into `refs/heads/factory/` is allowed only to
-   * `refs/heads/factory/<sessionId>`: D11's "push to `refs/heads/factory/<session-id>`", not any
-   * session's branch. Absent (no session known), the prefixes alone decide.
+   * the session's own branch (`branch`, or `refs/heads/factory/<sessionId>` when it is bound to
+   * none): D11's "push to `refs/heads/factory/<session-id>`", not any session's branch. Absent (no
+   * session known, and no branch), the prefixes alone decide.
    */
   readonly sessionId?: string;
+  /**
+   * The branch the session's worktree is bound to (`workspace.branch`, F15), when it was bound to one
+   * rather than cutting D10's `factory/<its id>`: a card's later run continues its first change run's
+   * `factory/<that id>` (C19), a reviewer works on `factory/review-…`. That branch is the one push
+   * into `refs/heads/factory/` it may make; every other ref there is another session's. The prefixes
+   * still apply first, so a column that pushes nothing (C22) refuses this one too.
+   */
+  readonly branch?: string;
   readonly pushRefPrefixes: readonly string[];
   readonly allowedHosts: readonly string[];
   /** Command prefixes that need a person's approval before they run (LOB-52), normalized. */
@@ -140,14 +149,28 @@ export type AutonomyRules = {
 /** The namespace D11 gives sessions for their own branches. */
 const SESSION_BRANCH_NAMESPACE = "refs/heads/factory/";
 
+/**
+ * The one ref in D11's namespace a session may push (F15): the branch it is bound to, or
+ * `refs/heads/factory/<its id>` when it is bound to none. `undefined` when the rules name neither,
+ * and the prefixes alone decide.
+ */
+const ownBranchRef = (rules: AutonomyRules): string | undefined =>
+  rules.branch !== undefined
+    ? fullRef(rules.branch)
+    : rules.sessionId === undefined
+      ? undefined
+      : `${SESSION_BRANCH_NAMESPACE}${rules.sessionId}`;
+
 /** Resolve a deployment's configuration for one session's worktree. */
 export const autonomyRules = (
   config: AutonomyConfig,
   worktree: string,
   sessionId?: string,
+  branch?: string,
 ): AutonomyRules => ({
   worktree: normalize(worktree),
   ...(sessionId === undefined ? {} : { sessionId }),
+  ...(branch === undefined || branch === "" ? {} : { branch }),
   pushRefPrefixes: config.pushRefPrefixes,
   allowedHosts: config.allowedHosts.map((host) => host.toLowerCase()),
   approvalRequired: (config.approvalRequired ?? [])
@@ -676,13 +699,14 @@ const decidePush = (
         `pushing ${ref} is refused: this session may only push ${rules.pushRefPrefixes.join(", ")}. Push refs/heads/factory/<session-id> instead.`,
       );
     }
+    const own = ownBranchRef(rules);
     if (
-      rules.sessionId !== undefined &&
+      own !== undefined &&
       ref.startsWith(SESSION_BRANCH_NAMESPACE) &&
-      ref !== `${SESSION_BRANCH_NAMESPACE}${rules.sessionId}`
+      ref !== own
     ) {
       return block(
-        `pushing ${ref} is refused: this session owns ${SESSION_BRANCH_NAMESPACE}${rules.sessionId} and may not push another session's branch. Push refs/heads/factory/${rules.sessionId} instead.`,
+        `pushing ${ref} is refused: this session owns ${own} and may not push another session's branch. Push ${own} instead.`,
       );
     }
   }
@@ -2233,8 +2257,9 @@ export const autonomyPolicy = (
   config: AutonomyConfig,
   worktree: string,
   sessionId?: string,
+  branch?: string,
 ): SessionPolicy => {
-  const rules = autonomyRules(config, worktree, sessionId);
+  const rules = autonomyRules(config, worktree, sessionId, branch);
   return {
     rules,
     decide: (call) => Effect.sync(() => decideToolCall(rules, call)),
@@ -2262,6 +2287,11 @@ export type PolicyShape = {
      * repository, then column, and each can only tighten what the one before it allows.
      */
     repo?: RepoPolicy,
+    /**
+     * The branch the session's worktree is bound to (`workspace.branch`, F15): the one ref in
+     * `refs/heads/factory/` it may push. Absent: `refs/heads/factory/<sessionId>`, as D11 has it.
+     */
+    branch?: string,
   ) => SessionPolicy;
 };
 
@@ -2275,11 +2305,12 @@ export const PolicyLive = (
 ): Layer.Layer<Policy> =>
   Layer.succeed(Policy, {
     config,
-    forWorktree: (worktree, sessionId, column, repo) =>
+    forWorktree: (worktree, sessionId, column, repo, branch) =>
       autonomyPolicy(
         withColumnAutonomy(withRepoPolicy(config, repo), column),
         worktree,
         sessionId,
+        branch,
       ),
   });
 

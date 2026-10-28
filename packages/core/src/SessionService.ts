@@ -311,7 +311,6 @@ import { SessionBus, SessionBusPostgres } from "./SessionBus";
 import { atCapacity, runCapReached, SESSION_MAX_CONCURRENT } from "./admission";
 import { checkRunCaps } from "./boardCaps";
 import {
-  branchOwnerOf,
   type CardBranch,
   cardBranchOf,
   changeColumnsOf,
@@ -3296,11 +3295,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               // column a run is told about is the column whose autonomy it runs under.
               // Under the column, the repository's policy (S-factory-config-as-code): the deployment's
               // rules tightened by what the base's `.factory/config` declares, then by the column.
+              // The one branch it may push is the one its worktree is bound to (F15): a card's later
+              // run continues its first change run's `factory/<that id>` (C19).
               policy: policy.forWorktree(
                 workspace.path,
-                branchOwnerOf(id, workspace.branch),
+                id,
                 run.autonomy,
                 repoPolicy.repo,
+                workspace.branch,
               ),
               policyRecord: repoPolicy,
               run,
@@ -5502,6 +5504,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        */
       const refuseUnpolicedChecks = (
         sessionId: string,
+        branch: string | undefined,
         worktree: string,
         workers: readonly MissionWorker[],
         runSession: SessionId,
@@ -5531,6 +5534,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             sessionId,
             column?.autonomy,
             repoPolicy.repo,
+            branch,
           );
           for (const worker of workers) {
             if (worker.check === undefined) continue;
@@ -5609,7 +5613,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // mission runs in is the owner's, cut under the gate.
           const planned = yield* workspaceFor(row, { cut: false });
           yield* refuseUnpolicedChecks(
-            branchOwnerOf(input.sessionId, planned.branch),
+            input.sessionId,
+            planned.branch,
             planned.path,
             workers,
             input.sessionId,

@@ -6,7 +6,6 @@
 import type { BoardColumn } from "@repo/domain/Task";
 import { describe, expect, it } from "vitest";
 import {
-  branchOwnerOf,
   type CardRun,
   cardBranchOf,
   changeColumnsOf,
@@ -124,17 +123,5 @@ describe("cardBranchOf", () => {
         REPO,
       ),
     ).toBeUndefined();
-  });
-});
-
-describe("branchOwnerOf (C19)", () => {
-  it("names the session whose branch a card's later run is bound to", () => {
-    expect(branchOwnerOf("ses_b", "factory/ses_a")).toBe("ses_a");
-  });
-
-  it("keeps the session's own id for any other binding", () => {
-    expect(branchOwnerOf("ses_b", undefined)).toBe("ses_b");
-    expect(branchOwnerOf("ses_b", "factory/review-12-abc")).toBe("ses_b");
-    expect(branchOwnerOf("ses_b", "feature/widget")).toBe("ses_b");
   });
 });
