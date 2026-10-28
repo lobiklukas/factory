@@ -1,6 +1,6 @@
 ---
 name: verify-cli
-description: Drive and prove the factory CLI (`factory run` / `watch` / `history` / `ls` / `send` / `withdraw` / `approvals` / `approve` / `deny` / `repo` / `discard` / `replay` / `pr` in apps/cli; `pr` is proven by verify-board's build phase) in a real tmux terminal against a real control plane. Use when asked to verify, test, or show evidence that the CLI works, or after changing apps/cli, packages/domain, or apps/api.
+description: Drive and prove the factory CLI (`factory run` / `watch` / `history` / `ls` / `status` / `send` / `withdraw` / `approvals` / `approve` / `deny` / `repo` / `discard` / `replay` / `pr` in apps/cli; `pr` is proven by verify-board's build phase) in a real tmux terminal against a real control plane. Use when asked to verify, test, or show evidence that the CLI works, or after changing apps/cli, packages/domain, or apps/api.
 ---
 
 # Verify the CLI
@@ -23,6 +23,8 @@ own instance of `apps/api` and record it in `.verify/run/api.pid`, so run them o
 | The run's session is named                                | `session ses_…` on stdout, and `workspace <path>`                            | the server's own answer, not a client guess                  |
 | The tool call is real                                     | a `[tool:bash]` line carrying the faux tool's output                         | the transcript can only exist if the tool ran                |
 | `factory ls` (LOB-6)                                      | the new session is a row, with its title, exit 0                             | the list is a server read, not a local registry              |
+| The model, in `run` and `ls` (LOB-272)                    | `model faux/faux-1` and `warning: faux backend` in `run`; a MODEL column     | a scripted answer is not mistaken for a real one             |
+| `factory status` (LOB-272)                                | `backend faux`, `selected-by MODEL_BACKEND`, the boot's `reason`, exit 0     | the operator can ask which model backend is running and why  |
 | The PR column (LOB-65)                                    | a seeded PR's URL in its row; `-` for the run's row                          | the operator sees the link without a browser                 |
 | `factory watch`, live (D8)                                | `mode: live`, then the same answer                                           | a session this process owns streams                          |
 | `factory watch`, historical                               | `mode: historical` after the idle sweep, same answer                         | the fold path, and the label that tells them apart           |
