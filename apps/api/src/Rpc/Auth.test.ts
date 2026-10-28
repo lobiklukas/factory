@@ -727,7 +727,7 @@ describe("the actor every write records is the credential's, not the body's (LOB
         // The run's own spec (its actor is the run, as the tool records it): the exit from
         // specifying needs one.
         const specRevision = yield* declareSpec(created.id, started.id);
-        const planning = yield* client.moveTask({
+        yield* client.moveTask({
           taskId: created.id,
           expectedRevision: specRevision,
           to: "planning",
