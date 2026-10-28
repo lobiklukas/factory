@@ -58,7 +58,7 @@ export const forkCommand = Command.make(
     sessionId: sessionIdArgument("Session to fork"),
     at: Flag.String("at").pipe(
       Flag.withDescription(
-        "Entry to fork at, as the transcript names it (the last entry when absent)",
+        "Entry id to fork at: the # in `factory watch|history --ids` lines, or the id `reset` prints (the last entry when absent)",
       ),
       Flag.optional,
     ),

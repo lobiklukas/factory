@@ -187,7 +187,21 @@ check "the child's transcript is the parent's: the task and its answer" \
   "[user] fork probe, then an answer"
 
 # --at: fork at the parent's first entry, which leaves the child with that entry and no answer.
-FIRST_ID="$(rpc_entries "$PARENT" | awk '$2 == "user" { print $1; exit }')"
+# The id comes from what a person has: `factory watch --ids` prints it as [user#<id>]. The RPC read
+# is the cross-check that the printed id is the entry's real one.
+run_cmd "$W" watchids "$FACTORY watch $PARENT --ids --api $API_URL" || true
+pane "$W" > "$EVIDENCE_DIR/session-watch-ids.txt"
+FIRST_ID="$(grep -o '^\[user#[0-9a-z]*\]' "$EVIDENCE_DIR/session-watch-ids.txt" | head -1 | sed 's/^\[user#//; s/\]$//')"
+RPC_FIRST_ID="$(rpc_entries "$PARENT" | awk '$2 == "user" { print $1; exit }')"
+check "factory watch --ids prints the entry id fork --at takes, matching the RPC's" \
+  "$([ "$(exit_code "$W" watchids)" = "0" ] && [ -n "$FIRST_ID" ] && [ "$FIRST_ID" = "$RPC_FIRST_ID" ] && echo 0 || echo 1)" \
+  "cli=${FIRST_ID:-none} rpc=${RPC_FIRST_ID:-none}"
+run_cmd "$W" historyids "$FACTORY history $PARENT --before 999999 --ids --api $API_URL" || true
+pane "$W" > "$EVIDENCE_DIR/session-history-ids.txt"
+check "factory history --ids (no --all) prints the same ids" \
+  "$([ "$(exit_code "$W" historyids)" = "0" ] && grep -q "^\[user#$RPC_FIRST_ID\]" "$EVIDENCE_DIR/session-history-ids.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code "$W" historyids)"
+
 run_cmd "$W" forkat "$FACTORY fork $PARENT --at $FIRST_ID --api $API_URL" || true
 pane "$W" > "$EVIDENCE_DIR/session-fork-at.txt"
 EARLY="$(grep -o "^fork ses_[0-9a-z]\{26\} of $PARENT at entry $FIRST_ID$" "$EVIDENCE_DIR/session-fork-at.txt" | cut -d' ' -f2)"

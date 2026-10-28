@@ -21,18 +21,25 @@ export const watchCommand = Command.make(
       Argument.withDescription("Session to attach to"),
       Argument.withSchema(SessionId),
     ),
+    ids: Flag.Boolean("ids").pipe(
+      Flag.withDescription(
+        "Print each entry's id as [kind#id], the id `factory fork --at` takes",
+      ),
+      Flag.withDefault(false),
+    ),
     api: Flag.String("api").pipe(
       Flag.withDescription("Control plane base URL"),
       Flag.optional,
     ),
   },
-  Effect.fnUntraced(function* ({ sessionId, api }) {
+  Effect.fnUntraced(function* ({ sessionId, ids, api }) {
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
       const { client } = yield* SessionClient;
       const { answer } = yield* followSession(client, sessionId, {
         printMode: true,
+        ids,
       });
       yield* Console.log(`answer: ${answer ?? "(no answer)"}`);
     });

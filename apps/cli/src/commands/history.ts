@@ -35,13 +35,20 @@ export const historyCommand = Command.make(
     ),
     all: Flag.Boolean("all").pipe(
       Flag.withDescription("Page back to the first entry"),
+      Flag.withDefault(false),
+    ),
+    ids: Flag.Boolean("ids").pipe(
+      Flag.withDescription(
+        "Print each entry's id as [kind#id], the id `factory fork --at` takes",
+      ),
+      Flag.withDefault(false),
     ),
     api: Flag.String("api").pipe(
       Flag.withDescription("Control plane base URL"),
       Flag.optional,
     ),
   },
-  Effect.fnUntraced(function* ({ sessionId, before, limit, all, api }) {
+  Effect.fnUntraced(function* ({ sessionId, before, limit, all, ids, api }) {
     const apiUrl = yield* resolveApiUrl(api);
 
     const program = Effect.gen(function* () {
@@ -64,7 +71,8 @@ export const historyCommand = Command.make(
       }
       for (const entry of page.entries) {
         // The same lines `watch` prints: an entry with no text is a marker, not a line.
-        if (entry.text.trim() !== "") yield* Console.log(formatEntry(entry));
+        if (entry.text.trim() !== "")
+          yield* Console.log(formatEntry(entry, { ids }));
       }
     });
 

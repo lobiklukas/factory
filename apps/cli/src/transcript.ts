@@ -11,13 +11,22 @@ import { Console, Effect, Ref, Stream } from "effect";
 import type { RpcClientError } from "effect/rpc/RpcClientError";
 import type { SessionRpcClient } from "./rpc";
 
-/** One transcript entry as a terminal line: the kind, the tool on a result, then the text. */
-export const formatEntry = (entry: TranscriptEntry): string => {
+/**
+ * One transcript entry as a terminal line: the kind, the tool on a result, then the text.
+ *
+ * With `ids` the bracket also names the entry (`[assistant#7]`): the id is what `factory fork --at`
+ * takes, and a line that hid it would leave a terminal user no fork point to choose (C15).
+ */
+export const formatEntry = (
+  entry: TranscriptEntry,
+  options?: { readonly ids?: boolean },
+): string => {
+  const at = options?.ids === true ? `#${entry.id}` : "";
   switch (entry.kind) {
     case "toolResult":
-      return `[tool:${entry.toolName ?? "?"}] ${entry.text}`;
+      return `[tool:${entry.toolName ?? "?"}${at}] ${entry.text}`;
     default:
-      return `[${entry.kind}] ${entry.text}`;
+      return `[${entry.kind}${at}] ${entry.text}`;
   }
 };
 
@@ -115,13 +124,14 @@ export type FollowResult = {
 const printEntry = (
   state: Ref.Ref<FollowResult>,
   entry: TranscriptEntry,
+  ids: boolean,
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
     // Pi Durable commits a head marker and an in-flight assistant entry with no text yet; a
     // terminal line for each of those would be noise around the transcript (the dashboard renders
     // them as dividers instead).
     if (entry.text.trim() !== "") {
-      yield* Console.log(formatEntry(entry));
+      yield* Console.log(formatEntry(entry, { ids }));
     }
     if (entry.kind === "assistant" && entry.text.trim() !== "") {
       yield* Ref.update(state, (current) => ({
@@ -143,12 +153,13 @@ const printEntry = (
 export const followSession = (
   client: SessionRpcClient,
   sessionId: SessionId,
-  options: { readonly printMode: boolean },
+  options: { readonly printMode: boolean; readonly ids?: boolean },
 ): Effect.Effect<
   FollowResult,
   SessionError | Unauthenticated | RpcClientError
 > =>
   Effect.gen(function* () {
+    const ids = options.ids === true;
     const state = yield* Ref.make<FollowResult>({
       mode: undefined,
       answer: undefined,
@@ -173,7 +184,7 @@ export const followSession = (
                 yield* Console.log(formatEarlier(event.earlier, sessionId));
               }
               for (const entry of event.entries) {
-                yield* printEntry(state, entry);
+                yield* printEntry(state, entry, ids);
               }
               yield* Ref.set(queuedCount, event.queued.length);
               for (const q of event.queued) {
@@ -182,7 +193,7 @@ export const followSession = (
               break;
             }
             case "entry": {
-              yield* printEntry(state, event.entry);
+              yield* printEntry(state, event.entry, ids);
               break;
             }
             case "queued": {
