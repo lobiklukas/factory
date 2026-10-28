@@ -4938,11 +4938,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         sessionId: string,
         worktree: string,
         workers: readonly MissionWorker[],
+        runSession: SessionId,
       ): Effect.Effect<void, SessionError> =>
         Effect.gen(function* () {
           // The session's column narrows its checks as it narrows its agent (C22): a check is held to
           // the policy the session's own `bash` calls meet, gates and push scope included.
-          const column = yield* runColumnFor(sessionId);
+          const column = yield* runColumnFor(runSession);
           const sessionPolicy = policy.forWorktree(
             worktree,
             sessionId,
@@ -5028,6 +5029,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             branchOwnerOf(input.sessionId, planned.branch),
             planned.path,
             workers,
+            input.sessionId,
           );
           const owner = yield* acquireOwner(input.sessionId, row, {
             starts: true,
