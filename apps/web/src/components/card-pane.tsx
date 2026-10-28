@@ -54,6 +54,7 @@ import {
   composerIntent,
   draftAfterSend,
   liftedBlock,
+  nextRunOffer,
   sendable,
   THREAD_ANCHOR,
   type CommentRefusal,
@@ -395,6 +396,43 @@ const BlockNote = ({ task }: { readonly task: Task }) => {
 };
 
 /**
+ * Open a run on a card and send it its first message (C6), then take the pane to it. The start is
+ * the card pane's one way to a run: the Runs section's prompt field and the Thread's offer after an
+ * answer (C24) both go through it, so a refused first message or a failed start reads the same.
+ * `onOpened` runs once the run is open, before the pane navigates to it.
+ */
+const useStartRun = (boardId: BoardInstanceId, task: Task) => {
+  const start = useAtomSet(startRunAtom, { mode: "promiseExit" });
+  const navigate = useNavigate();
+  const [starting, setStarting] = useState(false);
+  const begin = (prompt: string, onOpened: () => void) => {
+    setStarting(true);
+    void start({ task, prompt })
+      .then((exit) => {
+        if (Exit.isSuccess(exit)) {
+          onOpened();
+          if (exit.value.sendFailure !== undefined) {
+            toast.warning("The run opened, but its first message was refused", {
+              description: exit.value.sendFailure,
+            });
+          }
+          void navigate({
+            to: "/boards/$boardId",
+            params: { boardId },
+            search: { card: task.id, run: exit.value.session.id },
+          });
+          return;
+        }
+        toast.error("No run was started", {
+          description: Cause.pretty(exit.cause),
+        });
+      })
+      .finally(() => setStarting(false));
+  };
+  return { starting, begin };
+};
+
+/**
  * The card's thread (LOB-239, B7): the question a parked run asked, a person's answer, and every
  * note, oldest first, each with its kind, its actor and its time, and its body verbatim — whitespace
  * kept, nothing wrapped into a paraphrase, because the next run on the card is quoted the same text.
@@ -417,10 +455,12 @@ const BlockNote = ({ task }: { readonly task: Task }) => {
 const Thread = ({
   boardId,
   task,
+  definition,
   writes,
 }: {
   readonly boardId: BoardInstanceId;
   readonly task: Task;
+  readonly definition: BoardDefinition;
   readonly writes: CardWrites;
 }) => {
   const thread = useAtomValue(taskCommentsAtom(task.id));
@@ -434,6 +474,7 @@ const Thread = ({
   const [pending, setPending] = useState(false);
   const [refusal, setRefusal] = useState<CommentRefusal | null>(null);
   const [lifted, setLifted] = useState<TaskBlocked | undefined>(undefined);
+  const { starting, begin } = useStartRun(boardId, task);
   const intent = composerIntent(task);
   const ready = sendable(draft);
   const held = pending || writes.busy || writes.settling;
@@ -447,6 +488,8 @@ const Thread = ({
       (landedAt !== null && task.revision < landedAt))
       ? lifted
       : undefined;
+  // After an answer: the run the answer is for, offered from the column the card is back in (C24).
+  const nextRun = nextRunOffer(liftedShown, task, definition);
   // The last answer stays on screen through a failed refresh; only a first read that fails says so.
   const listed = Option.getOrUndefined(AsyncResult.value(thread));
 
@@ -581,6 +624,38 @@ const Thread = ({
           run on it reads the answer in its prompt.
         </p>
       )}
+      {nextRun === undefined ? null : nextRun.allowed ? (
+        <div className="flex items-center gap-2" data-thread-next-run>
+          <Button
+            type="button"
+            size="sm"
+            data-thread-start-next
+            disabled={starting}
+            aria-busy={starting}
+            title={`Start a run from ${nextRun.column}, sent the card's default prompt`}
+            onClick={() =>
+              begin(startPrompt(task, definition), () => setLifted(undefined))
+            }
+          >
+            {starting ? (
+              <Spinner className="size-3.5" />
+            ) : (
+              <PlayIcon className="size-3.5" strokeWidth={1.75} />
+            )}
+            Start the next run
+          </Button>
+          <span className="text-[11px] text-muted-foreground">
+            In {nextRun.column}, with the card's default prompt.
+          </span>
+        </div>
+      ) : (
+        <p
+          className="text-[11px] text-muted-foreground"
+          data-thread-next-run-unavailable
+        >
+          No run is offered: {nextRun.reason}.
+        </p>
+      )}
       <form
         aria-label={intent.answers ? "Answer the question" : "Comment"}
         className="flex flex-col gap-1.5"
@@ -694,9 +769,7 @@ const Runs = ({
       (entry) => [entry.id, entry] as const,
     ),
   );
-  const start = useAtomSet(startRunAtom, { mode: "promiseExit" });
-  const navigate = useNavigate();
-  const [starting, setStarting] = useState(false);
+  const { starting, begin } = useStartRun(boardId, task);
   // The prompt field: `null` while closed, the text as typed while open, with the column it was
   // built for. It opens with the card as it is now, so a card edited meanwhile is read again by
   // closing and reopening it; a card that moves while it is open is not sent (`moved`).
@@ -716,28 +789,7 @@ const Runs = ({
 
   const send = () => {
     if (draft === null || !sendable || starting) return;
-    setStarting(true);
-    void start({ task, prompt: draft })
-      .then((exit) => {
-        if (Exit.isSuccess(exit)) {
-          setOpen(null);
-          if (exit.value.sendFailure !== undefined) {
-            toast.warning("The run opened, but its first message was refused", {
-              description: exit.value.sendFailure,
-            });
-          }
-          void navigate({
-            to: "/boards/$boardId",
-            params: { boardId },
-            search: { card: task.id, run: exit.value.session.id },
-          });
-          return;
-        }
-        toast.error("No run was started", {
-          description: Cause.pretty(exit.cause),
-        });
-      })
-      .finally(() => setStarting(false));
+    begin(draft, () => setOpen(null));
   };
 
   return (
@@ -1122,6 +1174,7 @@ export const CardPane = ({
           key={`thread:${task.id}`}
           boardId={boardId}
           task={task}
+          definition={definition}
           writes={writes}
         />
         <Spec task={task} />

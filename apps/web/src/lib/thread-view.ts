@@ -1,6 +1,17 @@
-import type { CommentKind, Task, TaskBlocked } from "@repo/domain/Task";
+import type {
+  BoardDefinition,
+  CommentKind,
+  Task,
+  TaskBlocked,
+} from "@repo/domain/Task";
 import { MAX_COMMENT_CHARS } from "@repo/domain/Task";
-import { refusalWith, type Refusal, type RefusedWith } from "./board-view";
+import {
+  refusalWith,
+  runStart,
+  type Refusal,
+  type RefusedWith,
+  type RunStart,
+} from "./board-view";
 
 /**
  * The card pane's thread arithmetic (LOB-239): what the Thread section says about `listTaskComments`
@@ -115,4 +126,20 @@ export const liftedBlock = (
 ): TaskBlocked | undefined =>
   before.blocked !== undefined && after.blocked === undefined
     ? before.blocked
+    : undefined;
+
+/**
+ * The run an answer calls for (C24): after an answer lifted a `needs_input` block, the card is back in
+ * the column it blocked from and nothing reads the answer until a run starts there, so the pane offers
+ * that run — the start `runStart` allows for the card as it is now, or its reason when the column is
+ * not one a run starts in. `undefined` when no answer landed (nothing lifted, or a block a comment
+ * does not lift): there is nothing to offer then.
+ */
+export const nextRunOffer = (
+  lifted: TaskBlocked | undefined,
+  task: Task,
+  definition: BoardDefinition,
+): RunStart | undefined =>
+  lifted !== undefined && lifted.reason === "needs_input"
+    ? runStart(task, definition)
     : undefined;
