@@ -40,6 +40,13 @@ The GitHub row's PR creation is also driven through the API's `openPullRequest` 
 session's own branch; `apps/api/src/Rpc/Session.test.ts` covers the same member in the gate against
 an in-process `HttpClient.make` fake.
 
+The same loopback endpoint refuses a second create for a head and base only while a PR on them is
+_open_, as GitHub does, and lists only open ones for `state=open`: `.pi/skills/verify-api/pr-closed.sh`
+(F12) closes a card's PR on it (`PATCH .../pulls/:number`), and the card's next run opens a second PR
+from the same branch. `packages/core/src/SessionService.cardProcesses.test.ts` (F13) has an in-process
+`HttpClient.make` fake of the create and the lookup that answers `422` for a second open PR on one
+head, so two processes stepping one card's PR are counted by the creates they made.
+
 ## Adding a row
 
 Strategy preference, in order: (1) in-process fake behind an existing Effect service seam; (2) HTTP

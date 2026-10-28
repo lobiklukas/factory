@@ -21,8 +21,11 @@ import { Effect, Option } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 
-/** What a lease is a claim on: a session's log, or (wave 2) a board card. */
-export type LeaseKind = "session" | "card";
+/**
+ * What a lease is a claim on: a session's log, the right to step a card's PR (`card_pr`, keyed by
+ * task: F13, held for one PR step), or (wave 2) a board card.
+ */
+export type LeaseKind = "session" | "card" | "card_pr";
 
 /** A lease as the table holds it: who has it, under which fence, and until when. */
 export type Lease = {

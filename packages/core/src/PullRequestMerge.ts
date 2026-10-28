@@ -11,6 +11,9 @@
  * - **A revert** is a merged PR whose body says `Reverts owner/repo#N` (GitHub's revert wording,
  *   `revertedPullRequest`): it is recorded on the sessions of PR `N`, whoever opened the revert —
  *   a person's revert of the factory's merge is exactly the defect signal.
+ * - **An unmerged close** (F12) is recorded on the PR's sessions as a merge is, as the close
+ *   (`sessions.pr_closed_at`): a card's later run then opens a new PR rather than adopting one nobody
+ *   will review (`SessionService`'s `cardPullRequestFor`).
  *
  * Every write is idempotent: the first merge and the first revert stand, so GitHub redelivering an
  * event records nothing new. A session whose record fails is logged and the rest are still
@@ -28,13 +31,17 @@ import {
 } from "./LinearSync";
 import { SessionService } from "./SessionService";
 
-/** What one `pull_request` event recorded: how many sessions took a first merge and a first revert. */
+/**
+ * What one `pull_request` event recorded: how many sessions took a first merge, a first revert, and
+ * (F12) a first unmerged close.
+ */
 export type MergeRecorded = {
   readonly merged: number;
   readonly reverted: number;
+  readonly closed: number;
 };
 
-const NOTHING: MergeRecorded = { merged: 0, reverted: 0 };
+const NOTHING: MergeRecorded = { merged: 0, reverted: 0, closed: 0 };
 
 /** The sessions whose recorded PR is `url` (or its API resource), oldest id first. */
 const sessionsOfPullRequest = (
@@ -83,14 +90,36 @@ const recordLogged = (
   });
 
 /**
- * Record one `pull_request` event's merge, and the revert it is, on the sessions they belong to.
- * Anything but a merge records nothing. `now` stands in for a merge time the payload did not name.
+ * Record one `pull_request` event's merge, and the revert it is, on the sessions they belong to —
+ * or its unmerged close (F12). Anything else records nothing. `now` stands in for a merge or close
+ * time the payload did not name.
  */
 export const recordMergedPullRequest = (
   event: PullRequestLifecycle,
   now: string,
 ): Effect.Effect<MergeRecorded, never, SessionService | SqlClient> =>
   Effect.gen(function* () {
+    if (event._tag === "closed") {
+      const closedAt =
+        event.closedAt !== undefined &&
+        Option.isSome(DateTime.make(event.closedAt))
+          ? event.closedAt
+          : now;
+      let closed = 0;
+      for (const sessionId of yield* sessionsOfPullRequest(
+        event.pr.url,
+        event.apiUrl,
+      )) {
+        const first = yield* recordLogged(sessionId, {
+          _tag: "closed",
+          url: event.pr.url,
+          number: event.pr.number,
+          closedAt,
+        });
+        if (first) closed += 1;
+      }
+      return { ...NOTHING, closed };
+    }
     if (event._tag !== "merged") return NOTHING;
     // GitHub's `merged_at` when it is an instant; `now` when it is absent or is not one, so a
     // malformed payload still records the merge rather than a value no rebuild could cast.
@@ -127,7 +156,7 @@ export const recordMergedPullRequest = (
         if (first) reverted += 1;
       }
     }
-    return { merged, reverted };
+    return { merged, reverted, closed: 0 };
   });
 
 const JsonBody = Schema.fromJsonString(Schema.Unknown);

@@ -315,12 +315,7 @@ import { homeOf, makePresence, type Lease } from "./Presence";
 import { SessionBus, SessionBusPostgres } from "./SessionBus";
 import { atCapacity, runCapReached, SESSION_MAX_CONCURRENT } from "./admission";
 import { checkRunCaps } from "./boardCaps";
-import {
-  branchOwnerOf,
-  type CardBranch,
-  cardBranchOf,
-  changeColumnsOf,
-} from "./cardBranch";
+import { type CardBranch, cardBranchOf, changeColumnsOf } from "./cardBranch";
 import {
   countRefusal,
   countSessionCreate,
@@ -741,10 +736,11 @@ export type SessionServiceShape = {
     readonly reason: WorkspaceReleaseReason;
   }) => Effect.Effect<ReleaseWorkspaceResult, SessionError>;
   /**
-   * Record what the GitHub webhook reported about the session's PR (LOB-44): its merge, or a later
-   * PR's revert of it. The fact is committed to the log as `factory.merge` and indexed in
-   * `sessions.pr_merged_at` / `pr_reverted_at`, so `rebuildIndexes` reproduces it and the outcome
-   * metrics read it without asking GitHub. Idempotent: the first merge and the first revert stand,
+   * Record what the GitHub webhook reported about the session's PR (LOB-44): its merge, a later
+   * PR's revert of it, or (F12) its close without a merge. The fact is committed to the log as
+   * `factory.merge` and indexed in `sessions.pr_merged_at` / `pr_reverted_at` / `pr_closed_at`, so
+   * `rebuildIndexes` reproduces it, the outcome metrics read it without asking GitHub, and a card's
+   * later run adopts no PR that was closed (`cardPullRequestFor`). Idempotent: the first merge and the first revert stand,
    * and a repeat answers `first: false` with what the log already holds. A released session is
    * recorded on too — a merge releases its workspace first (LOB-268), and its log still takes writes.
    */
@@ -1005,6 +1001,12 @@ export type SessionServiceOptions = {
 
 /** How often a followed stream reads its log without a hint, when the deployment names nothing. */
 export const DEFAULT_FOLLOW_POLL_MS = 2_000;
+
+/**
+ * The longest wait between two attempts on a card's PR lease another process holds (F13): the
+ * wait starts at 50ms and doubles to this, so a loser hears of the holder's release within a second.
+ */
+const CARD_PR_LEASE_POLL_MAX_MS = 1_000;
 
 /**
  * Whether a clone URL carries a credential: a password anywhere, or a username on http(s), where it
@@ -1473,10 +1475,100 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * Serializes the PR steps of one card's runs (C19), inside each one's session gate: a card's
        * runs share one branch and one PR (`./cardBranch`), so two of them stepping close together
        * — a run that settles while the run before it is still pushing — would each read no PR on the
-       * card and each ask GitHub for one. Keyed by task, in this process; across processes a second
-       * open of the same head is GitHub's own refusal.
+       * card and each ask GitHub for one. Keyed by task, in this process.
        */
-      const withCardPrGate = keyedGate<string>();
+      const withCardPrInProcess = keyedGate<string>();
+      /**
+       * The same across processes (F13): under the in-process gate, the step holds the card's PR
+       * lease (`./Presence`, kind `card_pr`, keyed by task) — the table every process already claims
+       * its sessions in. Two API processes on one database stepping the same card's PR then step one
+       * after the other: the second reads the PR the first recorded (`cardPullRequestFor`) and adopts
+       * it, answering `already-open`, rather than asking GitHub for a second open of the same head.
+       *
+       * A lease rather than a Postgres lock held open for the step: an advisory lock lives on one
+       * connection, which the step's push and GitHub call would pin from the pool for minutes — so a
+       * handful of cards stepping at once would hold every connection while their own statements, and
+       * the log's writes, waited for one — and a transaction open around the step hands its
+       * connection to everything the step runs and forks. The lease holds nothing while the step
+       * runs: each claim, renewal and release is one short statement, the step runs in the context
+       * it was called in, and a process waiting for another's lease polls it rather than holding a
+       * connection. The holder renews it every third of the TTL until the step ends, and releases it
+       * then, however the step ended; a process that dies stops renewing, and its lease lapses after
+       * the TTL. A claim lost while the step runs — a renewal held up past the TTL — is logged and
+       * the step carries on: the worst it costs is the second open GitHub refuses for the head, which
+       * `createPullRequest` adopts (LOB-179), as before F13.
+       */
+      const withCardPrGate = <A, E, R>(
+        taskId: string,
+        step: Effect.Effect<A, E, R>,
+      ): Effect.Effect<A, E | SessionError, R> =>
+        withCardPrInProcess(
+          taskId,
+          Effect.acquireUseRelease(
+            claimCardPr(taskId),
+            (fence) =>
+              Effect.gen(function* () {
+                const renewing = yield* Effect.forkChild(
+                  renewCardPr(taskId, fence),
+                );
+                return yield* step.pipe(
+                  Effect.ensuring(Fiber.interrupt(renewing)),
+                );
+              }),
+            (fence) =>
+              presence
+                .release("card_pr", taskId, fence)
+                .pipe(
+                  Effect.catch((error) =>
+                    Effect.logWarning(
+                      `task ${taskId}: its PR lease was not released and lapses in ${presence.ttlMs}ms: ${String(error)}`,
+                    ),
+                  ),
+                ),
+          ),
+        );
+      /**
+       * Take the card's PR lease, waiting while another process holds it. Each attempt is one
+       * statement, run uninterruptibly so a claim taken is always handed to the release; the wait
+       * between attempts is interruptible, so a caller that gives up while another process steps
+       * the card stops waiting and holds nothing.
+       */
+      const claimCardPr = (
+        taskId: string,
+      ): Effect.Effect<number, SessionError> =>
+        Effect.gen(function* () {
+          for (let attempt = 0; ; attempt += 1) {
+            const claim = yield* paper(
+              `take task ${taskId}'s PR lease`,
+              presence.acquire("card_pr", taskId),
+            );
+            if (claim._tag === "Held") return claim.fence;
+            yield* Effect.interruptible(
+              Effect.sleep(
+                Math.min(
+                  CARD_PR_LEASE_POLL_MAX_MS,
+                  50 * 2 ** Math.min(attempt, 5),
+                ),
+              ),
+            );
+          }
+        });
+      /** Keep the card's PR lease while its step runs: renewed every third of the TTL until interrupted. */
+      const renewCardPr = (taskId: string, fence: number) =>
+        Effect.gen(function* () {
+          for (;;) {
+            yield* Effect.sleep(Math.max(1, Math.trunc(presence.ttlMs / 3)));
+            const renewed = yield* presence
+              .renew("card_pr", [{ key: taskId, fence }])
+              .pipe(Effect.option);
+            if (Option.isSome(renewed) && !renewed.value.has(taskId)) {
+              yield* Effect.logWarning(
+                `task ${taskId}: its PR lease lapsed while its PR step ran; another process may step the card's PR too`,
+              );
+              return;
+            }
+          }
+        });
       /**
        * Serializes the approvals of one session, for the reason `withPrGate` serializes PR opens: two
        * overlapping calls would each read a proposal as not yet created and each create it. Keyed by
@@ -2843,8 +2935,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       /**
        * Refuse a start that would hand the card's branch over from under a run still working on it
        * (C19, `./cardBranch`): the hand-over detaches that run's worktree, and every commit it made
-       * from then on would miss the card's branch and PR. Seen for the runs this process owns; a run
-       * owned by another process is held by the card's `task` cap (B9).
+       * from then on would miss the card's branch and PR. A run this process owns is asked directly;
+       * one another process owns (F13) is busy when that process's presence lease on it is live
+       * (LOB-18) and the activity index it writes says `busy` — a lease that lapsed is a process that
+       * died, whose last `busy` nobody is working under.
        */
       const refuseBusyHolder = (
         branch: CardBranch,
@@ -2853,8 +2947,24 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         Effect.gen(function* () {
           const owners = yield* Ref.get(live);
           for (const holder of branch.holders) {
-            const owner = HashMap.get(owners, yield* toSessionId(holder));
-            if (Option.isNone(owner)) continue;
+            const holderId = yield* toSessionId(holder);
+            const owner = HashMap.get(owners, holderId);
+            if (Option.isNone(owner)) {
+              const elsewhere = yield* ownerElsewhere(holderId);
+              if (Option.isNone(elsewhere)) continue;
+              const status = yield* paper(
+                "read the status of a run on the card's branch",
+                sql<{ status: string }>`
+                  SELECT status FROM session_activity WHERE session_id = ${holderId}
+                `,
+              );
+              if (status[0]?.status === "busy")
+                return yield* new SessionErrorClass({
+                  code: "busy",
+                  message: `run ${holder} of task ${taskId ?? ""} is still working on the card's branch ${branch.branch} in another process (${elsewhere.value.holder}, home ${elsewhere.value.home}): wait for it to settle, or interrupt it there, before starting another run on the card (the new run would take the branch over from under it)`,
+                });
+              continue;
+            }
             const busy = yield* isBusy(
               owner.value.harness,
               owner.value.root,
@@ -3380,11 +3490,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               // column a run is told about is the column whose autonomy it runs under.
               // Under the column, the repository's policy (S-factory-config-as-code): the deployment's
               // rules tightened by what the base's `.factory/config` declares, then by the column.
+              // The one branch it may push is the one its worktree is bound to (F15): a card's later
+              // run continues its first change run's `factory/<that id>` (C19).
               policy: policy.forWorktree(
                 workspace.path,
-                branchOwnerOf(id, workspace.branch),
+                id,
                 run.autonomy,
                 repoPolicy.repo,
+                workspace.branch,
               ),
               policyRecord: repoPolicy,
               run,
@@ -4761,10 +4874,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * Read only for a session whose own log records none; `undefined` for a run of no card, and for
        * a card with no such PR — whose run then opens it. Read under the card's PR gate
        * (`withCardPrGate`), so two runs of the card stepping together adopt one PR rather than each
-       * opening one. A PR closed on GitHub without merging is still adopted, because the index records
-       * merges (`pr_merged_at`) but not closes: the push lands on the closed PR's branch, and
-       * reopening it is a person's call. Recording closes, so a closed PR is not adopted, is a
-       * follow-up.
+       * opening one. A PR closed on GitHub without merging is not adopted (F12): the index records the
+       * close (`pr_closed_at`, from the `pull_request` webhook or the PR-state read when the card is
+       * opened), and a push onto a closed PR's branch is one nobody would review, so the run opens a
+       * fresh PR from the card's branch instead. A person who reopens the old PR gets it back through
+       * GitHub's own refusal of a second PR for the head, which `createPullRequest` adopts (LOB-179).
        */
       const cardPullRequestFor = (
         sessionId: SessionId,
@@ -4783,6 +4897,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               JOIN sessions s ON s.id = other.session_id
               WHERE mine.session_id = ${sessionId} AND s.repo = ${repo}
                 AND s.pr_url IS NOT NULL AND s.pr_merged_at IS NULL
+                AND s.pr_closed_at IS NULL
               ORDER BY other.started_at DESC, other.id DESC
             `,
           );
@@ -5018,13 +5133,15 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                        WHERE sa.session_id = s.id AND sa.decision IS NULL
                      )) AS waiting,
                      tr.task_id, tr."column", bd.columns::text AS columns,
-                     -- C19: another run of the card recorded an unmerged PR from this run's branch.
+                     -- C19: another run of the card recorded an open PR from this run's branch
+                     -- (neither merged nor, F12, closed: the PR cardPullRequestFor would adopt).
                      EXISTS (
                        SELECT 1 FROM task_runs other
                        JOIN sessions os ON os.id = other.session_id
                        WHERE other.task_id = tr.task_id AND other.session_id <> s.id
                          AND os.repo = s.repo
                          AND os.pr_url IS NOT NULL AND os.pr_merged_at IS NULL
+                         AND os.pr_closed_at IS NULL
                          AND COALESCE(os.branch, 'factory/' || os.id)
                            = COALESCE(s.branch, 'factory/' || s.id)
                      ) AS continues_card_pr
@@ -5696,6 +5813,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        */
       const refuseUnpolicedChecks = (
         sessionId: string,
+        branch: string | undefined,
         worktree: string,
         workers: readonly MissionWorker[],
         runSession: SessionId,
@@ -5725,6 +5843,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             sessionId,
             column?.autonomy,
             repoPolicy.repo,
+            branch,
           );
           for (const worker of workers) {
             if (worker.check === undefined) continue;
@@ -5804,7 +5923,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // mission runs in is the owner's, cut under the gate.
           const planned = yield* workspaceFor(row, { cut: false });
           yield* refuseUnpolicedChecks(
-            branchOwnerOf(input.sessionId, planned.branch),
+            input.sessionId,
+            planned.branch,
             planned.path,
             workers,
             input.sessionId,
@@ -7736,9 +7856,16 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
 
       /** The instant an event says its fact happened at (`recordMerge` refuses one that is not one). */
       const mergeEventAt = (event: MergeEvent): string =>
-        event._tag === "merged" ? event.mergedAt : event.revertedAt;
+        event._tag === "merged"
+          ? event.mergedAt
+          : event._tag === "closed"
+            ? event.closedAt
+            : event.revertedAt;
 
-      /** Whether a session's merge record already holds `event`'s fact: the first one stands. */
+      /**
+       * Whether a session's merge record already holds `event`'s fact: the first one stands. A close
+       * of a PR the record holds as merged is no fact to record (F12).
+       */
       const holdsMergeFact = (
         merge: MergeRecord | undefined,
         event: MergeEvent,
@@ -7746,7 +7873,9 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         merge !== undefined &&
         (event._tag === "merged"
           ? merge.mergedAt !== ""
-          : merge.revert !== undefined);
+          : event._tag === "closed"
+            ? merge.closedAt !== undefined || merge.mergedAt !== ""
+            : merge.revert !== undefined);
 
       const recordMerge = (input: {
         readonly sessionId: SessionId;
@@ -7792,7 +7921,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             sql`
               UPDATE sessions SET
                 pr_merged_at = ${merge.mergedAt === "" ? null : merge.mergedAt}::timestamptz,
-                pr_reverted_at = ${merge.revert?.at ?? null}::timestamptz
+                pr_reverted_at = ${merge.revert?.at ?? null}::timestamptz,
+                pr_closed_at = ${merge.closedAt ?? null}::timestamptz
               WHERE id = ${input.sessionId}
             `,
           );
