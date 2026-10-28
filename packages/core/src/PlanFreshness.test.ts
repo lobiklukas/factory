@@ -275,13 +275,17 @@ const delivery = (
   });
 };
 
-const sessionCount = Effect.gen(function* () {
-  const sql = yield* SqlClient;
-  const rows = yield* sql<{
-    readonly n: number;
-  }>`SELECT count(*)::int AS n FROM sessions`;
-  return rows[0]?.n ?? 0;
-});
+// The runs of the spec's card, not every session in the database: the suites share one database and
+// run in parallel, so a count of all sessions moves under a case for reasons that are not its own.
+const sessionCount = (spec: string) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const rows = yield* sql<{
+      readonly n: number;
+    }>`SELECT count(*)::int AS n FROM task_runs
+       WHERE task_id = (SELECT task_id FROM task_runs WHERE session_id = ${spec})`;
+    return rows[0]?.n ?? 0;
+  });
 
 const claimOf = (requestId: string) =>
   Effect.gen(function* () {
@@ -312,7 +316,7 @@ describe("plan freshness after a merged PR (LOB-45)", () => {
       Effect.gen(function* () {
         const sessions = yield* SessionService;
         const runs = yield* merged(key, pr);
-        const before = yield* sessionCount;
+        const before = yield* sessionCount(runs.spec);
         const first = yield* delivery(pr, ON);
         const callsAfterFirst = planCalls();
         const again = yield* delivery(pr, ON);
@@ -322,7 +326,7 @@ describe("plan freshness after a merged PR (LOB-45)", () => {
           again,
           callsAfterFirst,
           sessionsBefore: before,
-          sessionsAfter: yield* sessionCount,
+          sessionsAfter: yield* sessionCount(runs.spec),
           spec: yield* sessions.get(runs.spec),
           build: yield* sessions.get(runs.build),
           claim: yield* claimOf(`plan-freshness:${runs.spec}:${pr}`),
