@@ -18,7 +18,8 @@
 import { realpathSync } from "node:fs";
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { ApprovalsRpc, SessionRpc } from "@repo/domain/Rpc";
+import { ApprovalsRpc, SessionRpc, TasksRpc } from "@repo/domain/Rpc";
+import { DefinitionId } from "@repo/domain/Task";
 import {
   RepoSlug,
   SessionId,
@@ -314,6 +315,69 @@ const program = Effect.gen(function* () {
       boundSnapshot.workspace.commands.verify ===
         "bun .pi/skills/verify-api/drive.ts",
     `source=${boundSnapshot.workspace.commandsSource} commands=${JSON.stringify(boundSnapshot.workspace.commands)}`,
+  );
+
+  // Feature: a repo with no local checkout says so when it is bound (LOB-263). Naming a repo is
+  // enough to open a session, so the session opens — in an empty directory, with no worktree — and
+  // its workspace carries the warning, with the command that fixes it. A repo with a checkout and a
+  // scratch session carry none; a board over the repo carries the same warning on create and on read,
+  // and registering a path clears the board's.
+  const noCheckoutRepo = RepoSlug.make(
+    `lobiklukas/verify-api-nocheckout-${Date.now()}`,
+  );
+  const noCheckoutFix = `factory repo add ${noCheckoutRepo} --path <dir>`;
+  const unbound = yield* client.createSession({
+    repo: noCheckoutRepo,
+    title: "no checkout probe",
+  });
+  const unboundSnapshot = yield* client.getSession({ sessionId: unbound.id });
+  assert(
+    "a session bound to a repo with no local checkout opens and carries the warning",
+    unbound.repo === noCheckoutRepo &&
+      unboundSnapshot.workspace.warning?.includes(noCheckoutFix) === true,
+    `warning=${unboundSnapshot.workspace.warning}`,
+  );
+  const scratchSnapshot = yield* client.getSession({ sessionId: created.id });
+  assert(
+    "a repo with a checkout and a scratch session carry no warning",
+    boundSnapshot.workspace.warning === undefined &&
+      scratchSnapshot.workspace.warning === undefined,
+    `bound=${boundSnapshot.workspace.warning} scratch=${scratchSnapshot.workspace.warning}`,
+  );
+  const tasksClient = yield* RpcClient.make(TasksRpc);
+  const warnedBoard = yield* tasksClient.createBoard({
+    repo: noCheckoutRepo,
+    definitionId: DefinitionId.make("default"),
+  });
+  const warnedRead = yield* tasksClient.getBoard({ boardId: warnedBoard.id });
+  assert(
+    "createBoard and getBoard over a repo with no local checkout carry the warning",
+    warnedBoard.warning?.includes(noCheckoutFix) === true &&
+      warnedRead.warning === warnedBoard.warning,
+    `created=${warnedBoard.warning} read=${warnedRead.warning}`,
+  );
+  yield* client.registerRepo({ repo: noCheckoutRepo, localPath: fixture });
+  const clearedRead = yield* tasksClient.getBoard({ boardId: warnedBoard.id });
+  assert(
+    "registering a checkout clears the board's warning",
+    clearedRead.warning === undefined,
+    `warning=${clearedRead.warning}`,
+  );
+  const cleanBoard = yield* tasksClient
+    .createBoard({
+      repo: repoSlug,
+      definitionId: DefinitionId.make("default"),
+    })
+    .pipe(Effect.exit);
+  assert(
+    "a board over a repo with a checkout carries no warning",
+    Exit.isSuccess(cleanBoard)
+      ? cleanBoard.value.warning === undefined
+      : // One board per repository: a rerun against this database finds the board it made.
+        JSON.stringify(cleanBoard.cause).includes("BoardExists"),
+    Exit.isSuccess(cleanBoard)
+      ? `warning=${cleanBoard.value.warning}`
+      : "the repo already had its board",
   );
 
   // Feature: the session list (LOB-6). A session created a moment ago is in the list without any

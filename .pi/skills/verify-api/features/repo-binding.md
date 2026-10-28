@@ -34,6 +34,24 @@ against it, and reads the snapshot back:
 session auto-registers (no URL, no checkout, both facts `false`) and a second registration that names
 only a base ref and keeps the path. The CLI over it is `.pi/skills/verify-cli/features/repo.md`.
 
+**A repo with no checkout (LOB-263).** A session bound to a repo whose registry row has no
+`local_path` still opens — naming a repo is enough, and refusing would break every first use — but
+the rule is that it says so: `workspace.warning` is set, naming the repo and the fix
+(`factory repo add <repo> --path <dir>`), because no worktree is cut and `non_empty_diff` or the PR
+step would fail columns later. The same sentence (`noCheckoutWarning` in `packages/core`'s
+`workspace.ts`) is on `createBoard`'s answer (`warning`) and on `getBoard` (`BoardView.warning`), read
+from the registry each time, so registering a path clears a board's. A repo with a checkout and a
+scratch session carry no `warning` key. A session whose owner is live keeps the answer it
+opened with after the path is registered (it holds an empty directory); once its owner is released
+(idle sweep, restart) a read says nothing, because the next acquisition cuts the worktree into that
+empty directory (`resolveWorkspace` treats an empty directory as no workspace), so the fix the
+warning names reaches the sessions it was raised for. A session made after the fix is cut a worktree
+at once. `SessionService.test.ts` pins it: release the owner, register, send, and the `.git` appears. The drive checks all of it over RPC; `no-checkout.sh` boots the API with two
+`TRIGGER_RULES` and reads the boot log, which names the rule's label and repo for each repo without a
+checkout and, after one is registered, only the other. `factory run`, `factory board create`,
+`factory board start` and `factory board ls` print it as `warning …`, and the dashboard shows it
+under the header of the board and of the session.
+
 **What proves it.** The binding lives in the log as a `factory.session` document, so the index is
 derivable from it: `packages/core`'s suite empties the index tables, runs `rebuildIndexes`, and gets
 the repo, base ref, title, spend, and creation time back from the logs alone. A repo with no config

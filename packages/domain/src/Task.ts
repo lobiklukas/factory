@@ -335,6 +335,12 @@ export type BoardInstance = typeof BoardInstance.Type;
 export const BoardView = Schema.Struct({
   instance: BoardInstance,
   definition: BoardDefinition,
+  /**
+   * Set when the board's repository has no local checkout registered (LOB-263): its runs get no
+   * worktree, so no card can produce a diff. Read with the board, so it clears once the repo is
+   * registered with a path.
+   */
+  warning: Schema.optional(Schema.String),
 });
 export type BoardView = typeof BoardView.Type;
 
@@ -485,6 +491,18 @@ export const CreateBoardInput = Schema.Struct({
   definitionVersion: Schema.optional(Schema.Int),
 });
 export type CreateBoardInput = typeof CreateBoardInput.Type;
+
+/**
+ * What `createBoard` answers (LOB-263): the instance, and a `warning` when its repository has no
+ * local checkout. The board is still made — a repository is registered on first use, so refusing
+ * would make every board for a not-yet-registered slug fail — but the first answer says that its
+ * runs can produce no diff, with the command that fixes it.
+ */
+export const CreatedBoard = Schema.Struct({
+  ...BoardInstance.fields,
+  warning: Schema.optional(Schema.String),
+});
+export type CreatedBoard = typeof CreatedBoard.Type;
 
 /** B9: within a column, dependency readiness, then this flag, then FIFO. */
 export const TaskPriority = Schema.Literals(["urgent", "normal"]);

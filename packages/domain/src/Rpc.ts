@@ -21,6 +21,7 @@ import {
   BoardView,
   CommentTaskInput,
   CreateBoardInput,
+  CreatedBoard,
   CreateTaskInput,
   DefinitionConfig,
   DefinitionNotFound,
@@ -323,7 +324,7 @@ export class TasksRpc extends RpcGroup.make(
   // (LOB-208): the instance every card and run on the board reads its columns through (B2).
   Rpc.make("createBoard", {
     payload: CreateBoardInput,
-    success: BoardInstance,
+    success: CreatedBoard,
     error: TaskErrorSchema,
   }),
   // Which definitions exist and the versions each holds (LOB-270): what `createBoard` can name.

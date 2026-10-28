@@ -9,6 +9,7 @@ import { boardAtom } from "@/lib/atoms/board-atom";
 import { boardLanes, definitionFor } from "@/lib/board-view";
 import { BoardLanesView } from "@/components/board-lanes";
 import { CardPane } from "@/components/card-pane";
+import { CheckoutWarning } from "@/components/checkout-warning";
 import { EmptyPane } from "@/components/empty-pane";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -146,6 +147,7 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
             to move it or start a run
           </span>
         </header>
+        <CheckoutWarning warning={last.warning} />
         <BoardLanesView
           boardId={boardId}
           board={boardLanes(definition, tasks)}

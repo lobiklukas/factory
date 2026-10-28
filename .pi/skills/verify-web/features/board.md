@@ -66,3 +66,7 @@ Evidence: `boards.png`, `board.png`, `board-after-move.png`, and `observed.board
   first because it is newest. The `listBoards` test dates its rows a day ahead to be the newest, and
   deletes any such rows an earlier killed run left before it inserts, so they cannot push the seed
   off the page for long.
+- **The no-checkout banner is not driven in a browser (LOB-263).** A board whose repo has no local
+  checkout shows `[data-checkout-warning]` under the header (`checkout-warning.tsx`, fed by
+  `BoardView.warning`). `checkout-warning.test.tsx` renders it and `verify-api` proves the answer it
+  reads; no `drive.mjs` check seeds a path-less board and looks for the element yet.
