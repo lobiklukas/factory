@@ -4,6 +4,7 @@ import { Option } from "effect";
 import { AsyncResult } from "effect/reactivity";
 import {
   BellIcon,
+  BookOpenTextIcon,
   CoinsIcon,
   GitBranchIcon,
   KanbanSquareIcon,
@@ -40,6 +41,8 @@ const SECTIONS = [
   { to: "/spend", label: "Spend", icon: CoinsIcon },
   // The repositories sessions are cut worktrees from, and the form that registers one (LOB-262).
   { to: "/repos", label: "Repositories", icon: GitBranchIcon },
+  // The prompt text a column's runs are told, and the form that publishes a new version of it (D8).
+  { to: "/skills", label: "Skills", icon: BookOpenTextIcon },
 ] as const;
 
 /**

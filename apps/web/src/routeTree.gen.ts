@@ -20,6 +20,8 @@ import { Route as BoardsIndexRouteImport } from './routes/boards.index'
 import { Route as BoardsBoardIdRouteImport } from './routes/boards.$boardId'
 import { Route as SessionsIndexRouteImport } from './routes/sessions.index'
 import { Route as SessionsSessionIdRouteImport } from './routes/sessions.$sessionId'
+import { Route as SkillsIndexRouteImport } from './routes/skills.index'
+import { Route as SkillsNameRouteImport } from './routes/skills.$name'
 import { Route as BoardsBoardIdSettingsRouteImport } from './routes/boards.$boardId_.settings'
 
 const IndexRoute = IndexRouteImport.update({
@@ -77,6 +79,16 @@ const SessionsSessionIdRoute = SessionsSessionIdRouteImport.update({
   path: '/$sessionId',
   getParentRoute: () => SessionsRoute,
 } as any)
+const SkillsIndexRoute = SkillsIndexRouteImport.update({
+  id: '/skills/',
+  path: '/skills/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SkillsNameRoute = SkillsNameRouteImport.update({
+  id: '/skills/$name',
+  path: '/skills/$name',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const BoardsBoardIdSettingsRoute = BoardsBoardIdSettingsRouteImport.update({
   id: '/boards/$boardId_/settings',
   path: '/boards/$boardId/settings',
@@ -93,8 +105,10 @@ export interface FileRoutesByFullPath {
   '/spend': typeof SpendRoute
   '/boards/$boardId': typeof BoardsBoardIdRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
+  '/skills/$name': typeof SkillsNameRoute
   '/boards/': typeof BoardsIndexRoute
   '/sessions/': typeof SessionsIndexRoute
+  '/skills/': typeof SkillsIndexRoute
   '/boards/$boardId/settings': typeof BoardsBoardIdSettingsRoute
 }
 export interface FileRoutesByTo {
@@ -106,8 +120,10 @@ export interface FileRoutesByTo {
   '/spend': typeof SpendRoute
   '/boards/$boardId': typeof BoardsBoardIdRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
+  '/skills/$name': typeof SkillsNameRoute
   '/boards': typeof BoardsIndexRoute
   '/sessions': typeof SessionsIndexRoute
+  '/skills': typeof SkillsIndexRoute
   '/boards/$boardId/settings': typeof BoardsBoardIdSettingsRoute
 }
 export interface FileRoutesById {
@@ -121,8 +137,10 @@ export interface FileRoutesById {
   '/spend': typeof SpendRoute
   '/boards/$boardId': typeof BoardsBoardIdRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
+  '/skills/$name': typeof SkillsNameRoute
   '/boards/': typeof BoardsIndexRoute
   '/sessions/': typeof SessionsIndexRoute
+  '/skills/': typeof SkillsIndexRoute
   '/boards/$boardId_/settings': typeof BoardsBoardIdSettingsRoute
 }
 export interface FileRouteTypes {
@@ -137,8 +155,10 @@ export interface FileRouteTypes {
     | '/spend'
     | '/boards/$boardId'
     | '/sessions/$sessionId'
+    | '/skills/$name'
     | '/boards/'
     | '/sessions/'
+    | '/skills/'
     | '/boards/$boardId/settings'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -150,8 +170,10 @@ export interface FileRouteTypes {
     | '/spend'
     | '/boards/$boardId'
     | '/sessions/$sessionId'
+    | '/skills/$name'
     | '/boards'
     | '/sessions'
+    | '/skills'
     | '/boards/$boardId/settings'
   id:
     | '__root__'
@@ -164,8 +186,10 @@ export interface FileRouteTypes {
     | '/spend'
     | '/boards/$boardId'
     | '/sessions/$sessionId'
+    | '/skills/$name'
     | '/boards/'
     | '/sessions/'
+    | '/skills/'
     | '/boards/$boardId_/settings'
   fileRoutesById: FileRoutesById
 }
@@ -178,7 +202,9 @@ export interface RootRouteChildren {
   SessionsRoute: typeof SessionsRouteWithChildren
   SpendRoute: typeof SpendRoute
   BoardsBoardIdRoute: typeof BoardsBoardIdRoute
+  SkillsNameRoute: typeof SkillsNameRoute
   BoardsIndexRoute: typeof BoardsIndexRoute
+  SkillsIndexRoute: typeof SkillsIndexRoute
   BoardsBoardIdSettingsRoute: typeof BoardsBoardIdSettingsRoute
 }
 
@@ -261,6 +287,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SessionsSessionIdRouteImport
       parentRoute: typeof SessionsRoute
     }
+    '/skills/': {
+      id: '/skills/'
+      path: '/skills'
+      fullPath: '/skills/'
+      preLoaderRoute: typeof SkillsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/skills/$name': {
+      id: '/skills/$name'
+      path: '/skills/$name'
+      fullPath: '/skills/$name'
+      preLoaderRoute: typeof SkillsNameRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/boards/$boardId_/settings': {
       id: '/boards/$boardId_/settings'
       path: '/boards/$boardId/settings'
@@ -294,7 +334,9 @@ const rootRouteChildren: RootRouteChildren = {
   SessionsRoute: SessionsRouteWithChildren,
   SpendRoute: SpendRoute,
   BoardsBoardIdRoute: BoardsBoardIdRoute,
+  SkillsNameRoute: SkillsNameRoute,
   BoardsIndexRoute: BoardsIndexRoute,
+  SkillsIndexRoute: SkillsIndexRoute,
   BoardsBoardIdSettingsRoute: BoardsBoardIdSettingsRoute,
 }
 export const routeTree = rootRouteImport

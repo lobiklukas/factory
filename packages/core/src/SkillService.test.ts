@@ -220,6 +220,44 @@ describe("SkillService", () => {
     }
   });
 
+  /**
+   * D8's history. Mutations: oldest first, the newest only (a `LIMIT 1` copied from `get`), another
+   * name's versions mixed in, or an empty list for an unknown name instead of `SkillNotFound`.
+   */
+  it("lists every version of one skill, newest first, with who put each, and refuses an unknown name", async () => {
+    const skill = newSkill();
+    const other = newSkill();
+    try {
+      await withService((s) => s.put(skill));
+      await withService((s) => s.put(other));
+      await withService((s) =>
+        s.put({ ...skill, description: "the second", actor: "person:ana" }),
+      );
+      const third = await withService((s) =>
+        s.put({ ...skill, body: "# Third\n" }),
+      );
+      const history = await withService((s) => s.versions(skill.name));
+      expect(
+        history.map((entry) => [entry.version, entry.description, entry.author]),
+      ).toEqual([
+        [3, skill.description, ""],
+        [2, "the second", "person:ana"],
+        [1, skill.description, ""],
+      ]);
+      expect(history.every((entry) => entry.name === skill.name)).toBe(true);
+      expect(history[0]?.createdAt).toBe(third.createdAt);
+      // No body: the history is the small read, and a version's body is `get` with its number.
+      expect(history[0]).not.toHaveProperty("body");
+
+      const missing = `test-missing-${hex(6)}`;
+      const error = await refusal((s) => s.versions(missing));
+      expect(error).toMatchObject({ _tag: "SkillNotFound", name: missing });
+    } finally {
+      await removeSkill(skill.name);
+      await removeSkill(other.name);
+    }
+  });
+
   it("gives concurrent puts of one name distinct versions, losing none", async () => {
     const skill = newSkill();
     try {

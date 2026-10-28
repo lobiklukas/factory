@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Link } from "@tanstack/react-router";
 import type { ColumnConfig } from "@repo/domain/Task";
 import { cn } from "cn";
 import {
@@ -33,7 +34,7 @@ const Fact = ({
  * model or a requirement's status. Each value carries a `data-*` hook so `verify-web` reads what is on
  * screen back and compares it with `getDefinition`'s answer (`board-settings.mjs`).
  *
- * Skill names are plain text: there is no skill page to link them to yet.
+ * Each skill name links to its page (D8), where its body, history and Edit form are.
  */
 export const ColumnSettings = ({
   column,
@@ -81,8 +82,15 @@ export const ColumnSettings = ({
               <li key={skill}>
                 <Badge
                   variant="outline"
-                  data-column-skill
                   className="font-mono text-[10px]"
+                  render={
+                    <Link
+                      to="/skills/$name"
+                      params={{ name: skill }}
+                      data-column-skill
+                      data-column-skill-link={skill}
+                    />
+                  }
                 >
                   {skill}
                 </Badge>
