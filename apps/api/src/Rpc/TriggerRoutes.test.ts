@@ -250,4 +250,81 @@ describe("trigger routes over RPC", () => {
       (await call((client) => client.listTriggerRoutes({}))).routes,
     ).toEqual([]);
   }, 60_000);
+
+  it("lists the recorded deliveries newest first over the wire: outcome, reason verbatim, the session or card, filters and a cursor", async () => {
+    const id = (name: string) => `t4-${run}-${name}`;
+    const session = "ses_00000000000000000000000d01";
+    const card = "tsk_00000000000000000000000d01";
+    // The rows the seam writes, with instants a walk can order by (written in SQL: a bound
+    // parameter rounds to the millisecond).
+    await scratch.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        yield* sql`INSERT INTO webhook_deliveries
+            (request_id, status, source, skip_reason, session_id, received_at)
+          VALUES (${id("processed")}, 'processed', 'linear', 'rule "x" mapped it', ${session},
+            timestamptz '2098-01-01 00:00:03+00')`;
+        yield* sql`INSERT INTO webhook_deliveries
+            (request_id, status, source, skip_reason, task_id, received_at)
+          VALUES (${id("card")}, 'processed', 'generic', 'filed card', ${card},
+            timestamptz '2098-01-01 00:00:02+00')`;
+        yield* sql`INSERT INTO webhook_deliveries
+            (request_id, status, source, skip_reason, received_at)
+          VALUES (${id("skipped")}, 'skipped', 'linear', 'repo acme/nope is not registered',
+            timestamptz '2098-01-01 00:00:01+00')`;
+      }),
+    );
+
+    const first = await call((client) =>
+      client.listTriggerDeliveries({ limit: 2 }),
+    );
+    expect(first.deliveries.map((row) => row.deliveryId)).toEqual([
+      id("processed"),
+      id("card"),
+    ]);
+    expect(first.deliveries[0]).toEqual({
+      deliveryId: id("processed"),
+      source: "linear",
+      receivedAt: "2098-01-01T00:00:03.000Z",
+      status: "processed",
+      reason: 'rule "x" mapped it',
+      sessionId: session,
+    });
+    expect(first.deliveries[1]).toMatchObject({ taskId: card });
+    expect(first.nextCursor).toBeDefined();
+
+    const next = await call((client) =>
+      client.listTriggerDeliveries({
+        limit: 2,
+        ...(first.nextCursor === undefined ? {} : { cursor: first.nextCursor }),
+      }),
+    );
+    expect(next.deliveries[0]).toMatchObject({
+      deliveryId: id("skipped"),
+      status: "skipped",
+      reason: "repo acme/nope is not registered",
+    });
+    expect(next.deliveries[0]).not.toHaveProperty("sessionId");
+
+    const skippedLinear = await call((client) =>
+      client.listTriggerDeliveries({ status: "skipped", source: "linear" }),
+    );
+    expect(skippedLinear.deliveries.map((row) => row.deliveryId)).toEqual([
+      id("skipped"),
+    ]);
+
+    const bad = await call((client) =>
+      failureOf(client.listTriggerDeliveries({ cursor: "nope" })),
+    );
+    expect(bad).toMatchObject({
+      _tag: "TriggerDeliveryError",
+      code: "invalid_input",
+    });
+    // A source this build does not know is refused before it is sent, as a route with no key is.
+    await expect(
+      call((client) =>
+        failureOf(client.listTriggerDeliveries({ source: "fax" } as never)),
+      ),
+    ).rejects.toThrow(/validation failed/);
+  }, 60_000);
 });

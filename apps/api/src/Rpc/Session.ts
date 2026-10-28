@@ -3,6 +3,7 @@ import {
   SessionService,
   SkillServiceLive,
   TaskServiceLive,
+  TriggerDeliveriesLive,
   TriggerRoutesLive,
 } from "@repo/core";
 import { RpcApi, SessionRpc } from "@repo/domain/Rpc";
@@ -113,5 +114,6 @@ export const SessionRpcLive = RpcServer.layerHttp({
   Layer.provide(RpcSerialization.layerNdjson),
   Layer.provide(TaskServiceLive),
   Layer.provide(TriggerRoutesLive),
+  Layer.provide(TriggerDeliveriesLive),
   Layer.provide(SkillServiceLive),
 );

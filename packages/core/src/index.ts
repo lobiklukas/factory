@@ -14,6 +14,7 @@ export * from "./prStep";
 export * from "./SkillService";
 export * from "./TriggerService";
 export * from "./TriggerRoutes";
+export * from "./TriggerDeliveries";
 export * from "./Jira";
 export * from "./GitHub";
 export * from "./GitHubReview";

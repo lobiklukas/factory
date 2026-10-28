@@ -269,9 +269,14 @@ export const handlePlanFreshnessDelivery = (input: {
     ): Effect.Effect<PlanFreshnessPass> =>
       Effect.gen(function* () {
         const settle = (status: "processed" | "skipped", reason: string) =>
-          settleDeliveryClaim(sql, requestId, claim, status, reason).pipe(
-            Effect.ignore,
-          );
+          settleDeliveryClaim(
+            sql,
+            requestId,
+            claim,
+            status,
+            reason,
+            sessionId,
+          ).pipe(Effect.ignore);
         const release = releaseDeliveryClaim(sql, requestId, claim).pipe(
           Effect.ignore,
         );
@@ -354,7 +359,7 @@ export const handlePlanFreshnessDelivery = (input: {
       Effect.gen(function* () {
         const requestId = planFreshnessDeliveryId(sessionId, pr);
         const claimed = yield* Effect.result(
-          claimDeliveryRow(sql, requestId, reclaimSeconds),
+          claimDeliveryRow(sql, requestId, reclaimSeconds, "plan-freshness"),
         );
         if (Result.isFailure(claimed)) {
           yield* Effect.logError(
