@@ -1,7 +1,7 @@
 // The loopback GitHub fake the PR step is driven against (LOB-179).
 //
 // The routes the factory's PR clients call: `POST /repos/:owner/:repo/pulls` creates a pull request,
-// `GET /repos/:owner/:repo/pulls?head=&base=` answers the one that already exists for a head and base,
+// `GET /repos/:owner/:repo/pulls?head=&base=` answers the open one that already exists for a head and base,
 // and `GET /repos/:owner/:repo/pulls/:number` answers one PR's state (C20: the PR-state read when a
 // card is opened). Two more are GitHub's own merge and close (`PUT .../pulls/:number/merge`,
 // `PATCH .../pulls/:number` with `{"state":"closed"}`), which nothing in the factory calls: a drive
@@ -281,8 +281,11 @@ const server = Bun.serve({
       if (scripted !== undefined) return json(scripted.status, scripted.body);
       const head = body.head ?? "";
       const base = body.base ?? "";
+      // Only an open PR stands in the way, as on GitHub: a head whose PR was closed may open another
+      // (F12, `pr-closed.sh`).
       const recorded = read().pulls.find(
-        (pull) => pull.head === head && pull.base === base,
+        (pull) =>
+          pull.head === head && pull.base === base && pull.state !== "closed",
       );
       if (recorded !== undefined) {
         // What GitHub answers for a second PR on one head and base, which is the refusal the
@@ -329,10 +332,17 @@ const server = Bun.serve({
       const branch = head.includes(":")
         ? head.slice(head.indexOf(":") + 1)
         : head;
+      // `state=open` (what the client asks) leaves closed PRs out, as GitHub's list does.
+      const openOnly = (url.searchParams.get("state") ?? "open") === "open";
       return json(
         200,
         read()
-          .pulls.filter((pull) => pull.head === branch && pull.base === base)
+          .pulls.filter(
+            (pull) =>
+              pull.head === branch &&
+              pull.base === base &&
+              (!openOnly || pull.state !== "closed"),
+          )
           .map((pull) => answer(owner, repo, pull)),
       );
     }

@@ -334,6 +334,7 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | Shutdown and recovery    | passing | [lifecycle.md](lifecycle.md)                 |
 | Errors over the wire     | passing | [errors.md](errors.md)                       |
 | One PR across a kill     | passing | [pr-once.md](pr-once.md)                     |
+| A closed PR not adopted  | passing | [pr-closed.md](pr-closed.md)                 |
 | Inbound triggers         | passing | [trigger.md](trigger.md)                     |
 | Jira adapter             | passing | [jira.md](jira.md)                           |
 | GitHub issues adapter    | passing | [github.md](github.md)                       |
