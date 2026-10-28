@@ -23,6 +23,7 @@
  * are a PR, which are a failed run, and which are an interrupt that says nothing about the run.
  */
 import { Cause, Context, Duration, Effect, Exit, Layer, Option } from "effect";
+import { pullRequestRefusal } from "@repo/domain/PullRequest";
 import type { SessionError, SessionId } from "@repo/domain/Session";
 import type { VerifyRecord } from "@repo/harness";
 import type { CredentialError } from "./credentials";
@@ -130,14 +131,13 @@ export const pullRequestReport = (
         return {
           _tag: "failed",
           step: "over-cap",
-          reason: `the branch changes ${step.measured} ${step.limit}, over the cap of ${step.cap}, so no pull request was opened`,
+          reason: pullRequestRefusal(step),
         };
       case "no-change":
         return {
           _tag: "failed",
           step: "no-change",
-          reason:
-            "the run changed no file against its base branch, so there is nothing to open a pull request for",
+          reason: pullRequestRefusal(step),
         };
       case "non-fast-forward":
         return {

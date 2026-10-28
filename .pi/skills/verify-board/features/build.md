@@ -11,6 +11,9 @@ verifies it, the run's PR is opened on the forge with the verification in its bo
 on the PR's head, not a person's note), the run is refused the merge, and the person's merge takes the
 card to `done` (docs/board.md B4, B5, B8).
 
+Since C7 the drive opens the run's PR **in the browser** (the card pane's run row, `pr-browser.mjs`),
+not with `factory pr`; the command is unchanged and `requires.sh` still uses it.
+
 Three things are new beside the drive:
 
 - **`factory pr <session-id> [--title …]`** (`apps/cli/src/commands/pr.ts`) — the CLI's caller of the
@@ -42,7 +45,8 @@ Three things are new beside the drive:
 factory board move --task tsk_… --to building --expect-revision 7 --actor person:…   # plan approval
 factory board start --task tsk_… --prompt "build this card"                          # ses_… makes the change
 factory board move --task tsk_… --to review --expect-revision 8 --actor ses_…        # refused: needs "pr_link"
-factory pr ses_…                                                                     # pr https://github.com/…/pull/N
+# the run's row in the card pane: Open pull request                                  # PR #N, on the row and in the run pane
+factory pr ses_…                                                                     # the terminal's equivalent: pr https://github.com/…/pull/N
 factory ls                                                                           # the run's row carries the link
 factory board move --task tsk_… --to review --expect-revision 8 --actor ses_…        # the run moves its card on
 factory board move --task tsk_… --to done --expect-revision 9 --actor person:reviewer  # refused: needs "review_verdict"
@@ -74,7 +78,12 @@ card's latest run ses_… recorded no PR` and a non-zero exit. It names `pr_link
    `non_empty_diff`: the branch's change is the one step 3 read, and the service measured it the same
    way (`git diff --numstat main...factory/<run>`, the PR step's `diffSize`). The refusal writes
    nothing, so the move after the PR is made at the same revision.
-5. **The PR.** `factory pr <run>`; the link is the `pr` line the command printed. `build.ts MODE=pr`
+5. **The PR.** The page that holds the card open (`pr-browser.mjs`) waits for the build run's row to
+   offer **Open pull request**, presses it, and requires the forge's link on the row _and_ in the run
+   pane's header, the same one, without a reload; it prints the `pr` line `factory pr` would, which the
+   phases after it read. With no GitHub path the control is disabled with the server's reason
+   (`credential_error`'s words), the script prints `error: <reason>` and exits 1, and the drive fails
+   naming it. The link is the `pr` line. `build.ts MODE=pr`
    then reads the fake's ledger: exactly one create request for the run's branch
    (`factory/<run> → main`), the PR the fake answered has the printed link, the body it was sent
    lists the path under `## Changed files`, names `faux/builder` as the model, and its
@@ -101,6 +110,13 @@ does not assume it either: the run's `building → review` is refused naming `pr
 stays in `building` (a check that passes only when there is no link says so).
 
 ## What proves it works
+
+C7 (2026-10-28, `agent/C7`, API `:9572`, web `:3572`, the fake on `:9573`): `./drive.sh` passed with the PR
+opened in the browser from the card pane's run row (`pr-browser.json`: the row offered the control, the
+link on the row and in the run pane's header agreed without a reload) and no `factory pr`. Under
+`BOARD_GITHUB=off` the control was disabled with `no GITHUB_TOKEN configured; cannot resolve a token for
+verify-board/…`, the drive printed `drive: the PR path is missing — error: …` and failed the PR and
+every check that needs a link, and the card stayed in `building` (`pr_link`).
 
 `.verify/evidence/lob-240/pass/board/` (LOB-240, 2026-10-27, `agent/LOB-240`): `observed.json`
 (**49/49**), `build-built.json` (3/3), `build-pr.json` (8/8), `pr-body.md` (the body as the fake

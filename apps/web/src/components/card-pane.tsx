@@ -26,6 +26,7 @@ import {
   boardAtom,
   commentTaskAtom,
   moveTaskAtom,
+  runSessionsAtom,
   startRunAtom,
   taskCommentsAtom,
   taskRunsAtom,
@@ -60,6 +61,7 @@ import { DASHBOARD_ACTOR } from "@/lib/approvals-view";
 import { specLists } from "@/lib/spec-view";
 import { startPrompt, startSendable } from "@/lib/run-start-view";
 import { RunApprovals } from "@/components/approvals";
+import { PrControl } from "@/components/open-pull-request";
 import { SessionPane } from "@/components/session-pane";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -532,6 +534,12 @@ const Runs = ({
   readonly selected: SessionId | undefined;
 }) => {
   const runs = useAtomValue(taskRunsAtom(task.id));
+  const runSessions = useAtomValue(runSessionsAtom);
+  const sessionOf = new Map(
+    (Option.getOrUndefined(AsyncResult.value(runSessions))?.sessions ?? []).map(
+      (entry) => [entry.id, entry] as const,
+    ),
+  );
   const start = useAtomSet(startRunAtom, { mode: "promiseExit" });
   const navigate = useNavigate();
   const [starting, setStarting] = useState(false);
@@ -699,26 +707,47 @@ const Runs = ({
         </p>
       ) : (
         <ul aria-label="Runs of this card" className="flex flex-col">
-          {listed.map((run) => (
-            <li key={run.sessionId} data-run={run.sessionId}>
-              <Link
-                to="/boards/$boardId"
-                params={{ boardId }}
-                search={{ card: task.id, run: run.sessionId }}
-                aria-current={run.sessionId === selected ? "true" : undefined}
-                className={cn(
-                  "flex items-baseline gap-2 px-2 py-1.5 font-mono text-[10px] text-muted-foreground hover:bg-muted hover:text-foreground",
-                  run.sessionId === selected && "bg-muted text-foreground",
+          {listed.map((run) => {
+            const entry = sessionOf.get(run.sessionId);
+            return (
+              <li key={run.sessionId} data-run={run.sessionId}>
+                <Link
+                  to="/boards/$boardId"
+                  params={{ boardId }}
+                  search={{ card: task.id, run: run.sessionId }}
+                  aria-current={run.sessionId === selected ? "true" : undefined}
+                  className={cn(
+                    "flex items-baseline gap-2 px-2 py-1.5 font-mono text-[10px] text-muted-foreground hover:bg-muted hover:text-foreground",
+                    run.sessionId === selected && "bg-muted text-foreground",
+                  )}
+                >
+                  <span className="truncate">{run.sessionId}</span>
+                  <span className="shrink-0">from {run.column}</span>
+                  <span className="ml-auto shrink-0">
+                    {run.startedAt.slice(0, 19).replace("T", " ")}
+                  </span>
+                </Link>
+                {/*
+                 * The run's PR (C7): its link, or the control that opens it. The state is the index's
+                 * (repo, idle, no PR), so a run the page has no row for offers nothing here.
+                 */}
+                {entry === undefined ? null : (
+                  <div className="px-2 pb-1.5">
+                    <PrControl
+                      variant="row"
+                      session={{
+                        id: run.sessionId,
+                        title: entry.title,
+                        repo: entry.repo,
+                        status: entry.status,
+                        prUrl: entry.prUrl,
+                      }}
+                    />
+                  </div>
                 )}
-              >
-                <span className="truncate">{run.sessionId}</span>
-                <span className="shrink-0">from {run.column}</span>
-                <span className="ml-auto shrink-0">
-                  {run.startedAt.slice(0, 19).replace("T", " ")}
-                </span>
-              </Link>
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ul>
       )}
     </section>
