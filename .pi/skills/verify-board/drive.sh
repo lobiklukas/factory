@@ -172,7 +172,9 @@ rm -f "$RUN_DIR/card.json" "$EVIDENCE_DIR/create.json" "$EVIDENCE_DIR/web.json" 
   "$EVIDENCE_DIR/pr-body.md" \
   "$EVIDENCE_DIR"/spec-{declared,closed}.json "$EVIDENCE_DIR"/spec-pane.{json,png} \
   "$EVIDENCE_DIR/both-ways.json" "$EVIDENCE_DIR"/both-ways-{cli,browser}.png \
-  "$EVIDENCE_DIR"/{move,show}-building.txt
+  "$EVIDENCE_DIR"/{move,show}-building.txt "$EVIDENCE_DIR"/attention{,-board,-bad}.txt \
+  "$EVIDENCE_DIR"/{runs,block,block-stale,block-again,unblock,unblock-stale}.txt \
+  "$EVIDENCE_DIR"/show-{blocked,unblocked}.txt
 API_URL="$API_URL" BOARD_ID="$BOARD_ID" EVIDENCE_DIR="$EVIDENCE_DIR" CARD_FILE="$RUN_DIR/card.json" \
   bun "$SKILL/create.ts" > "$RUN_DIR/create.log" 2>&1
 CREATE_RC=$?
@@ -318,6 +320,29 @@ check "show prints the run's spec, its gap under it" \
 check "show prints the run's question verbatim" \
   "$(grep -qF "  [question] ${SESSION_ID:-ses_missing} (revision $((REVISION + 2)))" "$EVIDENCE_DIR/show-asked.txt" && grep -qxF "    $QUESTION" "$EVIDENCE_DIR/show-asked.txt" && echo 0 || echo 1)" \
   "question by ${SESSION_ID:-none}"
+
+# --- attention: the parked card is what a person is asked for (LOB-264) -----------------------------
+# `board attention` lists every card that waits on a person, on every board; other drives' cards may
+# be there, so the check finds this drive's card by id. The row leads with its reason and carries the
+# card id second; the question the run asked is on the line under it.
+fresh
+run_cmd attention "$FACTORY board attention --api $API_URL" || true
+capture attention.txt
+check "board attention lists the parked card as a question, with its card id and the run's question" \
+  "$([ "$(exit_code attention)" = "0" ] && grep -qE "^question  $TASK_ID  " "$EVIDENCE_DIR/attention.txt" && grep -A1 "^question  $TASK_ID  " "$EVIDENCE_DIR/attention.txt" | grep -qF "blocked needs_input since " && grep -A1 "^question  $TASK_ID  " "$EVIDENCE_DIR/attention.txt" | grep -qF ": $QUESTION" && echo 0 || echo 1)" \
+  "exit=$(exit_code attention)"
+fresh
+run_cmd attention-board "$FACTORY board attention --board $BOARD_ID --api $API_URL" || true
+capture attention-board.txt
+check "board attention --board narrows to the drive's board and still lists the card" \
+  "$([ "$(exit_code attention-board)" = "0" ] && grep -qE "^question  $TASK_ID  " "$EVIDENCE_DIR/attention-board.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code attention-board)"
+fresh
+run_cmd attention-bad "$FACTORY board attention --board not-a-board --api $API_URL" || true
+capture attention-bad.txt
+check "a malformed --board is invalid_input, sent nowhere" \
+  "$([ "$(exit_code attention-bad)" != "0" ] && [ -n "$(exit_code attention-bad)" ] && grep -qF 'error: invalid_input: --board "not-a-board" is not a board id (brd_…)' "$EVIDENCE_DIR/attention-bad.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code attention-bad)"
 
 # --- answer: a person's comment on the blocked card lifts the block ---------------------------------
 fresh
@@ -512,7 +537,7 @@ build_probe() { # mode, extra env...
   cat "$RUN_DIR/build-$mode.log"
   return "$rc"
 }
-build_probe built
+build_probe built REPO="$BOARD_REPO_SLUG"
 BUILT_RC=$?
 check "the build run committed a change and verified it (build.ts)" "$BUILT_RC" "see build-built.json"
 
@@ -560,6 +585,74 @@ capture ls-pr.txt
 check "factory ls shows the build run's PR link" \
   "$([ -n "$PR_URL" ] && [ -n "$BUILD_SESSION_ID" ] && grep "^$BUILD_SESSION_ID  " "$EVIDENCE_DIR/ls-pr.txt" | grep -qF "  $PR_URL  " && echo 0 || echo 1)" \
   "row for ${BUILD_SESSION_ID:-none}"
+
+# --- runs: the card's runs, each with its session, column, status and PR (LOB-264) ----------------
+# Newest run first: the build run (with the PR `factory pr` opened), then the specifying runs — the
+# second one `board start` opened after the answer, then the one that asked — each with `-` for a PR
+# it never had. The status is the session's own, read through `getSession`: every run here is idle.
+fresh
+run_cmd runs "$FACTORY board runs --task $TASK_ID --api $API_URL" || true
+capture runs.txt
+run_row() { grep "^$1  " "$EVIDENCE_DIR/runs.txt" | head -1; }
+check "board runs prints the header and one row per run, newest first" \
+  "$([ "$(exit_code runs)" = "0" ] && grep -qx 'session  column  status  pr  started' "$EVIDENCE_DIR/runs.txt" && [ "$(grep -c '^ses_' "$EVIDENCE_DIR/runs.txt")" = "3" ] && [ "$(grep '^ses_' "$EVIDENCE_DIR/runs.txt" | awk '{print $1}' | tr '\n' ' ')" = "${BUILD_SESSION_ID:-none} ${NEXT_SESSION_ID:-none} ${SESSION_ID:-none} " ] && echo 0 || echo 1)" \
+  "exit=$(exit_code runs), rows: $(grep '^ses_' "$EVIDENCE_DIR/runs.txt" | awk '{print $1}' | tr '\n' ' ')"
+check "the build run's row names its column, status and the PR the forge opened" \
+  "$([ -n "$PR_URL" ] && run_row "${BUILD_SESSION_ID:-none}" | grep -qE "^${BUILD_SESSION_ID:-none}  building  idle  $PR_URL  [0-9T:.Z-]+$" && echo 0 || echo 1)" \
+  "$(run_row "${BUILD_SESSION_ID:-none}")"
+check "a specifying run's row has no PR" \
+  "$(run_row "${SESSION_ID:-none}" | grep -qE "^${SESSION_ID:-none}  specifying  idle  -  [0-9T:.Z-]+$" && echo 0 || echo 1)" \
+  "$(run_row "${SESSION_ID:-none}")"
+
+# --- block, unblock: a card parked for a reason and restored (LOB-264) -----------------------------
+# A block at a revision the card has already left is the typed conflict and writes nothing; the
+# block at the card's own revision parks it, a second is refused, the unblock at a stale revision is
+# the conflict again, and the unblock at the right one restores the card to `building`. The card ends
+# two revisions on, which the review move below is made at.
+fresh
+run_cmd block-stale "$FACTORY board block --task $TASK_ID --reason dependency --expect-revision $((${BUILDING_REVISION:-1} - 1)) --api $API_URL" || true
+capture block-stale.txt
+check "a block at a stale revision is the typed conflict, and non-zero" \
+  "$([ "$(exit_code block-stale)" != "0" ] && [ -n "$(exit_code block-stale)" ] && grep -qF "error: stale_revision: task $TASK_ID is at revision ${BUILDING_REVISION:-?}, not $((${BUILDING_REVISION:-1} - 1)): someone moved it first" "$EVIDENCE_DIR/block-stale.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code block-stale)"
+fresh
+run_cmd block "$FACTORY board block --task $TASK_ID --reason dependency --note 'waiting on the schema PR' --expect-revision ${BUILDING_REVISION:-0} --api $API_URL" || true
+capture block.txt
+check "board block parks the card at the revision it expected" \
+  "$([ "$(exit_code block)" = "0" ] && grep -qx "blocked $TASK_ID (revision $((${BUILDING_REVISION:-0} + 1))): dependency in building" "$EVIDENCE_DIR/block.txt" && grep -qx 'note    waiting on the schema PR' "$EVIDENCE_DIR/block.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code block)"
+fresh
+run_cmd blocked-show "$FACTORY board show --task $TASK_ID --api $API_URL" || true
+capture show-blocked.txt
+check "show prints the block: its reason and the column it blocked from" \
+  "$([ "$(exit_code blocked-show)" = "0" ] && grep -q '^blocked   dependency from building since ' "$EVIDENCE_DIR/show-blocked.txt" && grep -qx "revision  $((${BUILDING_REVISION:-0} + 1))" "$EVIDENCE_DIR/show-blocked.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code blocked-show)"
+fresh
+run_cmd block-again "$FACTORY board block --task $TASK_ID --reason capability --api $API_URL" || true
+capture block-again.txt
+check "a second block is refused as already_blocked" \
+  "$([ "$(exit_code block-again)" != "0" ] && [ -n "$(exit_code block-again)" ] && grep -qF "error: already_blocked: task $TASK_ID is already blocked (dependency)" "$EVIDENCE_DIR/block-again.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code block-again)"
+fresh
+run_cmd unblock-stale "$FACTORY board unblock --task $TASK_ID --expect-revision ${BUILDING_REVISION:-0} --api $API_URL" || true
+capture unblock-stale.txt
+check "an unblock at a stale revision is the typed conflict, and the card stays blocked" \
+  "$([ "$(exit_code unblock-stale)" != "0" ] && [ -n "$(exit_code unblock-stale)" ] && grep -qF "error: stale_revision: " "$EVIDENCE_DIR/unblock-stale.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code unblock-stale)"
+fresh
+run_cmd unblock "$FACTORY board unblock --task $TASK_ID --api $API_URL" || true
+capture unblock.txt
+UNBLOCKED_REVISION="$(sed -n "s/^unblocked $TASK_ID (revision \([0-9]*\)).*/\1/p" "$EVIDENCE_DIR/unblock.txt")"
+check "board unblock restores the card to the column it blocked from" \
+  "$([ "$(exit_code unblock)" = "0" ] && [ "${UNBLOCKED_REVISION:-0}" = "$((${BUILDING_REVISION:-0} + 2))" ] && grep -q "^unblocked $TASK_ID (revision ${UNBLOCKED_REVISION}): back in building (was dependency since " "$EVIDENCE_DIR/unblock.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code unblock), revision=${UNBLOCKED_REVISION:-none}"
+fresh
+run_cmd unblocked-show "$FACTORY board show --task $TASK_ID --api $API_URL" || true
+capture show-unblocked.txt
+check "show prints the card unblocked, in building" \
+  "$([ "$(exit_code unblocked-show)" = "0" ] && grep -qx 'blocked   -' "$EVIDENCE_DIR/show-unblocked.txt" && grep -qx 'column    building' "$EVIDENCE_DIR/show-unblocked.txt" && echo 0 || echo 1)" \
+  "exit=$(exit_code unblocked-show)"
+BUILDING_REVISION="${UNBLOCKED_REVISION:-$BUILDING_REVISION}"
 
 # --- review: the run moves its card on, and a person records the verdict --------------------------
 # `building → review` crosses no gate, so the run that built the change may make it (B5); the drive

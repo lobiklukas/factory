@@ -21,6 +21,19 @@ against it, and reads the snapshot back:
 - `workspace.commandsSource` is `"repo"` and `workspace.commands.test` is the fixture's own
   `bun run test` — the commands came from the repo, not from a default in the server.
 
+**The registry read (LOB-253).** After registering, the drive asks the registry back:
+
+- `registerRepo` answers the checkout's facts — `localPathIsGit: true` and `hasFactoryConfig: true`
+  for the fixture — read from the API's disk when the row is answered, never stored;
+- `listRepos` holds that row exactly as `registerRepo` answered it, and `getRepo` answers the same;
+- `getRepo` for a slug nobody registered fails with `RepoNotFound`, its own tag on the wire;
+- `registerRepo` with a `localPath` that is not a git work tree (`/`) is `invalid_input` naming the
+  path, and the slug is still `RepoNotFound` afterwards: a refusal writes nothing.
+
+`apps/api/src/Rpc/Session.test.ts` carries the same cases over the app's own router, plus the row a
+session auto-registers (no URL, no checkout, both facts `false`) and a second registration that names
+only a base ref and keeps the path. The CLI over it is `.pi/skills/verify-cli/features/repo.md`.
+
 **What proves it.** The binding lives in the log as a `factory.session` document, so the index is
 derivable from it: `packages/core`'s suite empties the index tables, runs `rebuildIndexes`, and gets
 the repo, base ref, title, spend, and creation time back from the logs alone. A repo with no config

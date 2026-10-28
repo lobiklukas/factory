@@ -27,8 +27,8 @@ Three things are new beside the drive:
   (`.pi/skills/verify-api/github-fake.ts`) on `GITHUB_PORT` (9403 by default), ledger in
   `.verify/run/github-ledger.json`, with `GITHUB_API_URL` and a fake `GITHUB_TOKEN` handed to the
   API. The board's repository is registered over a fixture checkout (`.verify/run/board-repo`,
-  carrying a passing `.pi/skills/verify-web/drive.sh`), and the drive's card names the repository,
-  so every run on it is a git worktree of the fixture. The board is pinned to the default pipeline's
+  carrying a passing `.pi/skills/verify-web/drive.sh`), and the drive's card names no repository —
+  it inherits the board's (LOB-255) — so every run on it is a git worktree of the fixture. The board is pinned to the default pipeline's
   **newest** version, so `review → done` is also gated on `verified` (LOB-80).
 
 ## How a user reaches it
@@ -52,9 +52,13 @@ After the dashboard phase, in the same tmux pane, each command followed by the e
 1. **Plan approval.** A person's `planning → building`, at the revision the last accepted move left —
    clicked in the dashboard since LOB-87, and read back with `board show`
    ([equivalence.md](equivalence.md)); from the terminal only when the browser did not make it.
-2. **The build run.** `board start` in `building`; `build.ts MODE=built` waits for it to answer and
-   reads its log: exactly one `verify` record, over `apps/web/src/card.ts`, a `VerifyRan` of the
-   `.pi/skills/verify-web` skill on the `web` surface, exit 0.
+2. **The build run.** `board start` in `building`; `build.ts MODE=built` checks it is bound to the
+   board's repository on `factory/<run>`, in a worktree whose `HEAD` is that branch, though the card
+   named no repo (LOB-255), then waits for it to answer and reads its log: exactly one `verify` record, over `apps/web/src/card.ts`, a `VerifyRan` of the
+   `.pi/skills/verify-web` skill on the `web` surface, exit 0. The card pane's run start
+   (`startRunAtom`) is not driven here: it sends the same `createSession` with the card named, and
+   the binding is the server's (`SessionService`'s `cardRepoFor`, covered in
+   `packages/core/src/TaskService.test.ts`), so which client started the run does not change it.
 3. **A non-empty diff.** `git diff --numstat main...factory/<run>` in the fixture checkout lists the
    changed path — git's own answer, not the factory's.
 4. **The building gate, before the PR** (LOB-240). The run's `building → review` is refused with

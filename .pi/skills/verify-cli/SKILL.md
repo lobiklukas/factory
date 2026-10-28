@@ -1,6 +1,6 @@
 ---
 name: verify-cli
-description: Drive and prove the factory CLI (`factory run` / `watch` / `ls` / `send` / `withdraw` / `approvals` / `approve` / `deny` / `discard` / `pr` in apps/cli; `pr` is proven by verify-board's build phase) in a real tmux terminal against a real control plane. Use when asked to verify, test, or show evidence that the CLI works, or after changing apps/cli, packages/domain, or apps/api.
+description: Drive and prove the factory CLI (`factory run` / `watch` / `ls` / `send` / `withdraw` / `approvals` / `approve` / `deny` / `repo` / `discard` / `pr` in apps/cli; `pr` is proven by verify-board's build phase) in a real tmux terminal against a real control plane. Use when asked to verify, test, or show evidence that the CLI works, or after changing apps/cli, packages/domain, or apps/api.
 ---
 
 # Verify the CLI
@@ -17,22 +17,24 @@ own instance of `apps/api` and record it in `.verify/run/api.pid`, so run them o
 
 ## What it proves
 
-| Feature                        | Check in the driver                                                      | Why it matters                                     |
-| ------------------------------ | ------------------------------------------------------------------------ | -------------------------------------------------- |
-| `factory run` (D9)             | creates, streams, and prints the answer, exit 0                          | the whole write path in one command                |
-| The run's session is named     | `session ses_…` on stdout, and `workspace <path>`                        | the server's own answer, not a client guess        |
-| The tool call is real          | a `[tool:bash]` line carrying the faux tool's output                     | the transcript can only exist if the tool ran      |
-| `factory ls` (LOB-6)           | the new session is a row, with its title, exit 0                         | the list is a server read, not a local registry    |
-| The PR column (LOB-65)         | a seeded PR's URL in its row; `-` for the run's row                      | the operator sees the link without a browser       |
-| `factory watch`, live (D8)     | `mode: live`, then the same answer                                       | a session this process owns streams                |
-| `factory watch`, historical    | `mode: historical` after the idle sweep, same answer                     | the fold path, and the label that tells them apart |
-| Typed errors                   | unknown id → `error: not_found`, non-zero exit                           | a script can branch on `code`, not on prose        |
-| `factory withdraw` (LOB-166)   | `./withdraw.sh`: a queued follow-up leaves the queue and the transcript  | withdrawing is a write, not a hidden row           |
-| `--when-busy steer` (LOB-167)  | `./steer.sh`: the steer joins the running run, which answers it once     | a steer is not a follow-up with a different label  |
-| `--when-busy reject` (LOB-167) | `./steer.sh`: `error: busy`, non-zero, nothing queued; idle → `run`      | a script can refuse to queue behind a running run  |
-| `factory approve` (LOB-53)     | `./approve.sh`, run by `drive.sh`: a parked approval decided, resumed    | the answer reaches the run, not only the row       |
-| `factory discard` (LOB-268)    | `./discard.sh`: worktree and branch gone, repeat names the first release | the only way an operator ends a session's work     |
-| `factory pr` (LOB-86)          | not here: verify-board `./drive.sh`'s build phase, against a GitHub fake | the link is the forge's answer, never assumed      |
+| Feature                                                   | Check in the driver                                                      | Why it matters                                              |
+| --------------------------------------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| `factory run` (D9)                                        | creates, streams, and prints the answer, exit 0                          | the whole write path in one command                         |
+| The run's session is named                                | `session ses_…` on stdout, and `workspace <path>`                        | the server's own answer, not a client guess                 |
+| The tool call is real                                     | a `[tool:bash]` line carrying the faux tool's output                     | the transcript can only exist if the tool ran               |
+| `factory ls` (LOB-6)                                      | the new session is a row, with its title, exit 0                         | the list is a server read, not a local registry             |
+| The PR column (LOB-65)                                    | a seeded PR's URL in its row; `-` for the run's row                      | the operator sees the link without a browser                |
+| `factory watch`, live (D8)                                | `mode: live`, then the same answer                                       | a session this process owns streams                         |
+| `factory watch`, historical                               | `mode: historical` after the idle sweep, same answer                     | the fold path, and the label that tells them apart          |
+| Typed errors                                              | unknown id → `error: not_found`, non-zero exit                           | a script can branch on `code`, not on prose                 |
+| `factory withdraw` (LOB-166)                              | `./withdraw.sh`: a queued follow-up leaves the queue and the transcript  | withdrawing is a write, not a hidden row                    |
+| `--when-busy steer` (LOB-167)                             | `./steer.sh`: the steer joins the running run, which answers it once     | a steer is not a follow-up with a different label           |
+| `--when-busy reject` (LOB-167)                            | `./steer.sh`: `error: busy`, non-zero, nothing queued; idle → `run`      | a script can refuse to queue behind a running run           |
+| `factory repo` (LOB-253)                                  | `./repo.sh`, run by `drive.sh`: add, re-add, refusals, `ls`, `show`      | an operator binds a checkout without writing code           |
+| `factory approve` (LOB-53)                                | `./approve.sh`, run by `drive.sh`: a parked approval decided, resumed    | the answer reaches the run, not only the row                |
+| `factory discard` (LOB-268)                               | `./discard.sh`: worktree and branch gone, repeat names the first release | the only way an operator ends a session's work              |
+| `factory pr` (LOB-86)                                     | not here: verify-board `./drive.sh`'s build phase, against a GitHub fake | the link is the forge's answer, never assumed               |
+| `factory board block\|unblock\|attention\|runs` (LOB-264) | not here: verify-board `./drive.sh`'s triage phase                       | the card and its runs are the server's, never a local guess |
 
 Every check is required: `drive.sh` exits non-zero when one fails.
 
@@ -46,7 +48,13 @@ Every check is required: `drive.sh` exits non-zero when one fails.
 ./approve.sh     # self-contained: its own gated API on :9330 (APPROVE_PORT); drive.sh runs it last
 ./steer.sh       # self-contained: its own API on :9320 (STEER_PORT) with the sleeping faux script
 ./discard.sh     # self-contained: its own API on :9340 (DISCARD_PORT) and a checkout it registers
+./repo.sh        # needs ./up.sh's instance (API_URL/API_PORT); drive.sh runs it before approve.sh
 ```
+
+`repo.sh` needs no deployment setting, so it drives the instance `up.sh` started with a tmux server
+of its own under `.verify/run/cli-repo/`. Its "not a git work tree" fixture is a temp directory, not
+one under `.verify/`: a subdirectory of a checkout is inside that checkout's work tree and the
+registry accepts it. See `features/repo.md`.
 
 `approve.sh` is separate for the same kind of reason: an approval exists only once a gated call asks,
 and the gate is a deployment setting (`APPROVAL_REQUIRED=sleep`, with the faux command the gated one

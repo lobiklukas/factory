@@ -16,6 +16,7 @@ import {
   BoardInstance,
   BoardExists,
   BoardNotFound,
+  BoardRepoMismatch,
   BoardView,
   CommentTaskInput,
   CreateBoardInput,
@@ -67,12 +68,16 @@ import {
   CompactSessionResult,
   CreateSessionInput,
   ForkSessionInput,
+  GetRepoInput,
+  ListReposInput,
+  ListReposOutput,
   ListSessionsInput,
   ListSessionsOutput,
   ListSpendInput,
   RegisterRepoInput,
   ReleaseWorkspaceResult,
   ReplaySessionInput,
+  RepoNotFound,
   RepoSummary,
   ResetSessionInput,
   SendMessageInput,
@@ -193,6 +198,19 @@ export class SessionRpc extends RpcGroup.make(
     success: RepoSummary,
     error: SessionError,
   }),
+  // The registry read every repo picker needs (LOB-253): each row carries what its checkout says
+  // about itself, read when it is answered. An unknown slug is `RepoNotFound`, not a session's
+  // `not_found`.
+  Rpc.make("listRepos", {
+    payload: ListReposInput,
+    success: ListReposOutput,
+    error: SessionError,
+  }),
+  Rpc.make("getRepo", {
+    payload: GetRepoInput,
+    success: RepoSummary,
+    error: Schema.Union([SessionError, RepoNotFound]),
+  }),
   // A mission is a session's, not a client's: starting one answers its id, and the phase it
   // reached is read off `getSession`'s snapshot rather than off a second call (LOB-230). The
   // surface decision — this group, not a `MissionRpc` of its own — is recorded in
@@ -259,6 +277,7 @@ const TaskErrorSchema = Schema.Union([
   BoardNotFound,
   DefinitionNotFound,
   BoardExists,
+  BoardRepoMismatch,
   StaleRevision,
   UndeclaredTransition,
   HumanGateRequired,
@@ -350,7 +369,8 @@ export class TasksRpc extends RpcGroup.make(
     error: TaskErrorSchema,
   }),
   // What needs a person (LOB-77): cards with a pending approval, an unanswered question, or a done
-  // run at a human gate, on one board or every board. One read over the indexes, so the attention
+  // run at a human gate, on one board or every board; the every-board read also lists the pending
+  // approvals of sessions no card owns (LOB-271). One read over the indexes, so the attention
   // view never walks cards, runs and approvals from the browser.
   Rpc.make("listAttention", {
     payload: ListAttentionInput,

@@ -68,7 +68,10 @@ import type { CheckRecord } from "./harness.ts";
 
 const SESSION_ROOT =
   process.env["SESSION_ROOT"] ?? ".verify/run/linear-writeback/sessions";
-const REPO_DIR = process.env["REPO_DIR"] ?? ".verify/run/linear-writeback/repo";
+// Absolute, because `registerRepo` refuses a relative checkout (LOB-253).
+const REPO_DIR = path.resolve(
+  process.env["REPO_DIR"] ?? ".verify/run/linear-writeback/repo",
+);
 const STAMP = process.env["LINEAR_RUN_STAMP"] ?? String(Date.now());
 const REPO = RepoSlugSchema.make(`acme/verify-linear-writeback-${STAMP}`);
 const FAKE_URL = process.env["LINEAR_FAKE_URL"] ?? "http://127.0.0.1:9416";

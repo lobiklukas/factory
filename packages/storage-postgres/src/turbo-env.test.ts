@@ -1,6 +1,16 @@
 import { spawnSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 
 /**
  * The gate must run every suite against the database `DATABASE_URL` names, not against the
@@ -374,6 +384,387 @@ describe("the dev tasks' environment", () => {
       expect(
         taskOf(dryRun, DEV_TASK).resolvedTaskDefinition.passThroughEnv,
       ).toContain(name);
+      expect(declared(dryRun, DEV_TASK)).not.toContain(name);
+    }
+  }, 90_000);
+});
+
+/**
+ * `bun run dev` must give the process the repository-root `.env` (LOB-256).
+ *
+ * Turborepo says it "does not load .env files into your task's runtime", and Bun only autoloads one
+ * from its own working directory, which for a workspace task is the package. A key in the root `.env`
+ * therefore never reached `apps/api`, and a README quickstart that said to put it there ran the faux
+ * provider. The scripts name the file themselves with `bun --env-file=../../.env`.
+ *
+ * The cases read each real script out of its `package.json`, lay it into a scratch monorepo (outside
+ * this repository, so a developer's real `.env` is neither read nor written) and run it through
+ * `turbo run dev --filter=...`, with the entry point swapped for one that prints a dummy variable.
+ * Only the script's own flags change: `--watch` is dropped so the probe exits. A script that stops
+ * naming the root file, or names the wrong depth, prints `<unset>` and fails the case.
+ */
+describe("the dev scripts load the repo-root env file (LOB-256)", () => {
+  const PROBE = "FACTORY_ENV_FILE_PROBE";
+  const scratch: string[] = [];
+  afterAll(() => {
+    for (const dir of scratch) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const scriptOf = (pkg: "api" | "cli", name: "dev" | "dev:watch") => {
+    const manifest = JSON.parse(
+      readFileSync(join(REPO_ROOT, "apps", pkg, "package.json"), "utf8"),
+    ) as { scripts: Record<string, string> };
+    const script = manifest.scripts[name];
+    if (script === undefined) throw new Error(`apps/${pkg} has no ${name}`);
+    return script;
+  };
+
+  /**
+   * What `turbo run dev` makes of `script` in a monorepo shaped like this one (`apps/<pkg>`, `.env` at
+   * the root): the probe's line, and turbo's exit status.
+   */
+  const probe = (
+    script: string,
+    options: { readonly rootEnv: string | null; readonly shell?: string },
+  ) => {
+    expect(script).toContain("src/index.ts");
+    const root = mkdtempSync(join(tmpdir(), "factory-env-probe-"));
+    scratch.push(root);
+    mkdirSync(join(root, "apps", "app"), { recursive: true });
+    writeFileSync(
+      join(root, "package.json"),
+      JSON.stringify({
+        name: "scratch",
+        private: true,
+        workspaces: ["apps/*"],
+        packageManager: "bun@1.4.2",
+      }),
+    );
+    writeFileSync(
+      join(root, "turbo.json"),
+      JSON.stringify({
+        tasks: { dev: { persistent: true, cache: false, env: [PROBE] } },
+      }),
+    );
+    writeFileSync(
+      join(root, "apps", "app", "package.json"),
+      JSON.stringify({
+        name: "@scratch/app",
+        private: true,
+        scripts: {
+          dev: script
+            .replace("--watch ", "")
+            .replace("src/index.ts", "probe.ts"),
+        },
+      }),
+    );
+    writeFileSync(
+      join(root, "apps", "app", "probe.ts"),
+      `console.log("PROBE=" + (process.env["${PROBE}"] ?? "<unset>"));\n`,
+    );
+    if (options.rootEnv !== null) {
+      writeFileSync(join(root, ".env"), `${PROBE}=${options.rootEnv}\n`);
+    }
+    const env = Object.fromEntries(
+      Object.entries(process.env).filter(
+        ([name]) => !name.startsWith("TURBO_") && name !== PROBE,
+      ),
+    );
+    const result = spawnSync(
+      join(REPO_ROOT, "node_modules", ".bin", "turbo"),
+      ["run", "dev", "--filter=@scratch/app", "--ui=stream"],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          ...env,
+          ...(options.shell === undefined ? {} : { [PROBE]: options.shell }),
+          TURBO_TELEMETRY_DISABLED: "1",
+          DO_NOT_TRACK: "1",
+        },
+        timeout: 60_000,
+      },
+    );
+    const line = /PROBE=(\S*)/.exec(result.stdout)?.[1];
+    return { status: result.status, value: line, output: result.stdout };
+  };
+
+  it("hands apps/api's dev script the value in the root .env", () => {
+    const run = probe(scriptOf("api", "dev"), { rootEnv: "from-root-file" });
+    expect(run.status).toBe(0);
+    expect(run.value).toBe("from-root-file");
+  }, 90_000);
+
+  it("hands apps/api's dev:watch script the value in the root .env", () => {
+    const run = probe(scriptOf("api", "dev:watch"), {
+      rootEnv: "from-root-file",
+    });
+    expect(run.status).toBe(0);
+    expect(run.value).toBe("from-root-file");
+  }, 90_000);
+
+  it("hands apps/cli's dev script the value in the root .env", () => {
+    const run = probe(scriptOf("cli", "dev"), { rootEnv: "from-root-file" });
+    expect(run.status).toBe(0);
+    expect(run.value).toBe("from-root-file");
+  }, 90_000);
+
+  it("boots with no root .env at all, the variable unset", () => {
+    for (const script of [
+      scriptOf("api", "dev"),
+      scriptOf("api", "dev:watch"),
+      scriptOf("cli", "dev"),
+    ]) {
+      const run = probe(script, { rootEnv: null });
+      expect(run.status).toBe(0);
+      expect(run.value).toBe("<unset>");
+    }
+  }, 120_000);
+
+  it("lets a value exported in the shell override the root .env", () => {
+    for (const script of [
+      scriptOf("api", "dev"),
+      scriptOf("api", "dev:watch"),
+      scriptOf("cli", "dev"),
+    ]) {
+      const run = probe(script, {
+        rootEnv: "from-root-file",
+        shell: "from-shell",
+      });
+      expect(run.status).toBe(0);
+      expect(run.value).toBe("from-shell");
+    }
+  }, 180_000);
+});
+
+/**
+ * The names a source file reads from the environment: `process.env["X"]`, `process.env.X`, and any
+ * upper-case string literal inside a `Config.*(...)` call (`Config.String("X")`,
+ * `Config.Literals([...], "X")`, `Config.schema(Schema, "X")`, `Config.withDefault(Config.Int("X"), 1)`).
+ * Comments are dropped first, so a name only mentioned in prose is not a read.
+ *
+ * A read through a variable (`process.env[name]`) is invisible here by construction, so the source
+ * keeps every read a literal at its call site.
+ */
+const environmentReads = (source: string): readonly string[] => {
+  const code = source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+  const names = new Set<string>();
+  for (const match of code.matchAll(
+    /process\.env(?:\["([A-Z][A-Z0-9_]*)"\]|\.([A-Z][A-Z0-9_]*))/g,
+  )) {
+    names.add(match[1] ?? match[2] ?? "");
+  }
+  for (const call of code.matchAll(/\bConfig\.[A-Za-z]+\(/g)) {
+    let depth = 1;
+    let end = call.index + call[0].length;
+    while (end < code.length && depth > 0) {
+      if (code[end] === "(") depth += 1;
+      if (code[end] === ")") depth -= 1;
+      end += 1;
+    }
+    for (const literal of code
+      .slice(call.index, end)
+      .matchAll(/"([A-Z][A-Z0-9_]+)"/g)) {
+      names.add(literal[1] ?? "");
+    }
+  }
+  return [...names].sort();
+};
+
+/** Every production source under `directory` (relative to the repo root), tests and builds excluded. */
+const sourceFiles = (directory: string): readonly string[] =>
+  readdirSync(`${REPO_ROOT}${directory}`, { recursive: true, encoding: "utf8" })
+    .filter(
+      (path) =>
+        /\.tsx?$/.test(path) &&
+        !/\.test\.tsx?$/.test(path) &&
+        !/(^|\/)(node_modules|dist)\//.test(path),
+    )
+    .map((path) => `${REPO_ROOT}${directory}/${path}`);
+
+/** The workspace packages a package's `dependencies` name, as directories relative to the repo root. */
+const workspaceDependencies = (directory: string): readonly string[] => {
+  const manifest = JSON.parse(
+    readFileSync(`${REPO_ROOT}${directory}/package.json`, "utf8"),
+  ) as { dependencies?: Record<string, string> };
+  return Object.entries(manifest.dependencies ?? {})
+    .filter(([, range]) => range.startsWith("workspace:"))
+    .map(([name]) => `packages/${name.replace("@repo/", "")}`);
+};
+
+/**
+ * Where `apps/api` reads configuration: its own sources and every workspace package it boots,
+ * followed transitively through `dependencies`, so a new package is scanned without editing this list.
+ */
+const apiSourceDirectories = (): readonly string[] => {
+  const seen = new Set<string>(["apps/api"]);
+  const pending = ["apps/api"];
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    for (const dependency of workspaceDependencies(next)) {
+      if (!seen.has(dependency)) {
+        seen.add(dependency);
+        pending.push(dependency);
+      }
+    }
+  }
+  return [...seen].map((directory) => `${directory}/src`);
+};
+const API_SOURCE_DIRECTORIES = apiSourceDirectories();
+
+/** The reads whose name is not in `known`, each with the file that reads it. */
+const undeclaredReads = (
+  reads: ReadonlyMap<string, string>,
+  known: ReadonlySet<string>,
+): readonly string[] =>
+  [...reads]
+    .filter(([name]) => !known.has(name))
+    .map(([name, file]) => `${name} (read in ${file.slice(REPO_ROOT.length)})`);
+
+describe("the API's environment reads (LOB-257)", () => {
+  const readsOf = (directories: readonly string[]) =>
+    new Map(
+      directories
+        .flatMap((directory) => sourceFiles(directory))
+        .flatMap((file) =>
+          environmentReads(readFileSync(file, "utf8")).map(
+            (name) => [name, file] as const,
+          ),
+        ),
+    );
+
+  const fixture = `
+    // process.env["ONLY_IN_A_COMMENT"] is prose, not a read.
+    /* Config.String("ALSO_PROSE") */
+    const a = process.env["PLAIN_BRACKET"];
+    const b = process.env.PLAIN_DOT;
+    const c = Config.option(Config.String("NESTED_STRING"));
+    const d = Config.Literals(["anthropic", "faux"], "LITERALS_NAME");
+    const e = Config.option(
+      Config.schema(
+        Schema.Struct({ cap: Schema.Number }),
+        "MULTILINE_SCHEMA",
+      ),
+    );
+    const f = Config.withDefault("");
+  `;
+
+  it("finds every read form the sources use, and nothing mentioned only in a comment", () => {
+    expect(environmentReads(fixture)).toEqual([
+      "LITERALS_NAME",
+      "MULTILINE_SCHEMA",
+      "NESTED_STRING",
+      "PLAIN_BRACKET",
+      "PLAIN_DOT",
+    ]);
+  });
+
+  it("scans every workspace package the API boots, harness included", () => {
+    expect([...API_SOURCE_DIRECTORIES].sort()).toEqual([
+      "apps/api/src",
+      "packages/core/src",
+      "packages/domain/src",
+      "packages/harness/src",
+      "packages/storage-postgres/src",
+    ]);
+  });
+
+  it("reads the real sources: the trigger, Linear, Sentry and model variables are all seen", () => {
+    // A scanner that silently matched nothing would make the guard below pass for any change.
+    const names = [...readsOf(API_SOURCE_DIRECTORIES).keys()];
+    for (const name of [
+      "TRIGGER_SECRET",
+      "TRIGGER_RULES",
+      "LINEAR_API_KEY",
+      "SENTRY_RATE_LIMIT",
+      "GITHUB_WEBHOOK_MAX_BODY_BYTES",
+      "MODEL_BACKEND",
+      "SESSION_BUDGET",
+      "GITHUB_REVIEWER_TOKEN",
+      "DATABASE_URL",
+      "DATABASE_MAX_CONNECTIONS",
+      "ANTHROPIC_API_KEY",
+    ]) {
+      expect(names).toContain(name);
+    }
+  });
+
+  it("declares every variable the API reads on @repo/api#dev, in env or passThroughEnv", () => {
+    const dryRun = resolveScript(
+      "dev",
+      "@repo/api",
+      databaseUrl("factory_probe"),
+    );
+    const known = new Set([
+      ...declared(dryRun, DEV_TASK),
+      ...(taskOf(dryRun, DEV_TASK).resolvedTaskDefinition.passThroughEnv ?? []),
+    ]);
+    expect(undeclaredReads(readsOf(API_SOURCE_DIRECTORIES), known)).toEqual([]);
+  }, 90_000);
+
+  it("fails on a read nobody declared: the same comparison, against a temporary read", () => {
+    const reads = new Map(
+      environmentReads(
+        `const a = process.env["PORT"]; const b = process.env["BRAND_NEW_SETTING"];`,
+      ).map((name) => [name, `${REPO_ROOT}fixture.ts`] as const),
+    );
+    expect(undeclaredReads(reads, new Set(["PORT"]))).toEqual([
+      "BRAND_NEW_SETTING (read in fixture.ts)",
+    ]);
+  });
+
+  it("lists the trigger, Linear and Sentry variables under @repo/api#dev", () => {
+    const dryRun = resolveScript(
+      "dev",
+      "@repo/api",
+      databaseUrl("factory_probe"),
+    );
+    const known = [
+      ...declared(dryRun, DEV_TASK),
+      ...(taskOf(dryRun, DEV_TASK).resolvedTaskDefinition.passThroughEnv ?? []),
+    ];
+    for (const name of [
+      "TRIGGER_RULES",
+      "TRIGGER_SECRET",
+      "TRIGGER_SECRET_HEADER",
+      "TRIGGER_DELIVERY_HEADER",
+      "TRIGGER_MAX_BODY_BYTES",
+      "LINEAR_WEBHOOK_SECRET",
+      "LINEAR_API_KEY",
+      "LINEAR_API_URL",
+      "LINEAR_STATE_STARTED",
+      "LINEAR_STATE_IN_REVIEW",
+      "LINEAR_STATE_DONE",
+      "LINEAR_SESSION_URL_BASE",
+      "SENTRY_CLIENT_SECRET",
+      "SENTRY_RATE_LIMIT",
+      "SENTRY_RATE_WINDOW_SECONDS",
+      "GITHUB_WEBHOOK_MAX_BODY_BYTES",
+    ]) {
+      expect(known).toContain(name);
+    }
+  }, 90_000);
+
+  it("passes every secret through without declaring it, so none enters the task hash", () => {
+    const dryRun = resolveScript(
+      "dev",
+      "@repo/api",
+      databaseUrl("factory_probe"),
+    );
+    const passThrough =
+      taskOf(dryRun, DEV_TASK).resolvedTaskDefinition.passThroughEnv ?? [];
+    for (const name of [
+      "TRIGGER_SECRET",
+      "LINEAR_WEBHOOK_SECRET",
+      "SENTRY_CLIENT_SECRET",
+      "LINEAR_API_KEY",
+      "GITHUB_WEBHOOK_SECRET",
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_OAUTH_TOKEN",
+      "ANTHROPIC_AUTH_TOKEN",
+    ]) {
+      expect(passThrough).toContain(name);
       expect(declared(dryRun, DEV_TASK)).not.toContain(name);
     }
   }, 90_000);

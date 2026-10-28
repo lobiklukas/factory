@@ -84,7 +84,17 @@ export const RepoCommands = Schema.Struct({
 });
 export type RepoCommands = typeof RepoCommands.Type;
 
-/** One row of the repo registry: where a repo is cloned from and which ref sessions start at. */
+/**
+ * One row of the repo registry: where a repo is cloned from and which ref sessions start at, with
+ * what its local checkout says about itself (LOB-253).
+ *
+ * `url` is `""` for a repo nobody gave a clone URL — the row `createSession` writes the first time
+ * a session names a slug — and `localPath` is absent for a repo with no checkout on this machine.
+ * Such a repo still opens sessions, but in an empty directory: no worktree is cut, so nothing it
+ * changes can be measured. The two booleans are read from the checkout at the moment the row is
+ * answered, never stored, so a checkout that was moved or deleted since it was registered reads as
+ * `localPathIsGit: false` rather than as the fact it was when registered.
+ */
 export const RepoSummary = Schema.Struct({
   repo: RepoSlug,
   url: Schema.String,
@@ -92,8 +102,41 @@ export const RepoSummary = Schema.Struct({
   /** A checkout on this machine to read `.factory/config` and the default ref from, if any. */
   localPath: Schema.optional(Schema.String),
   registeredAt: Timestamp,
+  /** `localPath` is inside a git work tree, so a session's worktree can be cut from it. */
+  localPathIsGit: Schema.Boolean,
+  /** `localPath` holds a `.factory/config` declaring the repo's commands. */
+  hasFactoryConfig: Schema.Boolean,
+  /**
+   * The root of the git work tree `localPath` is inside (`git rev-parse --show-toplevel`): the
+   * repository a session's worktree is cut from. The path itself for a checkout's root, an
+   * enclosing directory for one inside it (a monorepo package, or a plain directory under an
+   * unrelated repository). Present exactly when `localPathIsGit`.
+   */
+  workTree: Schema.optional(Schema.String),
 });
 export type RepoSummary = typeof RepoSummary.Type;
+
+/** What `listRepos` reads: every registered repo — the registry is small, so no page. */
+export const ListReposInput = Schema.Struct({});
+export type ListReposInput = typeof ListReposInput.Type;
+
+export const ListReposOutput = Schema.Struct({
+  /** Ordered by slug. */
+  repos: Schema.Array(RepoSummary),
+});
+export type ListReposOutput = typeof ListReposOutput.Type;
+
+export const GetRepoInput = Schema.Struct({ repo: RepoSlug });
+export type GetRepoInput = typeof GetRepoInput.Type;
+
+/**
+ * `getRepo` was asked for a slug the registry has no row for (LOB-253). A tag of its own rather
+ * than `SessionError`'s `not_found`, which means a session: the CLI prints it as `repo_not_found`.
+ */
+export class RepoNotFound extends Schema.TaggedError<RepoNotFound>()(
+  "RepoNotFound",
+  { repo: Schema.String, message: Schema.String },
+) {}
 
 export const SessionSummary = Schema.Struct({
   id: SessionId,
@@ -629,7 +672,10 @@ export const CreateSessionInput = Schema.Struct({
   title: Schema.optional(Schema.String),
   /** Deduplicates a retried create: the same request id returns the same session. */
   requestId: Schema.optional(Schema.String),
-  /** The repo the session works on. Absent means a scratch session, which is what tests use. */
+  /**
+   * The repo the session works on. Absent with a `taskId`, the card's repository, which is its
+   * board's (LOB-255); absent without one, a scratch session, which is what tests use.
+   */
   repo: Schema.optional(RepoSlug),
   /** The ref the session starts from. Defaults to the repo registry's default base ref. */
   baseRef: Schema.optional(Schema.String),
@@ -666,6 +712,10 @@ export type CreateSessionInput = typeof CreateSessionInput.Type;
  * Register or update a repo so sessions can bind to it. A session that names an unregistered repo
  * still opens: `createSession` registers it with no clone URL, and this is how the URL and the
  * local checkout arrive (a trigger, later, is the other writer — D14 needs the URL to clone).
+ *
+ * A field left out keeps the row's value, so a second registration that names only a new base ref
+ * keeps the checkout. A `localPath` that is named must be absolute and inside a git work tree, or
+ * the call is `invalid_input` naming the path and nothing is written (LOB-253).
  */
 export const RegisterRepoInput = Schema.Struct({
   repo: RepoSlug,

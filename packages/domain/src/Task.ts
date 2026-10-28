@@ -344,6 +344,10 @@ export const Task = Schema.Struct({
   boardId: BoardInstanceId,
   title: Schema.String,
   column: Schema.String,
+  /**
+   * The board's repository, which `createTask` gives every card (LOB-255). A card made before then
+   * holds none in its row and reads back with its board's, the one its runs are bound to.
+   */
   repo: Schema.optional(RepoSlug),
   /** The definition version this task started under (B2). */
   definitionVersion: Schema.Int,
@@ -514,6 +518,21 @@ export class BoardExists extends Schema.TaggedError<BoardExists>()(
   { repo: Schema.String, boardId: Schema.String, message: Schema.String },
 ) {}
 
+/**
+ * A card was asked for on a board with a repository other than the board's (LOB-255). A card
+ * inherits its board's repository (B2), so one naming another would put runs on the board that
+ * work somewhere else. Names both: `repo` is the one the caller named, `boardRepo` the board's.
+ */
+export class BoardRepoMismatch extends Schema.TaggedError<BoardRepoMismatch>()(
+  "BoardRepoMismatch",
+  {
+    boardId: Schema.String,
+    boardRepo: Schema.String,
+    repo: Schema.String,
+    message: Schema.String,
+  },
+) {}
+
 export class StaleRevision extends Schema.TaggedError<StaleRevision>()(
   "StaleRevision",
   {
@@ -582,6 +601,7 @@ export type TaskError =
   | BoardNotFound
   | DefinitionNotFound
   | BoardExists
+  | BoardRepoMismatch
   | StaleRevision
   | UndeclaredTransition
   | HumanGateRequired
@@ -591,6 +611,10 @@ export type TaskError =
   | EmptyComment
   | TaskStorageError;
 
+/**
+ * A new card (B3). `repo` defaults to the board instance's repository, which is the only one a card
+ * on that board may name: another is `BoardRepoMismatch` (LOB-255).
+ */
 export const CreateTaskInput = Schema.Struct({
   boardId: BoardInstanceId,
   title: Schema.String,
@@ -715,17 +739,24 @@ export type AttentionReason = typeof AttentionReason.Type;
 /**
  * One row of the attention view (LOB-77): a card, the repository its board binds (so a row from any
  * board says where it is), and one reason it needs a person. A card with two reasons is two rows.
+ *
+ * An approval can also belong to a session no card owns — a scratch session, or one opened from a
+ * repo with no card (LOB-271). That row has no `task`: `sessionTitle` names the session instead
+ * (an untitled session says `""`), `repo` is the session's own repo when it has one, and the reason's
+ * `sessionId` is where the row links. Only the `approval` reason ever appears without a card, and
+ * only on the every-board read: a board's view lists the board's cards.
  */
 export const AttentionItem = Schema.Struct({
-  task: Task,
-  repo: RepoSlug,
+  task: Schema.optional(Task),
+  repo: Schema.optional(RepoSlug),
+  sessionTitle: Schema.optional(Schema.String),
   reason: AttentionReason,
 });
 export type AttentionItem = typeof AttentionItem.Type;
 
 /**
  * What needs a person, on one board or on every board (LOB-77). The answer is ordered approvals
- * first (oldest request first), then questions (oldest block first), then gates (least recently
+ * first (oldest request first, a card-less session's among them), then questions (oldest block first), then gates (least recently
  * changed card first). An unknown board is `BoardNotFound`, not an empty list: "nothing needs you"
  * must not be what a board that does not exist says.
  */

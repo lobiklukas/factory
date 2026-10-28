@@ -10,6 +10,7 @@ import { boardCommand } from "./commands/board";
 import { discardCommand } from "./commands/discard";
 import { lsCommand } from "./commands/ls";
 import { prCommand } from "./commands/pr";
+import { repoCommand } from "./commands/repo";
 import { runCommand } from "./commands/run";
 import { sendCommand } from "./commands/send";
 import { watchCommand } from "./commands/watch";
@@ -30,6 +31,7 @@ const root = Command.make("factory").pipe(
     discardCommand,
     prCommand,
     boardCommand,
+    repoCommand,
     approvalsCommand,
     approveCommand,
     denyCommand,

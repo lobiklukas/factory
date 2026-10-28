@@ -3,7 +3,12 @@
 One file per user-facing feature of the board's CLI surface. Each answers: what it is, how a user
 reaches it, how the skill drives it, and what observable end state proves it works.
 
-Status reflects the last verified runs: the both-ways phase and `./equivalence.sh` (LOB-87,
+Status reflects the last verified runs: a card created with no repo (LOB-255, 2026-10-28,
+`agent/LOB-255`), API on `:9530`, web on `:3530`, the GitHub fake on `:9533`: `./drive.sh` exit 0,
+**52/52** required checks, with `create.ts`'s **5/5** (`create.json`: the board's repo inherited, another
+refused as `BoardRepoMismatch`, no card written) and `build.ts`'s **4/4** (`build-built.json`: the
+build run bound to the board's repo on `factory/<session-id>`) and **8/8** (`build-pr.json`) folded
+in — the repo-less card reached review with a PR, then done. Before it, the both-ways phase and `./equivalence.sh` (LOB-87,
 2026-10-27, `agent/LOB-87`), API on `:9500`, web on `:3500`, verify-cli's gated API on `:9501`, the
 GitHub fake on `:9503`: `./equivalence.sh` exit 0, its nine steps green — verify-cli's drive (with
 `approve.sh`), verify-web's `drive.mjs` (**91/91**), then `./drive.sh` **51/51** with `both-ways.mjs`'s
@@ -28,21 +33,22 @@ The specify phase's spec (LOB-238, 2026-10-27, `agent/LOB-238`), API on `:9520`,
 card held in `building` by a `pr_link` refusal ([build.md](build.md)). `./board-create.sh` (LOB-208, 2026-10-27, `agent/LOB-208`), API on
 `:9510`, **18/18** checks passed (`create-board.json`). Evidence: `.verify/evidence/latest/board/`.
 
-| Feature                         | Status  | File                             |
-| ------------------------------- | ------- | -------------------------------- |
-| `factory board create`          | passing | [boards.md](boards.md)           |
-| create a card (`createTask`)    | passing | [create.md](create.md)           |
-| `factory board ls`              | passing | [ls.md](ls.md)                   |
-| `factory board show`            | passing | [show.md](show.md)               |
-| `factory board move` + refusals | passing | [move.md](move.md)               |
-| `factory board start`           | passing | [start.md](start.md)             |
-| the board read back in the web  | passing | [dashboard.md](dashboard.md)     |
-| specify, ask, answer (the card) | passing | [specify.md](specify.md)         |
-| build, PR + evidence, merge     | passing | [build.md](build.md)             |
-| the specifying run's spec       | passing | [specify.md](specify.md)         |
-| the ask on the task             | passing | [ask.md](ask.md)                 |
-| `requires[]` on exit            | passing | [requires.md](requires.md)       |
-| CLI ⇄ browser, one board        | passing | [equivalence.md](equivalence.md) |
+| Feature                                 | Status  | File                             |
+| --------------------------------------- | ------- | -------------------------------- |
+| `factory board create`                  | passing | [boards.md](boards.md)           |
+| create a card (`createTask`)            | passing | [create.md](create.md)           |
+| `factory board ls`                      | passing | [ls.md](ls.md)                   |
+| `factory board show`                    | passing | [show.md](show.md)               |
+| `factory board move` + refusals         | passing | [move.md](move.md)               |
+| `factory board start`                   | passing | [start.md](start.md)             |
+| `board block\|unblock\|attention\|runs` | passing | [triage.md](triage.md)           |
+| the board read back in the web          | passing | [dashboard.md](dashboard.md)     |
+| specify, ask, answer (the card)         | passing | [specify.md](specify.md)         |
+| build, PR + evidence, merge             | passing | [build.md](build.md)             |
+| the specifying run's spec               | passing | [specify.md](specify.md)         |
+| the ask on the task                     | passing | [ask.md](ask.md)                 |
+| `requires[]` on exit                    | passing | [requires.md](requires.md)       |
+| CLI ⇄ browser, one board                | passing | [equivalence.md](equivalence.md) |
 
 ## Deliberately absent
 
@@ -50,10 +56,10 @@ card held in `building` by a `pr_link` refusal ([build.md](build.md)). `./board-
   the tracker's work item, and `factory board` reads and moves what exists. The drive creates its
   card over the API's `createTask` — the door a trigger uses — for the same reason
   ([create.md](create.md)).
-- **Blocking and unblocking by hand.** `blockTask`/`unblockTask` are on the RPC surface with typed
-  refusals covered in `packages/core`. B7's block — `needs_input`, set by a run's `ask` and lifted by a
+- **A block's other writers.** B7's block — `needs_input`, set by a run's `ask` and lifted by a
   person's `board comment` — is driven by `drive.sh`'s specify phase ([specify.md](specify.md)) and,
-  across a restart, by `ask.sh` ([ask.md](ask.md)).
+  across a restart, by `ask.sh` ([ask.md](ask.md)); a person's own `board block`/`unblock` is
+  [triage.md](triage.md).
 - **The card pane's own walk.** The dashboard phase only reads what the CLI's refusals left behind
   ([dashboard.md](dashboard.md)), and the both-ways phase moves the drive's card once each way
   ([equivalence.md](equivalence.md)); the pane's declared moves, its stale refusal, a fresh context

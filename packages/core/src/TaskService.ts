@@ -143,6 +143,21 @@ export class BoardExists extends Schema.TaggedError<BoardExists>()(
   { repo: Schema.String, boardId: Schema.String, message: Schema.String },
 ) {}
 
+/**
+ * `create` named a repository other than its board's (LOB-255). A card inherits its board's repo
+ * (B2) — the default when none is named — so naming another is refused, naming both, and nothing is
+ * written: runs on the card would otherwise work in a repository the board is not over.
+ */
+export class BoardRepoMismatch extends Schema.TaggedError<BoardRepoMismatch>()(
+  "BoardRepoMismatch",
+  {
+    boardId: Schema.String,
+    boardRepo: Schema.String,
+    repo: Schema.String,
+    message: Schema.String,
+  },
+) {}
+
 /** The expected revision was not the card's current one; `actual` is what it is now. */
 export class StaleRevision extends Schema.TaggedError<StaleRevision>()(
   "StaleRevision",
@@ -213,6 +228,7 @@ export type TaskError =
   | BoardNotFound
   | DefinitionNotFound
   | BoardExists
+  | BoardRepoMismatch
   | StaleRevision
   | UndeclaredTransition
   | HumanGateRequired
@@ -225,6 +241,7 @@ export type TaskError =
 export type CreateTaskInput = {
   readonly boardId: string;
   readonly title: string;
+  /** Defaults to the board's repository; any other is `BoardRepoMismatch` (LOB-255). */
   readonly repo?: string;
   readonly priority?: TaskPriorityType;
   readonly actor: Actor;
@@ -416,10 +433,21 @@ const TASK_COLUMN_NAMES = [
   "created_at",
   "updated_at",
 ];
-const TASK_COLUMNS = TASK_COLUMN_NAMES.join(", ");
+/**
+ * The list a read selects, `table` qualifying every column. A card made before cards carried a
+ * repository reads back with its board's (LOB-255), the same one `SessionService` binds its runs
+ * to, so the card and its runs never disagree about where the work is.
+ */
+const taskColumns = (table: string): string =>
+  TASK_COLUMN_NAMES.map((name) =>
+    name === "repo"
+      ? `COALESCE(${table}.repo, (SELECT b.repo FROM board_instances b WHERE b.id = ${table}.board_id)) AS repo`
+      : `${table}.${name}`,
+  ).join(", ");
+const TASK_COLUMNS = taskColumns("tasks");
 
 /** The same list qualified by `t.`, for a read that joins `tasks` to tables sharing column names. */
-const TASK_COLUMNS_T = TASK_COLUMN_NAMES.map((name) => `t.${name}`).join(", ");
+const TASK_COLUMNS_T = taskColumns("t");
 
 /**
  * One run of a card as the exit checks read it (`cardEvidence`): its session, and the branch binding
@@ -445,6 +473,34 @@ type ExitJudgement = {
 
 const iso = (value: Date | string): string =>
   DateTime.formatIso(DateTime.makeUnsafe(value));
+
+/**
+ * Merge two lists each already in the order `session_approvals` is read in (oldest request first,
+ * then session, then request id) into one, without reordering either. `key` is the request time at
+ * microsecond precision, as the database orders it: the `requestedAt` an item carries is cut to
+ * milliseconds, so comparing that would reorder rows the database keeps apart. A tie takes the left
+ * list's row first, and the two lists never share a session.
+ */
+const mergeByRequest = <A>(
+  left: ReadonlyArray<readonly [key: string, item: A]>,
+  right: ReadonlyArray<readonly [key: string, item: A]>,
+): Array<A> => {
+  const merged: Array<A> = [];
+  let i = 0;
+  let j = 0;
+  while (i < left.length || j < right.length) {
+    const l = left[i];
+    const r = right[j];
+    if (l !== undefined && (r === undefined || l[0] <= r[0])) {
+      merged.push(l[1]);
+      i += 1;
+    } else if (r !== undefined) {
+      merged.push(r[1]);
+      j += 1;
+    }
+  }
+  return merged;
+};
 
 export const TaskServiceLive = Layer.effect(
   TaskService,
@@ -748,15 +804,28 @@ export const TaskServiceLive = Layer.effect(
           Effect.gen(function* () {
             const boards = yield* sql<{
               id: string;
+              repo: string;
               definitionVersion: number;
             }>`
-              SELECT id, definition_version FROM board_instances WHERE id = ${input.boardId}
+              SELECT id, repo, definition_version FROM board_instances WHERE id = ${input.boardId}
             `;
             const board = boards[0];
             if (board === undefined) {
               return yield* new BoardNotFound({
                 boardId: input.boardId,
                 message: `no board ${input.boardId}`,
+              });
+            }
+            // The card's repository is its board's (B2, LOB-255): the default when none is named,
+            // and the only one a caller may name. A card with none made only scratch runs, which
+            // have no branch and so can never leave building.
+            const repo = input.repo ?? board.repo;
+            if (repo !== board.repo) {
+              return yield* new BoardRepoMismatch({
+                boardId: board.id,
+                boardRepo: board.repo,
+                repo,
+                message: `board ${board.id} is over ${board.repo}, so a card on it cannot name ${repo}`,
               });
             }
             const id = yield* mintTaskId;
@@ -767,7 +836,7 @@ export const TaskServiceLive = Layer.effect(
                 revision, priority, created_at, updated_at
               )
               VALUES (
-                ${id}, ${board.id}, ${input.title}, ${INITIAL_COLUMN}, ${input.repo ?? null},
+                ${id}, ${board.id}, ${input.title}, ${INITIAL_COLUMN}, ${repo},
                 ${board.definitionVersion}, 1, ${priority}, now(), now()
               )
               RETURNING ${sql.literal(TASK_COLUMNS)}
@@ -1536,6 +1605,28 @@ export const TaskServiceLive = Layer.effect(
         );
       });
 
+    /** One attention row for an approval of a session no card owns (LOB-271); a bad row is a storage fault. */
+    const toSessionAttention = (
+      row: {
+        readonly approvalSession: string;
+        readonly sessionTitle: string;
+        readonly sessionRepo: string | null;
+      },
+      reason: unknown,
+    ): Effect.Effect<AttentionItem, TaskStorageError> =>
+      decodeAttention({
+        sessionTitle: row.sessionTitle,
+        ...(row.sessionRepo === null ? {} : { repo: row.sessionRepo }),
+        reason,
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new TaskStorageError({
+              message: `session ${row.approvalSession} does not read as an attention row: ${String(cause)}`,
+            }),
+        ),
+      );
+
     /**
      * What needs a person (LOB-77): three statements over the rows the board and the approvals
      * service already keep, and no log fold — the view is polled, so its cost is a fixed number of
@@ -1545,7 +1636,11 @@ export const TaskServiceLive = Layer.effect(
      * count, and a partial index on `blocked_reason` is the fix when it is not.
      *
      * - **Approvals** are `session_approvals` rows with no decision, on a session `task_runs` names
-     *   as a run of the card. Every column, every block: only a person settles one.
+     *   as a run of the card. Every column, every block: only a person settles one. On the every-board
+     *   read they also include the undecided rows of sessions `task_runs` names nowhere (LOB-271): a
+     *   scratch session gated by `APPROVAL_REQUIRED` waits on a person as much as a run does, and the
+     *   view is the one place that person looks. They carry no card, only the session; a board's own
+     *   view lists the board's cards, so it leaves them out. Both kinds share one order, oldest first.
      * - **Questions** are cards blocked `needs_input` (B7). The question is the newest `question`
      *   comment asked since the block began (an answered question from an earlier block is not this
      *   block's), falling back to the block's note (a person may block a card `needs_input` by hand,
@@ -1585,11 +1680,13 @@ export const TaskServiceLive = Layer.effect(
               readonly action: string;
               readonly detail: string;
               readonly requestedAt: Date | string;
+              readonly requestedKey: string;
             }
           >`
             SELECT ${sql.literal(TASK_COLUMNS_T)}, bi.repo AS board_repo,
                    sa.session_id AS approval_session, sa.request_id, sa.action, sa.detail,
-                   sa.requested_at
+                   sa.requested_at,
+                   to_char(sa.requested_at AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISSUS') AS requested_key
             FROM session_approvals sa
             JOIN task_runs tr ON tr.session_id = sa.session_id
             JOIN tasks t ON t.id = tr.task_id
@@ -1598,6 +1695,34 @@ export const TaskServiceLive = Layer.effect(
               AND (${board}::text IS NULL OR t.board_id = ${board})
             ORDER BY sa.requested_at, sa.session_id, sa.request_id
           `;
+
+          // A session no card owns. `task_runs.session_id` is unique, so the anti-join is one index probe
+          // per pending row, and the pending rows come from `session_approvals_pending`.
+          const sessionApprovals =
+            board !== null
+              ? []
+              : yield* sql<{
+                  readonly approvalSession: string;
+                  readonly requestId: string;
+                  readonly action: string;
+                  readonly detail: string;
+                  readonly requestedAt: Date | string;
+                  readonly requestedKey: string;
+                  readonly sessionTitle: string;
+                  readonly sessionRepo: string | null;
+                }>`
+                  SELECT sa.session_id AS approval_session, sa.request_id, sa.action, sa.detail,
+                         sa.requested_at,
+                         to_char(sa.requested_at AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISSUS') AS requested_key,
+                         s.title AS session_title, s.repo AS session_repo
+                  FROM session_approvals sa
+                  JOIN sessions s ON s.id = sa.session_id
+                  WHERE sa.decision IS NULL
+                    AND NOT EXISTS (
+                      SELECT 1 FROM task_runs tr WHERE tr.session_id = sa.session_id
+                    )
+                  ORDER BY sa.requested_at, sa.session_id, sa.request_id
+                `;
 
           const questions = yield* sql<
             TaskRow & {
@@ -1666,7 +1791,19 @@ export const TaskServiceLive = Layer.effect(
               action: row.action,
               detail: row.detail,
               requestedAt: iso(row.requestedAt),
-            }),
+            }).pipe(Effect.map((item) => [row.requestedKey, item] as const)),
+          );
+          const sessionApprovalItems = yield* Effect.forEach(
+            sessionApprovals,
+            (row) =>
+              toSessionAttention(row, {
+                _tag: "approval",
+                sessionId: row.approvalSession,
+                requestId: row.requestId,
+                action: row.action,
+                detail: row.detail,
+                requestedAt: iso(row.requestedAt),
+              }).pipe(Effect.map((item) => [row.requestedKey, item] as const)),
           );
           const questionItems = yield* Effect.forEach(questions, (row) =>
             toAttention(row, {
@@ -1686,7 +1823,11 @@ export const TaskServiceLive = Layer.effect(
               sessionId: row.runSession,
             });
           });
-          return [...approvalItems, ...questionItems, ...gateItems];
+          return [
+            ...mergeByRequest(approvalItems, sessionApprovalItems),
+            ...questionItems,
+            ...gateItems,
+          ];
         }),
       );
 
