@@ -1,6 +1,6 @@
 ---
 name: verify-cli
-description: Drive and prove the factory CLI (`factory run` / `watch` / `history` / `ls` / `status` / `send` / `withdraw` / `approvals` / `approve` / `deny` / `repo` / `discard` / `replay` / `fork` / `reset` / `compact` / `spend` / `pr` / `outcomes` in apps/cli; `pr` is proven by verify-board's build phase, `outcomes` by verify-api's `outcomes.sh`) in a real tmux terminal against a real control plane. Use when asked to verify, test, or show evidence that the CLI works, or after changing apps/cli, packages/domain, or apps/api.
+description: Drive and prove the factory CLI (`factory run` / `watch` / `history` / `ls` / `status` / `send` / `withdraw` / `approvals` / `approve` / `deny` / `repo` / `skill` / `discard` / `replay` / `fork` / `reset` / `compact` / `spend` / `pr` / `outcomes` in apps/cli; `pr` is proven by verify-board's build phase, `outcomes` by verify-api's `outcomes.sh`) in a real tmux terminal against a real control plane. Use when asked to verify, test, or show evidence that the CLI works, or after changing apps/cli, packages/domain, or apps/api.
 ---
 
 # Verify the CLI
@@ -33,6 +33,7 @@ own instance of `apps/api` and record it in `.verify/run/api.pid`, so run them o
 | `--when-busy steer` (LOB-167)                             | `./steer.sh`: the steer joins the running run, which answers it once          | a steer is not a follow-up with a different label            |
 | `--when-busy reject` (LOB-167)                            | `./steer.sh`: `error: busy`, non-zero, nothing queued; idle → `run`           | a script can refuse to queue behind a running run            |
 | `factory repo` (LOB-253)                                  | `./repo.sh`, run by `drive.sh`: add, re-add, refusals, `ls`, `show`           | an operator binds a checkout without writing code            |
+| `factory skill` (D7)                                      | `./skill.sh`, run by `drive.sh`: `ls`, `show`, two puts, refusals             | a skill is edited without a migration, as a new version      |
 | `factory approve` (LOB-53)                                | `./approve.sh`, run by `drive.sh`: a parked approval decided, resumed         | the answer reaches the run, not only the row                 |
 | `factory discard` (LOB-268)                               | `./discard.sh`: worktree and branch gone, repeat names the first release      | the only way an operator ends a session's work               |
 | `factory fork` / `reset` / `compact` / `spend` (C15)      | `./session.sh`: a fork's transcript, a reset marker, a summary, the totals    | the session controls the dashboard has, from a shell         |
@@ -60,6 +61,7 @@ Every check is required: `drive.sh` exits non-zero when one fails.
 ./session.sh     # self-contained: its own API on :9380 (SESSION_PORT), a checkout it registers, FAUX_COST
 ./clone.sh       # self-contained: its own API on :9350 (CLONE_PORT) and a loopback git forge on :9351
 ./repo.sh        # needs ./up.sh's instance (API_URL/API_PORT); drive.sh runs it before approve.sh
+./skill.sh       # needs ./up.sh's instance (API_URL/API_PORT); drive.sh runs it after repo.sh
 ./model.sh       # self-contained: its own API on :9370 (MODEL_PORT) and a refused boot on :9371
 ```
 

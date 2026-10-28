@@ -32,11 +32,18 @@ transcript, approvals and sandbox as panes (LOB-76, part 2 of LOB-22).
   move from the page lands, so a move made in `factory board move` appears without a reload. A poll
   that fails keeps the last good board (and the open pane) on screen with a `[data-board-stale]`
   "Reconnecting" marker; only a first read that fails, or `BoardNotFound`, replaces the page.
-- **Run start.** `button[data-start-run]` is `createSession` with the card named, exactly as
-  `factory board start` does; it is enabled only in a `working` column (B4) and its `title` says why
-  when it is not. The card's runs are `listTaskRuns` (new on `TasksRpc`), newest first, as
+- **Run start.** `button[data-start-run]` opens `form[data-start-form]` (C6): a prompt field,
+  `textarea[data-start-prompt]`, pre-filled with the card's default prompt — its title, its body and
+  the column's instruction (`runPrompt`, the text `factory board start` sends with no `--prompt`) —
+  and **Send** (`[data-start-send]`) is `createSession` with the card named, exactly as `factory board
+start` does, then `sendMessage` with the field's text, so the run is busy when the pane opens it.
+  **Cancel** (`[data-start-cancel]`) closes the field and opens no run; an empty field cannot be sent
+  (`[data-start-unsendable]`). A first message the server refuses leaves the run open and says so in a
+  toast. The button is enabled only in a `working` column (B4) and its `title` says why when it is not.
+  The card's runs are `listTaskRuns` (new on `TasksRpc`), newest first, as
   `li[data-run=<session id>]`; picking one sets `?run=`. `?run=` opens only a run the card lists: any
-  other session id renders `[data-run-foreign=<id>]` and no run panes.
+  other session id renders `[data-run-foreign=<id>]` and no run panes. Proven end to end, against the
+  CLI's twin, by verify-board's `start-prompt.sh`.
 - **Run panes.** Transcript (the session pane, composer and steering included), Approvals (the run's
   pending `listApprovals`, each `li[data-approval=<request id>]` with `[data-decide=approved|denied]`
   buttons, disabled while the decision is in flight; the click is `decideApproval` as `dashboard`,

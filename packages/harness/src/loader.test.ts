@@ -17,12 +17,26 @@ import {
   type RunColumn,
   type RunProfile,
   type RunSkill,
+  type SkillPin,
 } from "./loader";
+import { mergeSkillPins } from "./session";
 
 const library: readonly RunSkill[] = [
-  { name: "specify", body: "# Specify\n\nClarify the goal first.\n" },
-  { name: "implement", body: "# Implement\n\nChange as little as possible.\n" },
-  { name: "review", body: "# Review\n\nReport evidenced findings.\n" },
+  {
+    name: "specify",
+    version: 1,
+    body: "# Specify\n\nClarify the goal first.\n",
+  },
+  {
+    name: "implement",
+    version: 1,
+    body: "# Implement\n\nChange as little as possible.\n",
+  },
+  {
+    name: "review",
+    version: 1,
+    body: "# Review\n\nReport evidenced findings.\n",
+  },
 ];
 
 type Loaded =
@@ -33,9 +47,10 @@ type Loaded =
 const run = (
   column: RunColumn | undefined,
   skills: readonly RunSkill[] = library,
+  pinned: readonly SkillPin[] = [],
 ): Loaded =>
   Effect.runSync(
-    loadRun(column, skills).pipe(
+    loadRun(column, skills, pinned).pipe(
       Effect.match({
         onFailure: (error) => ({
           ok: false as const,
@@ -97,6 +112,89 @@ describe("loadRun", () => {
   });
 });
 
+/**
+ * Which version of a skill a run is told (D7, docs/board.md B2): the newest for a run whose log pins
+ * nothing, and the pinned one for a run reopened after a newer version was put.
+ */
+describe("loadRun's versions", () => {
+  const v1: RunSkill = { name: "specify", version: 1, body: "# Specify v1\n" };
+  const v2: RunSkill = { name: "specify", version: 2, body: "# Specify v2\n" };
+  const v3: RunSkill = { name: "specify", version: 3, body: "# Specify v3\n" };
+  const specifying: RunColumn = { name: "specifying", skills: ["specify"] };
+
+  const told = (loaded: Loaded): readonly number[] =>
+    loaded.ok ? loaded.profile.skills.map((skill) => skill.version) : [];
+
+  it("tells a run with no pin the newest version, whatever order the library is in", () => {
+    expect(told(run(specifying, [v2, v3, v1]))).toEqual([3]);
+    expect(told(run(specifying, [v3, v1, v2]))).toEqual([3]);
+  });
+
+  it("tells a pinned run its pinned version, even when a newer one exists", () => {
+    const loaded = run(
+      specifying,
+      [v1, v2, v3],
+      [{ name: "specify", version: 2 }],
+    );
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    expect(loaded.profile.skills).toEqual([v2]);
+  });
+
+  it("ignores a pin for a skill the column does not name, and pins nothing it was not given", () => {
+    const loaded = run(
+      { name: "specifying", skills: ["specify", "review"] },
+      [...library, v2],
+      [{ name: "implement", version: 7 }],
+    );
+    expect(loaded.ok).toBe(true);
+    if (!loaded.ok) return;
+    expect(
+      loaded.profile.skills.map((skill) => `${skill.name}@${skill.version}`),
+    ).toEqual(["specify@2", "review@1"]);
+  });
+
+  it("refuses a pinned version the factory does not hold, naming it, rather than move to another", () => {
+    const loaded = run(specifying, [v1, v2], [{ name: "specify", version: 3 }]);
+    expect(loaded.ok).toBe(false);
+    if (loaded.ok) return;
+    expect(loaded.message).toBe(
+      'column "specifying" runs pinned to skill specify@3, which the factory does not hold',
+    );
+  });
+});
+
+describe("mergeSkillPins", () => {
+  const v1: RunSkill = { name: "specify", version: 1, body: "" };
+  const review: RunSkill = { name: "review", version: 4, body: "" };
+
+  it("pins what a first open was given, in the column's order", () => {
+    expect(mergeSkillPins([], [v1, review])).toEqual([
+      { name: "specify", version: 1 },
+      { name: "review", version: 4 },
+    ]);
+  });
+
+  it("writes nothing when every skill given is already pinned, or none was given", () => {
+    expect(mergeSkillPins([{ name: "specify", version: 1 }], [v1])).toBe(
+      undefined,
+    );
+    expect(mergeSkillPins([], [])).toBe(undefined);
+  });
+
+  it("never replaces a pin, and adds only the skills it lacked", () => {
+    expect(
+      mergeSkillPins(
+        [{ name: "specify", version: 1 }],
+        [{ ...v1, version: 2 }, review, review],
+      ),
+    ).toEqual([
+      { name: "specify", version: 1 },
+      { name: "review", version: 4 },
+    ]);
+  });
+});
+
 describe("skillsExtension", () => {
   it("is one section per skill, addressed by name", () => {
     const extension = skillsExtension(library);
@@ -111,8 +209,12 @@ describe("skillsExtension", () => {
   });
 
   it("orders the sections the profile gave it, not the library's order", () => {
-    const review: RunSkill = { name: "review", body: "# Review\n" };
-    const specify: RunSkill = { name: "specify", body: "# Specify\n" };
+    const review: RunSkill = { name: "review", version: 1, body: "# Review\n" };
+    const specify: RunSkill = {
+      name: "specify",
+      version: 1,
+      body: "# Specify\n",
+    };
 
     const extension = skillsExtension([review, specify]);
 

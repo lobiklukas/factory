@@ -8,7 +8,8 @@ order, with the cards the server lists in each (LOB-75, part 1 of LOB-22).
 
 - The rail's first entry is **Boards** (`/boards`): `listBoards`, newest first, each row a link
   carrying the repository, the definition and version, and the board id. No boards reads
-  `No boards yet`.
+  `No boards yet`. **New board** (header and empty state) opens the form that makes one
+  ([board-create.md](board-create.md)).
 - `/boards/<id>` reads `getBoard` and `listTasks` together (`boardAtom`), so the lane order is the
   pinned version's and the cards are the server's, urgent first then FIFO (docs/board.md B2, B9).
 - Each lane is a `section[data-lane=<column>]` with the column's kind and role; an empty lane reads
@@ -27,8 +28,9 @@ order, with the cards the server lists in each (LOB-75, part 1 of LOB-22).
 
 ## How to get to it (user POV)
 
-Open the dashboard, click **Boards** in the rail, click a board. Each `node drive.mjs` run seeds its
-own board with one card in `intake` through the board skill's seed (`.pi/skills/verify-board/seed.ts`),
+Open the dashboard, click **Boards** in the rail, click a board. Each `node drive.mjs` run makes its
+own board through the **New board** form (C5, version 1 of the default definition) and seeds one card
+in `intake` onto it through the board skill's seed (`.pi/skills/verify-board/seed.ts`, `SEED_BOARD_ID`),
 so a rerun against the same `./up.sh` instance moves a fresh card rather than the last run's.
 
 ## Driving it with drive.mjs
@@ -36,7 +38,8 @@ so a rerun against the same `./up.sh` instance moves a fresh card rather than th
 The block runs after the session checks. The oracle for the lane order is `getBoard`, asked from the
 drive process rather than the page. It requires:
 
-1. the seed to print `brd_…`, `tsk_…` at revision 1, and the API's `getBoard` to hold that board (a
+1. the form to land on a board of this run's repository pinned to version 1, then the seed to print
+   `brd_…`, `tsk_…` at revision 1 for that board, and the API's `getBoard` to hold it (a
    miss means the drive's `DATABASE_URL` is not the API's);
 2. the rail's **Boards** link, then the board's own link, to reach `/boards/<id>`;
 3. the rendered lane names, left to right, to equal the definition's column names exactly;

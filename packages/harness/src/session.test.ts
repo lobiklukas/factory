@@ -31,6 +31,7 @@ import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
 import { Clock, Effect, Exit, ManagedRuntime, Random } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { loadRun, type RunColumn, type RunSkill } from "./loader";
 import { createModelAccess } from "./models";
 import { autonomyPolicy, DEFAULT_AUTONOMY, policyExtension } from "./policy";
 import {
@@ -53,6 +54,7 @@ import {
   readPage,
   readPullRequestDoc,
   readSessionLog,
+  readSkillPins,
   readSpec,
   resetSession,
   SESSION_PROGRESS,
@@ -538,8 +540,8 @@ describe("a run's column decides its prompt", () => {
           run: {
             column: "specifying",
             skills: [
-              { name: "specify", body: SPECIFY_BODY },
-              { name: "review", body: REVIEW_BODY },
+              { name: "specify", version: 1, body: SPECIFY_BODY },
+              { name: "review", version: 1, body: REVIEW_BODY },
             ],
           },
         });
@@ -587,6 +589,91 @@ describe("a run's column decides its prompt", () => {
     );
 
     expect(sections).toEqual({});
+  }, 120_000);
+});
+
+/**
+ * A skill version is pinned to the run that opened on it (D7, docs/board.md B2), driven the way the
+ * control plane drives it: read the log's pins, resolve the column with `loadRun` against the
+ * factory's versions, open, and send. The "put" is the library growing a version 2 between two
+ * opens; that `putSkill` adds exactly that row is `@repo/core`'s SkillService suite, and the same
+ * flow through the real service and table is its SessionService suite.
+ *
+ * Mutation: have `loadRun` ignore `pinned` — the reopened run is told version 2. Mutation: drop the
+ * pins from the open's commit — the log records none, so the reopen pins nothing and moves to 2.
+ */
+describe("a run keeps the skill version it opened with", () => {
+  const SPECIFYING: RunColumn = {
+    name: "specifying",
+    role: "specifier",
+    skills: ["specify"],
+  };
+  const V1: RunSkill = {
+    name: "specify",
+    version: 1,
+    body: "# Specify\n\nVersion one: ask about the goal.",
+  };
+  const V2: RunSkill = {
+    name: "specify",
+    version: 2,
+    body: "# Specify\n\nVersion two: ask about the risks.",
+  };
+
+  /** One open of `id` as the control plane makes it, one turn, and what its log then says. */
+  const runOnce = (id: string, library: readonly RunSkill[]) =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Effect.promise(() =>
+          PostgresStorage.owner(sql, id),
+        );
+        const pinned = yield* readSkillPins(storage);
+        const run = yield* loadRun(SPECIFYING, library, pinned);
+        const { harness, root } = yield* openSession({
+          storage,
+          model,
+          cwd: workdir,
+          run,
+        });
+        const submitted = yield* submitMessage(root, { content: "begin" });
+        yield* Effect.promise(() => submitted.submission.wait(context));
+        yield* closeHarness(harness);
+        yield* Effect.promise(() => storage.dispose());
+        const reader = yield* Effect.promise(() =>
+          PostgresStorage.reader(sql, id),
+        );
+        const prompts = yield* readPromptSections(reader);
+        const pins = yield* readSkillPins(reader);
+        yield* Effect.promise(() => reader.dispose());
+        return { told: run.skills, prompts, pins };
+      }),
+    );
+
+  it("tells a new run the newest version, and a reopened one the version its log pinned", async () => {
+    const stamp = `${Effect.runSync(Random.nextIntBetween(0, 2 ** 31))}-${Effect.runSync(Clock.currentTimeMillis)}`;
+    const before = `harness-pin-before-${stamp}`;
+    const after = `harness-pin-after-${stamp}`;
+
+    // The run opened before the edit: the factory holds version 1 only.
+    const opened = await runOnce(before, [V1]);
+    // The edit: version 2 is put. A run opened now is a new run; the old one is reopened.
+    const fresh = await runOnce(after, [V1, V2]);
+    const reopened = await runOnce(before, [V1, V2]);
+
+    // The log records the version the run was told, by name and number.
+    expect(opened.pins).toEqual([{ name: "specify", version: 1 }]);
+    expect(opened.prompts["skill_specify"]).toContain("Version one");
+
+    // A new specifying run carries the new body, and its log pins version 2.
+    expect(fresh.told).toEqual([V2]);
+    expect(fresh.prompts["skill_specify"]).toContain("Version two");
+    expect(fresh.pins).toEqual([{ name: "specify", version: 2 }]);
+
+    // The run opened before the edit keeps version 1 through the reopen: what it is told and what
+    // its log's prompt holds are the old body, and its pin did not move.
+    expect(reopened.told).toEqual([V1]);
+    expect(reopened.prompts["skill_specify"]).toContain("Version one");
+    expect(reopened.prompts["skill_specify"]).not.toContain("Version two");
+    expect(reopened.pins).toEqual([{ name: "specify", version: 1 }]);
   }, 120_000);
 });
 

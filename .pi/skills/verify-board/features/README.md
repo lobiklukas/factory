@@ -3,7 +3,7 @@
 One file per user-facing feature of the board's CLI surface. Each answers: what it is, how a user
 reaches it, how the skill drives it, and what observable end state proves it works.
 
-Status reflects the last verified runs: `factory board add` (LOB-261, 2026-10-28, `agent/LOB-261`), API on
+Status reflects the last verified runs: `./start-prompt.sh` (C6, 2026-10-28, `agent/C6`), API on `:9550`, web on `:3550`, the GitHub fake on `:9553`: **10/10** checks passed (`start-prompt-web.json`: the board page's Start run + Send and `factory board start` with no `--prompt` hand the run the same first `pi.user` entry, both runs busy; an edited field is sent as typed, Cancel opens no run, `--idle` sends nothing), with `./drive.sh` exit 0 (147 PASS), `./triage.sh` and `./start-body.sh` passing against the same instance ([start.md](start.md)). `factory board add` (LOB-261, 2026-10-28, `agent/LOB-261`), API on
 `:9650`, web on `:3650`, the GitHub fake on `:9653`: `./drive.sh` exit 0, **124/124** checks, its card
 made in the pane by `factory board add`, with `add.ts`'s **5/5** (`add.json`: the repo inherited, the
 body read back, another repo refused, the CLI's card and the form's `createTask` listing the same)

@@ -70,6 +70,14 @@ import { StartMissionInput, StartMissionResult } from "@repo/domain/Mission";
 import { OutcomeReport, OutcomesInput } from "@repo/domain/Outcomes";
 import { GetServerInfoInput, ServerInfo } from "@repo/domain/Server";
 import {
+  GetSkillInput,
+  ListSkillsInput,
+  PutSkillInput,
+  SkillErrorSchema,
+  SkillRecord,
+  SkillSummary,
+} from "@repo/domain/Skill";
+import {
   AddTriggerRouteInput,
   ListTriggerRoutesInput,
   ListTriggerRoutesOutput,
@@ -537,6 +545,34 @@ export class ServerRpc extends RpcGroup.make(
   }),
 ).middleware(ControlPlaneAuth) {}
 
+/**
+ * The factory's skills (D7): the prompt text a column binds (docs/board.md B6), read and edited
+ * without a migration. A put is a new version, never an update, and a run keeps the version its log
+ * pinned when it opened (B2), so an edit reaches the next run and no run in flight. Its own group:
+ * a skill is the factory's, not a session's or a board's, and a column names it only by name.
+ */
+export class SkillsRpc extends RpcGroup.make(
+  // Every skill at its newest version, with the default definition's columns that bind it.
+  Rpc.make("listSkills", {
+    payload: ListSkillsInput,
+    success: Schema.Array(SkillSummary),
+    error: SkillErrorSchema,
+  }),
+  // One version: the one named, or the newest. An unknown name or version is `SkillNotFound`.
+  Rpc.make("getSkill", {
+    payload: GetSkillInput,
+    success: SkillRecord,
+    error: SkillErrorSchema,
+  }),
+  // Version newest + 1 (1 for a new name), attributed to the caller's credential. A blank body is
+  // `InvalidSkill`, and nothing is written.
+  Rpc.make("putSkill", {
+    payload: PutSkillInput,
+    success: SkillRecord,
+    error: SkillErrorSchema,
+  }),
+).middleware(ControlPlaneAuth) {}
+
 // Every group carries `ControlPlaneAuth` (LOB-20), so every member — `watchSession`'s stream too —
 // is refused as `Unauthenticated` without a credential the server knows, and a handler that records
 // an actor reads it from the `Caller` the middleware provides, not from the body.
@@ -544,4 +580,5 @@ export class ServerRpc extends RpcGroup.make(
 export const RpcApi = SessionRpc.merge(ApprovalsRpc)
   .merge(TasksRpc)
   .merge(TriggerRoutesRpc)
-  .merge(ServerRpc);
+  .merge(ServerRpc)
+  .merge(SkillsRpc);

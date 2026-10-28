@@ -152,6 +152,23 @@ the flagged repo turned runnable in place, a session on the registered repo cut 
 behind the registry's back flipping its row on the poll (`features/repos.md`). Evidence goes to
 `.verify/evidence/latest/repos/`.
 
+### Creating a board
+
+```sh
+BOARD_CREATE_API_PORT=9561 BOARD_CREATE_WEB_PORT=3561 ./board-create.sh   # its own instance and empty database; leaves nothing running
+```
+
+The empty state of `/boards` needs a database with no board, so `board-create.sh` starts its own API
+and dashboard on a throwaway database it mints on `DATABASE_URL`'s server (over TCP) and drops on exit.
+`board-create.mjs` requires the empty state to offer **New board**, the form's definition and version
+pickers to be `listDefinitions`' (the newest version first), a bad slug stopped in the form with no
+request, a typed slug to land on the new board's lanes pinned to the newest version and printed by
+`factory board list`, a second create for it to be `BoardExists` with a link to the existing board and
+nothing written, a registered repository to be offered by the picker and version 1 to pin version 1,
+and `DefinitionNotFound` (the page's own request rewritten in flight to name a definition that does
+not exist) to be shown verbatim with nothing written (`features/board-create.md`). `drive.mjs` makes
+its own board through the same form. Evidence goes to `.verify/evidence/latest/board-create/`.
+
 ### The dashboard's credential
 
 ```sh
@@ -240,22 +257,23 @@ touch `.verify/evidence/`; after cleanup, confirm the evidence is still there.
 
 ## Helpers
 
-| File                | Purpose                                                                   |
-| ------------------- | ------------------------------------------------------------------------- |
-| `up.sh`             | Launch isolated API + web, wait for readiness                             |
-| `down.sh`           | Stop only what `up.sh` started                                            |
-| `doctor.sh`         | Read-only health check of the instance                                    |
-| `drive.mjs`         | Browser drive + evidence capture                                          |
-| `seed-attention.ts` | The attention block's board, cards and the run's ask                      |
-| `spend.sh`          | The spend pane's own priced instance and its drive (`spend.mjs`)          |
-| `thread.sh`         | The card thread's own asking instance and its drive (`thread.mjs`)        |
-| `seed-spend.ts`     | The spend drive's board and the two cards its runs start from             |
-| `repos.sh`          | The repositories page's own instance, checkouts and drive (`repos.mjs`)   |
-| `backend.sh`        | The anthropic-inferred instance, no banner, and the model (`backend.mjs`) |
-| `history.sh`        | A long history's own short-idle instance and its drive (`history.mjs`)    |
-| `auth.sh`           | An API that requires a token, two dashboards and the drive (`auth.mjs`)   |
-| `model.sh`          | The model picker's own instance (`DEFAULT_MODEL`) and drive (`model.mjs`) |
-| `features/`         | Feature map: what each user-facing feature is and how to prove it         |
+| File                | Purpose                                                                          |
+| ------------------- | -------------------------------------------------------------------------------- |
+| `up.sh`             | Launch isolated API + web, wait for readiness                                    |
+| `down.sh`           | Stop only what `up.sh` started                                                   |
+| `doctor.sh`         | Read-only health check of the instance                                           |
+| `drive.mjs`         | Browser drive + evidence capture                                                 |
+| `seed-attention.ts` | The attention block's board, cards and the run's ask                             |
+| `spend.sh`          | The spend pane's own priced instance and its drive (`spend.mjs`)                 |
+| `thread.sh`         | The card thread's own asking instance and its drive (`thread.mjs`)               |
+| `seed-spend.ts`     | The spend drive's board and the two cards its runs start from                    |
+| `repos.sh`          | The repositories page's own instance, checkouts and drive (`repos.mjs`)          |
+| `board-create.sh`   | The New board form's own instance, empty database and drive (`board-create.mjs`) |
+| `backend.sh`        | The anthropic-inferred instance, no banner, and the model (`backend.mjs`)        |
+| `history.sh`        | A long history's own short-idle instance and its drive (`history.mjs`)           |
+| `auth.sh`           | An API that requires a token, two dashboards and the drive (`auth.mjs`)          |
+| `model.sh`          | The model picker's own instance (`DEFAULT_MODEL`) and drive (`model.mjs`)        |
+| `features/`         | Feature map: what each user-facing feature is and how to prove it                |
 
 ## Feature map
 

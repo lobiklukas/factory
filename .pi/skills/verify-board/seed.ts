@@ -18,6 +18,10 @@
 // board's repository through the API's `registerRepo`, pointing it at that checkout, so a run on one
 // of its cards is a git worktree of it and has a branch a PR can publish.
 //
+// `SEED_BOARD_ID=brd_…` seeds the card on that board and creates none (C5): verify-web's drive makes
+// its board with the dashboard's **New board** form, as an operator does, and asks this seed for the
+// card alone — the board's repository and version are read back from the server, not assumed.
+//
 // Prints one JSON line: {"boardId":"brd_…","repo":"…","definitionVersion":1,"taskId":"tsk_…",
 // "revision":1,"title":"…"}, or the board's three fields alone with `SEED_CARD=0`.
 import { randomBytes } from "node:crypto";
@@ -34,12 +38,28 @@ const hex = (bytes: number) => randomBytes(bytes).toString("hex");
 const TITLE = "verify-board card";
 const WITH_CARD = process.env["SEED_CARD"] !== "0";
 const NEWEST = process.env["SEED_DEFINITION_VERSION"] === "newest";
+const BOARD_ID = process.env["SEED_BOARD_ID"] ?? "";
 const REPO_ROOT = process.env["SEED_REPO_ROOT"] ?? "";
 const API_URL = process.env["API_URL"] ?? "http://localhost:9400";
 
 const program = Effect.gen(function* () {
   const tasks = yield* TaskService;
   const repo = RepoSlug.make(`verify-board/${hex(6)}`);
+
+  if (BOARD_ID !== "") {
+    // The board is the caller's: read it back, add the card, and print the same line.
+    const { instance } = yield* tasks.getBoard(BOARD_ID);
+    const boardId = instance.id;
+    const task = yield* tasks.create({ boardId, title: TITLE, actor: "cli" });
+    return JSON.stringify({
+      boardId,
+      repo: instance.repo,
+      definitionVersion: instance.definitionVersion,
+      taskId: task.id,
+      revision: task.revision,
+      title: task.title,
+    });
+  }
 
   if (REPO_ROOT !== "") {
     // Through the API, as `requires.ts` does: the session service the runs open in is the one

@@ -53,7 +53,7 @@ ask. The drive requires:
 
 1. a fresh card in `specifying` (moved there through the API as a person) to show
    `[data-thread-empty]` and a disabled **Comment**;
-2. **Start run** in the pane and a message in the run's composer to park the card: `getTask` says
+2. **Start run** then **Send** in the pane (the first message is the card's default prompt; nothing is typed into the run's composer) to park the card: `getTask` says
    `needs_input` from `specifying`, `getSession` says the run is idle, and — with no reload — the pane
    shows the question verbatim with kind `Question`, the run's session id as actor and the server's
    `createdAt`, the composer turned into **Answer**, and the card marked blocked;
