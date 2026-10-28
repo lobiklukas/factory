@@ -98,9 +98,10 @@ const invocations = (markdown: string): ReadonlyArray<Invocation> => {
         end++;
         text = `${text.trimEnd().slice(0, -1)} ${lines[end] ?? ""}`;
       }
-      // A `factory` word that starts a command: at the line's start, or after `$(`, `|`, `&&`, `;`.
+      // A `factory` word that starts a command: at the line's start, or after `$(`, `|`, `&&`, `;`,
+      // `!`, a function body's `{`, or the keywords `then`, `do`, `if`, `else`.
       for (const match of text.matchAll(
-        /(?:^|\$\(|\||&&|;)\s*factory\s+([^|;&)]*)/g,
+        /(?:^|\$\(|\||&&|;|!|\{|\b(?:then|do|if|else))\s*factory\s+([^|;&)}]*)/g,
       )) {
         const tokens = words(match[1] ?? "");
         if (tokens.length > 0) found.push({ line: index + 1, tokens });
@@ -276,6 +277,8 @@ describe("docs/getting-started.md", () => {
       "  --body x | awk '{print $2}')\"",
       "echo not-a-command",
       'factory watch "$S"',
+      "rev() { factory board show --task \"$T\" | awk '{print $2}'; }",
+      "if x; then factory board ls; fi",
       "```",
     ].join("\n");
     expect(invocations(text)).toEqual([
@@ -294,6 +297,8 @@ describe("docs/getting-started.md", () => {
         ],
       },
       { line: 6, tokens: ["watch", "$S"] },
+      { line: 7, tokens: ["board", "show", "--task", "$T"] },
+      { line: 8, tokens: ["board", "ls"] },
     ]);
   });
 
@@ -311,7 +316,10 @@ describe("docs/getting-started.md", () => {
     ]);
     const missing = named.filter(
       (name) =>
-        !elsewhere.has(name) && !new RegExp(`\\b${name}\\b`).test(documented),
+        !elsewhere.has(name) &&
+        // An assignment line, commented out or not: a passing mention in another variable's
+        // comment does not document it.
+        !new RegExp(`^#?\\s*${name}=`, "m").test(documented),
     );
     expect(missing).toEqual([]);
   });

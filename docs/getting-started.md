@@ -78,7 +78,13 @@ API with a scripted model per role (the specifier asks one question, the planner
 builder commits a change and verifies it), a fake GitHub on loopback that records every pull request
 it is asked to open, and a dashboard. Pick ports that are free:
 
+The rehearsal keeps its data in a database of its own, so it never touches the one `bun run dev` uses.
+`docker compose` creates only `factory`; create `factory_rehearsal` beside it over TCP (no Postgres
+client needed, and a second run finds it already there), and name it in `DATABASE_URL`:
+
 ```sh
+export DATABASE_URL=postgres://factory:factory@localhost:5442/factory_rehearsal
+bun -e 'import { SQL } from "bun"; const sql = new SQL("postgres://factory:factory@localhost:5442/factory"); try { await sql.unsafe(`CREATE DATABASE "factory_rehearsal"`) } catch (e) { if (!String(e).includes("already exists")) throw e } await sql.close()'
 API_PORT=9400 WEB_PORT=3400 GITHUB_PORT=9403 .pi/skills/verify-board/up.sh
 export FACTORY_API_URL=http://localhost:9400
 ```
@@ -359,8 +365,9 @@ makes the third party retry, and eventually disable the webhook.
    signature, a body over `TRIGGER_MAX_BODY_BYTES`) is only in the API's log.
 
 7. **Follow the card** from step 6 on: it is the same board, so its runs, its PR and the plan approval
-   are the steps above. With `LINEAR_API_KEY` set the issue moves to your started state when a run
-   opens, gets the PR and moves to in review when it opens, and moves to done when it merges.
+   are the steps above. With `LINEAR_API_KEY` set, a card's issue first moves when its run opens the
+   PR: it gets the PR link and moves to in review, and moves to done when the PR merges. Filing the
+   card moves nothing. The started state applies only to a rule that opens a session (one with no `"mode": "card"`).
 
 8. **Proof a live smoke happened** is a hand run: put the delivery's id from `factory triggers ls` and
    the card id in your notes. No live smoke is recorded in the repository; the fakes in
