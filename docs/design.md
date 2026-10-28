@@ -158,6 +158,15 @@ commit and no `finished_at`, so its factory time reads as ending at the session'
 which a later commit (an approval, the merge record) stretches. The share is then an upper bound for
 those runs. Recording a run's end in the log is the fix if the share is ever load-bearing.
 
+_As built (S-notifications): a third exception._ `run_failures` (migration 0039) is derived — a
+budget stop and a failed model request are both entries in the log — but `rebuildIndexes` does not
+refold it: the activity projection writes a row as it watches a run end, keyed by the entry that
+announced it, and a row that is missing is a notification not sent, never a wrong one. A rebuild
+leaves the table alone; refolding it from the `factory.budget.stopped` entries and the `stopReason: "error"`
+assistant entries a run ended on is the fix if a dropped table must page again.
+`notification_deliveries` is not derived at all: it is the notifier's outbox and its memory of who
+was told what, control-plane state that is in no log, so dropping it re-sends every open event once.
+
 ### D8 — Read model: live when running, historical when not
 
 If the sandbox is live, the UI attaches to the harness (`viewState()`, `watch()`) and streams.
@@ -212,6 +221,9 @@ the commit it measured, never forced; a remote branch that moved past it is the 
 into the checkout's `refs/remotes/factory/<base>` and cuts there. The agent's own push stays
 allowed once it has a credential of its own; what is rejected above is pushes that are _only_ the
 control plane's.
+_Refined (C18):_ nobody has to ask for it. A run that settles in a session that declares its PR — a
+card's run in a column that requires one, a session a trigger opened — runs the PR step with no
+operator call; a person's session keeps `factory pr` and the dashboard's control.
 
 ### D11 — Autonomy: the branch is the boundary
 

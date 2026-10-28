@@ -349,6 +349,12 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | Reviewer measurement     | passing | [review-eval.md](review-eval.md)             |
 | Outcome metrics          | passing | [outcomes.md](outcomes.md)                   |
 | Cost prediction          | passing | [cost.md](cost.md)                           |
+| Notifications            | passing | [notify.md](notify.md)                       |
+
+The notification checks (S-notifications) were run from the `agent/S-notifications` worktree on
+2026-10-28 (`NOTIFY_PORT=9550`, the fake on `NOTIFY_FAKE_PORT=9551`, a scratch database minted on the
+worktree's 5442 server): `./notify.sh` **26/26**, evidence `.verify/evidence/latest/api/notify-*`.
+See [notify.md](notify.md).
 
 The model-backend checks (LOB-258) were run from the `agent/LOB-258` worktree on 2026-10-28
 (`BACKEND_BOOT_PORT=9542`, the worktree's own database on 5442, no repo-root `.env`):

@@ -466,6 +466,7 @@ await page.route(/\/rpc\/?$/, async (route) => {
   if (
     freeze &&
     (body.includes('"tag":"getBoard"') ||
+      body.includes('"tag":"listBoardCards"') ||
       body.includes('"tag":"listTasks"') ||
       body.includes('"tag":"listTaskComments"'))
   ) {

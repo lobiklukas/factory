@@ -29,18 +29,19 @@
 #
 # After the dashboard reads the card back in `planning`, the drive takes it the rest of the way
 # (LOB-86, docs/board.md B4, B5, B8): a person approves the plan (`planning → building`), a run in
-# `building` makes a change, commits it and verifies it, the browser opens its PR (the card pane's
-# run row, C7 — no `factory pr`) on the loopback GitHub fake, and the drive asserts a non-empty diff, a link the forge answered, and a body whose
+# `building` makes a change, commits it and verifies it, and its PR is opened on the loopback GitHub
+# fake when the run settles (C18 — no `factory pr`, nothing pressed; the card pane shows the link), and
+# the drive asserts a non-empty diff, a link the forge answered, and a body whose
 # evidence section names the verify skill and its exit code. The run moves its card to `review`; a
 # person's merge is refused naming `review_verdict` until a faux reviewer run — opened by the review
 # trigger on a signed `pull_request` for the PR (`review.ts`, LOB-36) — records a pass on the PR's
 # head (LOB-241); then the run's own `review → done` is refused at the merge gate, and the person's
 # merge goes through. The PR is never assumed: with no GitHub path (./up.sh with
-# BOARD_GITHUB=off) the control is refused with the missing credential's message, the drive prints
-# that reason and exits non-zero, and the phases after it run on with the link empty rather than one
-# the drive made up. The board holds the card too (LOB-240): `building` is left only with a
-# committed change and a recorded PR, so the run's move on is refused naming `pr_link` before the PR
-# is opened, and — with no GitHub path — after it.
+# BOARD_GITHUB=off) the settled run's step fails on the missing credential and says so in its
+# transcript and on its card, the drive prints that reason and exits non-zero, and the phases after it
+# run on with the link empty rather than one the drive made up. The board holds the card too
+# (LOB-240): `building` is left only with a committed change and a recorded PR, so with no GitHub path
+# the run's move on is refused naming `pr_link`.
 #
 # The CLI and the browser are one board (LOB-87): around the move to `planning` a browser page holds
 # the card open (`both-ways.mjs`), follows the terminal's move without a reload and shows nothing of
@@ -194,13 +195,13 @@ fi
 rm -f "$EVIDENCE_DIR/add.json" "$EVIDENCE_DIR/web.json" \
   "$EVIDENCE_DIR/web-board.png" "$EVIDENCE_DIR/observed.json" \
   "$EVIDENCE_DIR"/add{,-pair,-unknown,-empty}.txt \
-  "$EVIDENCE_DIR"/specify-{busy,parked,told}.json "$EVIDENCE_DIR"/build-{built,pr}.json \
+  "$EVIDENCE_DIR"/specify-{busy,parked,told}.json "$EVIDENCE_DIR"/build-{built,settled,pr}.json \
   "$EVIDENCE_DIR/pr-body.md" "$EVIDENCE_DIR/review-drive.json" \
   "$EVIDENCE_DIR"/spec-{declared,closed}.json "$EVIDENCE_DIR"/spec-pane.{json,png} \
   "$EVIDENCE_DIR/both-ways.json" "$EVIDENCE_DIR"/both-ways-{cli,browser}.png \
-  "$EVIDENCE_DIR"/pr-browser.{json,png} "$EVIDENCE_DIR/pr.txt" "$EVIDENCE_DIR"/{move,show}-building.txt "$EVIDENCE_DIR"/attention{,-board,-bad}.txt \
+  "$EVIDENCE_DIR"/pr-browser.{json,png,txt} "$EVIDENCE_DIR/pr.txt" "$EVIDENCE_DIR"/{move,show}-building.txt "$EVIDENCE_DIR"/attention{,-board,-bad}.txt \
   "$EVIDENCE_DIR"/{runs,block,block-stale,block-again,unblock,unblock-stale}.txt \
-  "$EVIDENCE_DIR"/show-{blocked,unblocked}.txt
+  "$EVIDENCE_DIR"/show-{blocked,unblocked,settled}.txt
 
 t kill-server 2>/dev/null || true
 rm -f "$SOCK"
@@ -650,42 +651,51 @@ check "the build run's branch has a non-empty diff against main" \
   "$(printf '%s\n' "$DIFF" | grep -qE "^[0-9]+[[:space:]]+[0-9]+[[:space:]]+$BUILD_CHANGED$" && echo 0 || echo 1)" \
   "$(printf '%s' "$DIFF" | head -1 | tr '\t' ' ')"
 
-# --- the building gate: the change is there, the PR is not yet (LOB-240) ---------------------------
-# `building` declares `non_empty_diff` and `pr_link`, and the service checks both on exit: the run's
-# move on before its PR is opened is refused naming the PR, not the diff — the diff is the one above —
-# and writes nothing, so the move after the PR is made at the same revision.
+# --- pr: opened when the build run settled, by nobody (C18) -----------------------------------------
+# `building` requires a PR (`pr_link`), so a run of it that settles with a change takes the PR step on
+# its own: the drive neither types `factory pr` nor presses Open pull request, it only reads. `build.ts
+# MODE=settled` waits for the run's link (or the line the run left saying why there is none) and
+# prints `pr       <url>` — or `error: <that line>` — as the command did, so the checks below read the
+# link and the reason as they always have. The card pane then shows the link with nothing pressed
+# (`pr-browser.mjs` with PR_MODE=recorded). With no GitHub path (BOARD_GITHUB=off) the step fails on
+# the missing credential, and the run's transcript and its card both carry that sentence.
 PR_LINK_MESSAGE="requirement_unmet: the move building → review needs \"pr_link\" (a PR link), which is not met: the card's latest run ${BUILD_SESSION_ID:-ses_missing} recorded no PR"
-fresh
-run_cmd review-early "$FACTORY board move --task $TASK_ID --to review --expect-revision ${BUILDING_REVISION:-0} --actor ${BUILD_SESSION_ID:-ses_missing} --api $API_URL" || true
-capture move-review-no-pr.txt
-check "before its PR, the run's building → review is refused naming pr_link" \
-  "$([ -n "$BUILD_SESSION_ID" ] && [ "$(exit_code review-early)" != "0" ] && [ -n "$(exit_code review-early)" ] && grep -qF "$PR_LINK_MESSAGE" "$EVIDENCE_DIR/move-review-no-pr.txt" && echo 0 || echo 1)" \
-  "exit=$(exit_code review-early), $(grep -m1 -o 'needs "[a-z_]*"' "$EVIDENCE_DIR/move-review-no-pr.txt" 2>/dev/null)"
-
-# --- pr: the run's PR, opened in the browser; the link is read, never assumed ----------------------
-# C7: a card driven from the browser leaves `building` without `factory pr`. The page that holds the
-# card open offers "Open pull request" on the run's row, the drive presses it, and the link the
-# forge answered appears on the row and in the run pane's header. `pr-browser.mjs` prints the same
-# `pr       <url>` line the command did (or `error: <reason>`, the control's own words), so the checks
-# below read the link and the reason as they always have.
-fresh
-WEB_URL="$WEB_URL" BOARD_ID="$BOARD_ID" TASK_ID="$TASK_ID" SESSION_ID="${BUILD_SESSION_ID:-}" \
-  EVIDENCE_DIR="$EVIDENCE_DIR" node "$SKILL/pr-browser.mjs" > "$EVIDENCE_DIR/pr.txt" 2> "$RUN_DIR/pr-browser.log"
-PR_RC=$?
-cat "$RUN_DIR/pr-browser.log"
+env MODE=settled API_URL="$API_URL" SESSION_ID="${BUILD_SESSION_ID:-}" TASK_ID="$TASK_ID" \
+  EVIDENCE_DIR="$EVIDENCE_DIR" bun "$BUILD_PROBE" > "$EVIDENCE_DIR/pr.txt" 2> "$RUN_DIR/build-settled.log"
+SETTLED_RC=$?
+cat "$EVIDENCE_DIR/pr.txt" "$RUN_DIR/build-settled.log"
 PR_URL="$(sed -n 's/^pr       \(https:\/\/[^ ]*\)$/\1/p' "$EVIDENCE_DIR/pr.txt" | head -1)"
-PR_REASON="$(grep -m1 '^error: ' "$EVIDENCE_DIR/pr.txt" | cut -c1-200)"
-check "the browser opens the build run's PR: its link is on the card pane's run row and the run pane's header" \
-  "$([ "$PR_RC" = "0" ] && [ -n "$PR_URL" ] && echo 0 || echo 1)" \
-  "${PR_URL:-no PR (exit=$PR_RC): ${PR_REASON:-no link and no reason printed}}"
+PR_REASON="$(grep -m1 '^error: ' "$EVIDENCE_DIR/pr.txt" | cut -c1-240)"
+check "the build run's PR is opened when its run settles: no factory pr, nothing pressed" \
+  "$([ "$SETTLED_RC" = "0" ] && [ -n "$PR_URL" ] && echo 0 || echo 1)" \
+  "${PR_URL:-no PR (exit=$SETTLED_RC): ${PR_REASON:-no link and no reason printed}}"
 if [ -z "$PR_URL" ]; then
   # The phase does not stop or substitute a link: every check below that needs one fails on its own.
-  echo "drive: the PR path is missing — ${PR_REASON:-the page printed no link}" >&2
+  echo "drive: the PR path is missing — ${PR_REASON:-the run printed no link}" >&2
+  check "with no PR path, the settled run says why in its transcript and on its card" \
+    "$(grep -q '^PASS  a settled run that opened no PR says why in its transcript and on its card' "$EVIDENCE_DIR/pr.txt" && echo 0 || echo 1)" \
+    "${PR_REASON:-no reason}"
+else
+  WEB_URL="$WEB_URL" BOARD_ID="$BOARD_ID" TASK_ID="$TASK_ID" SESSION_ID="${BUILD_SESSION_ID:-}" \
+    PR_MODE=recorded PR_URL="$PR_URL" EVIDENCE_DIR="$EVIDENCE_DIR" \
+    node "$SKILL/pr-browser.mjs" > "$EVIDENCE_DIR/pr-browser.txt" 2> "$RUN_DIR/pr-browser.log"
+  PR_BROWSER_RC=$?
+  cat "$RUN_DIR/pr-browser.log"
+  check "the card pane shows the settled run's PR on its row and the run pane's header, with nothing pressed" \
+    "$([ "$PR_BROWSER_RC" = "0" ] && grep -qxF "pr       $PR_URL" "$EVIDENCE_DIR/pr-browser.txt" && echo 0 || echo 1)" \
+    "exit=$PR_BROWSER_RC, see pr-browser.json"
 fi
 build_probe pr PR_URL="$PR_URL" LEDGER="$LEDGER" REPO="$BOARD_REPO_SLUG"
 PR_PROBE_RC=$?
 check "the forge holds that PR, with the diff and the evidence in its body (build.ts)" "$PR_PROBE_RC" \
   "see build-pr.json and pr-body.md"
+# The card's revision as the server has it now: a run that opened nothing notes why on the card,
+# which is a revision, so the moves below are made at the one the card is at rather than a guess.
+fresh
+run_cmd show-settled "$FACTORY board show --task $TASK_ID --api $API_URL" || true
+capture show-settled.txt
+SETTLED_REVISION="$(sed -n 's/^revision  \([0-9]*\)$/\1/p' "$EVIDENCE_DIR/show-settled.txt")"
+BUILDING_REVISION="${SETTLED_REVISION:-$BUILDING_REVISION}"
 
 fresh
 run_cmd ls-pr "$FACTORY ls --api $API_URL" || true

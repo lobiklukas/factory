@@ -2,8 +2,8 @@
 
 **Status:** passing
 
-The shell is the product's frame: a 48px icon rail, then the route. `/` redirects to `/sessions`,
-which adds the session list beside the pane — from `md` (768 px) up. Below it the list and the pane
+The shell is the product's frame: a 48px icon rail, then the route. `/` opens the boards (C9,
+[first-run.md](first-run.md)); `/sessions` adds the session list beside the pane — from `md` (768 px) up. Below it the list and the pane
 take turns (LOB-210): `/sessions` is the list at the full width beside the rail, and a session's
 route is its pane at that width, with a back link (`Show sessions`) at the start of its header.
 
@@ -13,7 +13,8 @@ route is its pane at that width, with a back link (`Show sessions`) at the start
   with a tooltip carrying the label the icon replaces; Boards leads (LOB-75), see
   [board.md](board.md). Sandboxes and approvals left the rail for panes of a card's run (LOB-76,
   [card-pane.md](card-pane.md))
-- `/` lands on `/sessions` (the redirect is the assertion, not the absence of an error)
+- `/` and the logo land on the only board's lanes, or on `/boards` with none or several (C9; the
+  redirect is the assertion, not the absence of an error)
 - The session sidebar is the server's `listSessions` (LOB-75): its rows are the first page in the
   server's order, and with no sessions it says `No sessions on this control plane yet`
 - The theme toggle sits at the rail's foot and dark is the default
