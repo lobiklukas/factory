@@ -305,57 +305,57 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 `./admission.sh` **11/11** (8 driver checks, 3 shell checks), evidence
 `.verify/evidence/latest/api/admission*.json`. See [limits.md](limits.md).
 
-| Feature                   | Status  | File                                         |
-| ------------------------- | ------- | -------------------------------------------- |
-| Create a session          | passing | [create.md](create.md)                       |
-| Repo binding              | passing | [repo-binding.md](repo-binding.md)           |
-| Session list              | passing | [session-list.md](session-list.md)           |
-| Watch a live session      | passing | [live-stream.md](live-stream.md)             |
-| Reset a session           | passing | [reset.md](reset.md)                         |
-| Compact on demand         | passing | [compact.md](compact.md)                     |
-| Fold a released session   | passing | [fold.md](fold.md)                           |
-| Cross-process streaming   | passing | [fold.md](fold.md) (`follow.sh`)             |
-| A long session's history  | passing | [history.md](history.md)                     |
-| Fork a session            | passing | [fork.md](fork.md)                           |
-| Replay a session          | passing | [replay.md](replay.md)                       |
-| Request limits            | passing | [limits.md](limits.md)                       |
-| Probes and readiness      | passing | [probes.md](probes.md)                       |
-| Shutdown and recovery     | passing | [lifecycle.md](lifecycle.md)                 |
-| Errors over the wire      | passing | [errors.md](errors.md)                       |
-| One PR across a kill      | passing | [pr-once.md](pr-once.md)                     |
-| Inbound triggers          | passing | [trigger.md](trigger.md)                     |
-| Jira adapter              | passing | [jira.md](jira.md)                           |
-| GitHub issues adapter     | passing | [github.md](github.md)                       |
-| Slack adapter             | passing | [slack.md](slack.md)                         |
-| Linear adapter            | passing | [linear.md](linear.md)                       |
-| Sentry receiver           | passing | [sentry.md](sentry.md)                       |
-| Sentry link-back          | passing | [sentry.md](sentry.md)                       |
-| Linear write-back         | passing | [linear-writeback.md](linear-writeback.md)   |
-| Approvals                 | passing | [approvals.md](approvals.md)                 |
-| Curate a session's pages  | passing | [curate.md](curate.md)                       |
-| A mission                 | passing | [mission.md](mission.md)                     |
-| A docs run                | passing | [docs-run.md](docs-run.md)                   |
-| A docs run on a trigger   | passing | [docs-trigger.md](docs-trigger.md)           |
-| The `verify` tool         | passing | [verify-tool.md](verify-tool.md)             |
-| A worktree's setup        | passing | [setup.md](setup.md)                         |
-| Repo AGENTS.md and skills | passing | [repo-context.md](repo-context.md)           |
-| PR evidence block         | passing | [pr-evidence.md](pr-evidence.md)             |
-| The spec document         | passing | [spec.md](spec.md)                           |
-| A budget cap              | passing | [budget.md](budget.md)                       |
-| The PR step over RPC      | passing | [pr-rpc.md](pr-rpc.md)                       |
-| The branch pushed first   | passing | [pr-push.md](pr-push.md)                     |
-| The pages surface         | passing | [pages.md](pages.md)                         |
-| Propose child issues      | passing | [decompose.md](decompose.md)                 |
-| Approve proposals         | passing | [approve-proposals.md](approve-proposals.md) |
-| Plan freshness            | passing | [plan-freshness.md](plan-freshness.md)       |
-| The model backend         | passing | [model-backend.md](model-backend.md)         |
-| What the server runs      | passing | [server-info.md](server-info.md)             |
-| Metrics to a collector    | passing | [metrics.md](metrics.md)                     |
-| Control-plane identity    | passing | [identity.md](identity.md)                   |
-| Reviewer measurement      | passing | [review-eval.md](review-eval.md)             |
-| Outcome metrics           | passing | [outcomes.md](outcomes.md)                   |
-| Cost prediction           | passing | [cost.md](cost.md)                           |
-| Notifications             | passing | [notify.md](notify.md)                       |
+| Feature                  | Status  | File                                         |
+| ------------------------ | ------- | -------------------------------------------- |
+| Create a session         | passing | [create.md](create.md)                       |
+| Repo binding             | passing | [repo-binding.md](repo-binding.md)           |
+| Session list             | passing | [session-list.md](session-list.md)           |
+| Watch a live session     | passing | [live-stream.md](live-stream.md)             |
+| Reset a session          | passing | [reset.md](reset.md)                         |
+| Compact on demand        | passing | [compact.md](compact.md)                     |
+| Fold a released session  | passing | [fold.md](fold.md)                           |
+| Cross-process streaming  | passing | [fold.md](fold.md) (`follow.sh`)             |
+| A long session's history | passing | [history.md](history.md)                     |
+| Fork a session           | passing | [fork.md](fork.md)                           |
+| Replay a session         | passing | [replay.md](replay.md)                       |
+| Request limits           | passing | [limits.md](limits.md)                       |
+| Probes and readiness     | passing | [probes.md](probes.md)                       |
+| Shutdown and recovery    | passing | [lifecycle.md](lifecycle.md)                 |
+| Errors over the wire     | passing | [errors.md](errors.md)                       |
+| One PR across a kill     | passing | [pr-once.md](pr-once.md)                     |
+| Inbound triggers         | passing | [trigger.md](trigger.md)                     |
+| Jira adapter             | passing | [jira.md](jira.md)                           |
+| GitHub issues adapter    | passing | [github.md](github.md)                       |
+| Slack adapter            | passing | [slack.md](slack.md)                         |
+| Linear adapter           | passing | [linear.md](linear.md)                       |
+| Sentry receiver          | passing | [sentry.md](sentry.md)                       |
+| Sentry link-back         | passing | [sentry.md](sentry.md)                       |
+| Linear write-back        | passing | [linear-writeback.md](linear-writeback.md)   |
+| Approvals                | passing | [approvals.md](approvals.md)                 |
+| Curate a session's pages | passing | [curate.md](curate.md)                       |
+| A mission                | passing | [mission.md](mission.md)                     |
+| A docs run               | passing | [docs-run.md](docs-run.md)                   |
+| A docs run on a trigger  | passing | [docs-trigger.md](docs-trigger.md)           |
+| The `verify` tool        | passing | [verify-tool.md](verify-tool.md)             |
+| A worktree's setup       | passing | [setup.md](setup.md)                         |
+| Repo instructions        | passing | [repo-context.md](repo-context.md)           |
+| PR evidence block        | passing | [pr-evidence.md](pr-evidence.md)             |
+| The spec document        | passing | [spec.md](spec.md)                           |
+| A budget cap             | passing | [budget.md](budget.md)                       |
+| The PR step over RPC     | passing | [pr-rpc.md](pr-rpc.md)                       |
+| The branch pushed first  | passing | [pr-push.md](pr-push.md)                     |
+| The pages surface        | passing | [pages.md](pages.md)                         |
+| Propose child issues     | passing | [decompose.md](decompose.md)                 |
+| Approve proposals        | passing | [approve-proposals.md](approve-proposals.md) |
+| Plan freshness           | passing | [plan-freshness.md](plan-freshness.md)       |
+| The model backend        | passing | [model-backend.md](model-backend.md)         |
+| What the server runs     | passing | [server-info.md](server-info.md)             |
+| Metrics to a collector   | passing | [metrics.md](metrics.md)                     |
+| Control-plane identity   | passing | [identity.md](identity.md)                   |
+| Reviewer measurement     | passing | [review-eval.md](review-eval.md)             |
+| Outcome metrics          | passing | [outcomes.md](outcomes.md)                   |
+| Cost prediction          | passing | [cost.md](cost.md)                           |
+| Notifications            | passing | [notify.md](notify.md)                       |
 
 The notification checks (S-notifications) were run from the `agent/S-notifications` worktree on
 2026-10-28 (`NOTIFY_PORT=9550`, the fake on `NOTIFY_FAKE_PORT=9551`, a scratch database minted on the
