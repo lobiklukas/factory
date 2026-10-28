@@ -91,12 +91,21 @@ describe("opensPullRequestOnSettle", () => {
     expect(
       opensPullRequestOnSettle({ ...review, continuesCardPr: false }),
     ).toBe(false);
-    // Still not once it recorded the PR itself, nor when it ended parked on a person.
+    // Still once it recorded the PR itself (F14: its later commits are pushed onto it), until that
+    // PR merged; and not when it ended parked on a person.
     expect(
       settleDeclarationOf({
         ...review,
         continuesCardPr: true,
         prUrl: "https://github.com/acme/widget/pull/1",
+      }),
+    ).toBe("declared");
+    expect(
+      settleDeclarationOf({
+        ...review,
+        continuesCardPr: true,
+        prUrl: "https://github.com/acme/widget/pull/1",
+        prMerged: true,
       }),
     ).toBe("undeclared");
     expect(
@@ -104,17 +113,42 @@ describe("opensPullRequestOnSettle", () => {
     ).toBe("parked");
   });
 
-  it("has nothing to open with no repo, a PR already recorded, or a released workspace", () => {
+  it("has nothing to publish with no repo, a PR that merged, or a released workspace", () => {
     expect(opensPullRequestOnSettle({ ...trigger, repo: null })).toBe(false);
     expect(
       opensPullRequestOnSettle({
         ...trigger,
         prUrl: "https://github.com/acme/widgets/pull/1",
+        prMerged: true,
       }),
     ).toBe(false);
     expect(opensPullRequestOnSettle({ ...trigger, released: true })).toBe(
       false,
     );
+  });
+
+  /**
+   * Mutation: keep `prUrl !== null` as undeclared — a session's later commits are never pushed onto
+   * its open PR by a settle (F14).
+   */
+  it("still takes the step for a session whose PR is recorded and unmerged: it pushes later commits (F14)", () => {
+    const recorded = {
+      ...trigger,
+      prUrl: "https://github.com/acme/widgets/pull/1",
+    };
+    expect(settleDeclarationOf(recorded)).toBe("declared");
+    expect(settleDeclarationOf({ ...recorded, prMerged: false })).toBe(
+      "declared",
+    );
+    expect(settleDeclarationOf({ ...recorded, waiting: true })).toBe("parked");
+    // A person's session with a PR is still the person's to push.
+    expect(
+      settleDeclarationOf({
+        ...recorded,
+        actor: "person:lukas",
+        requestId: null,
+      }),
+    ).toBe("undeclared");
   });
 
   it("opens nothing for a run that ended parked on a person", () => {
@@ -206,6 +240,28 @@ describe("notOpenedText", () => {
     );
     expect(notOpenedText({ outcome: "stopped", ending: "failed" })).toContain(
       "its model answer failed",
+    );
+  });
+
+  it("says a refused push onto an open PR pushed nothing to it, and how to push it (F14)", () => {
+    const pr = "https://github.com/acme/widgets/pull/7";
+    expect(
+      notOpenedText({ outcome: "non-fast-forward", head: "factory/ses_x" }, pr),
+    ).toBe(
+      `the run settled and the PR step pushed nothing to ${pr}: the remote's factory/ses_x has commits this branch does not, and the push is never forced; integrate them, then push it (\`factory pr\`)`,
+    );
+    expect(
+      notOpenedText(
+        { outcome: "over-cap", limit: "files", cap: 2, measured: 3 },
+        pr,
+      ),
+    ).toBe(
+      `the run settled and the PR step pushed nothing to ${pr}: the branch's diff is over the cap (3 files, at most 2)`,
+    );
+    expect(
+      notOpenedText({ outcome: "stopped", ending: "interrupted" }, pr),
+    ).toBe(
+      `the run settled without finishing, so nothing was pushed to ${pr}: it was interrupted; a run that finishes pushes it, or \`factory pr\` does`,
     );
   });
 

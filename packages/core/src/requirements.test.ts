@@ -735,6 +735,35 @@ describe("the pr_link requirement", () => {
     ).toEqual({ met: true });
   });
 
+  /**
+   * F14. Mutation: drop the published-commit comparison for the latest run's own PR — a run that
+   * committed after its PR was recorded, and whose commits are not on the PR, still passes.
+   */
+  it("is met by the latest run's own PR only at the commit it was published at (F14)", () => {
+    const at = "c".repeat(40);
+    const past = "d".repeat(40);
+    const own = (prCommit?: string) => ({
+      sessionId: "ses_a",
+      calls: [],
+      branch: "factory/ses_a",
+      prUrl: link,
+      prHead: "factory/ses_a",
+      ...(prCommit === undefined ? {} : { prCommit }),
+    });
+    expect(prLinkVerdict({ runs: [own(at)], branchTip: at })).toEqual({
+      met: true,
+    });
+    expect(prLinkVerdict({ runs: [own(at)], branchTip: past })).toEqual({
+      met: false,
+      reason: `the card's latest run ses_a recorded the PR ${link}, but its branch factory/ses_a is at ${past.slice(0, 12)}, past ${at.slice(0, 12)} where that PR was published: push the run's commits to the PR (factory pr ses_a) before moving the card on`,
+    });
+    // Nothing to compare — a record from before C19, or a tip that does not read — is met as before.
+    expect(prLinkVerdict({ runs: [own()], branchTip: past })).toEqual({
+      met: true,
+    });
+    expect(prLinkVerdict({ runs: [own(at)] })).toEqual({ met: true });
+  });
+
   it("is unmet when the latest run recorded none, even if an older run did", () => {
     expect(
       prLinkVerdict({ runs: [withPr("ses_a", link), withPr("ses_b")] }),

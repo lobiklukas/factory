@@ -3271,7 +3271,9 @@ describe("the diff cap", () => {
     }
   }, 120_000);
 
-  it("does not re-measure a branch whose PR the log already records", async () => {
+  // A deployment with no push (no `repoRemote` here) cannot publish a recorded PR's later commits,
+  // so it measures none of them: the cap on an update is `prStep.test.ts`'s, where the step pushes.
+  it("does not re-measure a recorded PR's branch when the step has no push to publish it with (F14)", async () => {
     const url = "https://github.com/lobiklukas/factory/pull/35";
     const github = makeGithubFake(201, { number: 35, url });
     const result = await program(
@@ -3300,15 +3302,18 @@ describe("the diff cap", () => {
           base: "main",
         };
         const first = yield* sessions.openPullRequest(asked);
-        // The branch then grows past the cap. The PR exists, so the step's answer is the one its
-        // log records — the cap bounds what the step would open, not what it already opened.
+        // Asked again on the same commit: the log answers, nothing is measured.
+        const repeated = yield* sessions.openPullRequest(asked);
+        // The branch then grows past the cap. With no push the step updates nothing, so the PR
+        // stands as recorded and nothing is measured to refuse it.
         commitDiff({
           worktree: openedOnce.workspace.path,
           files: 1,
           lines: DEFAULT_DIFF_CAP.maxLines + 1,
         });
-        const repeated = yield* sessions.openPullRequest(asked);
-        return { first, repeated };
+        const grown = yield* sessions.openPullRequest(asked);
+        const after = yield* sessions.get(created.id);
+        return { first, repeated, grown, prUrl: after.session.prUrl };
       }).pipe(Effect.provide(github.layer)),
     );
 
@@ -3322,7 +3327,13 @@ describe("the diff cap", () => {
       url,
       outcome: "already-open",
     });
-    // One POST for both: the retry was answered by the log, whatever the branch has become.
+    expect(opened(result.grown)).toEqual({
+      number: 35,
+      url,
+      outcome: "already-open",
+    });
+    expect(result.prUrl).toBe(url);
+    // One POST for all three: both retries were answered by the log.
     expect(github.requests).toHaveLength(1);
   }, 120_000);
 

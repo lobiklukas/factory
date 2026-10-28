@@ -72,6 +72,29 @@ describe("prAnswer", () => {
       message: `session ${SESSION}'s diff is over the cap (73 files, at most 50); no PR was opened`,
     });
   });
+
+  // F14: a refused update of a PR that is open says the PR was left, not that none was opened.
+  it("names the PR a refused update left as it was, rather than saying none was opened", () => {
+    const pr = "https://github.com/acme/web/pull/7";
+    const overCap = prAnswer(SESSION, {
+      outcome: "over-cap",
+      limit: "files",
+      cap: 50,
+      measured: 73,
+      pullRequest: pr,
+    });
+    const behind = prAnswer(SESSION, {
+      outcome: "non-fast-forward",
+      head: `factory/${SESSION}`,
+      pullRequest: pr,
+    });
+    for (const answer of [overCap, behind]) {
+      expect(answer._tag).toBe("NotOpened");
+      if (answer._tag !== "NotOpened") continue;
+      expect(answer.message).toContain(`othing was pushed to ${pr}`);
+      expect(answer.message).not.toMatch(/no PR was opened/i);
+    }
+  });
 });
 
 describe("factory pr's typed failures", () => {

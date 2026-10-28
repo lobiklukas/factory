@@ -164,6 +164,13 @@ export const NO_CHANGE_ENTRY_KIND = "factory.pr.no-change";
  */
 export const PR_NOT_OPENED_ENTRY_KIND = "factory.pr.not-opened";
 /**
+ * The entry a recorded PR's push of later commits is announced with (F14): the session's branch had
+ * moved past the commit its `factory.pr` was published at, and the step pushed the new tip onto the
+ * same PR. Not a second `factory.pr.opened` — nothing was opened, and an attached client that reads
+ * that kind as "a PR appeared" would announce the same PR twice.
+ */
+export const PR_UPDATED_ENTRY_KIND = "factory.pr.updated";
+/**
  * A session's spend ceiling and its last stop (LOB-163, `./budget`). A document because the cap is
  * state a hook reads before every request, and the stop beside it is what a snapshot reports.
  */
@@ -519,14 +526,15 @@ export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
       : failedRequest
         ? true
         : undefined;
-  // The title, no-change, not-opened, budget, interrupted and inherited-PR entries carry no model
-  // content, so their text comes from their data — which is what makes a no-op PR step or a budget
-  // stop a readable line, not an empty entry.
+  // The title, no-change, not-opened, PR-updated, budget, interrupted and inherited-PR entries carry
+  // no model content, so their text comes from their data — which is what makes a no-op PR step or
+  // a budget stop a readable line, not an empty entry.
   const text =
     entry.kind === TITLE_ENTRY_KIND
       ? (stringAt(asObject(entry.data), "title") ?? "")
       : entry.kind === NO_CHANGE_ENTRY_KIND ||
           entry.kind === PR_NOT_OPENED_ENTRY_KIND ||
+          entry.kind === PR_UPDATED_ENTRY_KIND ||
           entry.kind === BUDGET_STOPPED_ENTRY_KIND ||
           entry.kind === INTERRUPTED_ENTRY_KIND
         ? (stringAt(asObject(entry.data), "text") ?? "")

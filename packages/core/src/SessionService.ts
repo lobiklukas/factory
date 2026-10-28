@@ -209,6 +209,9 @@ import {
   readVerifyRecords,
   writePullRequestNotOpened,
   readRunEnding,
+  readRunTurn,
+  readSettleAnnouncement,
+  readPullRequestDoc,
   readCurationUsage,
   compareReplay,
   mirrorComparison,
@@ -327,6 +330,7 @@ import { openPullRequest, type OpenPullRequestInput } from "./prStep";
 import {
   notOpenedText,
   settleDeclarationOf,
+  TRIGGER_PREFIX,
   type NotOpened,
   type SettleDecision,
   type SettledRun,
@@ -815,6 +819,33 @@ export type SessionServiceShape = {
    */
   readonly resumeRuns: Effect.Effect<readonly SessionId[], SessionError>;
   /**
+   * Take the PR step a settled run was owed and no process took (F16): the boot's half of C18's
+   * settle-time step, which is forked only where a process sees a run go idle — so a process that
+   * died between a run settling and its step, or in the step before `factory.pr` committed, left a
+   * session with no PR until someone ran `factory pr`.
+   *
+   * The sessions are the ones the settle rule declares (`./prOnSettle`'s `settleDeclarationOf`: a
+   * trigger's session, a card's run in a column that requires a PR or continuing the card's PR) that
+   * record no PR, have no run or mission in flight, and whose worktree is under this process's
+   * session root and its own checkout — so a person's session, a fork, a replay, a released
+   * workspace and a parked run are never opened, and another instance's sessions are its own. Nor is
+   * a card run a later run of the card took the branch over from (C19): it is superseded, and its
+   * step would publish the later run's branch into its stale log. Nor a session this process saw a
+   * run go busy in before the sweep finished (one `resumeRuns` continued, one a client started):
+   * that run's own settle takes the step. A log whose newest no-change or not-opened entry — whatever
+   * run wrote it — is at the branch's current tip was answered, so it is not announced again on every
+   * boot; a tip that moved since is stepped. The step is the settle's own (`settlePullRequest`), so
+   * its gate, cap, push, record and card note are the same as a live settle's. A settled session is
+   * no work in progress, so the sweep opens it as a background reopen — one the cap has no room for
+   * is logged and left for the next boot — and releases an owner it opened once the step is done.
+   * Answers the sessions it stepped; one that fails is logged and does not stop the others. Without
+   * `pullRequestOnSettle` it steps nothing, as a settle would not.
+   */
+  readonly settlePullRequestsAtBoot: Effect.Effect<
+    readonly SessionId[],
+    SessionError
+  >;
+  /**
    * Close every harness this process owns: the idle sweep's release, for every owner at once, on
    * shutdown. The worktrees and branches stay (LOB-268), so a restarted process resumes on them.
    */
@@ -1300,6 +1331,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * Only the projection writes an entry, and `releaseOwner` drops it with the projection.
        */
       const runStarts = new Map<SessionId, number>();
+      /**
+       * Every session this process saw a run go busy in before the boot's settle sweep finished
+       * (F16): a run `resumeRuns` continued, or one a client started, settles here and its settle
+       * takes the PR step live, so the sweep — which may have read the session as unanswered before
+       * that settle wrote anything — leaves it alone rather than stepping it a second time. `null`
+       * once the sweep has finished, so it does not grow for the life of the process.
+       */
+      let ranBeforeSweep: Set<SessionId> | null = new Set<SessionId>();
       /**
        * The entry of each owned session's failed model request, while it is the newest thing its run
        * did (S-notifications): Pi Durable retries a failed request, so an error entry ends the run
@@ -4258,6 +4297,31 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         Effect.gen(function* () {
           const branch = owner.workspace.branch;
           if (branch === undefined || row.repo === null) return;
+          const later = yield* handedOverTo(
+            sessionId,
+            row.repo,
+            branch,
+            owner.workspace.path,
+          );
+          if (later === undefined) return;
+          return yield* new SessionErrorClass({
+            code: "invalid_input",
+            message: `session ${sessionId}'s worktree no longer holds the card's branch ${branch}: the card's later run ${later} took it over, so a turn here would commit off the branch and its PR. Send to ${later}, or start a new run on the card, which continues the branch`,
+          });
+        });
+
+      /**
+       * The card's later run that took `branch` over from this run's worktree at `worktree` (C19), or
+       * `undefined` when none did: `refuseHandedOver`'s two facts, also what keeps the boot's settle
+       * sweep from publishing a superseded run's stale log (F16).
+       */
+      const handedOverTo = (
+        sessionId: SessionId,
+        repo: string,
+        branch: string,
+        worktree: string,
+      ): Effect.Effect<string | undefined, SessionError> =>
+        Effect.gen(function* () {
           const later = (yield* paper(
             "read the run that took the card's branch",
             sql<{ sessionId: string }>`
@@ -4267,32 +4331,29 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 ON later.task_id = mine.task_id AND later.session_id <> mine.session_id
                 AND (later.started_at, later.id) > (mine.started_at, mine.id)
               JOIN sessions s ON s.id = later.session_id
-              WHERE mine.session_id = ${sessionId} AND s.repo = ${row.repo}
+              WHERE mine.session_id = ${sessionId} AND s.repo = ${repo}
                 AND COALESCE(s.branch, 'factory/' || s.id) = ${branch}
               ORDER BY later.started_at DESC, later.id DESC
               LIMIT 1
             `,
           ))[0];
-          if (later === undefined) return;
+          if (later === undefined) return undefined;
           const head = yield* fs
-            .readFileString(path.join(owner.workspace.path, ".git"))
+            .readFileString(path.join(worktree, ".git"))
             .pipe(
               Effect.map((pointer) => /^gitdir: (.+)$/m.exec(pointer)?.[1]),
               Effect.flatMap((gitdir) =>
                 gitdir === undefined
                   ? Effect.undefined
                   : fs.readFileString(
-                      path.resolve(owner.workspace.path, gitdir.trim(), "HEAD"),
+                      path.resolve(worktree, gitdir.trim(), "HEAD"),
                     ),
               ),
               Effect.orElseSucceed(() => undefined),
             );
           if (head === undefined || head.trim() === `ref: refs/heads/${branch}`)
-            return;
-          return yield* new SessionErrorClass({
-            code: "invalid_input",
-            message: `session ${sessionId}'s worktree no longer holds the card's branch ${branch}: the card's later run ${later.sessionId} took it over, so a turn here would commit off the branch and its PR. Send to ${later.sessionId}, or start a new run on the card, which continues the branch`,
-          });
+            return undefined;
+          return later.sessionId;
         });
 
       const send = (
@@ -5053,6 +5114,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               repo: string | null;
               requestId: string | null;
               prUrl: string | null;
+              prMerged: boolean;
               actor: string | null;
               forkedFrom: string | null;
               released: boolean;
@@ -5062,7 +5124,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               columns: string | null;
               continuesCardPr: boolean;
             }>`
-              SELECT s.title, s.repo, s.request_id, s.pr_url, s.actor, s.forked_from,
+              SELECT s.title, s.repo, s.request_id, s.pr_url,
+                     s.pr_merged_at IS NOT NULL AS pr_merged, s.actor, s.forked_from,
                      s.workspace_released_at IS NOT NULL AS released,
                      -- A review's changes_requested block (C21) is a prompt for a person, not a
                      -- hold: the push it waits for is the one that answers it.
@@ -5116,6 +5179,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               repo: row.repo,
               requestId: row.requestId,
               prUrl: row.prUrl,
+              prMerged: row.prMerged,
               actor: row.actor,
               forkedFrom: row.forkedFrom,
               released: row.released,
@@ -5232,6 +5296,23 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             );
             return "unchanged" as const;
           }
+          // A recorded PR the branch has not moved past (F14) has nothing to push and nothing to
+          // say, however the run ended: decided here, from the log, before the step — whose answer
+          // goes to the trackers' write-back, which would read and rewrite a Linear issue or a Slack
+          // thread on every steered turn — and before a stopped run's announcement, which would tell
+          // the transcript and the card that nothing was pushed when nothing was owed.
+          if (settled.run.prUrl !== null && tip !== undefined) {
+            const recorded = yield* readPullRequestDoc(
+              owned.value.harness,
+              owned.value.root,
+            );
+            if (recorded?.commit === tip) {
+              yield* Effect.logDebug(
+                `session ${sessionId}: its run settled on the commit ${recorded.url} was published at, so nothing was pushed`,
+              );
+              return "up-to-date" as const;
+            }
+          }
           const ending = yield* readRunEnding(owned.value.root);
           let reason: NotOpened;
           if (ending !== "finished") {
@@ -5248,10 +5329,23 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               // is what narrows the answer.
               if ("url" in answer) {
                 unchangedAt.delete(sessionId);
-                yield* Effect.logInfo(
-                  `session ${sessionId}: its run settled and the PR step opened ${answer.url} (${answer.outcome})`,
-                );
-                return "opened" as const;
+                // A recorded PR is pushed onto (F14), or answered as it stands when the branch is
+                // where it was published; a card's PR adopted is this session's first, so "opened".
+                const decision =
+                  answer.outcome === "updated"
+                    ? ("updated" as const)
+                    : answer.outcome === "already-open" &&
+                        settled.run.prUrl !== null
+                      ? ("up-to-date" as const)
+                      : ("opened" as const);
+                yield* decision === "up-to-date"
+                  ? Effect.logDebug(
+                      `session ${sessionId}: its run settled on the commit ${answer.url} was published at, so nothing was pushed`,
+                    )
+                  : Effect.logInfo(
+                      `session ${sessionId}: its run settled and the PR step ${decision === "updated" ? "pushed its new commits to" : "opened"} ${answer.url} (${answer.outcome})`,
+                    );
+                return decision;
               }
               reason = answer;
             } else {
@@ -5269,7 +5363,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               };
             }
           }
-          const text = notOpenedText(reason);
+          const text = notOpenedText(reason, settled.run.prUrl ?? undefined);
           if (reason.outcome === "no-change") {
             // An even branch is the ordinary answer of a run that changed no code, not a fault.
             yield* Effect.logInfo(`session ${sessionId}: ${text}`);
@@ -5279,8 +5373,15 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             // The step wrote the no-change line itself (LOB-196); every other reason is written
             // here, on the owner that holds the log now.
             const owner = HashMap.get(yield* Ref.get(live), sessionId);
+            // With the tip it was decided at, so a boot's sweep does not say it again (F16) — but
+            // not a stopped run's: it decided nothing about its tip, and a later run that finishes
+            // on the same commit is still owed its step.
             if (Option.isSome(owner)) {
-              yield* writePullRequestNotOpened(owner.value.root, text);
+              yield* writePullRequestNotOpened(
+                owner.value.root,
+                text,
+                reason.outcome === "stopped" ? undefined : tip,
+              );
             }
           }
           if (settled.taskId !== undefined) {
@@ -6491,6 +6592,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const started = runStarts.get(sessionId);
           if (status === "busy") {
             if (started === undefined) runStarts.set(sessionId, now);
+            ranBeforeSweep?.add(sessionId);
             return;
           }
           if (started === undefined) return;
@@ -8116,6 +8218,141 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return resumed;
         });
 
+      const settlePullRequestsAtBoot: Effect.Effect<
+        readonly SessionId[],
+        SessionError
+      > = Effect.gen(function* () {
+        const forge = options.pullRequestOnSettle;
+        if (forge === undefined) return [];
+        // The settle rule's provenance, narrowed in SQL to what could be declared and owes a PR:
+        // `settleDeclarationOf` below is still the rule, this only keeps a boot from reading every
+        // row. A run or mission still in flight is `resumeRuns`' and `resumeMissions`', and its
+        // settle takes the step as any live one does.
+        const rows = yield* paper(
+          "read settled sessions that may owe a PR",
+          sql<{
+            readonly id: string;
+            readonly repo: string;
+            readonly branch: string | null;
+          }>`
+            SELECT s.id, s.repo, s.branch FROM sessions s
+            WHERE s.repo IS NOT NULL AND s.pr_url IS NULL
+              AND s.workspace_released_at IS NULL AND s.forked_from IS NULL
+              AND s.run_session_root IS NULL AND NOT s.mission_in_flight
+              AND (
+                EXISTS (SELECT 1 FROM task_runs tr WHERE tr.session_id = s.id)
+                OR (s.actor LIKE ${`${TRIGGER_PREFIX}%`}
+                    AND s.request_id LIKE ${`${TRIGGER_PREFIX}%`})
+              )
+            ORDER BY s.id
+          `,
+        );
+        const stepped: SessionId[] = [];
+        for (const { id, repo, branch } of rows) {
+          const outcome = yield* Effect.result(
+            Effect.gen(function* () {
+              const sessionId = yield* toSessionId(id);
+              // A run this process saw (one `resumeRuns` continued, one a client started) settles
+              // here and takes its step live; stepping it too would say everything twice.
+              if (ranBeforeSweep?.has(sessionId) === true) return undefined;
+              // Where this process would open it, without cutting or reading anything else: a
+              // session whose worktree is not here is another root's (or was never cut), and a plain
+              // directory has no branch a settle would step.
+              const directory = sessionDirectory(
+                path,
+                options.sessionRoot,
+                sessionId,
+                yield* toRepoSlug(repo),
+              );
+              const checkout = yield* fs
+                .exists(path.join(directory, ".git"))
+                .pipe(Effect.orElseSucceed(() => false));
+              if (!checkout) return undefined;
+              // A card's run whose branch a later run of the card took over (C19) is superseded: its
+              // worktree is on a detached HEAD, nothing can steer it again, and stepping it would
+              // push the later run's branch and adopt the card's PR into this stale log.
+              if (
+                (yield* handedOverTo(
+                  sessionId,
+                  repo,
+                  branch ?? `factory/${id}`,
+                  directory,
+                )) !== undefined
+              )
+                return undefined;
+              // Decided from the index before anything is opened: an undeclared or parked session
+              // is left exactly as it was.
+              const settled = yield* settledRunOf(sessionId);
+              if (
+                settled === undefined ||
+                settleDeclarationOf(settled.run) !== "declared"
+              )
+                return undefined;
+              const tip = yield* resolveCommit(directory, "HEAD");
+              const { turn, announced } = yield* withReader(
+                sessionId,
+                (storage) =>
+                  Effect.all({
+                    turn: readRunTurn(storage),
+                    announced: readSettleAnnouncement(storage),
+                  }),
+              );
+              // No run settled yet (none started, or one still placed): nothing to step.
+              if (turn === "unfinished") return undefined;
+              // Already answered at this tip — or by an entry that names no tip, written before
+              // the tip was recorded, which is the same settle as far as anyone can tell.
+              if (
+                announced !== undefined &&
+                (announced === "" || announced === tip)
+              )
+                return undefined;
+              const row = yield* requireSession(sessionId);
+              // `background`: unlike a run the dead process left in flight, a settled session is
+              // nobody's work in progress, so the boot does not open it past the cap — one refused
+              // at capacity is logged and stepped by the next boot. An owner the sweep opened is
+              // released again once the step is done, so it counts against the cap no longer than
+              // the step.
+              const held = Option.isSome(
+                HashMap.get(yield* Ref.get(live), sessionId),
+              );
+              const owner = yield* acquireOwner(sessionId, row, {
+                admission: "background",
+              });
+              const busy = yield* isBusy(owner.harness, owner.root).pipe(
+                Effect.orElseSucceed(() => true),
+              );
+              if (busy || ranBeforeSweep?.has(sessionId) === true)
+                return undefined;
+              yield* settlePullRequest(sessionId, forge);
+              // The owner as the step left it: the step's own acquisition touched it.
+              const after = HashMap.get(yield* Ref.get(live), sessionId);
+              if (!held && Option.isSome(after)) {
+                const still = yield* isBusy(
+                  after.value.harness,
+                  after.value.root,
+                ).pipe(Effect.orElseSucceed(() => true));
+                if (!still) yield* releaseIdleOwner(sessionId, after.value);
+              }
+              return sessionId;
+            }),
+          );
+          if (outcome._tag === "Failure") {
+            yield* Effect.logWarning(
+              `session ${id}: could not take the PR step its settled run was owed: ${outcome.failure.message}`,
+            );
+            continue;
+          }
+          if (outcome.success !== undefined) stepped.push(outcome.success);
+        }
+        return stepped;
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            ranBeforeSweep = null;
+          }),
+        ),
+      );
+
       const closeAll = Effect.gen(function* () {
         // A comparison still waiting would reopen the owners this is closing (LOB-199), so the waits
         // end first. Nothing is lost: what is owed is in the logs, and the next owner or fold of
@@ -8129,6 +8366,28 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           { discard: true },
         );
       });
+
+      /**
+       * Release an owner found idle, only if it is still the owner the caller read: a caller that
+       * acquired it meanwhile touched it (a new value), and is about to use the harness this would
+       * otherwise close under it — a replay's comparison commit among them (LOB-199).
+       */
+      const releaseIdleOwner = (
+        sessionId: SessionId,
+        owner: LiveOwner,
+      ): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          const removed = yield* Ref.modify(live, (current) =>
+            Option.match(HashMap.get(current, sessionId), {
+              onNone: () => [false, current] as const,
+              onSome: (still) =>
+                still === owner
+                  ? ([true, HashMap.remove(current, sessionId)] as const)
+                  : ([false, current] as const),
+            }),
+          );
+          if (removed) yield* releaseOwner(sessionId, owner);
+        });
 
       const sweep = Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
@@ -8151,20 +8410,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             Effect.orElseSucceed(() => true),
           );
           if (mission) continue;
-          // Removed only if it is still the owner the snapshot read: a caller that acquired it while
-          // `isBusy` was answering touched it (a new value), and is about to use the harness this
-          // would otherwise close under it — a replay's comparison commit among them (LOB-199).
-          const removed = yield* Ref.modify(live, (current) =>
-            Option.match(HashMap.get(current, sessionId), {
-              onNone: () => [false, current] as const,
-              onSome: (still) =>
-                still === owner
-                  ? ([true, HashMap.remove(current, sessionId)] as const)
-                  : ([false, current] as const),
-            }),
-          );
-          if (!removed) continue;
-          yield* releaseOwner(sessionId, owner);
+          yield* releaseIdleOwner(sessionId, owner);
         }
       });
 
@@ -8303,6 +8549,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         rolePolicies: options.rolePolicies ?? DEFAULT_ROLE_POLICIES,
         resumeMissions,
         resumeRuns,
+        settlePullRequestsAtBoot,
         close: closeAll,
       });
     }),
