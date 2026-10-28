@@ -216,7 +216,12 @@ afterAll(async () => {
     Effect.gen(function* () {
       const sql = yield* SqlClient;
       for (const repo of slugs) {
+        // Every row a case made that may be deleted: its board (and so its cards, their events,
+        // comments and runs), the sessions' checkpoints, the sessions, and the repo (and so its
+        // secrets). The logs' `commits` stay: that table is append-only and refuses a DELETE.
         yield* sql`DELETE FROM task_runs WHERE session_id IN (SELECT id FROM sessions WHERE repo = ${repo})`;
+        yield* sql`DELETE FROM board_instances WHERE repo = ${repo}`;
+        yield* sql`DELETE FROM log_checkpoints WHERE log_id IN (SELECT id FROM sessions WHERE repo = ${repo})`;
         yield* sql`DELETE FROM sessions WHERE repo = ${repo}`;
         yield* sql`DELETE FROM repos WHERE slug = ${repo}`;
       }
@@ -442,5 +447,110 @@ describe("a repo's declared secrets in a session", CASE, () => {
     expect(
       shaOf(fixture.bare, `refs/heads/factory/${outcome.sessionId}`),
     ).toBeUndefined();
+  });
+
+  /**
+   * Mutation: bound the scan by the local measured base — the agent's shell moved `main` (and the
+   * fetched `factory/main`) onto the commit that adds the value, the scan reads only the commit that
+   * removes it, and the push publishes both.
+   */
+  it("bounds the scan by the forge's base, not a local ref the agent's shell moved onto its leak", async () => {
+    const fixture = makeRepo("moved", {});
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        yield* register(fixture);
+        const sessions = yield* SessionService;
+        const session = yield* sessions.create({
+          repo: fixture.repo,
+          title: "a moved base",
+        });
+        const worktree = (yield* sessions.get(session.id)).workspace.path;
+        writeFileSync(join(worktree, "leaked.txt"), `${FAKE_KEY}\n`);
+        git(worktree, "add", "-A");
+        git(worktree, "commit", "-q", "-m", "add");
+        const leak = git(worktree, "rev-parse", "HEAD");
+        git(worktree, "rm", "-q", "leaked.txt");
+        writeFileSync(join(worktree, "fine.txt"), "fine\n");
+        git(worktree, "add", "-A");
+        git(worktree, "commit", "-q", "-m", "remove");
+        // What a prompt-injected agent's shell can do in a worktree that shares the checkout's refs.
+        git(worktree, "update-ref", "refs/heads/main", leak);
+        git(worktree, "update-ref", "refs/remotes/factory/main", leak);
+        git(worktree, "update-ref", "refs/remotes/origin/main", leak);
+        const pushesBefore = remoteRequests.filter(
+          (request) => request.service === "git-receive-pack",
+        ).length;
+        const answer = yield* sessions
+          .openPullRequest({ sessionId: session.id, title: "moved" })
+          .pipe(Effect.provideContext(forge));
+        return {
+          sessionId: session.id,
+          leak,
+          answer,
+          pushes:
+            remoteRequests.filter(
+              (request) => request.service === "git-receive-pack",
+            ).length - pushesBefore,
+        };
+      }),
+    );
+    expect(outcome.answer).toMatchObject({
+      outcome: "secret-found",
+      findings: [
+        {
+          kind: "stored",
+          name: "TEST_API_KEY",
+          path: "leaked.txt",
+          commit: outcome.leak,
+        },
+      ],
+    });
+    expect(outcome.pushes).toBe(0);
+    expect(
+      shaOf(fixture.bare, `refs/heads/factory/${outcome.sessionId}`),
+    ).toBeUndefined();
+  });
+
+  /**
+   * Mutation: read the declaration at the base as it resolves on each open — the row is not
+   * written, or is rewritten once the agent's shell moves `main`.
+   */
+  it("pins the commit a session's grant is read at when it first opens, and keeps it when the base moves", async () => {
+    const fixture = makeRepo("pinned", {
+      ".factory/config": JSON.stringify({ verify: VERIFY }),
+    });
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        yield* register(fixture);
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const original = git(fixture.checkout, "rev-parse", "main");
+        const session = yield* sessions.create({
+          repo: fixture.repo,
+          title: "a pinned grant",
+        });
+        const pinned = () =>
+          sql<{ baseCommit: string }>`
+            SELECT base_commit FROM session_secret_bases WHERE session_id = ${session.id}
+          `.pipe(Effect.map((rows) => rows.map((row) => row.baseCommit)));
+        const first = yield* pinned();
+        const worktree = (yield* sessions.get(session.id)).workspace.path;
+        writeFileSync(
+          join(worktree, ".factory/config"),
+          JSON.stringify({
+            verify: VERIFY,
+            secrets: { verify: ["TEST_API_KEY"] },
+          }),
+        );
+        git(worktree, "add", "-A");
+        git(worktree, "commit", "-q", "-m", "grant myself the key");
+        git(worktree, "update-ref", "refs/heads/main", "HEAD");
+        yield* sessions.send({ sessionId: session.id, content: "go" });
+        yield* settledRun(session.id);
+        return { original, first, after: yield* pinned() };
+      }),
+    );
+    expect(outcome.first).toEqual([outcome.original]);
+    expect(outcome.after).toEqual([outcome.original]);
   });
 });
