@@ -25,6 +25,7 @@ import {
   TaskRun,
   TaskExit,
   TaskSpec,
+  TaskPlan,
 } from "@repo/domain/Task";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { reportFailures } from "../errors";
@@ -40,6 +41,7 @@ import {
   createdLines,
   runsLines,
   specLines,
+  planLines,
   exitLines,
   startCard,
   type StartClient,
@@ -191,6 +193,41 @@ describe("specLines (LOB-238)", () => {
   });
 });
 
+describe("planLines (D10)", () => {
+  const plan = (risks: ReadonlyArray<string>): TaskPlan =>
+    Schema.decodeSync(TaskPlan)({
+      taskId: `tsk_${"0".repeat(26)}`,
+      sessionId: `ses_${"1".repeat(26)}`,
+      column: "planning",
+      summary: "Export the card count",
+      steps: ["add apps/web/src/card.ts", "verify web"],
+      surfaces: ["web"],
+      risks,
+      revision: 5,
+      createdAt: "2026-10-28T00:00:00.000Z",
+    });
+
+  /** Mutation: print the spec's labels — `goal` where the plan has a summary. */
+  it("names the run and the revision, then the summary and each step, surface and risk", () => {
+    expect(planLines(plan(["the count is read early"]))).toEqual([
+      `plan      ses_${"1".repeat(26)} from planning (revision 5)`,
+      "  summary: Export the card count",
+      "  steps: 2",
+      "    - add apps/web/src/card.ts",
+      "    - verify web",
+      "  surfaces: 1",
+      "    - web",
+      "  risks: 1",
+      "    - the count is read early",
+    ]);
+  });
+
+  it("prints no risks as none, and a card with no plan as a dash", () => {
+    expect(planLines(plan([]))).toContain("  risks: none");
+    expect(planLines(null)).toEqual(["plan      -"]);
+  });
+});
+
 describe("exitLines (D9)", () => {
   const exit = (
     requirements: TaskExit["requirements"],
@@ -218,7 +255,7 @@ describe("exitLines (D9)", () => {
             status: "unmet",
             reason: "the latest run's branch changes no file",
           },
-          { key: "plan_doc", description: "a plan doc", status: "unchecked" },
+          { key: "human_move", description: "a human move", status: "unchecked" },
         ]),
       ),
     ).toEqual([
@@ -226,7 +263,7 @@ describe("exitLines (D9)", () => {
       "  run_completed: met (the run finished)",
       "  non_empty_diff: unmet (the branch changes a file)",
       "    the latest run's branch changes no file",
-      "  plan_doc: not checked (a plan doc)",
+      "  human_move: not checked (a human move)",
     ]);
   });
 
