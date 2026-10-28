@@ -21,7 +21,12 @@ import { Schema } from "effect";
 // with a *native* dynamic import, and in that context an extensionless relative specifier
 // inside this package is left for Node's ESM loader, which does not add `.ts`. Every other
 // consumer in the repo (`packages/core`, `packages/harness`) already imports the subpath.
-import { RepoSlug, SessionId, Timestamp } from "@repo/domain/Session";
+import {
+  RepoSlug,
+  SessionId,
+  SessionStatus,
+  Timestamp,
+} from "@repo/domain/Session";
 
 /**
  * Task ids use `SessionId`'s alphabet and shape (`tsk_`, ten of millisecond timestamp then sixteen
@@ -913,6 +918,37 @@ export type TaskRun = typeof TaskRun.Type;
  */
 export const ListTaskRunsInput = Schema.Struct({ taskId: TaskId });
 export type ListTaskRunsInput = typeof ListTaskRunsInput.Type;
+
+/**
+ * The newest run of a card, as a card face shows it (C10): which session it is and whether it is
+ * working. `status` is the session index's (`session_activity`), so it is what `listSessions` says
+ * about the same session — a run whose index row is missing reads `idle`, never `busy`.
+ */
+export const BoardCardRun = Schema.Struct({
+  sessionId: SessionId,
+  status: SessionStatus,
+  startedAt: Timestamp,
+});
+export type BoardCardRun = typeof BoardCardRun.Type;
+
+/**
+ * One card with what its runs say, as `listBoardCards` returns it (C10): the card, how many runs it
+ * has had, what they cost and where the newest stands, so a lane answers "what is live, what has a
+ * PR, what did it cost" without a read per card.
+ *
+ * - `run` is the newest run by `started_at` and is absent for a card no run was started against.
+ * - `prUrl` is the newest run's PR that has one, not necessarily the newest run's: a later run that
+ *   only reads the card does not take the link away from the run that opened it.
+ * - `costTotal` sums every run's `session_activity.cost_total`, in the dollars `pi.usage` reports.
+ */
+export const BoardCard = Schema.Struct({
+  task: Task,
+  runCount: Schema.Int,
+  costTotal: Schema.Finite,
+  run: Schema.optional(BoardCardRun),
+  prUrl: Schema.optional(Schema.String),
+});
+export type BoardCard = typeof BoardCard.Type;
 
 export class TaskNotFound extends Schema.TaggedError<TaskNotFound>()(
   "TaskNotFound",
