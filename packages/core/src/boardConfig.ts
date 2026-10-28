@@ -2,13 +2,14 @@
  * What a board definition version does, described for a reader (LOB-270): an operator or a reviewer
  * sees what a board will do before trusting it, rather than reading migrations and constants.
  *
- * A definition row declares columns; three more facts decide what a card on it meets, and none of
- * them is in the row. This module joins them onto each column, each from the one place that already
- * decides it, so the description cannot drift from what a move or a run actually does:
+ * A definition row declares columns; more facts decide what a card on it meets, and not all of them
+ * are in the row as written. This module joins them onto each column, each from the one place that
+ * already decides it, so the description cannot drift from what a move or a run actually does:
  *
- * - **Exits and human gates** are `@repo/domain/Task`'s `declaredTransitions` and `humanGate`, the
- *   tables `TaskService.move` refuses by and the card pane offers by (`BoardColumn` carries no
- *   transitions yet). A column those tables do not name has no exits.
+ * - **Exits and human gates** are `@repo/domain/Task`'s `columnTransitions`, which `TaskService.move`
+ *   refuses by and the card pane offers by: the column's own `transitions` (LOB-267), or the default
+ *   pipeline's table for a version that declares none (default versions 1–3). The **initial column**
+ *   is `initialColumnOf`, the one `TaskService.create` puts a new card in.
  * - **Whether a requirement is checked** is `./requirements`' `CHECKED_REQUIREMENTS`. A declared key
  *   outside it is `checked: false`: nothing refuses a move over it today, and a reader is told so.
  *   The `human_*` keys are among them — the gate is enforced by the move's actor, which the exit
@@ -24,7 +25,7 @@ import type {
   DefinitionConfig,
   ResolvedModel,
 } from "@repo/domain/Task";
-import { declaredTransitions, humanGate } from "@repo/domain/Task";
+import { columnTransitions, initialColumnOf } from "@repo/domain/Task";
 import { CHECKED_REQUIREMENTS } from "./requirements";
 
 /** The model a run with `role` talks to; `undefined` is a column with no role. */
@@ -32,6 +33,7 @@ export type RoleModelOf = (role: string | undefined) => ResolvedModel;
 
 /** One column of `definition`, described: its exits, its requirements' status and its model. */
 const describeColumn = (
+  definition: BoardDefinition,
   column: BoardDefinition["columns"][number],
   modelOf: RoleModelOf,
 ): ColumnConfig => ({
@@ -45,19 +47,24 @@ const describeColumn = (
     description: requirement.description,
     checked: CHECKED_REQUIREMENTS.has(requirement.key),
   })),
-  exits: declaredTransitions(column.name).map((to) => {
-    const gate = humanGate(column.name, to);
-    return gate === undefined ? { to } : { to, humanGate: gate };
-  }),
+  exits: columnTransitions(definition, column.name).map(({ to, gate }) =>
+    gate === undefined ? { to } : { to, humanGate: gate },
+  ),
 });
 
 /** A definition version described, its columns in declaration order. */
 export const describeDefinition = (
   definition: BoardDefinition,
   modelOf: RoleModelOf,
-): DefinitionConfig => ({
-  id: definition.id,
-  version: definition.version,
-  name: definition.name,
-  columns: definition.columns.map((column) => describeColumn(column, modelOf)),
-});
+): DefinitionConfig => {
+  const initialColumn = initialColumnOf(definition);
+  return {
+    id: definition.id,
+    version: definition.version,
+    name: definition.name,
+    ...(initialColumn === undefined ? {} : { initialColumn }),
+    columns: definition.columns.map((column) =>
+      describeColumn(definition, column, modelOf),
+    ),
+  };
+};

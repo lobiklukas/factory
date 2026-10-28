@@ -1503,6 +1503,77 @@ describe("the board's tables and seed", () => {
     },
   );
 
+  /**
+   * 0026 (LOB-267): transitions, gates and the initial column as definition data. Version 4 is
+   * version 3 with the default pipeline's table written onto each column and `intake` as its initial
+   * column; versions 1–3 keep no transitions and no initial column (B2), and a second pass writes no
+   * second row. Read through `BoardDefinition`, so a seed the contract rejects fails here.
+   *
+   * Mutation: drop `planning`'s gate from the seed — its first move reads ungated. Mutation: update
+   * version 3 in place instead of inserting — version 3 carries transitions.
+   */
+  it(
+    "seeds version 4 with each column's moves and gates and an initial column, and only ever once",
+    { timeout: 30_000 },
+    async () => {
+      const read = (version: number) =>
+        Effect.runPromise(
+          sql<{
+            id: string;
+            version: number;
+            name: string;
+            columns: unknown;
+            initialColumn: string | null;
+          }>`
+            SELECT id, version, name, columns, initial_column FROM board_definitions
+            WHERE id = 'default' AND version = ${version}
+          `,
+        );
+
+      const [row4] = await read(4);
+      expect(row4).toBeDefined();
+      if (row4 === undefined) return;
+      expect(row4.initialColumn).toBe("intake");
+      const v4 = Schema.decodeUnknownSync(BoardDefinition)(row4);
+      expect(
+        Object.fromEntries(
+          v4.columns.map((column) => [column.name, column.transitions]),
+        ),
+      ).toEqual({
+        intake: [{ to: "specifying" }, { to: "canceled" }],
+        specifying: [{ to: "planning" }, { to: "canceled" }],
+        planning: [
+          { to: "building", gate: "plan approval" },
+          { to: "canceled" },
+        ],
+        building: [{ to: "review" }, { to: "canceled" }],
+        review: [{ to: "done", gate: "merge" }, { to: "canceled" }],
+        done: [],
+        canceled: [],
+      });
+
+      for (const version of [1, 2, 3]) {
+        const [row] = await read(version);
+        expect(row?.initialColumn).toBeNull();
+        const earlier = Schema.decodeUnknownSync(BoardDefinition)({
+          ...row,
+          initialColumn: undefined,
+        });
+        expect(
+          earlier.columns.every((column) => column.transitions === undefined),
+        ).toBe(true);
+      }
+
+      const migration = (
+        await import("./migrations/0026_seed_definition_transitions")
+      ).default;
+      await Effect.runPromise(
+        migration.pipe(Effect.provideService(SqlClient, sql)),
+      );
+      expect(await read(4)).toHaveLength(1);
+    },
+  );
+
   it(
     "refuses a card that is blocked without the column it blocked from",
     { timeout: 30_000 },

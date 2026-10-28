@@ -400,6 +400,16 @@ describe("a board's configuration over RPC (LOB-270)", () => {
     expect(v3.version).toBe(3);
     expect(v3.name).toBe("Default pipeline");
     expect(v3.columns).toEqual(DEFAULT_V3);
+    expect(v3.initialColumn).toBe("intake");
+
+    // Version 4 (LOB-267) carries the moves on its columns and names its initial column, and they
+    // are exactly the table versions 1–3 resolve through: the same description, column by column.
+    const v4 = await call((client) =>
+      client.getDefinition({ definitionId: DEFAULT, version: 4 }),
+    );
+    expect(v4.version).toBe(4);
+    expect(v4.initialColumn).toBe("intake");
+    expect(v4.columns).toEqual(DEFAULT_V3);
 
     // Version 1 is its own row: no skills bound, and `review` does not declare `verified` yet.
     const v1 = await call((client) =>

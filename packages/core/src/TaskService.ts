@@ -14,16 +14,21 @@
  * Refusals are typed values (`TaskRefusal`-family, below), each naming what failed. They are not
  * booleans, and a caller branches on `_tag`.
  *
- * Two rules are checked here that the board decisions name but the definition does not carry yet
- * (`BoardColumn` has no transitions field). Their tables live in `@repo/domain/Task`, because the
+ * **Moves are the card's pinned definition's (B2, B5; LOB-267).** A column declares its moves —
+ * `transitions: [{ to, gate? }]` — and a definition the column a new card starts in, and every read
+ * of them resolves through `@repo/domain/Task` (`columnTransitions`, `initialColumnOf`), because the
  * dashboard's card pane offers exactly what this service accepts (LOB-76):
  *
- * - **Declared transitions** (`DECLARED_TRANSITIONS`) are the forward pipeline of the default
- *   definition, plus `canceled` from any non-terminal column. Anything else is an undeclared
- *   transition.
- * - **Human gates** (`HUMAN_GATES`) are `planning → building` (plan approval) and `review → done`
- *   (merge). A run is one Pi Durable session, so a run's actor is its session id; any actor that is
- *   a session id is a run and cannot cross a gate. Every other actor is a person.
+ * - **Declared transitions.** A move the card's column does not declare, under the definition
+ *   version the card pinned, is an undeclared transition. A version that declares no moves at all
+ *   (default versions 1–3, written before the field existed) resolves through the default pipeline's
+ *   table, so a card pinned to one moves exactly as it did.
+ * - **Human gates.** A declared move with a `gate` is one only a person can make — in the default
+ *   pipeline `planning → building` (plan approval) and `review → done` (merge). A run is one Pi
+ *   Durable session, so a run's actor is its session id; any actor that is a session id is a run and
+ *   cannot cross a gate. Every other actor is a person.
+ * - **The initial column.** `create` puts a card in its board's definition's `initialColumn`, or its
+ *   first column for a version with none.
  *
  * **Exit requirements (B5, B8; LOB-80).** A move out of a column checks the column's `requires[]`
  * under the card's pinned definition version, after the transition and the gate, and a requirement
@@ -68,21 +73,23 @@ import {
   BoardInstanceId,
   BoardView,
   type CreateBoardInput,
+  type DefinitionMoves,
+  definitionProblems,
   type CreatedBoard,
   DefinitionSummary,
-  GATED_COLUMNS,
+  gatedColumns,
   gatedExit,
+  initialColumnOf,
   LIST_BOARDS_LIMIT,
   MAX_TASK_BODY_CHARS,
   MAX_TASK_REF_CHARS,
-  humanGate,
   NON_EMPTY_DIFF_REQUIREMENT,
-  isDeclaredTransition,
   Task,
   TaskEvent,
   TaskId,
   TaskRun,
   TaskSpec,
+  transitionOf,
 } from "@repo/domain/Task";
 import { TaskComment } from "@repo/domain/Task";
 import type {
@@ -110,9 +117,6 @@ import {
   requirementVerdict,
   type RunEvidence,
 } from "./requirements";
-
-/** Every new card starts in the default definition's first column (B4). */
-export const INITIAL_COLUMN = "intake";
 
 /** A run's actor is its session id (B1: a run is exactly one session). Any other actor is a person. */
 export const isRunActor = (actor: Actor): boolean =>
@@ -529,6 +533,11 @@ type RunRow = {
  */
 type ExitJudgement = {
   readonly unmet: RequirementUnmet | undefined;
+  /**
+   * The card's pinned definition version as the judgement read it, which decides its moves; absent
+   * when the read found no card, which the transaction then refuses as `TaskNotFound`.
+   */
+  readonly definition?: DefinitionMoves;
 };
 
 const iso = (value: Date | string): string =>
@@ -585,6 +594,15 @@ export const cardText = (input: {
     }
     return { body, baseRef, externalRef };
   });
+
+/**
+ * `board_definitions.initial_column` as `BoardDefinition` carries it: absent, not `null`, for a
+ * version written before the column existed (0026), which starts a card in its first column.
+ */
+const initialColumnField = (
+  initialColumn: string | null,
+): { readonly initialColumn?: string } =>
+  initialColumn === null ? {} : { initialColumn };
 
 /**
  * Merge two lists each already in the order `session_approvals` is read in (oldest request first,
@@ -787,13 +805,15 @@ export const TaskServiceLive = Layer.effect(
             createdAt: Date | string;
             name: string;
             columns: string;
+            initialColumn: string | null;
           }>`
             SELECT bi.repo,
                    bi.definition_id AS "definitionId",
                    bi.definition_version AS "definitionVersion",
                    bi.created_at AS "createdAt",
                    bd.name,
-                   bd.columns::text AS columns
+                   bd.columns::text AS columns,
+                   bd.initial_column
             FROM board_instances bi
             JOIN board_definitions bd
               ON bd.id = bi.definition_id AND bd.version = bi.definition_version
@@ -822,6 +842,7 @@ export const TaskServiceLive = Layer.effect(
               version: row.definitionVersion,
               name: row.name,
               columns,
+              ...initialColumnField(row.initialColumn),
             },
           }).pipe(
             Effect.mapError(
@@ -1000,18 +1021,19 @@ export const TaskServiceLive = Layer.effect(
             version: number;
             name: string;
             columns: string;
+            initialColumn: string | null;
           };
           const rows =
             version === undefined
               ? yield* sql<DefinitionRow>`
-                  SELECT version, name, columns::text AS columns
+                  SELECT version, name, columns::text AS columns, initial_column
                   FROM board_definitions
                   WHERE id = ${definitionId}
                   ORDER BY version DESC
                   LIMIT 1
                 `
               : yield* sql<DefinitionRow>`
-                  SELECT version, name, columns::text AS columns
+                  SELECT version, name, columns::text AS columns, initial_column
                   FROM board_definitions
                   WHERE id = ${definitionId} AND version = ${version}
                 `;
@@ -1035,6 +1057,7 @@ export const TaskServiceLive = Layer.effect(
             version: row.version,
             name: row.name,
             columns,
+            ...initialColumnField(row.initialColumn),
           }).pipe(
             Effect.mapError(
               (cause) =>
@@ -1066,12 +1089,21 @@ export const TaskServiceLive = Layer.effect(
       withStorage(
         sql.withTransaction(
           Effect.gen(function* () {
+            // The board and the definition version it binds, which is the version the card pins (B2)
+            // and so the one whose initial column it starts in (LOB-267).
             const boards = yield* sql<{
               id: string;
               repo: string;
               definitionVersion: number;
+              columns: string;
+              initialColumn: string | null;
             }>`
-              SELECT id, repo, definition_version FROM board_instances WHERE id = ${input.boardId}
+              SELECT bi.id, bi.repo, bi.definition_version,
+                     bd.columns::text AS columns, bd.initial_column
+              FROM board_instances bi
+              JOIN board_definitions bd
+                ON bd.id = bi.definition_id AND bd.version = bi.definition_version
+              WHERE bi.id = ${input.boardId}
             `;
             const board = boards[0];
             if (board === undefined) {
@@ -1092,6 +1124,21 @@ export const TaskServiceLive = Layer.effect(
                 message: `board ${board.id} is over ${board.repo}, so a card on it cannot name ${repo}`,
               });
             }
+            const definition: DefinitionMoves = {
+              columns: yield* readColumns(board.columns, `board ${board.id}`),
+              ...initialColumnField(board.initialColumn),
+            };
+            // A definition that cannot be used as written (an initial column it lacks, no columns
+            // at all, a move to a lane it lacks) makes no card: one would start in a lane the board
+            // does not render, with no moves out (LOB-267). Only migrations write definitions today,
+            // and 0026 holds its seed to the same check; an authored version will be too.
+            const problems = definitionProblems(definition);
+            const column = initialColumnOf(definition);
+            if (problems.length > 0 || column === undefined) {
+              return yield* new TaskStorageError({
+                message: `board ${board.id}'s definition version ${board.definitionVersion} cannot start a card: ${problems.join("; ")}`,
+              });
+            }
             const id = yield* mintTaskId;
             const priority = input.priority ?? "normal";
             // What the card says and where its runs start (LOB-260). A blank value is none, so an
@@ -1103,7 +1150,7 @@ export const TaskServiceLive = Layer.effect(
                 revision, priority, body, base_ref, external_ref, created_at, updated_at
               )
               VALUES (
-                ${id}, ${board.id}, ${input.title}, ${INITIAL_COLUMN}, ${repo},
+                ${id}, ${board.id}, ${input.title}, ${column}, ${repo},
                 ${board.definitionVersion}, 1, ${priority}, ${body ?? ""},
                 ${baseRef ?? null}, ${externalRef ?? null}, now(), now()
               )
@@ -1116,7 +1163,7 @@ export const TaskServiceLive = Layer.effect(
               taskId: id,
               boardId: BoardInstanceId.make(board.id),
               title: input.title,
-              column: INITIAL_COLUMN,
+              column,
               actor: input.actor,
               revision: 1,
               priority,
@@ -1158,7 +1205,9 @@ export const TaskServiceLive = Layer.effect(
     /**
      * The column a card sits in, by name and as the definition version it pinned declares it (B2):
      * `undefined` for a card that is gone, and `declared` absent for a column its definition does
-     * not name.
+     * not name. `definition` is that version's columns and initial column, which decide the card's
+     * moves (LOB-267). A card's pinned version never changes, so a read before the card is locked
+     * and one under the lock answer the same definition.
      */
     const pinnedColumn = (taskId: string) =>
       Effect.gen(function* () {
@@ -1166,8 +1215,9 @@ export const TaskServiceLive = Layer.effect(
           column: string;
           revision: number;
           columns: string;
+          initialColumn: string | null;
         }>`
-          SELECT t."column", t.revision, bd.columns::text AS columns
+          SELECT t."column", t.revision, bd.columns::text AS columns, bd.initial_column
           FROM tasks t
           JOIN board_instances bi ON bi.id = t.board_id
           JOIN board_definitions bd
@@ -1184,10 +1234,15 @@ export const TaskServiceLive = Layer.effect(
               }),
           ),
         );
+        const definition: DefinitionMoves = {
+          columns,
+          ...initialColumnField(row.initialColumn),
+        };
         return {
           name: row.column,
           revision: row.revision,
           declared: columns.find((candidate) => candidate.name === row.column),
+          definition,
         };
       });
 
@@ -1335,6 +1390,7 @@ export const TaskServiceLive = Layer.effect(
       Effect.gen(function* () {
         const pinned = yield* pinnedColumn(input.taskId);
         if (pinned === undefined) return { unmet: undefined };
+        const definition = pinned.definition;
         if (pinned.revision !== input.expectedRevision) {
           return yield* new StaleRevision({
             taskId: input.taskId,
@@ -1346,7 +1402,7 @@ export const TaskServiceLive = Layer.effect(
         const column = pinned.declared;
         const requirements = exitRequirements(column, input.to);
         if (column === undefined || requirements.length === 0)
-          return { unmet: undefined };
+          return { unmet: undefined, definition };
         const evidence = yield* cardEvidence(
           input.taskId,
           requirements.some(
@@ -1357,6 +1413,7 @@ export const TaskServiceLive = Layer.effect(
           const verdict = requirementVerdict(requirement, evidence);
           if (!verdict.met) {
             return {
+              definition,
               unmet: new RequirementUnmet({
                 taskId: input.taskId,
                 column: column.name,
@@ -1367,7 +1424,7 @@ export const TaskServiceLive = Layer.effect(
             };
           }
         }
-        return { unmet: undefined };
+        return { unmet: undefined, definition };
       });
 
     const move = (input: MoveTaskInput): Effect.Effect<Task, TaskError> =>
@@ -1390,14 +1447,21 @@ export const TaskServiceLive = Layer.effect(
               input.expectedRevision,
             );
             const from = row.column;
-            if (!isDeclaredTransition(from, input.to)) {
+            // From the version the card pinned (B2): the moves are its, not the board's newest or
+            // the default pipeline's (LOB-267). The judgement read it at the revision this lock
+            // holds, and a pinned version never changes, so it is not read again here.
+            const transition =
+              exit.definition === undefined
+                ? undefined
+                : transitionOf(exit.definition, from, input.to);
+            if (transition === undefined) {
               return yield* new UndeclaredTransition({
                 from,
                 to: input.to,
                 message: `column "${from}" declares no transition to "${input.to}"`,
               });
             }
-            const gate = humanGate(from, input.to);
+            const gate = transition.gate;
             if (gate !== undefined && isRunActor(input.actor)) {
               return yield* new HumanGateRequired({
                 gate,
@@ -2065,14 +2129,54 @@ export const TaskServiceLive = Layer.effect(
             ORDER BY t.blocked_since, t.id
           `;
 
-          const gates = yield* sql<
-            TaskRow & {
-              readonly boardRepo: string;
-              readonly runSession: string;
-            }
-          >`
+          // The definition versions the unblocked cards pin, each with the columns whose exit crosses
+          // a human gate under it (LOB-267): a gate is the card's pinned version's, not a name the
+          // default pipeline gates. Keyed `<definition>@<version>:<column>`; a definition id has no
+          // `@` or `:`, so a key names one column of one version.
+          const pinned = yield* sql<{
+            readonly id: string;
+            readonly version: number;
+            readonly columns: string;
+            readonly initialColumn: string | null;
+          }>`
+            SELECT bd.id, bd.version, bd.columns::text AS columns, bd.initial_column
+            FROM board_definitions bd
+            WHERE EXISTS (
+              SELECT 1
+              FROM tasks t
+              JOIN board_instances bi ON bi.id = t.board_id
+              WHERE bi.definition_id = bd.id AND t.definition_version = bd.version
+                AND t.blocked_reason IS NULL
+                AND (${board}::text IS NULL OR t.board_id = ${board})
+            )
+          `;
+          const definitions = new Map<string, DefinitionMoves>();
+          for (const row of pinned) {
+            definitions.set(`${row.id}@${row.version}`, {
+              columns: yield* readColumns(
+                row.columns,
+                `board definition ${row.id} v${row.version}`,
+              ),
+              ...initialColumnField(row.initialColumn),
+            });
+          }
+          const gatedKeys = [...definitions].flatMap(([key, definition]) =>
+            gatedColumns(definition).map((column) => `${key}:${column}`),
+          );
+
+          type GateRow = TaskRow & {
+            readonly boardRepo: string;
+            readonly definitionId: string;
+            readonly runSession: string;
+          };
+          // No pinned version gates any column: nothing can wait at a gate, and an empty array is
+          // not a parameter to send.
+          const gates: ReadonlyArray<GateRow> =
+            gatedKeys.length === 0
+              ? []
+              : yield* sql<GateRow>`
             SELECT ${sql.literal(TASK_COLUMNS_T)}, bi.repo AS board_repo,
-                   r.session_id AS run_session
+                   bi.definition_id, r.session_id AS run_session
             FROM tasks t
             JOIN board_instances bi ON bi.id = t.board_id
             JOIN LATERAL (
@@ -2083,7 +2187,8 @@ export const TaskServiceLive = Layer.effect(
               LIMIT 1
             ) r ON true
             WHERE t.blocked_reason IS NULL
-              AND t."column" = ANY(${GATED_COLUMNS}::text[])
+              AND (bi.definition_id || '@' || t.definition_version || ':' || t."column")
+                = ANY(${gatedKeys}::text[])
               AND NOT EXISTS (
                 SELECT 1
                 FROM task_runs busy
@@ -2132,7 +2237,13 @@ export const TaskServiceLive = Layer.effect(
             }),
           );
           const gateItems = yield* Effect.forEach(gates, (row) => {
-            const exit = gatedExit(row.column);
+            const definition = definitions.get(
+              `${row.definitionId}@${row.definitionVersion}`,
+            );
+            const exit =
+              definition === undefined
+                ? undefined
+                : gatedExit(definition, row.column);
             return toAttention(row, {
               _tag: "gate",
               gate: exit?.gate,

@@ -31,14 +31,20 @@ import {
   DECLARED_TRANSITIONS,
   DEFAULT_DEFINITION_ID,
   DefinitionId,
-  GATED_COLUMNS,
+  columnTransitions,
+  declaresTransitions,
+  defaultPipelineTransitions,
+  definitionProblems,
+  type DefinitionMoves,
+  gatedColumns,
   gatedExit,
+  initialColumnOf,
   MAX_COMMENT_CHARS,
   declaredTransitions,
   HUMAN_GATES,
   humanGate,
-  isDeclaredTransition,
   Task,
+  transitionOf,
   TaskComment,
   TaskBlocked,
   TaskEvent,
@@ -675,8 +681,8 @@ describe("the declared transitions and human gates (B4, B5)", () => {
     expect(declaredTransitions("planning")).toEqual(["building", "canceled"]);
     expect(declaredTransitions("building")).toEqual(["review", "canceled"]);
     expect(declaredTransitions("review")).toEqual(["done", "canceled"]);
-    expect(isDeclaredTransition("intake", "done")).toBe(false);
-    expect(isDeclaredTransition("intake", "building")).toBe(false);
+    expect(declaredTransitions("intake")).not.toContain("done");
+    expect(declaredTransitions("intake")).not.toContain("building");
   });
 
   it("declares nothing out of a terminal column or one it does not know", () => {
@@ -693,21 +699,195 @@ describe("the declared transitions and human gates (B4, B5)", () => {
     expect(humanGate("building", "review")).toBeUndefined();
     for (const key of Object.keys(HUMAN_GATES)) {
       const [from = "", to = ""] = key.split("→");
-      expect(isDeclaredTransition(from, to)).toBe(true);
+      expect(declaredTransitions(from)).toContain(to);
     }
     expect(Object.keys(HUMAN_GATES)).toHaveLength(2);
   });
 
-  it("finds each gated column's exit, and only the gated ones (LOB-77)", () => {
-    expect(GATED_COLUMNS).toEqual(["planning", "review"]);
-    expect(gatedExit("planning")).toEqual({
+  it("finds each gated column's exit under the default table, and only the gated ones (LOB-77)", () => {
+    const legacy: DefinitionMoves = { columns: B4_NAMES.map(aColumn) };
+    expect(gatedColumns(legacy)).toEqual(["planning", "review"]);
+    expect(gatedExit(legacy, "planning")).toEqual({
       to: "building",
       gate: "plan approval",
     });
-    expect(gatedExit("review")).toEqual({ to: "done", gate: "merge" });
+    expect(gatedExit(legacy, "review")).toEqual({ to: "done", gate: "merge" });
     for (const column of ["intake", "specifying", "building", "done", "x"]) {
-      expect(gatedExit(column)).toBeUndefined();
+      expect(gatedExit(legacy, column)).toBeUndefined();
     }
+  });
+});
+
+/** The default pipeline's column names, in declaration order (B4). */
+const B4_NAMES = [
+  "intake",
+  "specifying",
+  "planning",
+  "building",
+  "review",
+  "done",
+  "canceled",
+];
+
+/** A column with nothing on it but its name: no role, skills, requirements or transitions. */
+const aColumn = (name: string): BoardColumn => ({
+  name,
+  kind: "working",
+  skills: [],
+  requires: [],
+});
+
+/**
+ * Transitions, gates and the initial column as definition data (LOB-267). A definition that declares
+ * moves on any column is read from its columns alone; one that declares none (default v1–v3) through
+ * the default pipeline's table, exactly as before.
+ */
+describe("a definition's own transitions, gates and initial column (LOB-267)", () => {
+  /** todo → doing → done, with a gate on doing → done: the issue's synthetic definition. */
+  const synthetic: DefinitionMoves = {
+    initialColumn: "todo",
+    columns: [
+      { ...aColumn("todo"), kind: "resting", transitions: [{ to: "doing" }] },
+      { ...aColumn("doing"), transitions: [{ to: "done", gate: "sign-off" }] },
+      { ...aColumn("done"), kind: "terminal", transitions: [] },
+    ],
+  };
+
+  /** Mutation: read the default table whatever the definition declares — `todo` has no moves. */
+  it("reads the moves a column declares, and only those", () => {
+    expect(declaresTransitions(synthetic)).toBe(true);
+    expect(columnTransitions(synthetic, "todo")).toEqual([{ to: "doing" }]);
+    expect(transitionOf(synthetic, "todo", "doing")).toEqual({ to: "doing" });
+    expect(transitionOf(synthetic, "todo", "done")).toBeUndefined();
+    expect(transitionOf(synthetic, "doing", "done")).toEqual({
+      to: "done",
+      gate: "sign-off",
+    });
+    expect(columnTransitions(synthetic, "done")).toEqual([]);
+    expect(columnTransitions(synthetic, "nowhere")).toEqual([]);
+    expect(gatedColumns(synthetic)).toEqual(["doing"]);
+    expect(gatedExit(synthetic, "doing")).toEqual({
+      to: "done",
+      gate: "sign-off",
+    });
+  });
+
+  /**
+   * A declaring definition never falls back to the table by name, so a column it leaves without
+   * `transitions` declares none even when the table knows its name. Mutation: fall back per column —
+   * `intake` here gains `specifying` and `canceled`.
+   */
+  it("declares no moves for a column without transitions once any column declares some", () => {
+    const mixed: DefinitionMoves = {
+      columns: [
+        aColumn("intake"),
+        { ...aColumn("specifying"), transitions: [{ to: "intake" }] },
+      ],
+    };
+    expect(columnTransitions(mixed, "intake")).toEqual([]);
+    expect(columnTransitions(mixed, "specifying")).toEqual([{ to: "intake" }]);
+  });
+
+  /** Mutation: drop the fallback — a card pinned to default v1–v3 has no moves at all. */
+  it("reads a definition that declares no moves through the default pipeline's table", () => {
+    const legacy: DefinitionMoves = { columns: B4_NAMES.map(aColumn) };
+    expect(declaresTransitions(legacy)).toBe(false);
+    for (const name of B4_NAMES) {
+      expect(columnTransitions(legacy, name)).toEqual(
+        defaultPipelineTransitions(name),
+      );
+    }
+    expect(columnTransitions(legacy, "planning")).toEqual([
+      { to: "building", gate: "plan approval" },
+      { to: "canceled" },
+    ]);
+  });
+
+  /** Mutation: hard-code `intake` — the synthetic definition starts a card in a column it lacks. */
+  it("starts a card in the declared initial column, or the first column when none is declared", () => {
+    expect(initialColumnOf(synthetic)).toBe("todo");
+    expect(initialColumnOf({ ...synthetic, initialColumn: "doing" })).toBe(
+      "doing",
+    );
+    expect(initialColumnOf({ columns: B4_NAMES.map(aColumn) })).toBe("intake");
+    expect(initialColumnOf({ columns: [aColumn("backlog")] })).toBe("backlog");
+    // No columns, no lane to start in: never a default name the definition lacks.
+    expect(initialColumnOf({ columns: [] })).toBeUndefined();
+  });
+
+  it("finds nothing wrong with the synthetic definition or the default pipeline's table", () => {
+    expect(definitionProblems(synthetic)).toEqual([]);
+    expect(
+      definitionProblems({
+        initialColumn: "intake",
+        columns: B4_NAMES.map((name) => ({
+          ...aColumn(name),
+          transitions: defaultPipelineTransitions(name),
+        })),
+      }),
+    ).toEqual([]);
+  });
+
+  /** Each fault on its own, so a check that is dropped reddens its own line. */
+  it("names every fault that would leave a card stuck or offered a lane that is not there", () => {
+    expect(
+      definitionProblems({ ...synthetic, initialColumn: "backlog" }),
+    ).toEqual([
+      'the initial column "backlog" is not a column of the definition',
+    ]);
+    expect(
+      definitionProblems({
+        columns: [
+          { ...aColumn("todo"), transitions: [{ to: "nowhere" }] },
+          aColumn("todo"),
+        ],
+      }),
+    ).toEqual([
+      'column "todo" is declared more than once',
+      'column "todo" declares a move to "nowhere", which is not a column of the definition',
+    ]);
+    expect(
+      definitionProblems({
+        columns: [
+          {
+            ...aColumn("todo"),
+            transitions: [{ to: "todo" }, { to: "done" }, { to: "done" }],
+          },
+          { ...aColumn("done"), transitions: [{ to: "todo", gate: " " }] },
+        ],
+      }),
+    ).toEqual([
+      'column "todo" declares a move to itself',
+      'column "todo" declares its move to "done" more than once',
+      'column "done"\'s move to "todo" names a gate with no name',
+    ]);
+    expect(definitionProblems({ columns: [] })).toEqual([
+      "the definition declares no columns",
+    ]);
+  });
+
+  /** A column's transitions round-trip through the schema a `board_definitions` row decodes with. */
+  it("decodes a column's transitions, and refuses a transition with no target", () => {
+    const column = {
+      ...aColumn("doing"),
+      transitions: [{ to: "done", gate: "sign-off" }],
+    };
+    expect(Schema.decodeSync(BoardColumn)(column)).toEqual(column);
+    expect(Schema.decodeSync(BoardColumn)(aColumn("doing"))).toEqual(
+      aColumn("doing"),
+    );
+    expect(
+      refuses(BoardColumn, { ...column, transitions: [{ gate: "x" }] }),
+    ).toBe(true);
+    expect(
+      Schema.decodeSync(BoardDefinition)({
+        id: "todo",
+        version: 1,
+        name: "Todo",
+        initialColumn: "todo",
+        columns: [column],
+      }).initialColumn,
+    ).toBe("todo");
   });
 });
 

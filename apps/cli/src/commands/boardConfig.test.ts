@@ -70,11 +70,12 @@ describe("columnLines (LOB-270)", () => {
 });
 
 describe("definitionLines (LOB-270)", () => {
-  it("names the definition and version, then every column in order", () => {
+  it("names the definition and version, its initial column (LOB-267), then every column in order", () => {
     const definition = Schema.decodeSync(DefinitionConfig)({
       id: "default",
       version: 3,
       name: "Default pipeline",
+      initialColumn: "planning",
       columns: [
         Schema.encodeSync(ColumnConfig)(planning),
         Schema.encodeSync(ColumnConfig)(done),
@@ -82,10 +83,25 @@ describe("definitionLines (LOB-270)", () => {
     });
     const lines = definitionLines(definition);
     expect(lines[0]).toBe("definition  default v3  Default pipeline");
+    expect(lines[1]).toBe("initial     planning");
     expect(lines.filter((line) => !line.startsWith(" "))).toEqual([
       "definition  default v3  Default pipeline",
+      "initial     planning",
       "planning  working",
       "done  terminal",
+    ]);
+  });
+
+  it("prints — for a definition with no initial column (one that declares no columns)", () => {
+    const definition = Schema.decodeSync(DefinitionConfig)({
+      id: "empty",
+      version: 1,
+      name: "Empty",
+      columns: [],
+    });
+    expect(definitionLines(definition)).toEqual([
+      "definition  empty v1  Empty",
+      "initial     —",
     ]);
   });
 });
