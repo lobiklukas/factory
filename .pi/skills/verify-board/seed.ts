@@ -18,6 +18,11 @@
 // board's repository through the API's `registerRepo`, pointing it at that checkout, so a run on one
 // of its cards is a git worktree of it and has a branch a PR can publish.
 //
+// `SEED_REPO_SLUG` and `SEED_REPO_URL` name the board's repository and its forge (LOB-40): verify-workflow
+// maps a Linear label to the repository before the API boots, so it picks the slug, and its pushes
+// go to a loopback git forge, so the URL is that forge's. Unset, a fresh `verify-board/<hex>` slug
+// whose URL is `example.invalid`, which nothing reaches.
+//
 // `SEED_BOARD_ID=brd_…` seeds the card on that board and creates none (C5): verify-web's drive makes
 // its board with the dashboard's **New board** form, as an operator does, and asks this seed for the
 // card alone — the board's repository and version are read back from the server, not assumed.
@@ -41,10 +46,14 @@ const NEWEST = process.env["SEED_DEFINITION_VERSION"] === "newest";
 const BOARD_ID = process.env["SEED_BOARD_ID"] ?? "";
 const REPO_ROOT = process.env["SEED_REPO_ROOT"] ?? "";
 const API_URL = process.env["API_URL"] ?? "http://localhost:9400";
+const REPO_SLUG = process.env["SEED_REPO_SLUG"] ?? "";
+const REPO_URL = process.env["SEED_REPO_URL"] ?? "";
 
 const program = Effect.gen(function* () {
   const tasks = yield* TaskService;
-  const repo = RepoSlug.make(`verify-board/${hex(6)}`);
+  const repo = RepoSlug.make(
+    REPO_SLUG === "" ? `verify-board/${hex(6)}` : REPO_SLUG,
+  );
 
   if (BOARD_ID !== "") {
     // The board is the caller's: read it back, add the card, and print the same line.
@@ -69,7 +78,8 @@ const program = Effect.gen(function* () {
         const client = yield* RpcClient.make(RpcApi);
         yield* client.registerRepo({
           repo,
-          url: `https://example.invalid/${repo}.git`,
+          url:
+            REPO_URL === "" ? `https://example.invalid/${repo}.git` : REPO_URL,
           localPath: REPO_ROOT,
         });
       }),

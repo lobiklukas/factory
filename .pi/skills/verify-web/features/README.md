@@ -85,6 +85,15 @@ from the `agent/D6` worktree, API `:9512` / web `:3512`; `board-settings.sh` re-
 API `:9541` / web `:3541`, on a throwaway database; `board-settings.sh` re-passed there (23/23, API `:9541` /
 web `:3541`) with each column's skills now links.
 
+`.pi/skills/verify-workflow/cycle.sh` (the whole loop on one card, milestone L, LOB-40: a Linear
+delegation through the webhook and the label rule, specify, plan approval, a gated `git commit` whose
+approval survives an API restart, a real `git push` with the token, one PR with its evidence, Linear
+write-back, review, merge, and the session list and spend) passed **42/42** twice in a row on
+2026-10-29 from the `agent/LOB-40` worktree, API `:9500` / web `:3500` / GitHub fake `:9501` / Linear
+fake `:9502` / git forge `:9503`, each on its own scratch database, each `down.sh` leaving nothing
+(`workflow-cycle.json`). It reads the run back over RPC and the CLI, not in the browser; its `--live`
+mode is the owner's to run (see its SKILL.md).
+
 `cost.sh` (cost prediction on the New session form and `/spend`, LOB-38) last passed **12/12** on
 2026-10-28 from the `agent/LOB-38` worktree, API `:9552` / web `:3552`; `spend.sh` and `model.sh`
 re-passed there beside it, as the strip and the form sit on their pages.
@@ -127,6 +136,7 @@ re-passed there beside it, as the strip and the form sit on their pages.
 | Exit checklist               | passing | [exit-checklist.md](exit-checklist.md) (`exit-checklist.sh`)                  |
 | Card pane state controls     | passing | [card-edit.md](card-edit.md) (`card-edit.sh`)                                 |
 | The dashboard's credential   | passing | verify-api's [identity.md](../../verify-api/features/identity.md) (`auth.sh`) |
+| The whole loop (L, faux)     | passing | [verify-workflow](../../verify-workflow/SKILL.md) (`cycle.sh`; live: owner's) |
 
 ## Known gaps
 

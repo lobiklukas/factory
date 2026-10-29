@@ -54,6 +54,18 @@ from the same branch. `packages/core/src/SessionService.cardProcesses.test.ts` (
 `HttpClient.make` fake of the create and the lookup that answers `422` for a second open PR on one
 head, so two processes stepping one card's PR are counted by the creates they made.
 
+**Where the MCP servers are configured.** The root `.mcp.json` is authoritative: `.pi/mcp.json` is a
+symlink to `../.mcp.json`, so pi's project-level read and every other client see one file and there is
+no second copy to drift out of step. The `linear` server is reached as
+`npx -y mcp-remote@<exact version>`, never as a bare `mcp-remote` — with no specifier `npx` installs
+whatever the registry calls `latest` on the day an agent starts, which is a different program from the
+one this repo was tested against. To bump it, change the version in `.mcp.json`'s `linear.args` **and**
+the two places in the Linear MCP row above that the guard reads — the strategy cell's
+`mcp-remote@<version>` and the sources cell's `(<version>, MIT, …)` — in one commit:
+`packages/storage-postgres/src/mcp-pin.test.ts` fails when any of the three disagrees. Then confirm
+the tools still mount with `pi mcp list`, which prints the server, its tool count and the pinned
+command line it resolved.
+
 ## Adding a row
 
 Strategy preference, in order: (1) in-process fake behind an existing Effect service seam; (2) HTTP
