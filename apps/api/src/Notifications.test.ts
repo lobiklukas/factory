@@ -143,7 +143,7 @@ describe("personal sinks and retention (F21, F22)", () => {
     expect(resolved.channels.allowInsecurePush).toBe(false);
     const line = describeNotifyPlan(resolved);
     expect(line).toBe(
-      `notifications: question, approval, gate, failed to each person's email and each person's Web Push, every 5000ms, linking to ${DASHBOARD}`,
+      `notifications: question, approval, gate, failed, spend to each person's email and each person's Web Push, every 5000ms, linking to ${DASHBOARD}`,
     );
     for (const secret of ["smtp-secret", keys.privateKey]) {
       expect(line).not.toContain(secret);

@@ -194,6 +194,7 @@ describe("the settings", () => {
       { kind: "approval", enabled: true, stored: false },
       { kind: "gate", enabled: true, stored: false },
       { kind: "failed", enabled: true, stored: false },
+      { kind: "spend", enabled: true, stored: false },
     ]);
     expect(settings.sinks).toEqual([]);
     expect(settings.channels).toEqual({
