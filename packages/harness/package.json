@@ -12,6 +12,7 @@
     "@earendil-works/chord": "1.0.3",
     "@earendil-works/pi-ai": "1.0.3",
     "@earendil-works/pi-durable": "1.0.3",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "@repo/domain": "workspace:*",
     "@repo/sandbox": "workspace:*",
     "effect": "4.0.0"
@@ -26,6 +27,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./reviewEval": "./src/reviewEval.ts",
-    "./reviewEvalCorpus": "./src/reviewEvalCorpus.ts"
+    "./reviewEvalCorpus": "./src/reviewEvalCorpus.ts",
+    "./openaiCompatibleFake": "./src/openaiCompatibleFake.ts",
+    "./mcpFake": "./src/mcpFake.ts"
   }
 }

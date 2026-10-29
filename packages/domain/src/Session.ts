@@ -298,7 +298,9 @@ export type ToolCallRef = typeof ToolCallRef.Type;
  * a tool result's own flag, and on an assistant entry it marks a model request that failed; `error` is
  * then the provider's message for it, kept out of `text` so the failure is never read as an answer.
  * `inherited` is a line a fork copied from the session it was forked from that is history, not
- * its own (LOB-211): the parent's PR, which the fork does not have.
+ * its own (LOB-211): the parent's PR, which the fork does not have. `modelSwitch` is a run's role
+ * fallback moving the session onto another model after its own answered overloaded or unavailable
+ * (S-model-provider-breadth); its text names both models and the provider's error.
  */
 export const TranscriptEntryKind = Schema.Literals([
   "user",
@@ -310,6 +312,7 @@ export const TranscriptEntryKind = Schema.Literals([
   "title",
   "budget",
   "interrupted",
+  "modelSwitch",
   "inherited",
   "other",
 ]);
@@ -323,6 +326,13 @@ export const TranscriptEntry = Schema.Struct({
   toolName: Schema.optional(Schema.String),
   isError: Schema.optional(Schema.Boolean),
   error: Schema.optional(Schema.String),
+  /**
+   * Set on the entries a settled run's PR step announces when it opened no PR (F17): an unchanged
+   * branch, a refusal, a push of later commits. Their kind is `other`, as every entry this package
+   * writes is, so a reader that waits for the step's answer (`factory run --open-pr`) matches this
+   * flag instead of taking any `other` entry — an approval or a page the run wrote — for it.
+   */
+  prStep: Schema.optional(Schema.Boolean),
 });
 export type TranscriptEntry = typeof TranscriptEntry.Type;
 
@@ -915,6 +925,14 @@ export const CreateSessionInput = Schema.Struct({
    * else the deployment's.
    */
   model: Schema.optional(Schema.String),
+  /**
+   * Open the session's pull request when its run settles with a change (F17, `@repo/core`'s
+   * `prOnSettle`). A person's session keeps its PR their call (`factory pr`, "Open pull request");
+   * this is how they say at the start that it opens by itself. Recorded in the session's log, so a
+   * rebuild keeps it. Requires `repo` and no `taskId`: a scratch session has no PR to open, and a
+   * card's run opens its PR by its column. Absent or `false`: nothing changes.
+   */
+  openPrOnSettle: Schema.optional(Schema.Boolean),
 });
 export type CreateSessionInput = typeof CreateSessionInput.Type;
 
@@ -1154,6 +1172,14 @@ export type CompactSessionResult = typeof CompactSessionResult.Type;
  *   one of its board definition's run caps (B9, LOB-71): the message names the cap, the board, task,
  *   repository or column it counts, and the definition version it is configured in, and `cap` says
  *   which it was.
+ * - `budget_exceeded` — an aggregate spend cap (S-aggregate-spend-caps): the spend already recorded
+ *   for the request's repository, or for the actor making it, reaches the cap configured for the
+ *   current UTC day or month (`SPEND_CAPS`), so a new run on it is refused before anything is
+ *   written or any model is called. `spendCap` names the cap, the scope it counted, the window, the
+ *   limit, the spend and where the limit is configured. Not transient in the way `at_capacity` is:
+ *   the same request succeeds once the window rolls over or the cap is raised, and runs on any other
+ *   repository or by any other actor are unaffected. Distinct from a session's own budget (C23), which
+ *   stops a run already under way.
  * - `setup_failed` — the session's worktree setup failed before the agent's first turn
  *   (S-env-setup): the repo's declared `install` or `build` exited non-zero or could not run, so the
  *   message was not submitted and no model was called. The message names the step, the command, its
@@ -1187,6 +1213,7 @@ export const SessionErrorCode = Schema.Literals([
   "repo_clone_failed",
   "owned_elsewhere",
   "at_capacity",
+  "budget_exceeded",
   "setup_failed",
   "setup_running",
   "policy_rejected",
@@ -1222,6 +1249,33 @@ export const CapacityCap = Schema.Struct({
 });
 export type CapacityCap = typeof CapacityCap.Type;
 
+/** What an aggregate spend cap counts: one repository's spend, or one actor's. */
+export const SpendCapScope = Schema.Literals(["repo", "actor"]);
+export type SpendCapScope = typeof SpendCapScope.Type;
+
+/** The window a spend cap counts over: the current UTC day or the current UTC month. */
+export const SpendCapWindow = Schema.Literals(["day", "month"]);
+export type SpendCapWindow = typeof SpendCapWindow.Type;
+
+/**
+ * The cap a `budget_exceeded` refusal names, typed (S-aggregate-spend-caps): what it counted (`scope`
+ * of `subject`, the repository slug or the actor), over which `window`, the `limit` in US dollars,
+ * the `spent` that reaches it, where an operator changes it (`source`, the configuration key and the
+ * entry), and when the window ends and the request would be let through (`resetsAt`, and the
+ * `retryAfterSeconds` to it from the refusal, which a webhook's `Retry-After` is).
+ */
+export const SpendCap = Schema.Struct({
+  scope: SpendCapScope,
+  subject: Schema.String,
+  window: SpendCapWindow,
+  limit: Schema.Finite,
+  spent: Schema.Finite,
+  source: Schema.String,
+  resetsAt: Timestamp,
+  retryAfterSeconds: Schema.Int,
+});
+export type SpendCap = typeof SpendCap.Type;
+
 export class SessionError extends Schema.TaggedError<SessionError>()(
   "SessionError",
   {
@@ -1229,5 +1283,7 @@ export class SessionError extends Schema.TaggedError<SessionError>()(
     message: Schema.String,
     /** Set on an `at_capacity` refusal only: the cap that was hit (LOB-70, LOB-71). */
     cap: Schema.optional(CapacityCap),
+    /** Set on a `budget_exceeded` refusal only: the aggregate spend cap that was reached. */
+    spendCap: Schema.optional(SpendCap),
   },
 ) {}

@@ -316,6 +316,13 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 `./admission.sh` **11/11** (8 driver checks, 3 shell checks), evidence
 `.verify/evidence/latest/api/admission*.json`. See [limits.md](limits.md).
 
+The aggregate-spend-cap checks (S-aggregate-spend-caps) were run from the `agent/S-aggregate-spend-caps`
+worktree on 2026-10-29 (a scratch database minted on the worktree's `factory_agent_s_aggregate_spend_caps`
+server, faux with `FAUX_COST=0.01`, the API on `SPEND_PORT=9520`, the fake on `SPEND_FAKE_PORT=9521`):
+`./spend-caps.sh` all checks passed, evidence
+`.verify/evidence/latest/api/spend-caps*.json`. The drive runs in the minutes before 00:00 UTC are the
+one place it can be flaky: its windows are the UTC day. See [limits.md](limits.md).
+
 | Feature                  | Status  | File                                         |
 | ------------------------ | ------- | -------------------------------------------- |
 | Create a session         | passing | [create.md](create.md)                       |
@@ -330,6 +337,7 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | Fork a session           | passing | [fork.md](fork.md)                           |
 | Replay a session         | passing | [replay.md](replay.md)                       |
 | Request limits           | passing | [limits.md](limits.md)                       |
+| Aggregate spend caps     | passing | [limits.md](limits.md)                       |
 | Probes and readiness     | passing | [probes.md](probes.md)                       |
 | Shutdown and recovery    | passing | [lifecycle.md](lifecycle.md)                 |
 | Errors over the wire     | passing | [errors.md](errors.md)                       |
@@ -371,11 +379,28 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | Outcome metrics          | passing | [outcomes.md](outcomes.md)                   |
 | Cost prediction          | passing | [cost.md](cost.md)                           |
 | Notifications            | passing | [notify.md](notify.md)                       |
+| Model fallback           | passing | [model-fallback.md](model-fallback.md)       |
+| MCP tools                | passing | [mcp-tools.md](mcp-tools.md)                 |
+
+The MCP tools checks (S-agent-mcp-tools) were run from the `agent/S-agent-mcp-tools` worktree on
+2026-10-29 (`API_PORT=9510`, the fake MCP server on `MCP_FAKE_PORT=9511`, the worktree's own database
+on 5442): `./mcp-tools.sh` **7/7** (an allowed read runs unattended with the repo secret as its bearer
+token and out of the agent's shell, a write raises an approval and a denial never reaches the server,
+an unallowed server is never contacted, and the log records the allowlist and the offered tools),
+evidence `.verify/evidence/latest/api/mcp-tools.json`. That an MCP server which never answers holds no
+other session's open is `packages/core/src/SessionService.mcp.test.ts`'s. See
+[mcp-tools.md](mcp-tools.md).
 
 The notification checks (S-notifications) were run from the `agent/S-notifications` worktree on
 2026-10-28 (`NOTIFY_PORT=9550`, the fake on `NOTIFY_FAKE_PORT=9551`, a scratch database minted on the
 worktree's 5442 server): `./notify.sh` **26/26**, evidence `.verify/evidence/latest/api/notify-*`.
 See [notify.md](notify.md).
+
+The second-provider and fallback checks (S-model-provider-breadth) were run from the
+`agent/S-model-provider-breadth` worktree on 2026-10-29 (`FALLBACK_PORT=9540`, the fake on
+`FALLBACK_FAKE_PORT=9541`, a scratch database minted on the worktree's 5442 server):
+`./model-fallback.sh` **18/18**, evidence `.verify/evidence/latest/api/model-fallback-*`. See
+[model-fallback.md](model-fallback.md).
 
 The model-backend checks (LOB-258) were run from the `agent/LOB-258` worktree on 2026-10-28
 (`BACKEND_BOOT_PORT=9542`, the worktree's own database on 5442, no repo-root `.env`):

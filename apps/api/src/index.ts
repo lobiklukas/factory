@@ -8,6 +8,8 @@ import {
   githubReviewPoster,
   gitRepoMirror,
   gitRepoRemote,
+  hasSpendCaps,
+  parseSpendCaps,
   PlanFreshnessPassesLive,
   ReviewerCredentialConfig,
   selectReviewerCredentialProvider,
@@ -23,13 +25,21 @@ import {
   type SessionError,
 } from "@repo/domain/Session";
 import {
+  checkModelAuth,
   createModelAccess,
   DEFAULT_AUTONOMY,
+  describeEndpoint,
+  OPENAI_COMPATIBLE_PROVIDER,
+  parseOpenAICompatible,
+  parseRoleFallbacks,
+  resolveRoleFallbacks,
   FAUX_COMMAND,
   FAUX_MODEL_ID,
   modelKey,
   parseFauxFail,
   parseFauxModelScripts,
+  parseFauxMcpCalls,
+  parseMcpServers,
   parseRoleModels,
   parseRolePolicies,
   extendRolePolicies,
@@ -175,6 +185,17 @@ const ApprovalGateConfig = Config.String("APPROVAL_REQUIRED").pipe(
 );
 
 /**
+ * The remote MCP servers the deployment registers for its agents (S-agent-mcp-tools): a JSON array
+ * of `{ "name", "url", "secret"? }` — `[{"name":"tracker","url":"https://mcp.example/mcp","secret":"TRACKER_MCP_TOKEN"}]`.
+ * Registering offers nothing: a repository's `.factory/config` `policy.mcp` names the servers and
+ * tools its runs are offered. `secret` names the repository secret (`factory secrets set`) sent as
+ * the bearer token. Parsed at boot (`parseMcpServers`), so a malformed list fails it. Blank: none.
+ */
+const McpServersConfig = Config.String("MCP_SERVERS").pipe(
+  Config.withDefault(""),
+);
+
+/**
  * Which model a session runs against.
  *
  * `MODEL_BACKEND` wins when set. Otherwise a credential decides (`./ModelBackend`, LOB-258): the real
@@ -265,6 +286,13 @@ const ModelConfig = Config.all({
    */
   fauxFail: Config.String("FAUX_FAIL").pipe(Config.withDefault("")),
   /**
+   * Tool calls the faux makes after its `bash` step (S-agent-mcp-tools): a JSON array of
+   * `{ "tool", "arguments"? }` — `[{"tool":"mcp__tracker__get_issue","arguments":{"id":"ISS-1"}}]` —
+   * each once a turn under `FAUX_EVERY_TURN`. What `verify-api/mcp-tools.sh` calls an MCP tool with.
+   * Blank: none; anything else fails the boot (`parseFauxMcpCalls`).
+   */
+  fauxMcpCalls: Config.String("FAUX_MCP_CALLS").pipe(Config.withDefault("")),
+  /**
    * A faux script per model id (LOB-86): `{"builder": {"command": "…", "verify": true}}`. With
    * `ROLE_MODELS=builder=faux/builder`, a run in a `builder` column writes, commits and verifies a
    * change while every other run keeps `FAUX_COMMAND` — what `.pi/skills/verify-board/drive.sh`
@@ -319,6 +347,34 @@ const DefaultModelConfig = Config.String("DEFAULT_MODEL").pipe(
   Config.withDefault(""),
 );
 
+/**
+ * A second model provider (S-model-provider-breadth, `@repo/harness`'s `./openaiCompatible`): an
+ * OpenAI-compatible endpoint registered beside the backend's provider, under either backend. Its
+ * models are `openai-compatible/<id>`, which a role row, `DEFAULT_MODEL` or a fallback chain names.
+ * `OPENAI_COMPATIBLE_MODELS` is a list of ids or a JSON array with each one's price and window; the
+ * key, when the endpoint has one, is `OPENAI_COMPATIBLE_API_KEY`, which pi-ai reads and this file
+ * never does. Both blank: no second provider. Half a configuration fails the boot.
+ */
+const OpenAICompatibleConfig = Config.all({
+  baseUrl: Config.String("OPENAI_COMPATIBLE_BASE_URL").pipe(
+    Config.withDefault(""),
+  ),
+  models: Config.String("OPENAI_COMPATIBLE_MODELS").pipe(
+    Config.withDefault(""),
+  ),
+});
+
+/**
+ * Which models a role's runs fall back to when their own answers overloaded or unavailable
+ * (S-model-provider-breadth): comma-separated `role=provider/modelId|provider/modelId`, tried in
+ * order, each switch recorded in the session's log. Resolved against the catalog at boot
+ * (`resolveRoleFallbacks`), so a chain naming a model the process cannot serve fails the boot. Blank:
+ * no role falls back, and an outage fails the run once Pi Durable's retries are spent.
+ */
+const RoleFallbacksConfig = Config.String("ROLE_FALLBACKS").pipe(
+  Config.withDefault(""),
+);
+
 /** The faux model ids `keys` name, which the faux backend has to publish to serve them. */
 const fauxModelIds = (keys: Iterable<string>): string[] =>
   [...keys]
@@ -351,6 +407,18 @@ const SessionMaxConcurrentConfig = Config.option(
     Schema.Finite.pipe(Schema.check(Schema.isInt(), Schema.isGreaterThan(0))),
     "SESSION_MAX_CONCURRENT",
   ),
+);
+
+/**
+ * Aggregate spend caps (S-aggregate-spend-caps): dollars per UTC day and month a repository or an
+ * actor may spend before a new run on them is refused `budget_exceeded` (a webhook delivery: `503`
+ * with `Retry-After`), with an alert (an attention item and a notification) at 80% and 100%. JSON:
+ * `{"repos": {"acme/web": {"daily": 20, "monthly": 300}}, "actors": {"alice": {"daily": 5}}}`. Unset
+ * or blank: no cap. A value that is not that shape, or names a key it does not know, fails the boot
+ * rather than silently leaving a spend uncapped.
+ */
+const SpendCapsConfig = Config.String("SPEND_CAPS").pipe(
+  Config.withDefault(""),
 );
 
 /**
@@ -597,11 +665,19 @@ const HttpLive = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const model = yield* ModelConfig;
   const prCap = yield* PrCapConfig;
-  const autonomy = yield* ApprovalGateConfig;
+  const mcpServers = yield* parseMcpServers(yield* McpServersConfig);
+  const autonomy = { ...(yield* ApprovalGateConfig), mcpServers };
   const defaultBudget = yield* SessionBudgetConfig;
   const maxConcurrent = yield* SessionMaxConcurrentConfig;
+  const spendCaps = yield* parseSpendCaps(yield* SpendCapsConfig);
   const declaredRoles = yield* parseRoleModels(yield* RoleModelsConfig);
   const declaredDefault = (yield* DefaultModelConfig).trim();
+  const declaredFallbacks = yield* parseRoleFallbacks(
+    yield* RoleFallbacksConfig,
+  );
+  const openaiCompatible = yield* parseOpenAICompatible(
+    yield* OpenAICompatibleConfig,
+  );
   const docsSchedule = yield* DocsScheduleConfig;
   const sandboxChoice = yield* SandboxRuntimeConfig;
   const missionResume = yield* MissionResumeConfig;
@@ -653,6 +729,11 @@ const HttpLive = Effect.gen(function* () {
         `session admission: at most ${limit} concurrent sessions (SESSION_MAX_CONCURRENT)`,
     }),
   );
+  yield* Effect.logInfo(
+    hasSpendCaps(spendCaps)
+      ? `spend caps: ${spendCaps.repos.size} repositor${spendCaps.repos.size === 1 ? "y" : "ies"} and ${spendCaps.actors.size} actor${spendCaps.actors.size === 1 ? "" : "s"} capped per UTC day or month (SPEND_CAPS)`
+      : "spend caps: none (SPEND_CAPS unset)",
+  );
   for (const warning of modelBackendWarnings(backendChoice)) {
     yield* Effect.logWarning(warning);
   }
@@ -673,6 +754,7 @@ const HttpLive = Effect.gen(function* () {
       FAUX_MODEL_ID,
       ...fauxModelIds([declaredDefault]),
       ...fauxModelIds(declaredRoles.values()),
+      ...fauxModelIds([...declaredFallbacks.values()].flat()),
     ]),
   ];
   const fauxModelScripts = yield* parseFauxModelScripts(
@@ -685,6 +767,7 @@ const HttpLive = Effect.gen(function* () {
     );
   }
   const fauxFail = yield* parseFauxFail(model.fauxFail);
+  const fauxMcpCalls = yield* parseFauxMcpCalls(model.fauxMcpCalls);
   if (backend === "faux" && fauxFail !== undefined) {
     yield* Effect.logWarning(
       `faux requests fail with model_error once a session holds ${fauxFail.afterAnswers} answers (FAUX_FAIL)`,
@@ -702,9 +785,25 @@ const HttpLive = Effect.gen(function* () {
     fauxVerify: model.fauxVerify,
     fauxSleepMs: model.fauxSleepMs,
     fauxFail,
+    fauxMcpCalls,
     fauxModels,
     fauxModelScripts,
+    openaiCompatible,
   });
+  if (openaiCompatible !== undefined) {
+    const auth = yield* checkModelAuth({
+      ...backendAccess,
+      provider: OPENAI_COMPATIBLE_PROVIDER,
+    });
+    yield* Effect.logInfo(
+      `second provider: ${OPENAI_COMPATIBLE_PROVIDER} at ${describeEndpoint(openaiCompatible.baseUrl)} serving ${openaiCompatible.models
+        .map((entry) => entry.id)
+        .join(", ")} (OPENAI_COMPATIBLE_BASE_URL; auth: ${Option.match(auth, {
+        onNone: () => "none",
+        onSome: (found) => found.source,
+      })})`,
+    );
+  }
   // The deployment's default (LOB-274): `DEFAULT_MODEL` resolved against the backend's catalog, or
   // the backend's own model when it is blank. One outside the catalog fails the boot here.
   const modelAccess = yield* resolveDefaultModel(
@@ -717,6 +816,23 @@ const HttpLive = Effect.gen(function* () {
       : `default model: ${modelKey(modelAccess)} (DEFAULT_MODEL)`,
   );
   const roleModels = yield* resolveRoleModels(modelAccess, declaredRoles);
+  const roleFallbacks = yield* resolveRoleFallbacks(
+    modelAccess,
+    roleModels,
+    declaredFallbacks,
+  );
+  if (roleFallbacks.size > 0) {
+    yield* Effect.logInfo(
+      `role fallbacks: ${[...roleFallbacks]
+        .map(
+          ([role, chain]) =>
+            `${role} → ${chain.map((access) => modelKey(access)).join(" | ")}`,
+        )
+        .join(
+          ", ",
+        )} (ROLE_FALLBACKS; on an overloaded or unavailable model only)`,
+    );
+  }
   const declaredPolicies = yield* parseRolePolicies(yield* RolePoliciesConfig);
   const rolePolicies = extendRolePolicies(declaredPolicies);
   if (declaredPolicies.size > 0) {
@@ -795,6 +911,7 @@ const HttpLive = Effect.gen(function* () {
     choice: backendChoice,
     model: modelAccess,
     roleModels,
+    roleFallbacks,
     approvalRequired: autonomy.approvalRequired,
     defaultBudget,
     // Resolved here to armed-or-not, so the secrets' values never enter the service.
@@ -829,6 +946,7 @@ const HttpLive = Effect.gen(function* () {
           repoRemote,
           model: modelAccess,
           roleModels,
+          roleFallbacks,
           rolePolicies,
           sessionRoot: model.sessionRoot,
           sandbox,
@@ -839,6 +957,8 @@ const HttpLive = Effect.gen(function* () {
           }),
           prCap,
           autonomy,
+          // Always given, even with no caps, so a cap removed from SPEND_CAPS stops its alerts.
+          spendCaps,
           ...Option.match(defaultBudget, {
             onNone: () => ({}),
             onSome: (budget) => ({ defaultBudget: budget }),
@@ -940,6 +1060,9 @@ const HttpLive = Effect.gen(function* () {
   );
   yield* Effect.logInfo(
     `  - commands that wait for an approval: ${autonomy.approvalRequired.length === 0 ? "none" : autonomy.approvalRequired.join(", ")}`,
+  );
+  yield* Effect.logInfo(
+    `  - MCP servers a repository may allow its runs: ${mcpServers.length === 0 ? "none (MCP_SERVERS unset)" : mcpServers.map((server) => `${server.name} (${server.url}${server.secret === undefined ? "" : `, token from secret ${server.secret}`})`).join(", ")}`,
   );
   yield* Effect.logInfo(
     `  - a session's PR step refuses a diff over ${prCap.maxFiles} files / ${prCap.maxLines} lines`,

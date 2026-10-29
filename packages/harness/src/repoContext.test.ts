@@ -118,6 +118,87 @@ describe("the repo_instructions section", () => {
   });
 });
 
+describe("the instruction file's name (F20)", () => {
+  it("names the file it was read from in the preamble and the record, whichever of the candidates it is", () => {
+    for (const path of ["CLAUDE.md", ".github/copilot-instructions.md"]) {
+      const prompt = assembleRepoPrompt(
+        context({ instructions: { path, bytes: 5, text: "rule\n" } }),
+      );
+      // Mutation: a preamble that says AGENTS.md whatever was read — the run is told the wrong file.
+      expect(prompt.instructions?.text).toBe(
+        `${PREAMBLE.replace("AGENTS.md", path)}\n\nrule\n`,
+      );
+      expect(repoPromptRecord(prompt).instructions?.path).toBe(path);
+    }
+  });
+});
+
+describe("the nested AGENTS.md paths in the index (F20)", () => {
+  const nested = ["packages/api/AGENTS.md", "packages/web/AGENTS.md"];
+
+  it("lists them by path after the skills, never their text", () => {
+    const prompt = assembleRepoPrompt(
+      context({ skills: [skill("a")], nested }),
+    );
+
+    expect(prompt.skills.nested).toEqual(nested);
+    const text = prompt.skills.text ?? "";
+    expect(text).toContain("- a (.pi/skills/a/SKILL.md): what a is for");
+    expect(
+      text.endsWith("- packages/api/AGENTS.md\n- packages/web/AGENTS.md"),
+    ).toBe(true);
+    expect(text.indexOf("- a (")).toBeLessThan(text.indexOf("packages/api"));
+    expect(prompt.skills.tokens).toBe(
+      estimateTextTokens(tagged("repo_skills", text)),
+    );
+    expect(repoPromptRecord(prompt).skills.nested).toEqual(nested);
+  });
+
+  it("makes an index of their own when the repository ships no skills", () => {
+    const prompt = assembleRepoPrompt(context({ nested }));
+
+    expect(prompt.skills.listed).toEqual([]);
+    expect(prompt.skills.text).toContain("Instruction files nested");
+    expect(prompt.skills.text).not.toContain("Skills this repository ships");
+    expect(prompt.skills.tokens).toBeGreaterThan(0);
+  });
+
+  it("keeps them inside the index's cap, and never crowds out a skill for them", () => {
+    const many = Array.from(
+      { length: 20 },
+      (_, index) => `packages/p${String(index).padStart(2, "0")}/AGENTS.md`,
+    );
+    const roomy = assembleRepoPrompt(
+      context({ skills: [skill("a")], nested: many }),
+    );
+    const alone = assembleRepoPrompt(context({ skills: [skill("a")] }));
+    const tight = assembleRepoPrompt(
+      context({ skills: [skill("a")], nested: many }),
+      [],
+      {
+        instructions: REPO_INSTRUCTIONS_TOKEN_CAP,
+        skills: alone.skills.tokens + 60,
+      },
+    );
+
+    expect(roomy.skills.nested).toEqual(many);
+    // A cap with room for a few paths takes a prefix of them, and the skill stays.
+    expect(tight.skills.listed.map((listed) => listed.name)).toEqual(["a"]);
+    expect(tight.skills.nested.length).toBeGreaterThan(0);
+    expect(tight.skills.nested.length).toBeLessThan(many.length);
+    expect(tight.skills.nested).toEqual(
+      many.slice(0, tight.skills.nested.length),
+    );
+    expect(tight.skills.tokens).toBeLessThanOrEqual(alone.skills.tokens + 60);
+  });
+
+  it("renders nothing for none, as before", () => {
+    expect(
+      assembleRepoPrompt(context({ nested: [] })).skills.text,
+    ).toBeUndefined();
+  });
+});
+
 describe("the repo_skills index", () => {
   it("lists each skill by name, path and one-line description, not its body", () => {
     const prompt = assembleRepoPrompt(
@@ -208,6 +289,7 @@ describe("the repo_skills index", () => {
       cap: REPO_SKILLS_TOKEN_CAP,
       tokens: 0,
       listed: [],
+      nested: [],
       dropped: [],
       shadowed: [],
     });
@@ -246,6 +328,7 @@ describe("the record of an open", () => {
         tokens: withFile.skills.tokens,
         cap: REPO_SKILLS_TOKEN_CAP,
         listed: [{ name: "a", path: ".pi/skills/a/SKILL.md" }],
+        nested: [],
         dropped: [],
         shadowed: [],
       },

@@ -217,12 +217,15 @@ describe("a repository's policy from .factory/config at the base", () => {
         approvalRequired: ["bun publish"],
         denied: [],
         allowedHosts: null,
+        // The repo allows no MCP server, so the open offered no MCP tool (S-agent-mcp-tools).
+        mcp: null,
       },
       effective: {
         approvalRequired: ["bun publish"],
         denied: [],
         allowedHosts: ["github.com", "api.github.com", "codeload.github.com"],
         pushRefPrefixes: ["refs/heads/factory/"],
+        mcpTools: [],
       },
     });
     expect(outcome.bareRecord).toMatchObject({

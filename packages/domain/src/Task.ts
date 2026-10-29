@@ -1932,7 +1932,7 @@ export const gatedColumns = (
     .filter((column) => gatedExit(definition, column) !== undefined);
 
 /**
- * Why a card needs a person (LOB-77): the four things the attention view lists.
+ * Why a card (or the factory) needs a person (LOB-77): the things the attention view lists.
  *
  * - `approval` — a run of the card asked to make a gated call and waits on a decision (D11). Listed
  *   whatever the card's column or block, because nothing but a person settles it.
@@ -1951,6 +1951,13 @@ export const gatedColumns = (
  *   and the review is on the card's thread. What the person does is start the next run on the card,
  *   which reads the review and lifts the block. `review` is the block's note: who requested the
  *   changes, on which PR, and the start of what they wrote.
+ *
+ * - `spend` — an aggregate spend cap has been approached or reached (S-aggregate-spend-caps): a
+ *   repository's or an actor's spend in the current UTC day or month crossed 80% of its cap
+ *   (`threshold` 80, a warning) or reached it (`threshold` 100, new runs are refused
+ *   `budget_exceeded`). It belongs to no card: only the every-board view lists it, one row per
+ *   cap and window, at the highest threshold crossed, and it leaves the view when its window ends.
+ *   `since` is when the highest threshold was crossed; `resetsAt` is the end of the window.
  *
  * A card blocked for any other reason — a dependency, a capability, a transient failure — is waiting
  * on that, not on a person, so it is never a `gate`; it is listed only for an approval its run holds.
@@ -1977,6 +1984,16 @@ export const AttentionReason = Schema.TaggedUnion({
     sessionId: SessionId,
     unmet: Schema.optional(Schema.Array(Schema.String)),
   },
+  spend: {
+    scope: Schema.Literals(["repo", "actor"]),
+    subject: Schema.String,
+    window: Schema.Literals(["day", "month"]),
+    threshold: Schema.Int,
+    limit: Schema.Finite,
+    spent: Schema.Finite,
+    since: Timestamp,
+    resetsAt: Timestamp,
+  },
 });
 export type AttentionReason = typeof AttentionReason.Type;
 
@@ -1984,11 +2001,12 @@ export type AttentionReason = typeof AttentionReason.Type;
  * One row of the attention view (LOB-77): a card, the repository its board binds (so a row from any
  * board says where it is), and one reason it needs a person. A card with two reasons is two rows.
  *
- * An approval can also belong to a session no card owns — a scratch session, or one opened from a
- * repo with no card (LOB-271). That row has no `task`: `sessionTitle` names the session instead
+ * A `spend` row belongs to no card and no session: no `task`, no `sessionTitle`, and no `repo` (its
+ * reason names the subject). An approval can also belong to a session no card owns — a scratch
+ * session, or one opened from a repo with no card (LOB-271). That row has no `task`: `sessionTitle` names the session instead
  * (an untitled session says `""`), `repo` is the session's own repo when it has one, and the reason's
- * `sessionId` is where the row links. Only the `approval` reason ever appears without a card, and
- * only on the every-board read: a board's view lists the board's cards.
+ * `sessionId` is where the row links. Only the `approval` and `spend` reasons ever appear without a
+ * card, and only on the every-board read: a board's view lists the board's cards.
  */
 export const AttentionItem = Schema.Struct({
   task: Schema.optional(Task),
@@ -2001,8 +2019,8 @@ export type AttentionItem = typeof AttentionItem.Type;
 /**
  * What needs a person, on one board or on every board (LOB-77). The answer is ordered approvals
  * first (oldest request first, a card-less session's among them), then questions (oldest block first), then reviews
- * (oldest block first), then gates (least recently
- * changed card first). An unknown board is `BoardNotFound`, not an empty list: "nothing needs you"
+ * (oldest block first), then gates (least recently changed card first), then spend caps (newest
+ * crossing first, S-aggregate-spend-caps; the every-board read only). An unknown board is `BoardNotFound`, not an empty list: "nothing needs you"
  * must not be what a board that does not exist says.
  */
 export const ListAttentionInput = Schema.Struct({

@@ -1,5 +1,7 @@
 export * from "./loader";
 export * from "./models";
+export * from "./openaiCompatible";
+export * from "./fallback";
 export * from "./pages";
 export * from "./repoContext";
 export * from "./policy";
@@ -26,3 +28,4 @@ export * from "./body";
 export * from "./budget";
 export * from "./follow";
 export * from "./secrets";
+export * from "./mcp";
