@@ -84,6 +84,8 @@ const GUARDED = [
   "verify-board-doctor.test.ts",
   // Every case spawns `bash` on verify-board's `equivalence.sh` and its fake skills (LOB-87).
   "verify-board-equivalence.test.ts",
+  // Every case spawns `bash` on verify-workflow's `--live` scripts in a scratch repo (LOB-40).
+  "verify-workflow-live.test.ts",
 ] as const;
 
 /**
