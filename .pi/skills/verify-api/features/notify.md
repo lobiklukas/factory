@@ -79,3 +79,13 @@ Slack adapter's `SlackWriteBack` replies in a thread) is not a sink: an incoming
 token and no channel id. A process that dies between a sink accepting a message and the ledger's
 stamp sends it again after the retry interval (a minute). There is no per-person routing: every
 message goes to every sink.
+
+## Personal sinks, routing, settings and retention (F21, F22)
+
+The Slack and ntfy sinks above are the _shared_ channel: with a person's own sinks configured (an email
+address, a Web Push subscription — added on the dashboard's Notifications page) an event is routed by its
+owner to that person's sinks only, and falls back here when no owner has one. This drive is unchanged by
+it — `notify.sh` re-passed with the routing in place — and `notify-fake.ts` now also answers `POST /push/<id>`
+and, with `NOTIFY_FAKE_SMTP_PORT`, SMTP, which is what the web drive
+([notifications.md](../../verify-web/features/notifications.md), `verify-web/notify-settings.sh`) proves them on:
+the settings page, per-person routing, a toggle with no restart and the retention sweep.

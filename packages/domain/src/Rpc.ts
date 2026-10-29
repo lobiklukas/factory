@@ -3,6 +3,16 @@ import { Rpc, RpcGroup } from "effect/rpc";
 import { ControlPlaneAuth } from "@repo/domain/Auth";
 import { SessionContext } from "@repo/domain/RepoContext";
 import {
+  AddNotificationSinkInput,
+  GetNotificationSettingsInput,
+  NotificationErrorSchema,
+  NotificationSettings,
+  NotificationSinkRefInput,
+  NotificationSinkSummary,
+  SetNotificationKindInput,
+  SetNotificationSinkEnabledInput,
+} from "@repo/domain/Notify";
+import {
   AddAutomationInput,
   Automation,
   AutomationErrorSchema,
@@ -771,6 +781,45 @@ export class SecretsRpc extends RpcGroup.make(
 ).middleware(ControlPlaneAuth) {}
 
 /**
+ * Notification settings (F21): the per-kind toggles and a person's own sinks. Its own group: it is
+ * the dashboard's settings page, and what it stores the notifier reads on every pass, so a change
+ * needs no restart.
+ */
+export class NotificationsRpc extends RpcGroup.make(
+  // The effective toggles, the caller's sinks and what this control plane can send.
+  Rpc.make("getNotificationSettings", {
+    payload: GetNotificationSettingsInput,
+    success: NotificationSettings,
+    error: NotificationErrorSchema,
+  }),
+  // A kind switched on or off for the whole deployment; answers the settings as they now stand.
+  Rpc.make("setNotificationKind", {
+    payload: SetNotificationKindInput,
+    success: NotificationSettings,
+    error: NotificationErrorSchema,
+  }),
+  // The caller's own sink. A malformed address or subscription is `InvalidNotificationSink`, a type
+  // this control plane cannot send `NotificationChannelUnavailable`; nothing is written for either.
+  Rpc.make("addNotificationSink", {
+    payload: AddNotificationSinkInput,
+    success: NotificationSinkSummary,
+    error: NotificationErrorSchema,
+  }),
+  // Pause or resume one of the caller's sinks without losing it.
+  Rpc.make("setNotificationSinkEnabled", {
+    payload: SetNotificationSinkEnabledInput,
+    success: NotificationSinkSummary,
+    error: NotificationErrorSchema,
+  }),
+  // Removed for good. A sink that is not the caller's is `NotificationSinkNotFound`.
+  Rpc.make("removeNotificationSink", {
+    payload: NotificationSinkRefInput,
+    success: NotificationSinkSummary,
+    error: NotificationErrorSchema,
+  }),
+).middleware(ControlPlaneAuth) {}
+
+/**
  * Scheduled automations (S-general-automations): a repo's cron or one-off schedules, each tick a card
  * on its board with a run on it. Its own group: a schedule is neither a session nor a card, and the
  * history it answers joins both.
@@ -838,4 +887,5 @@ export const RpcApi = SessionRpc.merge(ApprovalsRpc)
   .merge(DoctorRpc)
   .merge(SkillsRpc)
   .merge(SecretsRpc)
+  .merge(NotificationsRpc)
   .merge(AutomationsRpc);

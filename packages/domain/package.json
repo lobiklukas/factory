@@ -24,6 +24,7 @@
     "./Decomposition": "./src/Decomposition.ts",
     "./Ids": "./src/Ids.ts",
     "./Mission": "./src/Mission.ts",
+    "./Notify": "./src/Notify.ts",
     "./Outcomes": "./src/Outcomes.ts",
     "./Page": "./src/Page.ts",
     "./PlanFreshness": "./src/PlanFreshness.ts",

@@ -189,6 +189,21 @@ assistant entries a run ended on is the fix if a dropped table must page again.
 `notification_deliveries` is not derived at all: it is the notifier's outbox and its memory of who
 was told what, control-plane state that is in no log, so dropping it re-sends every open event once.
 
+_As built (F21, F22)._ `notification_kinds` and `notification_sinks` (migration 0054) are the same
+kind of state: what the settings page stores — a kind switched for the whole deployment over
+`NOTIFY_TYPES`, and a person's own email addresses and Web Push subscriptions — control-plane
+configuration in no log, left alone by `rebuildIndexes`, read by the notifier at the start of every
+pass so a change needs no restart. An event is routed by its owner, the actor that created the card
+and then the actor that started the run (both already rows), to that person's sinks only, and to the
+environment's shared sinks when no owner has one. The ledger's memory is now bounded: a delivered
+`notification_deliveries` row and a `run_failures` row older than `NOTIFY_RETENTION_DAYS` (30, never
+under the failure lookback) are deleted on the poll, and so is an undelivered row that can never be
+sent (out of attempts, or to a sink nothing sends to any more), but never a row still pending and never
+one whose event is still open — that row is the only thing that stops a card parked for six weeks from
+being announced again. An event already delivered to a person's own sink is not posted to the shared
+channel when they later pause it, and a Web Push subscription the push service answers 404/410 for is
+switched off and shown as expired, so the owner falls back to their other sinks or the shared ones.
+
 ### D8 — Read model: live when running, historical when not
 
 If the sandbox is live, the UI attaches to the harness (`viewState()`, `watch()`) and streams.

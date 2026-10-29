@@ -4,6 +4,7 @@ import { Option } from "effect";
 import { AsyncResult } from "effect/reactivity";
 import {
   BellIcon,
+  BellRingIcon,
   BookOpenTextIcon,
   CoinsIcon,
   GitBranchIcon,
@@ -46,6 +47,8 @@ const SECTIONS = [
   { to: "/triggers", label: "Triggers", icon: WebhookIcon },
   // The prompt text a column's runs are told, and the form that publishes a new version of it (D8).
   { to: "/skills", label: "Skills", icon: BookOpenTextIcon },
+  // Which events the factory tells people about, and where it tells you: email and Web Push (F21).
+  { to: "/notifications", label: "Notifications", icon: BellRingIcon },
 ] as const;
 
 /**

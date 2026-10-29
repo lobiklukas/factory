@@ -101,7 +101,12 @@
         "NOTIFY_NTFY_URL",
         "NOTIFY_TYPES",
         "NOTIFY_LINK_BASE",
-        "NOTIFY_POLL_MS"
+        "NOTIFY_POLL_MS",
+        "NOTIFY_SMTP_FROM",
+        "NOTIFY_VAPID_PUBLIC_KEY",
+        "NOTIFY_VAPID_SUBJECT",
+        "NOTIFY_PUSH_ALLOW_INSECURE",
+        "NOTIFY_RETENTION_DAYS"
       ],
       // A secret: it must reach the process but must not enter the task hash or the cache key.
       // The ANTHROPIC_* names are every variable pi-ai's Anthropic provider authenticates from, which
@@ -143,6 +148,10 @@
         "NOTIFY_SLACK_WEBHOOK_URL",
         "NOTIFY_NTFY_TOPIC",
         "NOTIFY_NTFY_TOKEN",
+        // Personal sinks (F21): an SMTP URL holds the mail password, and a VAPID private key signs as
+        // this deployment to every push service.
+        "NOTIFY_SMTP_URL",
+        "NOTIFY_VAPID_PRIVATE_KEY",
         // The key the repos' secrets are encrypted under (S-agent-secrets, `@repo/core`'s
         // SecretService): the one value that opens every stored secret.
         "FACTORY_SECRETS_KEY"
