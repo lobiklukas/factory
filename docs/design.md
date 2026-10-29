@@ -616,6 +616,21 @@ card pane's Start run (a Budget field) put `budget` on the `createSession` that 
 _As built (LOB-162)._ Spend is keyed by repo and actor. It is committed as `factory.actor` and
 indexed as `sessions.actor`. `listSpend` groups the list's own `cost_total` by the pair, and the
 dashboard's `/spend` shows it per repo, per actor and per pair.
+_As built (S-aggregate-spend-caps)._ Spend has ceilings above a session. `SPEND_CAPS` (JSON, deployment
+config: a repo's own `.factory/config` could be edited by whoever can push to it, so it does not set its
+own ceiling) gives a repo and an actor a `daily` and a `monthly` limit in dollars, counted over the
+current UTC day and month from `spend_ledger`, a row per increase of a session's `cost_total` written in
+the statement that moves it (`cost_total` alone cannot say what was spent today). `createSession`,
+`sendMessage` (one that would start a run), `startMission` and `replaySession` on a subject whose window has reached its limit are refused
+`budget_exceeded` before anything is written, with a typed `spendCap` naming the scope, window, limit,
+spend, `SPEND_CAPS` entry and when the window resets; a run under way is not stopped (it has its own
+budget), so a cap is held against the _next_ run. A webhook delivery refused this way is the same
+`503 at-capacity` as LOB-70's, with `Retry-After` the time to the window's end. Crossing 80% and 100% writes one `spend_alerts` row each per window and limit (a cap raised
+mid-window alerts afresh; the view lists an alert only while its cap and limit are the configured
+ones, `spend_cap_limits`),
+which the attention view lists (`spend` reason, the highest threshold per cap and window) and the
+notifier sends (`spend` kind). Counted per actor as the session's recorded actor, so a message sent by
+someone else to a session is charged to its creator.
 _As built (LOB-38)._ The spend history predicts what the next session will cost. `predictCost`
 classifies the prompt's first line into a task shape, then takes the completed sessions most like it.
 The comparables come from the first tier with three sessions: repo+model+shape, then repo+model,

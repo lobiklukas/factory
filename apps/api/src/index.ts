@@ -8,6 +8,8 @@ import {
   githubReviewPoster,
   gitRepoMirror,
   gitRepoRemote,
+  hasSpendCaps,
+  parseSpendCaps,
   PlanFreshnessPassesLive,
   ReviewerCredentialConfig,
   selectReviewerCredentialProvider,
@@ -374,6 +376,18 @@ const SessionMaxConcurrentConfig = Config.option(
 );
 
 /**
+ * Aggregate spend caps (S-aggregate-spend-caps): dollars per UTC day and month a repository or an
+ * actor may spend before a new run on them is refused `budget_exceeded` (a webhook delivery: `503`
+ * with `Retry-After`), with an alert (an attention item and a notification) at 80% and 100%. JSON:
+ * `{"repos": {"acme/web": {"daily": 20, "monthly": 300}}, "actors": {"alice": {"daily": 5}}}`. Unset
+ * or blank: no cap. A value that is not that shape, or names a key it does not know, fails the boot
+ * rather than silently leaving a spend uncapped.
+ */
+const SpendCapsConfig = Config.String("SPEND_CAPS").pipe(
+  Config.withDefault(""),
+);
+
+/**
  * The docs trigger's interval schedule (LOB-197, started here by LOB-234).
  *
  * `DOCS_SCHEDULE_MS` is the interval and `DOCS_SCHEDULE_REPO` the repo each tick docs. Unset (or
@@ -621,6 +635,7 @@ const HttpLive = Effect.gen(function* () {
   const autonomy = { ...(yield* ApprovalGateConfig), mcpServers };
   const defaultBudget = yield* SessionBudgetConfig;
   const maxConcurrent = yield* SessionMaxConcurrentConfig;
+  const spendCaps = yield* parseSpendCaps(yield* SpendCapsConfig);
   const declaredRoles = yield* parseRoleModels(yield* RoleModelsConfig);
   const declaredDefault = (yield* DefaultModelConfig).trim();
   const docsSchedule = yield* DocsScheduleConfig;
@@ -673,6 +688,11 @@ const HttpLive = Effect.gen(function* () {
       onSome: (limit) =>
         `session admission: at most ${limit} concurrent sessions (SESSION_MAX_CONCURRENT)`,
     }),
+  );
+  yield* Effect.logInfo(
+    hasSpendCaps(spendCaps)
+      ? `spend caps: ${spendCaps.repos.size} repositor${spendCaps.repos.size === 1 ? "y" : "ies"} and ${spendCaps.actors.size} actor${spendCaps.actors.size === 1 ? "" : "s"} capped per UTC day or month (SPEND_CAPS)`
+      : "spend caps: none (SPEND_CAPS unset)",
   );
   for (const warning of modelBackendWarnings(backendChoice)) {
     yield* Effect.logWarning(warning);
@@ -862,6 +882,8 @@ const HttpLive = Effect.gen(function* () {
           }),
           prCap,
           autonomy,
+          // Always given, even with no caps, so a cap removed from SPEND_CAPS stops its alerts.
+          spendCaps,
           ...Option.match(defaultBudget, {
             onNone: () => ({}),
             onSome: (budget) => ({ defaultBudget: budget }),

@@ -1550,7 +1550,11 @@ export const attentionLines = (item: AttentionItem): ReadonlyArray<string> => {
     item.repo ?? "-",
     task?.column ?? "-",
     task === undefined ? "-" : `r${task.revision}`,
-    oneLine(task?.title ?? item.sessionTitle ?? ""),
+    oneLine(
+      task?.title ??
+        item.sessionTitle ??
+        (reason._tag === "spend" ? `${reason.scope} ${reason.subject}` : ""),
+    ),
   ].join("  ");
   switch (reason._tag) {
     case "approval":
@@ -1579,6 +1583,14 @@ export const attentionLines = (item: AttentionItem): ReadonlyArray<string> => {
         reason.unmet === undefined || reason.unmet.length === 0
           ? `  ${reason.gate}: ${reason.sessionId} is idle; ${task?.column ?? "-"} → ${reason.to} is a person's`
           : `  ${reason.gate}: ${reason.sessionId} is idle; ${task?.column ?? "-"} → ${reason.to} needs ${reason.unmet.join(", ")} first (start or prompt a run), then is a person's`,
+      ];
+    case "spend":
+      return [
+        head,
+        `  ${reason.threshold >= 100 ? "reached" : `at ${reason.threshold}% of`} its ${reason.window === "day" ? "daily" : "monthly"} cap: $${reason.spent.toFixed(2)} of $${reason.limit.toFixed(2)} since ${reason.since}; ` +
+          (reason.threshold >= 100
+            ? `new runs are refused until ${reason.resetsAt}`
+            : `new runs are refused once it is reached`),
       ];
   }
 };
