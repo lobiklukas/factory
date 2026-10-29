@@ -187,14 +187,18 @@ function AttentionRoute() {
 const rowKey = (item: AttentionItem): string =>
   item.reason._tag === "approval"
     ? `${item.task?.id ?? "session"}:${item.reason.sessionId}:${item.reason.requestId}`
-    : `${item.task?.id ?? "session"}:${item.reason._tag}`;
+    : item.reason._tag === "spend"
+      ? `spend:${item.reason.scope}:${item.reason.subject}:${item.reason.window}`
+      : `${item.task?.id ?? "session"}:${item.reason._tag}`;
 
 /** The row's subject for `data-attention`: the card's id, or the session's when no card owns it. */
 const rowSubject = (item: AttentionItem): string =>
   item.task?.id ??
   (item.reason._tag === "question" || item.reason._tag === "review"
     ? "session"
-    : item.reason.sessionId);
+    : item.reason._tag === "spend"
+      ? `${item.reason.scope}:${item.reason.subject}:${item.reason.window}`
+      : item.reason.sessionId);
 
 const ROW_CLASS =
   "flex min-w-0 flex-1 flex-col gap-1 border border-border bg-card px-3 py-2 hover:border-ring/50 focus-visible:outline-1 focus-visible:outline-ring";
@@ -239,7 +243,9 @@ const AttentionRow = ({
         {showRepo && item.repo !== undefined ? (
           <span className="truncate">{item.repo}</span>
         ) : null}
-        {task === undefined ? (
+        {item.reason._tag === "spend" ? (
+          <span className="shrink-0">{item.reason.scope}</span>
+        ) : task === undefined ? (
           <span className="shrink-0">no card</span>
         ) : (
           <>
@@ -256,7 +262,9 @@ const AttentionRow = ({
     <li
       data-attention={rowSubject(item)}
       data-attention-reason={item.reason._tag}
-      {...(task === undefined ? { "data-attention-session": "" } : {})}
+      {...(task === undefined && item.reason._tag !== "spend"
+        ? { "data-attention-session": "" }
+        : {})}
       className="flex"
     >
       {link.kind === "card" ? (
@@ -277,6 +285,10 @@ const AttentionRow = ({
           aria-label={`Open session ${attentionTitle(item)}`}
           className={ROW_CLASS}
         >
+          {content}
+        </Link>
+      ) : link.kind === "spend" ? (
+        <Link to="/spend" aria-label={`Open spend`} className={ROW_CLASS}>
           {content}
         </Link>
       ) : (

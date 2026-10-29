@@ -36,6 +36,18 @@ scratch session, which could never cut a worktree or produce a pull request, eve
   for 400 ms, and asks nothing while it is blank. Changing the model or the repo unticks "Cap at
   predicted high" (`editSessionForm`): either is another range, whose high the person has not seen.
 
+- **"Open a PR when done" (F17).** A checkbox under the cost line, off by default and disabled with no
+  repo. Ticked on a repo, `createSession` carries `openPrOnSettle: true` (`factory run --open-pr`'s
+  field) and the PR opens when the run settles with a change; unticked, or with no change, none does.
+  `session-new.mjs` reads the fake GitHub's ledger for the create on `factory/<session>` and for its
+  absence, and the pane's PR link.
+- **What the run was told (F19, F20).** The session pane shows `[data-session-context]` under its header:
+  `told AGENTS.md (<bytes> bytes, <tokens> tokens) and 2 repo skills and 1 nested AGENTS.md listed`, the
+  file that was read (AGENTS.md, else CLAUDE.md, else the Copilot file), `data-session-context-truncated`
+  and the word `truncated` for a file cut to its cap, and `no repo instructions` for a scratch session or a
+  repo with neither file. The drive compares the bytes with the fixture's file and the tokens with
+  `getSessionContext`.
+
 The rules are pure and unit-tested in `apps/web/src/lib/session-create-view.test.ts`; the page is
 `apps/web/src/components/new-session.tsx`.
 

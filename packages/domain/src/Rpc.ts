@@ -1,6 +1,7 @@
 import { Schema } from "effect";
 import { Rpc, RpcGroup } from "effect/rpc";
 import { ControlPlaneAuth } from "@repo/domain/Auth";
+import { SessionContext } from "@repo/domain/RepoContext";
 import {
   DeleteSecretInput,
   ListSecretsInput,
@@ -207,6 +208,13 @@ export class SessionRpc extends RpcGroup.make(
   Rpc.make("readSessionHistory", {
     payload: ReadSessionHistoryInput,
     success: SessionHistoryPage,
+    error: SessionError,
+  }),
+  // What the session's run was told about its repository (F19): the instruction file, its size and
+  // whether it was cut, and the skills indexed. Read from the log, owned or not.
+  Rpc.make("getSessionContext", {
+    payload: SessionIdInput,
+    success: SessionContext,
     error: SessionError,
   }),
   Rpc.make("sendMessage", {

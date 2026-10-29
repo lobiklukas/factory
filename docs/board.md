@@ -191,6 +191,15 @@ follow that model's window, not today's row. One gap is the faux backend's: its 
 it leaves that run with no model to send to after a restart (a real backend's catalog holds every model,
 so it is not affected). Under faux, keep a row until the runs on it are done.
 
+A role may also have a fallback chain (S-model-provider-breadth): `ROLE_FALLBACKS`
+(`builder=openai-compatible/llama-3.1-70b|anthropic/claude-haiku-4-5`), resolved at boot like a row.
+When the run's model answers overloaded or unavailable, the run moves onto the next model of its
+chain — the agent reconfigured and a `factory.model.switched` entry committed together, so the
+transcript says which answers came from which model and why — and the session stays there. That
+recorded switch is the one exception to the pin above. A run created on a model of its own (below)
+never falls back. A second provider for a row or a chain to name
+is an OpenAI-compatible endpoint (`OPENAI_COMPATIBLE_BASE_URL`, `OPENAI_COMPATIBLE_MODELS`).
+
 A run can also be started on a model of its own (LOB-274): `createSession`'s `model`
 (`factory run --model`, the dashboard's New session picker) is resolved against the same catalog —
 an unserved one is `invalid_input` before anything is written — and pinned ahead of the role's row.
@@ -219,8 +228,12 @@ as two capped sections: `repo_instructions` (the file verbatim, ahead of the col
 `repo_skills` (one line per skill — name, description, path — after them; the run reads a body on
 demand with its own tools, and the factory's skills table never holds it). A repo skill whose name the
 column binds is left out of the index: the factory's skill is authoritative. What both cost is the
-log's `factory.repo.prompt` record. Importing a repository's skill _into_ the factory (wave 2, below)
-is still a copy, `factory skill put --file`, and it is still unbuilt as a flow.
+log's `factory.repo.prompt` record, which an operator reads back (F19: `getSessionContext`, `factory show`'s
+`context` line, the session pane's line). The instruction file is the first of `AGENTS.md`, `CLAUDE.md`
+and `.github/copilot-instructions.md` the base has (F20, the record names the path read), and the
+`AGENTS.md` files nested in directories are listed by path in the skills index, never injected. Importing
+a repository's skill _into_ the factory (wave 2, below) is still a copy, `factory skill put --file`, and it
+is still unbuilt as a flow.
 
 **The tool policy** is a filter on what a run is _offered_: a read-only role is not given `write`,
 `edit` or `verify` at all (`STAGE_REFUSED_TOOLS`), so a call to one meets Pi Durable's
@@ -331,8 +344,11 @@ policy unchanged.
 
 Built (S-factory-config-as-code): **a repository's policy**, between the deployment's and the
 column's. A repo's `.factory/config` may carry a `policy` block — `approvalRequired[]` (gates added
-to `APPROVAL_REQUIRED`), `deny[]` (command prefixes refused outright, read the way a gate is) and
-`allowedHosts[]` (the session's egress allowlist narrowed to these, each one the deployment allows).
+to `APPROVAL_REQUIRED`), `deny[]` (command prefixes refused outright, read the way a gate is),
+`allowedHosts[]` (the session's egress allowlist narrowed to these, each one the deployment allows)
+and `mcp` (S-agent-mcp-tools: the deployment-registered MCP servers its runs may call, and the tools of
+each; a server the deployment does not register is a widening and refuses the policy, and a write tool
+asks a person on every call).
 It is read at the session's base ref in the registered checkout or the factory's mirror
 (`packages/core/src/repoPolicy.ts`, `git cat-file`), never from the worktree, and pinned in the log
 by the first open (`factory.policy`, which also records the effective rules the run met), so an

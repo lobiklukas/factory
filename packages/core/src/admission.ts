@@ -2,8 +2,10 @@ import {
   type CapacityCapKind,
   type SessionError,
   SessionError as SessionErrorClass,
+  type SpendCap,
 } from "@repo/domain/Session";
 import { TriggerError } from "@repo/domain/Trigger";
+import { formatDollars } from "@repo/harness";
 import type { GitHubWebhookAnswer } from "./LinearSync";
 
 /**
@@ -85,6 +87,20 @@ export const runCapReached = (hit: RunCapHit): SessionError =>
   });
 
 /**
+ * The refusal past an aggregate spend cap (S-aggregate-spend-caps): `budget_exceeded`, built like
+ * `atCapacity` from a limit and where it is configured, and naming what it counted (a repository's
+ * or an actor's spend), the window, the spend that reaches the limit, and when the window ends.
+ * Nothing was written and no model was called: a retry succeeds when the window rolls over or an
+ * operator raises the cap.
+ */
+export const budgetExceeded = (cap: SpendCap): SessionError =>
+  new SessionErrorClass({
+    code: "budget_exceeded",
+    message: `budget exceeded: ${cap.scope === "repo" ? "repository" : "actor"} ${cap.subject} has spent ${formatDollars(cap.spent)} of its ${formatDollars(cap.limit)} ${cap.window === "day" ? "daily" : "monthly"} cap (${cap.source}), so no new run may start ${cap.scope === "repo" ? "on it" : "for them"} until that ${cap.window} ends at ${cap.resetsAt} or the cap is raised`,
+    spendCap: cap,
+  });
+
+/**
  * How long a sender is told to wait after an `at-capacity` delivery, in seconds. A slot frees when an
  * owner is released, which the idle sweep does on its own schedule, so this is a polite interval
  * rather than a promise; a sender with its own schedule (Linear) is told to retry by the status.
@@ -93,21 +109,28 @@ export const AT_CAPACITY_RETRY_AFTER_S = 60;
 
 /**
  * A session failure as the trigger seam reports it: `at_capacity` keeps its meaning as
- * `at-capacity`, so a route can answer "not now" rather than "broken", and `setup_failed` its as
+ * `at-capacity`, so a route can answer "not now" rather than "broken", `budget_exceeded` is the
+ * same "not now" (the window rolls over, or the cap is raised, and the redelivery then succeeds),
+ * and `setup_failed` its as
  * `setup-failed` (S-env-setup), which the seam records as an outcome; every other code is a failed
  * session create, as it was.
  */
 export const triggerErrorOfSession = (
-  cause: Pick<SessionError, "code" | "message">,
+  cause: Pick<SessionError, "code" | "message"> &
+    Partial<Pick<SessionError, "spendCap">>,
 ): TriggerError =>
   new TriggerError({
     code:
-      cause.code === "at_capacity"
+      cause.code === "at_capacity" || cause.code === "budget_exceeded"
         ? "at-capacity"
         : cause.code === "setup_failed"
           ? "setup-failed"
           : "session-create",
     message: cause.message,
+    // A spend cap holds until its window ends, so a sender is told when, not "in a minute".
+    ...(cause.code === "budget_exceeded" && cause.spendCap !== undefined
+      ? { retryAfterSeconds: cause.spendCap.retryAfterSeconds }
+      : {}),
   });
 
 /**
@@ -116,20 +139,23 @@ export const triggerErrorOfSession = (
  * claim); `500` for anything else, a real failure.
  */
 export const triggerFailureAnswer = (
-  cause: Pick<TriggerError, "code" | "message">,
-): GitHubWebhookAnswer =>
-  cause.code === "at-capacity"
+  cause: Pick<TriggerError, "code" | "message"> &
+    Partial<Pick<TriggerError, "retryAfterSeconds">>,
+): GitHubWebhookAnswer => {
+  const retryAfter = cause.retryAfterSeconds ?? AT_CAPACITY_RETRY_AFTER_S;
+  return cause.code === "at-capacity"
     ? {
         status: 503,
-        headers: { "retry-after": String(AT_CAPACITY_RETRY_AFTER_S) },
+        headers: { "retry-after": String(retryAfter) },
         body: {
           ok: false,
           error: cause.message,
           code: cause.code,
-          retryAfterSeconds: AT_CAPACITY_RETRY_AFTER_S,
+          retryAfterSeconds: retryAfter,
         },
       }
     : {
         status: 500,
         body: { ok: false, error: cause.message, code: cause.code },
       };
+};

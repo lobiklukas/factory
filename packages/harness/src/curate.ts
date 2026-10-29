@@ -104,6 +104,8 @@ const renderEntry = (entry: TranscriptEntry): string | undefined => {
       return undefined;
     case "interrupted":
       return undefined;
+    case "modelSwitch":
+      return undefined;
     case "inherited":
       return undefined;
     case "other":

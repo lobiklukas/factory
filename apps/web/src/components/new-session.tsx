@@ -358,6 +358,22 @@ const NewSessionForm = ({
         />
         Cap at predicted high
       </label>
+      <label
+        htmlFor="new-session-open-pr"
+        className="flex items-center gap-2 text-[11px] text-muted-foreground"
+      >
+        <input
+          id="new-session-open-pr"
+          name="openPr"
+          type="checkbox"
+          checked={form.openPr && form.repo !== undefined}
+          // A scratch session has no branch to publish.
+          disabled={form.repo === undefined}
+          onChange={(event) => edit("openPr", event.currentTarget.checked)}
+          className="size-3"
+        />
+        Open a PR when done
+      </label>
       {problem === null ? null : (
         <p
           id="new-session-problem"

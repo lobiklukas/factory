@@ -38,6 +38,10 @@ worktree with `./session.sh` (API on `:9580`, re-run after merging main with D7'
 dropped before the RPC) failed 4 of them: the fork prefix, the refused entry, the reset marker and the
 transcript order.
 
+`factory run --open-pr` and `factory show` (F17, F19, F20) were verified **2026-10-29** from the
+`agent/F17-F19-F20` worktree with `./open-pr.sh` (API on `:9552`, the GitHub fake on `:9553`) — **7/7**
+checks — and `./repo-context.sh` (API on `:9554`) — **8/8** ([show.md](show.md), [run.md](run.md)).
+
 `factory discard` was verified **2026-10-28** from the `agent/LOB-268` worktree with
 `./discard.sh` (API on `:9541`) — **11/11** checks.
 
@@ -77,6 +81,8 @@ mutation run (the row always printing `-`) failed "ls shows the recorded PR URL"
 | ----------------------------------------------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `factory run`                                                           | passing | [run.md](run.md)                                                                                                              |
 | `factory run --model`, `DEFAULT_MODEL`                                  | passing | [model.md](model.md) (`model.sh`)                                                                                             |
+| `factory run --open-pr`                                                 | passing | [run.md](run.md) (`open-pr.sh`)                                                                                               |
+| `factory show`                                                          | passing | [show.md](show.md) (`repo-context.sh`)                                                                                        |
 | `factory cost`, `factory run --cap-at-prediction`                       | passing | verify-api's [cost.md](../../verify-api/features/cost.md) (`cost.sh`)                                                         |
 | `factory ls`                                                            | passing | [ls.md](ls.md)                                                                                                                |
 | `factory status`, the model in `run` and `ls`                           | passing | [status.md](status.md)                                                                                                        |

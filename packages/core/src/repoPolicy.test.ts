@@ -286,3 +286,96 @@ describe("decodePolicy", () => {
     ).toEqual({ approvalRequired: [], denied: [], allowedHosts: [] });
   });
 });
+
+describe("the mcp block (S-agent-mcp-tools)", { timeout: 30_000 }, () => {
+  const decoded = (policy: unknown) =>
+    Effect.runPromiseExit(decodePolicy(config(policy)));
+  const refusal = async (policy: unknown) => {
+    const exit = await decoded(policy);
+    if (Exit.isSuccess(exit)) throw new Error("expected a refusal");
+    const failure = exit.cause.reasons[0];
+    if (failure?._tag !== "Fail") throw new Error("expected a typed failure");
+    return failure.error;
+  };
+
+  /** Mutation: decode `mcp` under another name, or drop it from the result — no tool is allowed. */
+  it("reads the servers it allows, their tools and their gates", async () => {
+    const exit = await decoded({
+      mcp: {
+        tracker: {
+          tools: [" get_issue ", "update_issue"],
+          approvalRequired: ["get_issue"],
+        },
+        docs: { tools: ["search"] },
+      },
+    });
+    expect(Exit.isSuccess(exit) ? exit.value : exit).toEqual({
+      approvalRequired: [],
+      denied: [],
+      mcp: {
+        tracker: {
+          tools: ["get_issue", "update_issue"],
+          approvalRequired: ["get_issue"],
+        },
+        docs: { tools: ["search"], approvalRequired: [] },
+      },
+    });
+  });
+
+  it("refuses a server entry of the wrong shape, a key it does not know and a bad server name", async () => {
+    expect(await refusal({ mcp: { tracker: ["get_issue"] } })).toMatchObject({
+      kind: "invalid",
+    });
+    expect(
+      await refusal({ mcp: { tracker: { tools: ["a"], url: "https://x" } } }),
+    ).toMatchObject({
+      kind: "invalid",
+      reasons: [expect.stringContaining("url")],
+    });
+    expect(
+      await refusal({ mcp: { "Tracker Prod": { tools: ["a"] } } }),
+    ).toMatchObject({ kind: "invalid" });
+  });
+
+  /** Mutation: drop the stray-gate check — a gate on a typo loads and gates nothing. */
+  it("refuses a gate on a tool the server's entry does not allow", async () => {
+    expect(
+      await refusal({
+        mcp: {
+          tracker: { tools: ["get_issue"], approvalRequired: ["get_isue"] },
+        },
+      }),
+    ).toMatchObject({
+      kind: "invalid",
+      reasons: [
+        "its mcp block gates tracker's get_isue, which its tools do not list",
+      ],
+    });
+  });
+
+  /** Mutation: drop the MCP half of `repoPolicyWidening` — a server the deployment never registered loads. */
+  it("refuses, at a base, a server the deployment does not register", async () => {
+    const checkout = fixtureRepo({
+      ".factory/config": config({ mcp: { rogue: { tools: ["get_issue"] } } }),
+    });
+    const exit = await Effect.runPromiseExit(
+      readRepoPolicy(
+        { repo: "acme/widgets", checkout, prefix: "", ref: "main" },
+        {
+          ...DEFAULT_AUTONOMY,
+          mcpServers: [{ name: "tracker", url: "http://127.0.0.1:1/mcp" }],
+        },
+      ),
+    );
+    if (Exit.isSuccess(exit)) throw new Error("expected a rejection");
+    const failure = exit.cause.reasons[0];
+    if (failure?._tag !== "Fail") throw new Error("expected a typed failure");
+    expect(failure.error).toMatchObject({
+      _tag: "RepoPolicyRejected",
+      kind: "widens",
+      reasons: [
+        "mcp names server rogue, which this deployment does not register (it registers tracker)",
+      ],
+    });
+  });
+});

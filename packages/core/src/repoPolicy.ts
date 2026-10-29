@@ -11,9 +11,11 @@
  * (`@repo/harness`'s `PolicyDoc`); this module is only the read.
  *
  * **Tighten-only, checked at load.** The block can add approval gates (`approvalRequired`), a deny
- * list (`deny`) and narrow the egress allowlist (`allowedHosts`); `@repo/harness`'s `withRepoPolicy`
+ * list (`deny`), narrow the egress allowlist (`allowedHosts`) and pick, of the MCP servers the
+ * deployment registers, the ones its runs may call and which of their tools (`mcp`,
+ * S-agent-mcp-tools); `@repo/harness`'s `withRepoPolicy`
  * merges it under the deployment's configuration. A block that tries to allow something the
- * deployment denies — a host off its allowlist — is refused whole, as `RepoPolicyRejected`, and so
+ * deployment denies — a host off its allowlist, an MCP server it does not register — is refused whole, as `RepoPolicyRejected`, and so
  * is one that is not the policy's shape: an unknown key is an error rather than ignored, because a
  * key the factory does not know (`allow`, `pushRefPrefixes`) is a rule its author thinks is in force.
  * A file that is not JSON is refused too, since there is no telling what policy it meant to declare.
@@ -26,8 +28,10 @@ import {
   RepoPolicyUnavailable,
 } from "@repo/domain/Session";
 import {
+  MCP_SERVER_NAME,
   repoPolicyWidening,
   type AutonomyConfig,
+  type RepoMcp,
   type RepoPolicy,
   type RepoPolicySource,
 } from "@repo/harness";
@@ -43,11 +47,26 @@ const GIT_READ_TIMEOUT_MS = 15_000;
 /** One entry of a list the block declares: a command prefix or a host, never blank. */
 const Entry = Schema.String.pipe(Schema.check(Schema.isPattern(/\S/)));
 
+/**
+ * What the block allows of one registered MCP server (S-agent-mcp-tools): the tools its runs are
+ * offered, by the server's names, and the ones among them that ask a person even if they only read.
+ */
+const McpServerBlock = Schema.Struct({
+  tools: Schema.Array(Entry),
+  approvalRequired: Schema.optional(Schema.Array(Entry)),
+});
+
 /** The `policy` block as a repository writes it. Every key is optional; no other key is allowed. */
 const PolicyBlock = Schema.Struct({
   approvalRequired: Schema.optional(Schema.Array(Entry)),
   deny: Schema.optional(Schema.Array(Entry)),
   allowedHosts: Schema.optional(Schema.Array(Entry)),
+  mcp: Schema.optional(
+    Schema.Record(
+      Schema.String.pipe(Schema.check(Schema.isPattern(MCP_SERVER_NAME))),
+      McpServerBlock,
+    ),
+  ),
 });
 
 /** What one read of a base came to. */
@@ -233,11 +252,39 @@ export const decodePolicy = (
           new RepoConfigUndecodable({
             kind: "invalid",
             reasons: [
-              `its policy block is not a policy (approvalRequired, deny and allowedHosts, each a list of non-empty strings): ${error.message.replace(/\n\s*/g, " ")}`,
+              `its policy block is not a policy (approvalRequired, deny and allowedHosts, each a list of non-empty strings, and mcp, each registered server's tools and approvalRequired): ${error.message.replace(/\n\s*/g, " ")}`,
             ],
           }),
       ),
     );
+    const mcp: RepoMcp | undefined =
+      block.mcp === undefined
+        ? undefined
+        : Object.fromEntries(
+            Object.entries(block.mcp).map(([server, allowed]) => [
+              server,
+              {
+                tools: allowed.tools.map((tool) => tool.trim()),
+                approvalRequired: (allowed.approvalRequired ?? []).map((tool) =>
+                  tool.trim(),
+                ),
+              },
+            ]),
+          );
+    // A gate on a tool the block does not allow gates nothing: a typo its author thinks is in force.
+    const stray = Object.entries(mcp ?? {}).flatMap(([server, allowed]) =>
+      allowed.approvalRequired
+        .filter((tool) => !allowed.tools.includes(tool))
+        .map(
+          (tool) =>
+            `its mcp block gates ${server}'s ${tool}, which its tools do not list`,
+        ),
+    );
+    if (stray.length > 0)
+      return yield* new RepoConfigUndecodable({
+        kind: "invalid",
+        reasons: stray,
+      });
     return {
       approvalRequired: (block.approvalRequired ?? []).map((entry) =>
         entry.trim(),
@@ -246,5 +293,6 @@ export const decodePolicy = (
       ...(block.allowedHosts === undefined
         ? {}
         : { allowedHosts: block.allowedHosts.map((host) => host.trim()) }),
+      ...(mcp === undefined ? {} : { mcp }),
     };
   });

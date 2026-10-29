@@ -224,6 +224,10 @@ control plane's.
 _Refined (C18):_ nobody has to ask for it. A run that settles in a session that declares its PR — a
 card's run in a column that requires one, a session a trigger opened — runs the PR step with no
 operator call; a person's session keeps `factory pr` and the dashboard's control.
+_Refined (F17):_ a person's session can ask at create (`openPrOnSettle`: `factory run --open-pr`, the
+New session form's checkbox), recorded in its log as `factory.settlePr`, and then declares the step
+as a trigger's session does; one that did not ask keeps `factory pr`. The boot sweep (F16) covers
+it, reading the same log record, so a settle no process saw still gets its PR.
 _Refined (F14, F16):_ the PR follows its session's branch. A recorded PR whose branch moved past the
 commit it was published at is pushed onto — measured, capped and pushed as an open is, never forced,
 answered `updated` — by `factory pr` and by every later settle, so a session's later commits reach
@@ -358,6 +362,17 @@ agent could write into the checkout's shared `.git/config` pinned on its command
 credential patterns apply to every repo, with or without a store; a line opts out of them with
 `factory-secret-scan:allow` only in a file that carries the marker at that base, so a marker the
 branch writes, or one in a commit message, exempts nothing.
+
+_Refined (S-agent-mcp-tools):_ a remote MCP server's bearer token is a repository secret used a
+third way, and still never in the session's shell. The control plane is the MCP client: the token is
+a header on its own requests, sent only to the URL the deployment registered the server under
+(`MCP_SERVERS`, which names the secret), and only for a session whose repository's `.factory/config`
+`policy.mcp` allows that server; it is masked in every tool result, in case a server echoes it. It is
+read through the same `SecretService` store as the setup and verify secrets, not `CredentialProvider`:
+that seam mints the forge's credential for the factory's own identity, while this is a value the
+repository's owner set for a third-party service, scoped per repo, write-only and rotated with
+`factory secrets set`. A server whose secret the repo does not hold, or holds in a form this key
+cannot read, is not offered, with a warning, rather than called with no credential.
 _Limits:_ masking is literal, so a command that prints a value encoded leaks it, and the scan is
 literal too, so a value committed encoded passes it; a line added to a file the base already marks
 is exempt from the patterns (never from a stored value); a repo the factory
@@ -601,6 +616,21 @@ card pane's Start run (a Budget field) put `budget` on the `createSession` that 
 _As built (LOB-162)._ Spend is keyed by repo and actor. It is committed as `factory.actor` and
 indexed as `sessions.actor`. `listSpend` groups the list's own `cost_total` by the pair, and the
 dashboard's `/spend` shows it per repo, per actor and per pair.
+_As built (S-aggregate-spend-caps)._ Spend has ceilings above a session. `SPEND_CAPS` (JSON, deployment
+config: a repo's own `.factory/config` could be edited by whoever can push to it, so it does not set its
+own ceiling) gives a repo and an actor a `daily` and a `monthly` limit in dollars, counted over the
+current UTC day and month from `spend_ledger`, a row per increase of a session's `cost_total` written in
+the statement that moves it (`cost_total` alone cannot say what was spent today). `createSession`,
+`sendMessage` (one that would start a run), `startMission` and `replaySession` on a subject whose window has reached its limit are refused
+`budget_exceeded` before anything is written, with a typed `spendCap` naming the scope, window, limit,
+spend, `SPEND_CAPS` entry and when the window resets; a run under way is not stopped (it has its own
+budget), so a cap is held against the _next_ run. A webhook delivery refused this way is the same
+`503 at-capacity` as LOB-70's, with `Retry-After` the time to the window's end. Crossing 80% and 100% writes one `spend_alerts` row each per window and limit (a cap raised
+mid-window alerts afresh; the view lists an alert only while its cap and limit are the configured
+ones, `spend_cap_limits`),
+which the attention view lists (`spend` reason, the highest threshold per cap and window) and the
+notifier sends (`spend` kind). Counted per actor as the session's recorded actor, so a message sent by
+someone else to a session is charged to its creator.
 _As built (LOB-38)._ The spend history predicts what the next session will cost. `predictCost`
 classifies the prompt's first line into a task shape, then takes the completed sessions most like it.
 The comparables come from the first tier with three sessions: repo+model+shape, then repo+model,

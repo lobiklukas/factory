@@ -38,6 +38,8 @@ field.
 | `factory.run.duration`    | histogram               | `s`         | —                                                                                         | Wall time of a run: from the session turning busy to idle again, as its owner saw it. Buckets: 0.1, 0.5, 1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600. A run cut short by its owner's release (workspace release, shutdown) is not recorded; one resumed after a restart is timed from the reopen.                                                                                                                                                                                             |
 | `factory.refusals`        | counter (monotonic sum) | `{refusal}` | `reason`: `message_too_long`, `busy`, `released`, `budget`, `at_capacity`, `setup_failed` | Requests the factory understood and declined: a message over the length cap, a `whenBusy: "reject"` message to a running session, a start on a session whose workspace was released, a model request stopped by the session's budget, and a request that would open one more session than `SESSION_MAX_CONCURRENT` allows (LOB-70) or start one more run on a card than its board definition's caps allow (LOB-71), and a first message whose worktree's declared setup failed (S-env-setup). |
 
+`budget_exceeded` (S-aggregate-spend-caps) is a run refused because its repository's or actor's aggregate spend cap (`SPEND_CAPS`) was reached; it is a `reason` of `factory.refusals` beside the ones above.
+
 A metric appears in an export once it has been updated in that process: a fresh process with no
 session yet sends none of them.
 

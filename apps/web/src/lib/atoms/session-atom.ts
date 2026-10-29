@@ -324,6 +324,22 @@ export const sendMessageAtom = runtime.fn(
 );
 
 /**
+ * What a session's run was told about its repository (F19's `getSessionContext`): the instruction
+ * file, its size and whether it was cut, and the skills indexed. Written when a run opens, so it is
+ * re-read when the session list is (`SESSIONS_KEY`) rather than polled.
+ */
+export const sessionContextAtom = Atom.family((sessionId: SessionId) =>
+  runtime
+    .atom(
+      Effect.gen(function* () {
+        const rpc = yield* RpcClient;
+        return yield* rpc.client.getSessionContext({ sessionId });
+      }),
+    )
+    .pipe(Atom.withReactivity([SESSIONS_KEY])),
+);
+
+/**
  * Reads the page of a session's transcript before an entry (LOB-243's RPC): what "Show earlier
  * entries" asks for when a historical snapshot carried only the newest of a long session. The page
  * goes above what the pane shows; the stream is not involved, because earlier entries never change.

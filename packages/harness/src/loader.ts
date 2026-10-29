@@ -32,6 +32,7 @@ import {
 import { Effect, Schema } from "effect";
 import type { ColumnAutonomy } from "@repo/domain/Task";
 import { modelAccessFor, type ModelAccess } from "./models";
+import { NO_ROLE_FALLBACKS, type RoleFallbacks } from "./fallback";
 import {
   readOnlyStageOf,
   STAGE_REFUSED_TOOLS,
@@ -297,6 +298,12 @@ export type RoleResolution = {
   /** The role's model, or the deployment's when the role has no row (or there is no role). */
   readonly model: ModelAccess;
   /**
+   * The models a run moves onto, in order, when `model` answers overloaded or unavailable
+   * (S-model-provider-breadth, `./fallback`): the role's row in the deployment's `ROLE_FALLBACKS`.
+   * Empty for a role with none, and for a run with no role.
+   */
+  readonly fallbacks: readonly ModelAccess[];
+  /**
    * Tool names the run is not offered at all. `openSession` removes them from the run's tool list
    * (`AgentChange.tools`), so the model never sees them; a call it makes anyway is answered
    * `tool_unavailable` by Pi Durable. The stage's hook refusal is what holds on a root whose tool
@@ -327,7 +334,8 @@ const NO_TOOLS_WITHHELD: ReadonlySet<string> = new Set();
 /**
  * Resolve the run's role to its model and its tool policy — the one place B6 says that happens.
  *
- * The model is the role's row in `roles`, or `deployment` when there is none. The tool policy is the
+ * The model is the role's row in `roles`, or `deployment` when there is none, and its fallbacks the
+ * role's row in `fallbacks` (S-model-provider-breadth). The tool policy is the
  * role's row in `policies` (`./rolePolicy`, the factory's table unless the deployment extended it): a
  * read-only role is not offered the tools the stage refuses (`STAGE_REFUSED_TOOLS`), and every other
  * role is offered every tool — except `spec` and `plan`, which only a role whose row says so is
@@ -340,6 +348,7 @@ export const resolveRole = (
   deployment: ModelAccess,
   roles: RoleModels = NO_ROLE_MODELS,
   policies: RolePolicies = DEFAULT_ROLE_POLICIES,
+  fallbacks: RoleFallbacks = NO_ROLE_FALLBACKS,
 ): RoleResolution => {
   const model = run?.role === undefined ? undefined : roles.get(run.role);
   const stage = readOnlyStageOf(run, policies);
@@ -347,6 +356,8 @@ export const resolveRole = (
     run?.column === undefined ? undefined : rolePolicyOf(run.role, policies);
   return {
     model: model ?? deployment,
+    fallbacks:
+      (run?.role === undefined ? undefined : fallbacks.get(run.role)) ?? [],
     withheldTools:
       stage === undefined ? NO_TOOLS_WITHHELD : STAGE_REFUSED_TOOLS,
     ...(stage === undefined ? {} : { stage }),
