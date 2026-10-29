@@ -10,6 +10,7 @@ import {
   mkdirSync,
   mkdtempSync,
   realpathSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -83,6 +84,7 @@ describe("workTreeRoot", () => {
     } finally {
       // oxlint-disable-next-line effecttsgo/process-env -- as above.
       process.env["PATH"] = path;
+      rmSync(bin, { recursive: true, force: true });
     }
   }, 60_000);
 

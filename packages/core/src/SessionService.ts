@@ -4211,22 +4211,30 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               yield* Ref.update(handoffSettled, HashSet.add(id));
             }
           });
-          // A card's run whose owner or first log writes fail here was committed above: it is
-          // ended rather than left holding a cap slot no turn will free (`endOpenRun`).
-          yield* input.taskId === undefined
-            ? opened
-            : opened.pipe(Effect.onError(() => endOpenRun(id)));
-          if (input.taskId !== undefined && input.review === undefined) {
-            // A review that requested changes blocked the card (C21); a run that writes code is the
-            // one that addresses it — the review is on the thread it is told — so the card no longer
-            // waits on a person. Only once its owner has opened: a start refused above leaves the
-            // block, and the card in 'Needs a person'. Best effort: the run is already the card's.
-            yield* liftReviewBlock(id, input.taskId, input.actor ?? id);
-          }
-          // The session exists and its directory is open: the list can show it without a fold.
-          yield* touchActivity(id);
-          yield* countSessionCreate("create");
-          return yield* describe(id, row);
+          // Held from before the owner is published to the answer (`holding`): its first log writes
+          // and the describe that reads it run after `acquireOwner`, and a sweep that went by
+          // `lastUsedAt` alone could release the owner between them on a loaded machine (DEFLAKE).
+          return yield* holding(
+            id,
+            Effect.gen(function* () {
+              // A card's run whose owner or first log writes fail here was committed above: it is
+              // ended rather than left holding a cap slot no turn will free (`endOpenRun`).
+              yield* input.taskId === undefined
+                ? opened
+                : opened.pipe(Effect.onError(() => endOpenRun(id)));
+              if (input.taskId !== undefined && input.review === undefined) {
+                // A review that requested changes blocked the card (C21); a run that writes code is the
+                // one that addresses it — the review is on the thread it is told — so the card no longer
+                // waits on a person. Only once its owner has opened: a start refused above leaves the
+                // block, and the card in 'Needs a person'. Best effort: the run is already the card's.
+                yield* liftReviewBlock(id, input.taskId, input.actor ?? id);
+              }
+              // The session exists and its directory is open: the list can show it without a fold.
+              yield* touchActivity(id);
+              yield* countSessionCreate("create");
+              return yield* describe(id, row);
+            }),
+          );
         }).pipe(Effect.scoped);
 
       /**
@@ -5645,72 +5653,78 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // read shows a fork whose parent the index cannot name. A fork refused after its row was
           // written (`at` names no entry of the parent, say) removes that row again: an index row
           // with no log is invisible to the list — which joins the activity index — and would wait
-          // for a rebuild to be swept, so it is not left behind.
-          yield* acquireOwnerWith(
+          // for a rebuild to be swept, so it is not left behind. Held to the answer, as a create's
+          // owner is (`holding`): the describe reads the owner the sweep could otherwise release.
+          return yield* holding(
             id,
-            row,
-            ({
-              storage,
-              cwd,
-              policy: sessionPolicy,
-              run,
-              pages,
-              repo,
-              verify,
-              secrets,
-            }) =>
-              Effect.acquireUseRelease(
-                openStorage(input.sessionId, "reader"),
-                (parentStorage) =>
-                  forkSession({
-                    parent: parentStorage,
-                    child: storage,
-                    ...(input.at === undefined ? {} : { at: input.at }),
-                    lineage: input.sessionId,
-                    run,
-                    pages,
-                    ...(repo === undefined ? {} : { repo }),
-                    verify,
-                    secrets,
-                    approvalAsker: askerFor(id),
-                    ...(binding.repo === undefined ||
-                    binding.baseRef === undefined
-                      ? {}
-                      : {
-                          binding: {
-                            repo: binding.repo,
-                            baseRef: binding.baseRef,
-                          },
-                        }),
-                    // The fork's actor (the caller's, or its parent's), committed with the lineage.
-                    ...(actor === null ? {} : { actor }),
-                    model: options.model,
-                    cwd,
-                    ...(options.sandbox === undefined
-                      ? {}
-                      : { sandbox: options.sandbox }),
-                    policy: sessionPolicy,
-                    // A fork keeps its parent's cap and carries its spend; an uncapped parent's
-                    // fork gets the default a create would (LOB-163).
-                    ...(options.defaultBudget === undefined
-                      ? {}
-                      : { defaultBudget: options.defaultBudget }),
-                  }),
-                (parentStorage) =>
-                  Effect.promise(() => parentStorage.dispose()),
-              ).pipe(
-                Effect.tapError(() =>
-                  paper(
-                    "remove the refused fork's index row",
-                    sql`DELETE FROM sessions WHERE id = ${id}`,
-                  ).pipe(Effect.ignore),
-                ),
-              ),
-            { slot },
+            Effect.gen(function* () {
+              yield* acquireOwnerWith(
+                id,
+                row,
+                ({
+                  storage,
+                  cwd,
+                  policy: sessionPolicy,
+                  run,
+                  pages,
+                  repo,
+                  verify,
+                  secrets,
+                }) =>
+                  Effect.acquireUseRelease(
+                    openStorage(input.sessionId, "reader"),
+                    (parentStorage) =>
+                      forkSession({
+                        parent: parentStorage,
+                        child: storage,
+                        ...(input.at === undefined ? {} : { at: input.at }),
+                        lineage: input.sessionId,
+                        run,
+                        pages,
+                        ...(repo === undefined ? {} : { repo }),
+                        verify,
+                        secrets,
+                        approvalAsker: askerFor(id),
+                        ...(binding.repo === undefined ||
+                        binding.baseRef === undefined
+                          ? {}
+                          : {
+                              binding: {
+                                repo: binding.repo,
+                                baseRef: binding.baseRef,
+                              },
+                            }),
+                        // The fork's actor (the caller's, or its parent's), committed with the lineage.
+                        ...(actor === null ? {} : { actor }),
+                        model: options.model,
+                        cwd,
+                        ...(options.sandbox === undefined
+                          ? {}
+                          : { sandbox: options.sandbox }),
+                        policy: sessionPolicy,
+                        // A fork keeps its parent's cap and carries its spend; an uncapped parent's
+                        // fork gets the default a create would (LOB-163).
+                        ...(options.defaultBudget === undefined
+                          ? {}
+                          : { defaultBudget: options.defaultBudget }),
+                      }),
+                    (parentStorage) =>
+                      Effect.promise(() => parentStorage.dispose()),
+                  ).pipe(
+                    Effect.tapError(() =>
+                      paper(
+                        "remove the refused fork's index row",
+                        sql`DELETE FROM sessions WHERE id = ${id}`,
+                      ).pipe(Effect.ignore),
+                    ),
+                  ),
+                { slot },
+              );
+              yield* touchActivity(id);
+              yield* countSessionCreate("fork");
+              return yield* describe(id, row);
+            }),
           );
-          yield* touchActivity(id);
-          yield* countSessionCreate("fork");
-          return yield* describe(id, row);
         }).pipe(Effect.scoped);
 
       /**
@@ -5767,59 +5781,64 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // the title and the binding are written with the lineage, and the source's prompt is what
           // starts it. A failure after the row is written removes the row again — an index row with
           // no log is invisible to the list and would wait for a rebuild to be swept (as a refused
-          // fork's does).
-          yield* acquireOwnerWith(
+          // fork's does). Held to the answer, as a create's owner is (`holding`).
+          return yield* holding(
             id,
-            row,
-            ({
-              storage,
-              cwd,
-              policy: sessionPolicy,
-              run,
-              repo,
-              verify,
-              secrets,
-            }) =>
-              replaySession({
-                source: origin,
-                sourceId: input.sessionId,
-                replayId: id,
-                target: storage,
-                model: target,
-                title: source.title,
-                // The replay's actor (the caller's, or its source's), committed with the lineage.
-                ...(actor === null ? {} : { actor }),
-                cwd,
-                ...(options.sandbox === undefined
-                  ? {}
-                  : { sandbox: options.sandbox }),
-                policy: sessionPolicy,
-                run,
-                ...(repo === undefined ? {} : { repo }),
-                verify,
-                secrets,
-                approvalAsker: askerFor(id),
-                // A replay keeps its source's cap, at no spend; an uncapped source's replay gets
-                // the default a create would (LOB-163).
-                ...(options.defaultBudget === undefined
-                  ? {}
-                  : { defaultBudget: options.defaultBudget }),
-              }),
-            { slot },
-          ).pipe(
-            Effect.tapError(() =>
-              paper(
-                "remove the refused replay's index row",
-                sql`DELETE FROM sessions WHERE id = ${id}`,
-              ).pipe(Effect.ignore),
-            ),
+            Effect.gen(function* () {
+              yield* acquireOwnerWith(
+                id,
+                row,
+                ({
+                  storage,
+                  cwd,
+                  policy: sessionPolicy,
+                  run,
+                  repo,
+                  verify,
+                  secrets,
+                }) =>
+                  replaySession({
+                    source: origin,
+                    sourceId: input.sessionId,
+                    replayId: id,
+                    target: storage,
+                    model: target,
+                    title: source.title,
+                    // The replay's actor (the caller's, or its source's), committed with the lineage.
+                    ...(actor === null ? {} : { actor }),
+                    cwd,
+                    ...(options.sandbox === undefined
+                      ? {}
+                      : { sandbox: options.sandbox }),
+                    policy: sessionPolicy,
+                    run,
+                    ...(repo === undefined ? {} : { repo }),
+                    verify,
+                    secrets,
+                    approvalAsker: askerFor(id),
+                    // A replay keeps its source's cap, at no spend; an uncapped source's replay gets
+                    // the default a create would (LOB-163).
+                    ...(options.defaultBudget === undefined
+                      ? {}
+                      : { defaultBudget: options.defaultBudget }),
+                  }),
+                { slot },
+              ).pipe(
+                Effect.tapError(() =>
+                  paper(
+                    "remove the refused replay's index row",
+                    sql`DELETE FROM sessions WHERE id = ${id}`,
+                  ).pipe(Effect.ignore),
+                ),
+              );
+              // The prompt is admitted, so the run is under way: opening the owner armed the comparison
+              // (`reconcileReplay`), which waits for it in the background, and the caller gets the replay
+              // now, as it always has.
+              yield* touchActivity(id);
+              yield* countSessionCreate("replay");
+              return yield* describe(id, row);
+            }),
           );
-          // The prompt is admitted, so the run is under way: opening the owner armed the comparison
-          // (`reconcileReplay`), which waits for it in the background, and the caller gets the replay
-          // now, as it always has.
-          yield* touchActivity(id);
-          yield* countSessionCreate("replay");
-          return yield* describe(id, row);
         }).pipe(Effect.scoped);
 
       /**

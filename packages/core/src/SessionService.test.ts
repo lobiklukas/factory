@@ -14499,7 +14499,9 @@ describe("a session's workspace outlives its owner (LOB-268)", () => {
    * acquires the owner, then checks its handoff and setup and writes its title before it submits:
    * with an idle timeout shorter than that, a sweep that went by `lastUsedAt` alone released the
    * owner in between, and the submit failed `Session is closed` — what this file's idle-sweep case
-   * above met under a loaded gate, at 200 ms.
+   * above met under a loaded gate, at 200 ms. A create is held the same way, from before its owner
+   * is published through its first log writes and its answer: `sessionWithWork` creates one whose
+   * title and repo binding are written after its owner is published, under the same 1 ms timeout.
    *
    * Mutation checked: dropping the sweep's `holds` check — the first send fails `submit message:
    * Session is closed`, or a later one does.
