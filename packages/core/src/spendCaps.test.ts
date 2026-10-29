@@ -59,6 +59,13 @@ describe("parsing SPEND_CAPS", () => {
     expect(await failure('{"repos":{"a/b":{}}}')).toContain(
       "daily or a monthly",
     );
+    // A repository that is not a lowercase `owner/name` never matches a session's repo.
+    expect(await failure('{"repos":{"Acme/Web":{"daily":5}}}')).toContain(
+      "Acme/Web",
+    );
+    expect(
+      await failure('{"repos":{"github.com/acme/web":{"daily":5}}}'),
+    ).toContain("github.com/acme/web");
     expect(await failure("20")).toContain("SPEND_CAPS");
     expect(await failure("{nope")).toContain("SPEND_CAPS");
   });

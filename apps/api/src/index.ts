@@ -859,7 +859,8 @@ const HttpLive = Effect.gen(function* () {
           }),
           prCap,
           autonomy,
-          ...(hasSpendCaps(spendCaps) ? { spendCaps } : {}),
+          // Always given, even with no caps, so a cap removed from SPEND_CAPS stops its alerts.
+          spendCaps,
           ...Option.match(defaultBudget, {
             onNone: () => ({}),
             onSome: (budget) => ({ defaultBudget: budget }),

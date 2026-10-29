@@ -25,16 +25,19 @@
  * **Alerts.** `raiseSpendAlerts` runs after spend is recorded and when a request is refused: each
  * threshold of each cap (80% and 100%) the window's spend has reached gets one `spend_alerts` row,
  * written once by `ON CONFLICT DO NOTHING`, so crossing 80% is one attention item however many
- * requests follow it. The attention view lists the highest threshold of each cap and window until
- * the window ends, and the notifier tells a person of each one (`spend` kind).
+ * requests follow it. The limit is part of the alert's key: a cap an operator raises mid-window
+ * alerts afresh at its own 80% and 100%. The attention view lists the highest threshold of each cap
+ * and window, while that cap and limit are the configured ones (`syncSpendCapLimits`) and until the
+ * window ends, and the notifier tells a person of each one (`spend` kind).
  */
 import { DateTime, Effect, Schema } from "effect";
 import type { SqlError } from "effect/sql/SqlError";
 import { SqlClient } from "effect/sql/SqlClient";
-import type {
-  SpendCap,
-  SpendCapScope,
-  SpendCapWindow,
+import {
+  RepoSlug,
+  type SpendCap,
+  type SpendCapScope,
+  type SpendCapWindow,
 } from "@repo/domain/Session";
 
 /** The configuration key the caps are read from (`apps/api`). */
@@ -76,10 +79,12 @@ export type SpendLimits = typeof SpendLimits.Type;
 /**
  * The shape of `SPEND_CAPS`: JSON, `{"repos": {"acme/web": {"daily": 20, "monthly": 300}},
  * "actors": {"alice": {"daily": 5}}}`. A key it does not know is refused, not ignored: a `"dayly"`
- * that silently capped nothing is a spend nobody limited.
+ * that silently capped nothing is a spend nobody limited. So is a repository that is not a
+ * `RepoSlug` (lowercase `owner/name`, as `sessions.repo` holds it): `"Acme/Web"` would never match
+ * a session and so would cap nothing.
  */
 const SpendCapsConfig = Schema.Struct({
-  repos: Schema.optional(Schema.Record(Schema.String, SpendLimits)),
+  repos: Schema.optional(Schema.Record(RepoSlug, SpendLimits)),
   actors: Schema.optional(Schema.Record(Schema.String, SpendLimits)),
 });
 
@@ -178,6 +183,40 @@ export const rulesFor = (
   return rules;
 };
 
+/** Every limit configured, in the order a refusal names them. */
+const allRules = (caps: SpendCaps): ReadonlyArray<SpendRule> => [
+  ...[...caps.repos.keys()].flatMap((repo) =>
+    rulesFor(caps, { repo, actor: undefined }),
+  ),
+  ...[...caps.actors.keys()].flatMap((actor) =>
+    rulesFor(caps, { repo: undefined, actor }),
+  ),
+];
+
+/**
+ * Record the caps this process runs under in `spend_cap_limits`, replacing what was there. The
+ * attention view lists an alert only while its cap and limit are in that table, so one whose cap
+ * was raised, lowered or removed (and the process restarted) stops standing for a refusal that no
+ * longer holds, and one raised again after a change is a new alert, not a stale row's.
+ */
+export const syncSpendCapLimits = (
+  caps: SpendCaps,
+): Effect.Effect<void, SqlError, SqlClient> =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        yield* sql`DELETE FROM spend_cap_limits`;
+        for (const rule of allRules(caps))
+          yield* sql`
+            INSERT INTO spend_cap_limits (scope, subject, span, limit_usd)
+            VALUES (${rule.scope}, ${rule.subject}, ${rule.window}, ${rule.limit})
+            ON CONFLICT (scope, subject, span) DO UPDATE SET limit_usd = EXCLUDED.limit_usd
+          `;
+      }),
+    );
+  });
+
 /** The current UTC day or month: where it starts and where the next one does, as ISO instants. */
 export const windowBounds = (
   window: SpendCapWindow,
@@ -252,6 +291,7 @@ export const firstSpendCapHit = (
   for (const rule of rules) {
     const spent = spentFor(spend, rule);
     if (!reachedCap(spent, rule.limit)) continue;
+    const resetsAt = windowBounds(rule.window, nowMs).end;
     return {
       scope: rule.scope,
       subject: rule.subject,
@@ -259,7 +299,11 @@ export const firstSpendCapHit = (
       limit: rule.limit,
       spent,
       source: rule.source,
-      resetsAt: windowBounds(rule.window, nowMs).end,
+      resetsAt,
+      retryAfterSeconds: Math.max(
+        1,
+        Math.ceil((Date.parse(resetsAt) - nowMs) / 1000),
+      ),
     };
   }
   return undefined;

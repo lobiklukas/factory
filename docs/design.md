@@ -606,11 +606,13 @@ config: a repo's own `.factory/config` could be edited by whoever can push to it
 own ceiling) gives a repo and an actor a `daily` and a `monthly` limit in dollars, counted over the
 current UTC day and month from `spend_ledger`, a row per increase of a session's `cost_total` written in
 the statement that moves it (`cost_total` alone cannot say what was spent today). `createSession`,
-`sendMessage` and `replaySession` on a subject whose window has reached its limit are refused
+`sendMessage` (one that would start a run), `startMission` and `replaySession` on a subject whose window has reached its limit are refused
 `budget_exceeded` before anything is written, with a typed `spendCap` naming the scope, window, limit,
 spend, `SPEND_CAPS` entry and when the window resets; a run under way is not stopped (it has its own
 budget), so a cap is held against the _next_ run. A webhook delivery refused this way is the same
-`503 at-capacity` as LOB-70's. Crossing 80% and 100% writes one `spend_alerts` row each per window,
+`503 at-capacity` as LOB-70's, with `Retry-After` the time to the window's end. Crossing 80% and 100% writes one `spend_alerts` row each per window and limit (a cap raised
+mid-window alerts afresh; the view lists an alert only while its cap and limit are the configured
+ones, `spend_cap_limits`),
 which the attention view lists (`spend` reason, the highest threshold per cap and window) and the
 notifier sends (`spend` kind). Counted per actor as the session's recorded actor, so a message sent by
 someone else to a session is charged to its creator.

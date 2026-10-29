@@ -18,8 +18,9 @@
  *   `run_failures` (migration 0039): `failed:<session>:<entry>`.
  *
  * - `spend` — an aggregate spend cap (S-aggregate-spend-caps) crossed 80% or reached 100% in its
- *   window, as the attention view lists it: `spend:<scope>:<subject>:<window>:<period>:<threshold>`,
- *   so each threshold of each cap is told once per day or month, not once per run.
+ *   window, as the attention view lists it: `spend:<scope>:<subject>:<window>:<period>:<limit>:<threshold>`,
+ *   so each threshold of each cap is told once per day or month, not once per run, and a cap raised
+ *   mid-window is told afresh at its own thresholds.
  *
  * The first three, and `spend`, are the attention view itself (`TaskService.attention`, every board), so "what
  * needs a person" has one definition and the notifier cannot disagree with the page. A failure is
@@ -261,7 +262,7 @@ export const notificationOfAttention = (
       const subject = `${reason.scope === "repo" ? "repository" : "actor"} ${reason.subject}`;
       const window = reason.window === "day" ? "daily" : "monthly";
       return {
-        eventId: `spend:${reason.scope}:${reason.subject}:${reason.window}:${reason.resetsAt}:${reason.threshold}`,
+        eventId: `spend:${reason.scope}:${reason.subject}:${reason.window}:${reason.resetsAt}:${reason.limit}:${reason.threshold}`,
         kind: "spend",
         title:
           reason.threshold >= 100

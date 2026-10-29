@@ -178,8 +178,8 @@ cat "$RUN_DIR/driver.log"
 check "the driver passes its checks" "$([ "$DRIVER_RC" = "0" ] && echo 0 || echo 1)" "exit=$DRIVER_RC"
 
 check "the API log records the refusal on the trigger route" \
-  "$(grep -q 'webhook /webhooks/generic: refused at-capacity' "$LOG" && echo 0 || echo 1)" \
-  "refused at-capacity"
+  "$(grep -q 'webhook /webhooks/generic: refused budget-exceeded' "$LOG" && echo 0 || echo 1)" \
+  "refused budget-exceeded"
 check "the API log says each threshold once" \
   "$([ "$(grep -c "spend: repo $REPO_WEB reached" "$LOG")" = "2" ] && echo 0 || echo 1)" \
   "lines=$(grep -c "spend: repo $REPO_WEB reached" "$LOG")"

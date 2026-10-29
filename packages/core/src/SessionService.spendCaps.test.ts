@@ -50,11 +50,14 @@ const actorOf = (name: string) => `${name}-${tag}`;
 const capsOf = (config: unknown): Effect.Effect<SpendCaps> =>
   parseSpendCaps(JSON.stringify(config)).pipe(Effect.orDie);
 
-const runtimeOver = (caps: SpendCaps) =>
+const runtimeOver = (caps: SpendCaps, fauxCommand?: string) =>
   ManagedRuntime.make(
     Layer.mergeAll(
       SessionServiceLive({
-        model: createFauxModelAccess({ fauxCost: COST }).access,
+        model: createFauxModelAccess({
+          fauxCost: COST,
+          ...(fauxCommand === undefined ? {} : { fauxCommand }),
+        }).access,
         sessionRoot: root,
         spendCaps: caps,
       }),
@@ -144,9 +147,12 @@ afterAll(async () => {
       Effect.gen(function* () {
         const sql = yield* SqlClient;
         yield* sql`DELETE FROM spend_alerts WHERE subject LIKE ${`%${tag}%`}`;
+        yield* sql`DELETE FROM spend_cap_limits WHERE subject LIKE ${`%${tag}%`}`;
         yield* sql`DELETE FROM board_instances WHERE repo = ${`caps-${tag}/board`}`;
         yield* sql`DELETE FROM spend_ledger WHERE repo LIKE ${`caps-${tag}/%`} OR actor LIKE ${`%-${tag}`}`;
-        yield* sql`DELETE FROM notification_deliveries WHERE event_id LIKE ${`spend:%${tag}%`}`;
+        // By sink, as `Notifier.test.ts` does: this test's notifier also delivers every other spend
+        // alert on the database to its sink, whose subjects are not this run's.
+        yield* sql`DELETE FROM notification_deliveries WHERE sink = ${`test:spend-${tag}`}`;
       }),
     );
   } finally {
@@ -405,7 +411,15 @@ describe("the alerts", () => {
   it("lists the highest threshold of each cap in its current window, only on the every-board view, and drops it when the window ends", async () => {
     const web = repoOf("view");
     const actor = actorOf("view");
-    const runtime = runtimeOver(await Effect.runPromise(capsOf({})));
+    // The caps the rows below were raised for: an alert is listed while its cap and limit stand.
+    const runtime = runtimeOver(
+      await Effect.runPromise(
+        capsOf({
+          repos: { [web]: { daily: 10, monthly: 10 } },
+          actors: { [actor]: { daily: 10 } },
+        }),
+      ),
+    );
     try {
       await runtime.runPromise(
         Effect.gen(function* () {
@@ -464,4 +478,228 @@ describe("the alerts", () => {
       await runtime.dispose();
     }
   }, 60_000);
+});
+
+/** A session that has answered, is idle, and whose spend has reached at least `usd` in the ledger. */
+const settledWithSpend = (sessionId: SessionId, usd: number) =>
+  Effect.gen(function* () {
+    const sessions = yield* SessionService;
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      const snapshot = yield* sessions.get(sessionId);
+      const spent = yield* ledgerOf([sessionId]);
+      if (
+        !snapshot.live.busy &&
+        spent >= usd - 1e-9 &&
+        snapshot.entries.some(
+          (entry) => entry.kind === "assistant" && entry.text !== "",
+        )
+      )
+        return;
+      yield* Effect.sleep(50);
+    }
+    return yield* Effect.die(new Error(`${sessionId} did not settle`));
+  });
+
+describe("what a cap refuses, and what it lets through", () => {
+  it("refuses a mission start, and answers a retried send from the log instead of refusing it", async () => {
+    const web = repoOf("mission");
+    const amy = actorOf("amy-mission");
+    const runtime = runtimeOver(
+      await Effect.runPromise(
+        capsOf({ repos: { [web]: { daily: 0.5 * RUN } } }),
+      ),
+    );
+    try {
+      await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          // Nothing spent yet: the session opens and its first message starts a run, whose own
+          // spend crosses the cap.
+          const created = yield* sessions.create({ repo: web, actor: amy });
+          const requestId = `retry-${tag}`;
+          const first = yield* sessions.send({
+            sessionId: created.id,
+            content: "go",
+            requestId,
+          });
+          yield* settledWithSpend(created.id, RUN);
+
+          // The client timed out and sends again with the same request id: Pi Durable answers it
+          // with the submission it already holds, as it would have before the cap was reached.
+          const retried = yield* sessions.send({
+            sessionId: created.id,
+            content: "go",
+            requestId,
+          });
+          expect(retried.submissionId).toBe(first.submissionId);
+          // A message that is new is a run, and refused.
+          const fresh = yield* refusal(
+            sessions.send({
+              sessionId: created.id,
+              content: "more",
+              requestId: `fresh-${tag}`,
+            }),
+          );
+          expect(fresh.code).toBe("budget_exceeded");
+          // A mission is the dearest run there is, and is refused its start.
+          const mission = yield* refusal(
+            sessions.startMission({
+              sessionId: created.id,
+              feature: "a mission on a capped repo",
+            }),
+          );
+          expect(mission.code).toBe("budget_exceeded");
+          expect(mission.spendCap?.subject).toBe(web);
+        }),
+      );
+    } finally {
+      await runtime.dispose();
+    }
+  }, 90_000);
+
+  it("does not refuse a steer into a run that is already going", async () => {
+    const web = repoOf("steer");
+    const amy = actorOf("amy-steer");
+    // A turn that sleeps, so the run is still going after its first request has paid the cap.
+    const runtime = runtimeOver(
+      await Effect.runPromise(
+        capsOf({ repos: { [web]: { daily: 0.5 * RUN } } }),
+      ),
+      "sleep 3 && echo faux-ok",
+    );
+    try {
+      await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const created = yield* sessions.create({ repo: web, actor: amy });
+          yield* sessions.send({ sessionId: created.id, content: "go" });
+          for (let attempt = 0; attempt < 200; attempt += 1) {
+            const snapshot = yield* sessions.get(created.id);
+            if (snapshot.live.busy && (yield* ledgerOf([created.id])) >= COST)
+              break;
+            yield* Effect.sleep(25);
+          }
+          expect((yield* sessions.get(created.id)).live.busy).toBe(true);
+          expect(yield* ledgerOf([created.id])).toBeGreaterThanOrEqual(COST);
+          // The cap is reached and the run is going: a person can still steer it.
+          const steered = yield* sessions.send({
+            sessionId: created.id,
+            content: "wrap up",
+            whenBusy: "steer",
+          });
+          expect(steered.placement).toBe("steer");
+          // A new run is refused all the same.
+          const other = yield* refusal(
+            sessions.create({ repo: web, actor: amy }),
+          );
+          expect(other.code).toBe("budget_exceeded");
+        }),
+      );
+    } finally {
+      await runtime.dispose();
+    }
+  }, 90_000);
+});
+
+describe("a cap an operator changes", () => {
+  it("alerts afresh at the new limit's thresholds, hides the old limit's alert, and hides every alert of a cap that is removed", async () => {
+    const web = repoOf("raise");
+    const amy = actorOf("amy-raise");
+    const limitsOf = () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        return yield* sql<{ threshold: number; limitUsd: number }>`
+          SELECT threshold, limit_usd FROM spend_alerts WHERE subject = ${web}
+          ORDER BY limit_usd, threshold
+        `;
+      });
+    const itemOf = () =>
+      Effect.gen(function* () {
+        const items = (yield* spendItems(web)).map((item) => item.reason);
+        return items.flatMap((reason) =>
+          reason._tag === "spend"
+            ? [{ threshold: reason.threshold, limit: reason.limit }]
+            : [],
+        );
+      });
+
+    // One run's spend, recorded before any cap.
+    const uncapped = runtimeOver(await Effect.runPromise(capsOf({})));
+    let spent = 0;
+    try {
+      spent = await uncapped.runPromise(
+        Effect.gen(function* () {
+          return yield* ledgerOf([yield* runOn(web, amy)]);
+        }),
+      );
+    } finally {
+      await uncapped.dispose();
+    }
+
+    // A cap under it: the refusal raises its 80% and 100%, and the view lists the 100%.
+    const low = spent / 2;
+    const capped = runtimeOver(
+      await Effect.runPromise(capsOf({ repos: { [web]: { daily: low } } })),
+    );
+    try {
+      await capped.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const refused = yield* refusal(
+            sessions.create({ repo: web, actor: amy }),
+          );
+          expect(refused.code).toBe("budget_exceeded");
+          expect((yield* limitsOf()).map((row) => row.threshold)).toEqual([
+            80, 100,
+          ]);
+          expect(yield* itemOf()).toEqual([
+            { threshold: 100, limit: expect.closeTo(low, 10) },
+          ]);
+        }),
+      );
+    } finally {
+      await capped.dispose();
+    }
+
+    // The operator raises it to unblock work and restarts: runs are admitted, and the old alert
+    // ("reached its cap") no longer stands in the view.
+    const high = 1.5 * spent;
+    const raised = runtimeOver(
+      await Effect.runPromise(capsOf({ repos: { [web]: { daily: high } } })),
+    );
+    try {
+      await raised.runPromise(
+        Effect.gen(function* () {
+          expect(yield* itemOf()).toEqual([]);
+          // Admitted, and the run crosses the new cap: its own 80% and 100% are alerts, though the
+          // old limit's rows for the same window and thresholds are still there.
+          yield* runOn(web, amy);
+          for (let attempt = 0; attempt < 200; attempt += 1) {
+            if ((yield* limitsOf()).length >= 4) break;
+            yield* Effect.sleep(25);
+          }
+          const rows = yield* limitsOf();
+          expect(rows.map((row) => row.threshold)).toEqual([80, 100, 80, 100]);
+          expect(rows[2]?.limitUsd).toBeCloseTo(high, 10);
+          expect(yield* itemOf()).toEqual([
+            { threshold: 100, limit: expect.closeTo(high, 10) },
+          ]);
+        }),
+      );
+    } finally {
+      await raised.dispose();
+    }
+
+    // The cap is taken out of SPEND_CAPS: nothing of it stands in the view.
+    const removed = runtimeOver(await Effect.runPromise(capsOf({})));
+    try {
+      await removed.runPromise(
+        Effect.gen(function* () {
+          expect(yield* itemOf()).toEqual([]);
+        }),
+      );
+    } finally {
+      await removed.dispose();
+    }
+  }, 120_000);
 });

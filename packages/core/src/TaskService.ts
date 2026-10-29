@@ -3961,7 +3961,7 @@ export const TaskServiceLive = Layer.effect(
             });
           });
           // Aggregate spend caps (S-aggregate-spend-caps): the highest threshold crossed of each cap
-          // in its current window, newest crossing first. They belong to no board, so a board's own
+          // in its current window, while that cap and limit are the configured ones, newest crossing first. They belong to no board, so a board's own
           // view leaves them out, as it leaves out the approvals of sessions no card owns.
           const spendRows =
             board !== null
@@ -3976,11 +3976,15 @@ export const TaskServiceLive = Layer.effect(
                   createdAt: Date | string;
                   periodEnd: Date | string;
                 }>`
-                  SELECT DISTINCT ON (scope, subject, span)
-                    scope, subject, span, threshold, limit_usd, spent_usd, created_at, period_end
-                  FROM spend_alerts
-                  WHERE period_end > now() AND period_start <= now()
-                  ORDER BY scope, subject, span, threshold DESC
+                  SELECT DISTINCT ON (a.scope, a.subject, a.span)
+                    a.scope, a.subject, a.span, a.threshold, a.limit_usd, a.spent_usd,
+                    a.created_at, a.period_end
+                  FROM spend_alerts a
+                  JOIN spend_cap_limits c
+                    ON c.scope = a.scope AND c.subject = a.subject AND c.span = a.span
+                   AND c.limit_usd = a.limit_usd
+                  WHERE a.period_end > now() AND a.period_start <= now()
+                  ORDER BY a.scope, a.subject, a.span, a.threshold DESC
                 `;
           const spendItems = yield* Effect.forEach(
             // ISO instants order as text, so the newest crossing is the greater string.

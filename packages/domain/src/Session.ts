@@ -1243,7 +1243,8 @@ export type SpendCapWindow = typeof SpendCapWindow.Type;
  * The cap a `budget_exceeded` refusal names, typed (S-aggregate-spend-caps): what it counted (`scope`
  * of `subject`, the repository slug or the actor), over which `window`, the `limit` in US dollars,
  * the `spent` that reaches it, where an operator changes it (`source`, the configuration key and the
- * entry), and when the window ends and the request would be let through (`resetsAt`).
+ * entry), and when the window ends and the request would be let through (`resetsAt`, and the
+ * `retryAfterSeconds` to it from the refusal, which a webhook's `Retry-After` is).
  */
 export const SpendCap = Schema.Struct({
   scope: SpendCapScope,
@@ -1253,6 +1254,7 @@ export const SpendCap = Schema.Struct({
   spent: Schema.Finite,
   source: Schema.String,
   resetsAt: Timestamp,
+  retryAfterSeconds: Schema.Int,
 });
 export type SpendCap = typeof SpendCap.Type;
 

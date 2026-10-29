@@ -122,7 +122,7 @@ describe("the message an event becomes", () => {
     const warned = notificationOfAttention(spend(80), `${BASE}/`);
     const reached = notificationOfAttention(spend(100), BASE);
     expect(warned).toEqual({
-      eventId: "spend:repo:acme/web:day:2026-10-29T00:00:00.000Z:80",
+      eventId: "spend:repo:acme/web:day:2026-10-29T00:00:00.000Z:20:80",
       kind: "spend",
       title: "Spend at 80% of the daily cap for repository acme/web",
       body: "$16.50 of its $20.00 daily cap; new runs are refused once it is reached, until 2026-10-29T00:00:00.000Z.",
@@ -149,6 +149,23 @@ describe("the message an event becomes", () => {
       },
     });
     expect(notificationOfAttention(tomorrow, BASE)?.eventId).not.toBe(
+      warned?.eventId,
+    );
+    // A cap raised mid-window crosses its own 80% in the same window: not the event already sent.
+    const raised = attention({
+      reason: {
+        _tag: "spend",
+        scope: "repo",
+        subject: "acme/web",
+        window: "day",
+        threshold: 80,
+        limit: 50,
+        spent: 41,
+        since: "2026-10-28T12:00:00.000Z",
+        resetsAt: "2026-10-29T00:00:00.000Z",
+      },
+    });
+    expect(notificationOfAttention(raised, BASE)?.eventId).not.toBe(
       warned?.eventId,
     );
   });

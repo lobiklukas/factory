@@ -26,7 +26,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { RpcApi } from "@repo/domain/Rpc";
 import { RepoSlug, type SessionId } from "@repo/domain/Session";
-import { Effect, Exit } from "effect";
+import { Clock, DateTime, Effect, Exit } from "effect";
 import { RpcClient } from "effect/rpc";
 import { makeChecker, protocolFor, waitUntil } from "./harness.ts";
 import type { CheckRecord } from "./harness.ts";
@@ -333,6 +333,23 @@ const program = Effect.gen(function* () {
       String(answer.body["error"]).includes("budget exceeded") &&
       Number(answer.retryAfter) > 0,
     `status=${answer.status} body=${JSON.stringify(answer.body)}`,
+  );
+
+  // The redelivery is asked for when the window ends, not in the minute a freed slot takes: the
+  // capped repo's cap is daily, so `Retry-After` is the seconds left to UTC midnight (within the
+  // seconds the delivery took to arrive).
+  const clock = yield* Clock.currentTimeMillis;
+  const midnight = DateTime.add(
+    DateTime.startOf(DateTime.makeUnsafe(clock), "day"),
+    { days: 1 },
+  );
+  const untilMidnight = Math.ceil(
+    (DateTime.toEpochMillis(midnight) - clock) / 1000,
+  );
+  assert(
+    "that delivery's Retry-After is the time to the end of the cap's UTC day",
+    Math.abs(Number(answer.retryAfter) - untilMidnight) <= 30,
+    `retry-after=${answer.retryAfter} untilMidnight=${untilMidnight}`,
   );
 
   // --- once: no refusal raised a second alert or message ---------------------------------------------

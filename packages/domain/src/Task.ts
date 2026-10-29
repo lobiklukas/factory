@@ -2002,11 +2002,11 @@ export type AttentionReason = typeof AttentionReason.Type;
  * board says where it is), and one reason it needs a person. A card with two reasons is two rows.
  *
  * A `spend` row belongs to no card and no session: no `task`, no `sessionTitle`, and no `repo` (its
- * reason names the subject). An approval can also belong to a session no card owns — a scratch session, or one opened from a
- * repo with no card (LOB-271). That row has no `task`: `sessionTitle` names the session instead
+ * reason names the subject). An approval can also belong to a session no card owns — a scratch
+ * session, or one opened from a repo with no card (LOB-271). That row has no `task`: `sessionTitle` names the session instead
  * (an untitled session says `""`), `repo` is the session's own repo when it has one, and the reason's
- * `sessionId` is where the row links. Only the `approval` reason ever appears without a card, and
- * only on the every-board read: a board's view lists the board's cards.
+ * `sessionId` is where the row links. Only the `approval` and `spend` reasons ever appear without a
+ * card, and only on the every-board read: a board's view lists the board's cards.
  */
 export const AttentionItem = Schema.Struct({
   task: Schema.optional(Task),
@@ -2019,8 +2019,8 @@ export type AttentionItem = typeof AttentionItem.Type;
 /**
  * What needs a person, on one board or on every board (LOB-77). The answer is ordered approvals
  * first (oldest request first, a card-less session's among them), then questions (oldest block first), then reviews
- * (oldest block first), then gates (least recently
- * changed card first). An unknown board is `BoardNotFound`, not an empty list: "nothing needs you"
+ * (oldest block first), then gates (least recently changed card first), then spend caps (newest
+ * crossing first, S-aggregate-spend-caps; the every-board read only). An unknown board is `BoardNotFound`, not an empty list: "nothing needs you"
  * must not be what a board that does not exist says.
  */
 export const ListAttentionInput = Schema.Struct({

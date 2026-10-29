@@ -116,7 +116,8 @@ export const AT_CAPACITY_RETRY_AFTER_S = 60;
  * session create, as it was.
  */
 export const triggerErrorOfSession = (
-  cause: Pick<SessionError, "code" | "message">,
+  cause: Pick<SessionError, "code" | "message"> &
+    Partial<Pick<SessionError, "spendCap">>,
 ): TriggerError =>
   new TriggerError({
     code:
@@ -126,6 +127,10 @@ export const triggerErrorOfSession = (
           ? "setup-failed"
           : "session-create",
     message: cause.message,
+    // A spend cap holds until its window ends, so a sender is told when, not "in a minute".
+    ...(cause.code === "budget_exceeded" && cause.spendCap !== undefined
+      ? { retryAfterSeconds: cause.spendCap.retryAfterSeconds }
+      : {}),
   });
 
 /**
@@ -134,20 +139,23 @@ export const triggerErrorOfSession = (
  * claim); `500` for anything else, a real failure.
  */
 export const triggerFailureAnswer = (
-  cause: Pick<TriggerError, "code" | "message">,
-): GitHubWebhookAnswer =>
-  cause.code === "at-capacity"
+  cause: Pick<TriggerError, "code" | "message"> &
+    Partial<Pick<TriggerError, "retryAfterSeconds">>,
+): GitHubWebhookAnswer => {
+  const retryAfter = cause.retryAfterSeconds ?? AT_CAPACITY_RETRY_AFTER_S;
+  return cause.code === "at-capacity"
     ? {
         status: 503,
-        headers: { "retry-after": String(AT_CAPACITY_RETRY_AFTER_S) },
+        headers: { "retry-after": String(retryAfter) },
         body: {
           ok: false,
           error: cause.message,
           code: cause.code,
-          retryAfterSeconds: AT_CAPACITY_RETRY_AFTER_S,
+          retryAfterSeconds: retryAfter,
         },
       }
     : {
         status: 500,
         body: { ok: false, error: cause.message, code: cause.code },
       };
+};

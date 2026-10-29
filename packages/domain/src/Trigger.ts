@@ -401,6 +401,12 @@ export class TriggerError extends Schema.TaggedError<TriggerError>()(
   {
     code: TriggerErrorCode,
     message: Schema.String,
+    /**
+     * Seconds until a redelivery can succeed, when the refusal knows: an `at-capacity` that is an
+     * aggregate spend cap holds until its window ends (S-aggregate-spend-caps), not for the
+     * minute a freed slot takes. Absent: the route's own default.
+     */
+    retryAfterSeconds: Schema.optional(Schema.Int),
   },
 ) {}
 

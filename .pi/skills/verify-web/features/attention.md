@@ -35,6 +35,16 @@ approval is walked from the browser. `TaskService.attention` decides; the page o
   is proven by the unit tests `apps/web/src/lib/attention-view.test.ts` and `board-view.test.ts`, and
   the block it lists by `../../verify-board/feedback.sh` through `factory board attention`;
   `drive.mjs` seeds no `changes_requested` card.
+- **See a spend cap near or reached** (S-aggregate-spend-caps) — an aggregate `SPEND_CAPS` window
+  (a repository's or an actor's, day or month) crossed 80% or reached 100%. One row per cap and
+  window at its highest threshold, the title naming the subject (`Repository acme/web`), the text
+  `At 80% of its daily cap ($16.50 of $20.00): …` or `Reached its daily cap (…): new runs are refused
+until <window end>`; it links to `/spend`. It belongs to no card and no session, so only the
+  every-board view lists it, and it goes when its window ends or its cap is raised, lowered or
+  removed. **Not driven in a browser yet:** the row is proven by
+  `apps/web/src/lib/attention-view.test.ts`, the server's list by
+  `packages/core/src/SessionService.spendCaps.test.ts`, and the refusal and alerts end to end by
+  `../../verify-api/spend-caps.sh`; `drive.mjs` seeds no spend alert.
 - **Make a person's move** — the card is not blocked, its column's exit crosses a human gate
   (`planning → building` plan approval, `review → done` merge; B5), it has a run started in that
   column, no run of the card is busy (`session_activity`), and no run of the card holds an

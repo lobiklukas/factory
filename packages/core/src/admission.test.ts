@@ -78,6 +78,7 @@ describe("the budget_exceeded refusal (S-aggregate-spend-caps)", () => {
     spent: 20.5,
     source: 'SPEND_CAPS repos["acme/web"].daily',
     resetsAt: "2026-10-30T00:00:00.000Z",
+    retryAfterSeconds: 2 * 3600,
   } as const;
 
   it("names the cap, what it counted, the spend, where it is configured and when it resets", () => {
@@ -109,5 +110,18 @@ describe("the budget_exceeded refusal (S-aggregate-spend-caps)", () => {
     expect(mapped.code).toBe("at-capacity");
     expect(mapped.message).toContain("budget exceeded");
     expect(triggerFailureAnswer(mapped).status).toBe(503);
+  });
+
+  it("tells a sender to retry when the window ends, not in the minute a freed slot takes", () => {
+    const mapped = triggerErrorOfSession(budgetExceeded(cap));
+    expect(mapped.retryAfterSeconds).toBe(2 * 3600);
+    const answer = triggerFailureAnswer(mapped);
+    expect(answer.headers).toEqual({ "retry-after": "7200" });
+    expect(answer.body).toMatchObject({ retryAfterSeconds: 7200 });
+    // A capacity refusal has no such hint and keeps the default.
+    expect(
+      triggerErrorOfSession(atCapacity({ limit: 1, source: "K" }))
+        .retryAfterSeconds,
+    ).toBeUndefined();
   });
 });
