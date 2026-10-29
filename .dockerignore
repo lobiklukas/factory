@@ -1,0 +1,17 @@
+# The repository root as a Docker build context (infra/sandbox/build.sh). BuildKit reads
+# infra/sandbox/Dockerfile.dockerignore instead; this is the same list for any builder that does
+# not (the legacy one), so no .env file of any kind reaches an image whichever builds it.
+**/.env
+**/.env.*
+.git
+.verify
+.ralph
+.omp
+.factory
+**/node_modules
+**/dist
+**/.turbo
+**/.cache
+**/coverage
+**/test-results
+**/playwright-report

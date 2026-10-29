@@ -1,0 +1,18 @@
+# What the sandbox image's build context leaves out (BuildKit reads <Dockerfile>.dockerignore).
+# The root .dockerignore is the same list, for a builder that reads only that one; a test keeps the
+# two equal (packages/sandbox-kubernetes/src/infra.test.ts).
+# Credentials first: no .env file of any kind reaches an image.
+**/.env
+**/.env.*
+.git
+.verify
+.ralph
+.omp
+.factory
+**/node_modules
+**/dist
+**/.turbo
+**/.cache
+**/coverage
+**/test-results
+**/playwright-report

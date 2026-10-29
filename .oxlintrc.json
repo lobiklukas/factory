@@ -18,6 +18,7 @@
       "files": [
         ".pi/skills/lib/*.ts",
         ".pi/skills/verify-rulesets/*.ts",
+        ".pi/skills/verify-sandbox/*.ts",
         "infra/src/testing/*.ts",
         ".pi/skills/verify-api/*.ts",
         ".pi/skills/verify-board/*.ts",

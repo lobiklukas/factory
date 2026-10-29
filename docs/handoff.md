@@ -336,6 +336,33 @@ into a git worktree.
 _Done when:_ `.pi/skills/verify-sandbox/` drives create → pause → resume → destroy against kind, and
 the handoff stops calling isolation unverified.
 
+_As built (LOB-89, LOB-91, LOB-90)._ The lifecycle and the PVC half are done; isolation is still
+unverified, and the runtime says so (`isolation: "none"`). `packages/sandbox-kubernetes` is a
+`SandboxRuntime` over the agent-sandbox `Sandbox` CRD (v1.0.8, vendored byte for byte in
+`infra/kind/agent-sandbox/`, checksum beside it): one resource per sandbox, one pod and one PVC
+(`workspace-<id>`) mounted at the workdir `/workspace/<id>`; `pause` is `operatingMode: Suspended`
+(pod deleted, PVC kept), `resume` is `Running`. Its `ExecutionEnv` runs every call inside the pod
+through an environment relay (`kubectl exec -i … factory-env-relay`, Pi Durable's `NodeExecutionEnv`
+on the pod's side), which passes Pi Durable's `registerEnvConformance` locally in the gate and on kind.
+The harness takes a runtime that cannot bind: it `create`s the conversation's sandbox on first use and
+its commands start at the sandbox's workdir (D6). apps/api still selects only `in-process`: a
+Kubernetes session needs its worktree cut inside the sandbox, which is the next step here, not done.
+SandboxTemplate, SandboxWarmPool and SandboxClaim (the extensions) are not used yet.
+
+The exact commands, from a clean machine with Docker running:
+
+```sh
+bash .pi/skills/verify-sandbox/up.sh            # infra/kind/up.sh (cluster + CRD + controller), infra/sandbox/build.sh (image, loaded into kind), doctor.sh
+bun .pi/skills/verify-sandbox/drive.ts          # lifecycle, PVC across pause/resume, a harness session in the pod, the image's tools: 13/13
+bash .pi/skills/verify-sandbox/conformance.sh   # the SandboxRuntime cases + Pi Durable's ExecutionEnv suite on kind: 40/40, ~6 min
+bash .pi/skills/verify-sandbox/down.sh          # kind delete cluster; checks no node container is left
+```
+
+Without kind, `infra/kind/up.sh` stops with `infra/kind/up.sh: kind is not installed (not on PATH);
+the sandbox tier needs docker, kind and kubectl` and `doctor.sh` with `doctor: NOT READY — kind is
+required and missing; install it, then run ./up.sh`, both exit 1; neither skips. `bun run test`
+needs none of it: the runtime runs there against a fake cluster (`packages/sandbox-kubernetes/src/testing.ts`).
+
 ### 11. Stop and ask before M7
 
 Nothing is provisioned in Google Cloud without explicit approval. M7 is where isolation is finally
@@ -480,7 +507,8 @@ owned conversations), automations, AutoWiki, Agent Readiness scoring, Slack/Line
 delegation, any diff or review UI (review is GitHub's, per D16), and the Cloudflare executor
 (interface only, per D6).
 
-Of the design's component inventory (§3), these do not exist yet, and none of them is an oversight.
+Of the design's component inventory (§3), these do not exist yet or exist only in part, and none of
+that is an oversight.
 `packages/sandbox` does (LOB-88): the `SandboxRuntime` interface, its capability descriptor, and
 the in-process runtime with its `ExecutionEnv` adapter. Every session's commands run through it
 (LOB-244): the harness binds a sandbox to the session's worktree (`InProcess.bind`, the
@@ -488,12 +516,12 @@ the in-process runtime with its `ExecutionEnv` adapter. Every session's commands
 (`in-process`, the only value and the default), and releasing the owner ends the sandbox and keeps
 the worktree's files.
 
-| Package                       | Status                                                       |
-| ----------------------------- | ------------------------------------------------------------ |
-| `packages/bus`                | Not built as a package; LOB-18 put it in `packages/core`.    |
-| `packages/storage-projection` | Not built; the fold lives in `PostgresStorage` — task 8.     |
-| `packages/sandbox-kubernetes` | M4.                                                          |
-| `infra`                       | M3 (Docker) and M7 (GKE); nothing is provisioned until then. |
+| Package                       | Status                                                                                                                                                                           |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/bus`                | Not built as a package; LOB-18 put it in `packages/core`.                                                                                                                        |
+| `packages/storage-projection` | Not built; the fold lives in `PostgresStorage` — task 8.                                                                                                                         |
+| `packages/sandbox-kubernetes` | Built (LOB-89, LOB-91): the kind runtime, task 10; apps/api does not select it yet.                                                                                              |
+| `infra`                       | The rulesets (LOB-30), the kind bootstrap with the pinned agent-sandbox release (`infra/kind/`) and the sandbox image (`infra/sandbox/`, LOB-90); nothing in any cloud until M7. |
 
 ## Gotchas that cost time already
 
