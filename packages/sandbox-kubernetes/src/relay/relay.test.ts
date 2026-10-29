@@ -19,6 +19,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { RemoteExecutionEnv } from "./client";
 import { type Connection, spawnConnection } from "./connection";
 import { buildRelay } from "./build";
+import { decode, RELAY_PROTOCOL } from "./protocol";
 
 const context = BACKGROUND_CONTEXT;
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-relay-")));
@@ -226,6 +227,82 @@ describe("relay connection", () => {
     );
     expect(read.ok ? "read" : read.error.code).toBe("aborted");
     expect(connections).toHaveLength(0);
+  });
+
+  it("answers a request it cannot serve at once, rather than leaving it unanswered", async () => {
+    const connection = spawnConnection("node", [RELAY], { cwd: scratch });
+    const lines: unknown[] = [];
+    // oxlint-disable-next-line effecttsgo/new-promise -- the answer arrives as a line on the connection.
+    const answered = new Promise<void>((resolve) =>
+      connection.onLine((line) => {
+        lines.push(decode(line));
+        if (lines.length === 3) resolve();
+      }),
+    );
+    connection.send(
+      JSON.stringify({
+        t: "call",
+        id: 1,
+        cwd: scratch,
+        method: "nope",
+        args: [],
+      }),
+    );
+    connection.send(
+      JSON.stringify({
+        t: "handle",
+        id: 2,
+        handle: 1,
+        method: "nope",
+        args: [],
+      }),
+    );
+    await answered;
+    connection.close();
+    expect(lines[0]).toMatchObject({ t: "ready", protocol: RELAY_PROTOCOL });
+    expect(lines.slice(1)).toEqual([
+      {
+        t: "done",
+        id: 1,
+        result: {
+          ok: false,
+          error: {
+            kind: "file",
+            code: "invalid",
+            message: `the relay (protocol ${RELAY_PROTOCOL}) has no method nope`,
+          },
+        },
+      },
+      {
+        t: "done",
+        id: 2,
+        result: {
+          ok: false,
+          error: {
+            kind: "file",
+            code: "invalid",
+            message: `the relay (protocol ${RELAY_PROTOCOL}) has no handle method nope`,
+          },
+        },
+      },
+    ]);
+  });
+
+  it("fails every call on a relay of another protocol, naming both, instead of waiting", async () => {
+    // A stale image's relay: it starts, says an older version, and answers nothing.
+    const env = new RemoteExecutionEnv({
+      id: "relay-test:stale",
+      cwd: scratch,
+      connect: () =>
+        spawnConnection("sh", [
+          "-c",
+          `echo '{"t":"ready","pid":1,"protocol":"0-stale"}'; cat >/dev/null`,
+        ]),
+    });
+    const read = await env.readTextFile("x", context);
+    expect(read.ok ? "read" : read.error.message).toContain(
+      `the relay speaks protocol 0-stale, this client ${RELAY_PROTOCOL}`,
+    );
   });
 
   it("names what the server said when it never started", async () => {

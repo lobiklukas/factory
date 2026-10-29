@@ -21,7 +21,7 @@ import { SandboxCapabilities } from "@repo/sandbox";
 import { registerSandboxRuntimeConformance } from "@repo/sandbox/testing";
 import { Cause, Effect, Exit, Fiber, Layer, Schema, type Scope } from "effect";
 import { afterAll, describe, expect, it } from "vitest";
-import { Kubernetes } from "./index";
+import { ClusterError, Kubernetes } from "./index";
 import { buildRelay } from "./relay/build";
 import { fakeCluster, type FakeCluster } from "./testing";
 
@@ -222,7 +222,7 @@ describe("kubernetes runtime lifecycle", () => {
     );
   }, 15_000);
 
-  it("destroys the resource, its pod and its volume; destroying twice is a no-op", async () => {
+  it("destroys the resource, its pod and its volume; destroying twice deletes nothing more", async () => {
     const cluster = freshCluster();
     await withRuntime(cluster, (runtime) =>
       Effect.gen(function* () {
@@ -233,17 +233,93 @@ describe("kubernetes runtime lifecycle", () => {
         expect(cluster.resources()).toEqual([]);
         expect(cluster.relays()).toBe(0);
         expect(existsSync(cluster.volume(sandbox.id))).toBe(false);
-        const removes = cluster.calls.filter(
-          (call) => call === `remove ${sandbox.id}`,
-        ).length;
         yield* runtime.destroy(sandbox);
-        expect(
-          cluster.calls.filter((call) => call === `remove ${sandbox.id}`),
-        ).toHaveLength(removes);
+        expect(cluster.resources()).toEqual([]);
         expect((yield* Effect.flip(runtime.exec(sandbox, "true")))._tag).toBe(
           "SandboxNotFound",
         );
       }),
+    );
+  });
+
+  it("destroys by name a sandbox it does not hold, as after the process that created it crashed", async () => {
+    const cluster = freshCluster();
+    await withRuntime(cluster, (first) =>
+      Effect.gen(function* () {
+        const sandbox = yield* first.create;
+        // A second runtime over the same cluster: the restarted process, which never saw the create.
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const restarted = yield* Kubernetes.make({
+              cluster,
+              pollInterval: "5 millis",
+            });
+            yield* restarted.destroy(sandbox);
+          }),
+        );
+        expect(cluster.resources()).toEqual([]);
+        expect(existsSync(cluster.volume(sandbox.id))).toBe(false);
+      }),
+    );
+  });
+
+  it("deletes a resource the API server accepted when kubectl then failed the create", async () => {
+    const cluster = freshCluster();
+    const exit = await withRuntime(
+      {
+        ...cluster,
+        create: (manifest) =>
+          cluster.create(manifest).pipe(
+            Effect.andThen(
+              Effect.fail(
+                new ClusterError({
+                  operation: "create",
+                  message: "the client timed out waiting for the answer",
+                }),
+              ),
+            ),
+          ),
+      },
+      (runtime) => Effect.exit(runtime.create),
+    );
+    expect(Exit.isFailure(exit)).toBe(true);
+    expect(
+      cluster.calls.filter((call) => call.startsWith("create ")),
+    ).toHaveLength(1);
+    expect(cluster.resources()).toEqual([]);
+  });
+
+  it("fails a pause the cluster refused as a typed failure, and leaves the sandbox running", async () => {
+    const cluster = freshCluster();
+    let refusing = true;
+    await withRuntime(
+      {
+        ...cluster,
+        setMode: (name, mode) =>
+          refusing
+            ? Effect.fail(
+                new ClusterError({
+                  operation: "setMode",
+                  message:
+                    "the server is currently unable to handle the request",
+                }),
+              )
+            : cluster.setMode(name, mode),
+      },
+      (runtime) =>
+        Effect.gen(function* () {
+          const sandbox = yield* runtime.create;
+          const failed = yield* Effect.flip(runtime.pause(sandbox));
+          expect(failed).toMatchObject({ _tag: "SandboxFileError" });
+          expect(String((failed as { message?: string }).message)).toContain(
+            "unable to handle the request",
+          );
+          // Not paused: commands still run, and the next attempt goes to the cluster again.
+          expect((yield* runtime.exec(sandbox, "true")).exitCode).toBe(0);
+          refusing = false;
+          yield* runtime.pause(sandbox);
+          expect(cluster.hasPod(sandbox.id)).toBe(false);
+        }),
     );
   });
 

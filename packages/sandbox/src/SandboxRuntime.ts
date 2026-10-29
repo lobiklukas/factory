@@ -71,14 +71,27 @@ export type SandboxRuntimeShape = {
     path: string,
     content: string | Uint8Array,
   ) => Effect.Effect<void, SandboxNotFound | SandboxFileError>;
-  /** Stop the sandbox's compute and keep its files; only when `capabilities.pauseResume`. */
+  /**
+   * Stop the sandbox's compute and keep its files; only when `capabilities.pauseResume`. A backend
+   * that could not do it (a cluster that failed or timed out) fails with `SandboxFileError`, as
+   * `create` does, and the sandbox stays running.
+   */
   readonly pause: (
     sandbox: Sandbox,
-  ) => Effect.Effect<void, SandboxNotFound | SandboxUnsupported>;
-  /** Bring a paused sandbox back with its files; only when `capabilities.pauseResume`. */
+  ) => Effect.Effect<
+    void,
+    SandboxNotFound | SandboxUnsupported | SandboxFileError
+  >;
+  /**
+   * Bring a paused sandbox back with its files; only when `capabilities.pauseResume`. A backend
+   * that could not do it fails with `SandboxFileError`, and the sandbox stays paused.
+   */
   readonly resume: (
     sandbox: Sandbox,
-  ) => Effect.Effect<void, SandboxNotFound | SandboxUnsupported>;
+  ) => Effect.Effect<
+    void,
+    SandboxNotFound | SandboxUnsupported | SandboxFileError
+  >;
   /**
    * The Pi Durable environment for the sandbox, `cwd` at its workdir, for the harness's tools.
    * It stops working when the sandbox is destroyed.

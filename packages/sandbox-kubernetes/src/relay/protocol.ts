@@ -56,6 +56,25 @@ export const HANDLE_METHODS = [
 ] as const;
 export type HandleMethod = (typeof HANDLE_METHODS)[number];
 
+/** FNV-1a over `text`, base 36: a short, stable fingerprint. */
+const fingerprint = (text: string): string => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(36);
+};
+
+/**
+ * The wire's version, which the server's `ready` carries and the client checks before anything it
+ * sent is answered: a client and a server built from different sources — a sandbox image loaded
+ * before the relay changed — fail every call at once, naming both, instead of waiting on requests
+ * the other side does not understand. The leading number is bumped by hand when a message changes
+ * meaning; the method lists are part of it, so adding or renaming a method changes it on its own.
+ */
+export const RELAY_PROTOCOL = `1-${fingerprint(`${ENV_METHODS.join(",")};${HANDLE_METHODS.join(",")}`)}`;
+
 /** A failure as it crosses the wire. */
 export type WireError = {
   readonly kind: "file" | "exec";
@@ -87,9 +106,12 @@ export type Request =
     }
   | { readonly t: "cancel"; readonly id: number };
 
-/** What the server sends. `ready` is its first line, so a client can tell it started. */
+/**
+ * What the server sends. `ready` is its first line, so a client can tell it started and which wire
+ * it speaks (`RELAY_PROTOCOL`).
+ */
 export type Reply =
-  | { readonly t: "ready"; readonly pid: number }
+  | { readonly t: "ready"; readonly pid: number; readonly protocol: string }
   | { readonly t: "done"; readonly id: number; readonly result: WireResult }
   | {
       readonly t: "output";

@@ -15,6 +15,8 @@
  * - **A lost connection** — the pod paused or gone, `kubectl` killed — fails every call still in
  *   flight with `unknown`, naming what the connection said last, and every handle opened on it is
  *   dead: its methods fail with `invalid`, as a closed one's do. The next call opens a new one.
+ * - **A relay of another version** — a stale sandbox image — says so in its first line (`ready`),
+ *   and every call on that connection fails with both versions named instead of waiting.
  * - **A refusal** (`refusal`) — the sandbox is paused — fails a call before any connection is
  *   tried, so a paused sandbox is never woken or waited on by a stray read.
  */
@@ -47,6 +49,7 @@ import {
   errorFromWire,
   type HandleMethod,
   isWireHandle,
+  RELAY_PROTOCOL,
   type Request,
   type WireError,
   type WireResult,
@@ -156,6 +159,17 @@ export class RemoteExecutionEnv implements ExecutionEnv {
     if (typeof message !== "object" || message === null) return;
     const reply = message as Record<string, unknown>;
     switch (reply["t"]) {
+      case "ready": {
+        // The first line: a server speaking another wire fails everything sent on this connection.
+        const protocol = reply["protocol"];
+        if (protocol === RELAY_PROTOCOL) return;
+        this.lose(
+          link,
+          `the relay speaks protocol ${typeof protocol === "string" ? protocol : "(none)"}, this client ${RELAY_PROTOCOL}: the sandbox image is older or newer than the control plane; rebuild and load it (infra/sandbox/build.sh)`,
+        );
+        link.connection.close();
+        return;
+      }
       case "done": {
         const id = reply["id"];
         if (typeof id !== "number") return;

@@ -16,8 +16,9 @@
 //      nothing
 //   5. a harness session opened with the Kubernetes runtime: the scripted model's `bash` command
 //      runs in the pod (it prints the pod's hostname), writes a marker read back from the pod and
-//      absent from the session's host directory, and sees a server credential blanked; closing the
-//      session deletes its sandbox
+//      absent from the session's host directory, and sees a host credential's name set and blank —
+//      the filter's per-command variables crossed the relay, and the host's value did not; closing
+//      the session deletes its sandbox
 //   6. the image the pods run contains bun, node, git, gh, ripgrep, Pi Durable and the harness, each
 //      printing its version from inside it
 //   7. nothing is left in the drive's namespace, which is then deleted
@@ -281,7 +282,10 @@ const program = Effect.gen(function* () {
   // --- 5. a harness session over the runtime -----------------------------------------------------
   const host = mkdtempSync(path.join(tmpdir(), "verify-sandbox-session-"));
   process.env[TOKEN_NAME] = "drive-throwaway-not-a-credential";
-  const command = `printf in-the-pod > marker.txt; hostname; printf "token=[%s]" "$${TOKEN_NAME}"`;
+  // `-unset` tells the two apart: the pod's own environment never has the name (kubectl exec carries
+  // nothing of the host's), so `token=[unset]` means the filter's per-command variables did not
+  // arrive over the relay, and `token=[]` means they did, blank.
+  const command = `printf in-the-pod > marker.txt; hostname; printf "token=[%s]" "\${${TOKEN_NAME}-unset}"`;
   const session = yield* openSession({
     storage: new MemoryStorage(),
     model: createModelAccess("faux", {
@@ -343,7 +347,7 @@ const program = Effect.gen(function* () {
     },
   );
   check(
-    "session: a server credential reaches the pod's command blank",
+    "session: a host credential's name reaches the pod's command set and blank — the filter's per-command variables arrive over the relay, the host's value does not",
     output.includes("token=[]"),
     { output },
   );

@@ -10,7 +10,7 @@
  * stored. A pod's relay is `kubectl exec -i` into the sandbox's container, running the image's
  * `factory-env-relay`.
  */
-import { Effect, Option, Schema, Stream } from "effect";
+import { Effect, Option, Ref, Schema, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { ClusterError, type SandboxClusterShape } from "./Cluster";
 import { SANDBOX_CONTAINER, SandboxObject } from "./manifest";
@@ -106,8 +106,13 @@ export const kubectlCluster = (
         ),
       );
 
-    const namespace = yield* Effect.cached(
-      must(
+    // Applied until one apply succeeds, then never again: a failed or interrupted first apply (the
+    // API server not answering yet) is retried by the next create rather than remembered. Two
+    // creates racing before the first success both apply, which `kubectl apply` makes harmless.
+    const namespaceApplied = yield* Ref.make(false);
+    const namespace = Effect.gen(function* () {
+      if (yield* Ref.get(namespaceApplied)) return;
+      yield* must(
         "namespace",
         ["apply", "-f", "-"],
         JSON.stringify({
@@ -118,8 +123,9 @@ export const kubectlCluster = (
             labels: { "app.kubernetes.io/managed-by": "factory" },
           },
         }),
-      ),
-    );
+      );
+      yield* Ref.set(namespaceApplied, true);
+    });
 
     const decodeObject = Schema.decodeUnknownEffect(
       Schema.fromJsonString(SandboxObject),

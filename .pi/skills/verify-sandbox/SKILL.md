@@ -32,21 +32,21 @@ Needs `docker` (a daemon that answers), `kind` and `kubectl` on PATH. Without ki
 
 ## What it proves
 
-| Check (drive.ts)                                                                                                                  | Why it matters                                            |
-| --------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| create: the `Sandbox` is `Running` and `Ready` for its current generation; pod `Running` on the pinned image; PVC `Bound`         | the controller made what the manifest asked for           |
-| create: a command's `hostname` is the sandbox's name and its `pwd -P` is the workdir on the volume                                | commands run inside the pod, not on the host              |
-| pause: `Suspended`/`PodTerminated`, `Ready` `False`/`SandboxSuspended`, no pod, the same PVC still `Bound`                        | a pause stops compute and keeps the files                 |
-| pause: an operation on the paused sandbox is refused                                                                              | nothing silently wakes or waits on a paused sandbox       |
-| resume: `Ready` again, a new pod (another uid) over the same PVC (same uid)                                                       | a resume is a new pod on the old volume                   |
-| resume: the file written before the pause reads back, through the runtime and through `kubectl exec`                              | PVC persistence across pause/resume (LOB-91)              |
-| destroy: the `Sandbox`, its pod and its PVC are gone                                                                              | a destroyed sandbox leaves nothing running or stored      |
-| destroy: a second destroy succeeds and changes nothing                                                                            | destroy is idempotent                                     |
-| session: the faux model's `bash` command prints the pod's hostname and writes a marker read back from the pod, absent on the host | a harness session opened with the runtime runs in the pod |
-| session: a server credential reaches the pod's command blank                                                                      | the session's credential filter still holds               |
-| session: closing the session deletes its sandbox, pod and PVC                                                                     | a session's sandbox ends with it                          |
-| image: `factory-sandbox-versions` prints bun, node, git, gh, ripgrep, Pi Durable and the harness                                  | the D13 base is what the pods run (LOB-90)                |
-| nothing is left in the drive's namespace                                                                                          | no leak across runs                                       |
+| Check (drive.ts)                                                                                                                  | Why it matters                                                       |
+| --------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| create: the `Sandbox` is `Running` and `Ready` for its current generation; pod `Running` on the pinned image; PVC `Bound`         | the controller made what the manifest asked for                      |
+| create: a command's `hostname` is the sandbox's name and its `pwd -P` is the workdir on the volume                                | commands run inside the pod, not on the host                         |
+| pause: `Suspended`/`PodTerminated`, `Ready` `False`/`SandboxSuspended`, no pod, the same PVC still `Bound`                        | a pause stops compute and keeps the files                            |
+| pause: an operation on the paused sandbox is refused                                                                              | nothing silently wakes or waits on a paused sandbox                  |
+| resume: `Ready` again, a new pod (another uid) over the same PVC (same uid)                                                       | a resume is a new pod on the old volume                              |
+| resume: the file written before the pause reads back, through the runtime and through `kubectl exec`                              | PVC persistence across pause/resume (LOB-91)                         |
+| destroy: the `Sandbox`, its pod and its PVC are gone                                                                              | a destroyed sandbox leaves nothing running or stored                 |
+| destroy: a second destroy succeeds and changes nothing                                                                            | destroy is idempotent                                                |
+| session: the faux model's `bash` command prints the pod's hostname and writes a marker read back from the pod, absent on the host | a harness session opened with the runtime runs in the pod            |
+| session: a host credential's name reaches the pod's command set and blank (`${NAME-unset}` prints empty, not `unset`)             | the filter's per-command variables reach the pod; no host value does |
+| session: closing the session deletes its sandbox, pod and PVC                                                                     | a session's sandbox ends with it                                     |
+| image: `factory-sandbox-versions` prints bun, node, git, gh, ripgrep, Pi Durable and the harness                                  | the D13 base is what the pods run (LOB-90)                           |
+| nothing is left in the drive's namespace                                                                                          | no leak across runs                                                  |
 
 `conformance.sh` adds the shared `SandboxRuntime` cases (19, pause/resume keeping a file included)
 and Pi Durable's `registerEnvConformance` (21) — each over its own real sandbox.

@@ -119,7 +119,11 @@ _As built (LOB-91):_ `OpenSessionOptions.sandbox` now takes `SandboxRuntimeShape
 runtime that has no `bind` (the Kubernetes one), the conversation's sandbox is `create`d on first use
 and its commands start at that sandbox's workdir, with the credential filter passed per command.
 `SessionServiceOptions.sandbox` and apps/api still require `bind`, until the control plane cuts the
-worktree inside the sandbox it creates.
+worktree inside the sandbox it creates. Two gaps are latent until then, and are that work's to close:
+the session's release (an idle sweep included) destroys a created sandbox and its PVC rather than
+pausing it, so a reopened session starts on an empty volume, and each distinct conversation `cwd`
+(a subagent's) gets its own sandbox rather than the session's one. `pause` and `resume` fail with a
+typed `SandboxFileError` when the backend cannot do them, as `create` does, never a defect.
 
 ### D7 — Storage: append-only log is truth, projections are derived
 

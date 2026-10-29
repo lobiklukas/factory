@@ -17,7 +17,9 @@ case "$IMAGE" in
 esac
 command -v docker >/dev/null 2>&1 || { echo "infra/sandbox/build.sh: docker is not installed" >&2; exit 1; }
 
-docker build --file "$ROOT/infra/sandbox/Dockerfile" --tag "$IMAGE" "$ROOT"
+# BuildKit, so the context is filtered by Dockerfile.dockerignore; the root .dockerignore holds the
+# same list for a builder that ignores this.
+DOCKER_BUILDKIT=1 docker build --file "$ROOT/infra/sandbox/Dockerfile" --tag "$IMAGE" "$ROOT"
 docker run --rm "$IMAGE" factory-sandbox-versions
 
 if [ -n "${KIND_CLUSTER:-}" ]; then

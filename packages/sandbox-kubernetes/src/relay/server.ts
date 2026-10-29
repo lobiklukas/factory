@@ -29,6 +29,7 @@ import {
   ENV_METHODS,
   errorToWire,
   HANDLE_METHODS,
+  RELAY_PROTOCOL,
   type Reply,
   type WireResult,
 } from "./protocol";
@@ -41,7 +42,10 @@ export type RelayServerOptions = {
 };
 
 export type RelayServer = {
-  /** Handle one line the client sent. Lines that are not requests are ignored. */
+  /**
+   * Handle one line the client sent. A line that is not a numbered request is ignored; a numbered
+   * one this server cannot serve (an unknown method) is answered with `invalid` at once.
+   */
   readonly receive: (line: string) => void;
   /** The client is gone: close every handle and kill every command still running. */
   readonly end: () => Promise<void>;
@@ -237,6 +241,14 @@ export const serveExecutionEnv = (options: RelayServerOptions): RelayServer => {
       });
   };
 
+  /** Answer a request this server cannot serve at once, so its caller fails rather than waits. */
+  const refuse = (id: number, message: string): void =>
+    send({
+      t: "done",
+      id,
+      result: { ok: false, error: { kind: "file", code: "invalid", message } },
+    });
+
   const receive = (line: string): void => {
     const message = decode(line);
     if (!isRecord(message) || typeof message["id"] !== "number") return;
@@ -249,10 +261,15 @@ export const serveExecutionEnv = (options: RelayServerOptions): RelayServer => {
       case "call": {
         const method = message["method"];
         const cwd = message["cwd"];
-        if (
-          typeof cwd !== "string" ||
-          !ENV_METHODS.some((known) => known === method)
-        ) {
+        if (typeof cwd !== "string") {
+          refuse(id, "the relay was sent a call without a cwd");
+          return;
+        }
+        if (!ENV_METHODS.some((known) => known === method)) {
+          refuse(
+            id,
+            `the relay (protocol ${RELAY_PROTOCOL}) has no method ${String(method)}`,
+          );
           return;
         }
         answer(id, (context) =>
@@ -263,10 +280,15 @@ export const serveExecutionEnv = (options: RelayServerOptions): RelayServer => {
       case "handle": {
         const handle = message["handle"];
         const method = message["method"];
-        if (
-          typeof handle !== "number" ||
-          !HANDLE_METHODS.some((known) => known === method)
-        ) {
+        if (typeof handle !== "number") {
+          refuse(id, "the relay was sent a handle call without a handle");
+          return;
+        }
+        if (!HANDLE_METHODS.some((known) => known === method)) {
+          refuse(
+            id,
+            `the relay (protocol ${RELAY_PROTOCOL}) has no handle method ${String(method)}`,
+          );
           return;
         }
         answer(id, (context) =>
@@ -290,6 +312,6 @@ export const serveExecutionEnv = (options: RelayServerOptions): RelayServer => {
       .then(() => undefined);
   };
 
-  send({ t: "ready", pid: process.pid });
+  send({ t: "ready", pid: process.pid, protocol: RELAY_PROTOCOL });
   return { receive, end };
 };

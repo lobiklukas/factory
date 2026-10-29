@@ -11,7 +11,9 @@
  *   terminated. Whatever ran in the pod is gone; the volume, and every file on it, is kept. While
  *   paused, every operation is refused rather than waking the sandbox.
  * - `resume` sets `Running` and returns once a new pod is `Ready` over the same volume.
- * - `destroy` deletes the resource and returns once the pod and the volume are gone with it.
+ * - `destroy` deletes the resource and returns once the pod and the volume are gone with it. It
+ *   deletes by name, so it also reclaims a sandbox this process does not hold (one a crashed
+ *   process created) and is a no-op for one already gone.
  *
  * Releasing the runtime destroys every sandbox it still holds, so none outlives the process that is
  * the only way to reach it. It separates nothing from anyone: locally the pod is a container on a
@@ -177,11 +179,12 @@ export const make = (
             ? {}
             : { storage: options.storage }),
         });
-        yield* restore(cluster.create(manifest)).pipe(
-          Effect.mapError(fileError(sandbox)),
-        );
-        // A resource that never became ready, or a create given up on, is not left behind.
-        yield* restore(settle(id, "running")).pipe(
+        // A resource that never became ready, or a create given up on — interrupted, or failed in
+        // `kubectl` after the API server had already accepted the resource — is not left behind:
+        // the deletion is by name and ignores one that does not exist.
+        yield* restore(
+          cluster.create(manifest).pipe(Effect.andThen(settle(id, "running"))),
+        ).pipe(
           Effect.onExit((exit) =>
             exit._tag === "Success"
               ? Effect.void
@@ -243,15 +246,14 @@ export const make = (
                 settle(sandbox.id, pausing ? "suspended" : "running"),
               ),
               // A pause that failed leaves the pod running, so calls may run again; a failed resume
-              // leaves the sandbox paused.
+              // leaves the sandbox paused. Either is the caller's typed failure, not a defect: a
+              // cluster that timed out once may answer the next attempt.
               Effect.tapError(() =>
                 Effect.sync(() => {
                   if (pausing) entry.state.paused = false;
                 }),
               ),
-              // The shape gives pause and resume no failure of their own: a cluster that cannot
-              // suspend or resume is a broken deployment, raised as a defect with its message.
-              Effect.orDie,
+              Effect.mapError(fileError(sandbox)),
             );
             entry.state.paused = pausing;
           }),
@@ -294,7 +296,15 @@ export const make = (
         );
       }
       const pending = entry ?? (yield* Ref.get(dying)).get(sandbox.id);
-      if (pending === undefined) return;
+      if (pending === undefined) {
+        // Not one this process holds — destroyed already, or created by a process that is gone
+        // (crashed, so its release never ran). The deletion is by name and idempotent, so it runs
+        // anyway: a sandbox nobody holds is not left running because nobody remembered it.
+        yield* cluster
+          .remove(sandbox.id)
+          .pipe(Effect.mapError(fileError(sandbox)));
+        return;
+      }
       yield* finish(pending);
     }, Effect.uninterruptible);
 
