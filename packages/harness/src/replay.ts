@@ -34,7 +34,7 @@ import {
 import type { BindableSandboxRuntimeShape } from "@repo/sandbox";
 import { ReplayDoc } from "./docs";
 import type { RunProfile } from "./loader";
-import type { McpServerAccess } from "./mcp";
+import type { McpListing, McpServerAccess } from "./mcp";
 import type { RepoContext } from "./repoContext";
 import type { ModelAccess } from "./models";
 import { modelKey } from "./models";
@@ -169,6 +169,8 @@ export type ReplaySessionOptions = {
   readonly approvalAsker?: ApprovalAsker;
   /** The MCP servers its run may call (S-agent-mcp-tools), as `OpenSessionOptions.mcp`. */
   readonly mcp?: readonly McpServerAccess[];
+  /** Their sessions, made before the open, as `OpenSessionOptions.mcpListing`. */
+  readonly mcpListing?: McpListing;
   readonly run?: RunProfile;
   /**
    * What the replay's repository tells it, as `OpenSessionOptions.repo`: read again for the replay's
@@ -220,6 +222,9 @@ export const replaySession = (
       ...(options.verify === undefined ? {} : { verify: options.verify }),
       ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
       ...(options.mcp === undefined ? {} : { mcp: options.mcp }),
+      ...(options.mcpListing === undefined
+        ? {}
+        : { mcpListing: options.mcpListing }),
     });
     // A failure that leaves the harness open would leave a lease nobody releases: close it where the
     // failure is, as the fork's copy does.

@@ -11,8 +11,13 @@
  * server — and what did not — rather than what the client says it sent. One process can stand in for
  * several servers: each path is one, and the path is in the record.
  *
- * What it does not prove: OAuth, SSE responses, session ids, resumability, or anything a real
- * server's tools do. A tool's answer is whatever its `answer` returns.
+ * With `sessions` set it is the stateful form instead: `initialize` answers with an
+ * `Mcp-Session-Id`, every later request must carry a live one or is `404` (as a server that expired
+ * or forgot the session answers), `DELETE` ends one, and `expireSessions` forgets them all — a
+ * server's restart, as the client meets it.
+ *
+ * What it does not prove: OAuth, SSE responses, resumability, or anything a real server's tools do.
+ * A tool's answer is whatever its `answer` returns.
  */
 import { once } from "node:events";
 // oxlint-disable-next-line effecttsgo/node-builtin-import -- a listener the MCP client connects to, not a client: the server's side of the wire.
@@ -38,6 +43,8 @@ export type FakeMcpRequest = {
   /** The JSON-RPC method, for a `POST`. */
   readonly rpc: string | undefined;
   readonly authorization: string | undefined;
+  /** The `Mcp-Session-Id` it carried. */
+  readonly session: string | undefined;
 };
 
 /** One `tools/call` the server answered. */
@@ -53,6 +60,8 @@ export type FakeMcpServer = {
   readonly url: string;
   readonly requests: FakeMcpRequest[];
   readonly calls: FakeMcpCall[];
+  /** Forget every session (`sessions` mode): the next request on one is `404`. */
+  readonly expireSessions: () => void;
   readonly close: () => Promise<void>;
 };
 
@@ -61,6 +70,10 @@ export type FakeMcpOptions = {
   readonly servers: Readonly<Record<string, readonly FakeMcpTool[]>>;
   /** Page `tools/list` this many tools at a time. Absent: one page. */
   readonly pageSize?: number;
+  /** Answer each `tools/list` page this many milliseconds late. Absent: at once. */
+  readonly listDelayMs?: number;
+  /** The stateful form: session ids, `404` for an unknown one, `DELETE` ends one. Absent: stateless. */
+  readonly sessions?: boolean;
   readonly port?: number;
   readonly host?: string;
 };
@@ -103,10 +116,15 @@ export const startFakeMcpServer = async (
 ): Promise<FakeMcpServer> => {
   const requests: FakeMcpRequest[] = [];
   const calls: FakeMcpCall[] = [];
+  const live = new Set<string>();
+  let minted = 0;
   const server = createServer((request, response) => {
     const path = (request.url ?? "/").split("?")[0] ?? "/";
     const header = request.headers.authorization;
     const authorization = typeof header === "string" ? header : undefined;
+    const sessionHeader = request.headers["mcp-session-id"];
+    const session =
+      typeof sessionHeader === "string" ? sessionHeader : undefined;
     const tools = Object.hasOwn(options.servers, path.replace(/^\//, ""))
       ? options.servers[path.replace(/^\//, "")]
       : undefined;
@@ -116,7 +134,17 @@ export const startFakeMcpServer = async (
         method: request.method ?? "",
         rpc: undefined,
         authorization,
+        session,
       });
+      if (
+        request.method === "DELETE" &&
+        options.sessions === true &&
+        tools !== undefined
+      ) {
+        const known = session !== undefined && live.delete(session);
+        response.writeHead(known ? 200 : 404).end();
+        return;
+      }
       response.writeHead(tools === undefined ? 404 : 405).end();
       return;
     }
@@ -125,15 +153,37 @@ export const startFakeMcpServer = async (
       try {
         message = record(JSON.parse(text));
       } catch {
-        requests.push({ path, method: "POST", rpc: undefined, authorization });
+        requests.push({
+          path,
+          method: "POST",
+          rpc: undefined,
+          authorization,
+          session,
+        });
         response.writeHead(400).end();
         return;
       }
       const rpc =
         typeof message.method === "string" ? message.method : undefined;
-      requests.push({ path, method: "POST", rpc, authorization });
+      requests.push({ path, method: "POST", rpc, authorization, session });
       if (tools === undefined) {
         response.writeHead(404).end();
+        return;
+      }
+      // The stateful form: a request on a session the server does not know is `404`.
+      const minting = options.sessions === true && rpc === "initialize";
+      if (
+        options.sessions === true &&
+        !minting &&
+        (session === undefined || !live.has(session))
+      ) {
+        response.writeHead(404, { "content-type": "application/json" }).end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32001, message: "Session not found" },
+          }),
+        );
         return;
       }
       // A notification (no id) is accepted and answers nothing.
@@ -142,8 +192,17 @@ export const startFakeMcpServer = async (
         return;
       }
       const answer = (body: Record<string, unknown>) => {
+        const headers: Record<string, string> = {
+          "content-type": "application/json",
+        };
+        if (minting) {
+          minted += 1;
+          const id = `fake-session-${minted}`;
+          live.add(id);
+          headers["mcp-session-id"] = id;
+        }
         response
-          .writeHead(200, { "content-type": "application/json" })
+          .writeHead(200, headers)
           .end(JSON.stringify({ jsonrpc: "2.0", id: message.id, ...body }));
       };
       const params = record(message.params);
@@ -170,12 +229,16 @@ export const startFakeMcpServer = async (
           const cursor = params["cursor"];
           const start = typeof cursor === "string" ? Number(cursor) : 0;
           const end = start + Math.max(1, size);
-          answer({
-            result: {
-              tools: tools.slice(start, end).map(toolJson),
-              ...(end < tools.length ? { nextCursor: String(end) } : {}),
-            },
-          });
+          const page = () =>
+            answer({
+              result: {
+                tools: tools.slice(start, end).map(toolJson),
+                ...(end < tools.length ? { nextCursor: String(end) } : {}),
+              },
+            });
+          if (options.listDelayMs === undefined) page();
+          // oxlint-disable-next-line effecttsgo/global-timers -- a fake server's slow answer, outside any Effect.
+          else setTimeout(page, options.listDelayMs);
           return;
         }
         case "tools/call": {
@@ -221,6 +284,7 @@ export const startFakeMcpServer = async (
     url: `http://${host}:${address.port}`,
     requests,
     calls,
+    expireSessions: () => live.clear(),
     // oxlint-disable-next-line effecttsgo/async-function -- a test's `afterAll` awaits it.
     close: async () => {
       server.closeAllConnections();

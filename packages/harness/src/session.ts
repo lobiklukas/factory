@@ -176,7 +176,9 @@ import {
 import {
   connectMcp,
   mcpPolicy,
+  offerMcp,
   type McpConnection,
+  type McpListing,
   type McpOfferedTool,
   type McpServerAccess,
 } from "./mcp";
@@ -427,6 +429,13 @@ export type OpenSessionOptions = {
    */
   readonly mcp?: readonly McpServerAccess[];
   /**
+   * The servers' sessions and tool lists, made before the open (`listMcp`) so the open waits on
+   * nothing remote: what `mcp` is offered from. A granted server it holds no session for is not
+   * offered, with a warning. The open owns it from the call on — it ends with the session, or with
+   * a failed open. Absent: the open connects to `mcp` itself.
+   */
+  readonly mcpListing?: McpListing;
+  /**
    * What the run's column gives it (B6, `./loader`): the skill bodies its prompt carries, resolved
    * by the control plane from the card's pinned board definition. Absent: no card, or a column that
    * names no skills, so nothing is injected.
@@ -625,18 +634,12 @@ export const openSession = (
   // session whose worktree is gone still opens. An open that fails after this releases it.
   openSessionEnvironment(options.sandbox, sessionShellEnv).pipe(
     Effect.flatMap((environment) =>
-      // The run's MCP servers (S-agent-mcp-tools): connected and listed before the registry is
-      // built, since their tools are registrations like any other. A read-only stage's run is
-      // offered their reads only. An open that fails after this closes the clients.
-      connectMcp(options.mcp ?? [], {
-        readOnly:
-          resolveRole(
-            options.run,
-            options.model,
-            options.roles,
-            options.rolePolicies,
-          ).stage !== undefined,
-      }).pipe(
+      // The run's MCP servers (S-agent-mcp-tools): offered before the registry is built, since their
+      // tools are registrations like any other — from the listing the caller made before the open
+      // when it made one (`mcpListing`), so the open itself waits on nothing remote, and connected
+      // and listed here otherwise. A read-only stage's run is offered their reads only. An open
+      // that fails after this ends the servers' sessions.
+      mcpOf(options).pipe(
         Effect.tap((mcp) =>
           Effect.forEach(mcp.problems, (problem) =>
             Effect.logWarning(`session open: ${problem}`),
@@ -650,7 +653,21 @@ export const openSession = (
         Effect.onError(() => environment.release),
       ),
     ),
+    // The listing is the open's from the call on: one that fails before it is offered ends it too.
+    Effect.onError(() => options.mcpListing?.close ?? Effect.void),
   );
+
+/** The MCP tools an open offers (`openSession`): from the caller's listing, or connected here. */
+const mcpOf = (options: OpenSessionOptions): Effect.Effect<McpConnection> => {
+  const readOnly =
+    resolveRole(options.run, options.model, options.roles, options.rolePolicies)
+      .stage !== undefined;
+  return options.mcpListing === undefined
+    ? connectMcp(options.mcp ?? [], { readOnly })
+    : Effect.succeed(
+        offerMcp(options.mcpListing, options.mcp ?? [], { readOnly }),
+      );
+};
 
 const openSessionIn = (
   options: OpenSessionOptions,
@@ -3024,6 +3041,8 @@ export type ForkSessionOptions = {
   readonly approvalAsker?: ApprovalAsker;
   /** The MCP servers its run may call (S-agent-mcp-tools), as `OpenSessionOptions.mcp`. */
   readonly mcp?: readonly McpServerAccess[];
+  /** Their sessions, made before the open, as `OpenSessionOptions.mcpListing`. */
+  readonly mcpListing?: McpListing;
   /**
    * What the run's column gives the fork's prompt (B6). A fork carries no task binding, so this is
    * `EMPTY_RUN_PROFILE` in practice; it is a parameter so a fork opens exactly as any other session
@@ -3091,6 +3110,9 @@ export const forkSession = (
       ...(options.verify === undefined ? {} : { verify: options.verify }),
       ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
       ...(options.mcp === undefined ? {} : { mcp: options.mcp }),
+      ...(options.mcpListing === undefined
+        ? {}
+        : { mcpListing: options.mcpListing }),
     });
     const lineage = yield* attempt(
       "copy the parent's entries",

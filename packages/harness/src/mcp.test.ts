@@ -22,7 +22,9 @@
  * The suites that open a harness allow 30 s a case: the first connection imports the MCP SDK, which
  * is loaded lazily and takes seconds on a loaded machine.
  */
+import { once } from "node:events";
 import { mkdtempSync } from "node:fs";
+import { createServer as createNetServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -41,10 +43,13 @@ import type { TranscriptEntry } from "@repo/domain/Session";
 import type { RunProfile } from "./loader";
 import {
   connectMcp,
+  listMcp,
   mcpGrants,
   mcpPolicy,
   mcpToolName,
+  offerMcp,
   parseMcpServers,
+  type McpLink,
   type McpServerAccess,
 } from "./mcp";
 import { startFakeMcpServer, type FakeMcpServer } from "./mcpFake";
@@ -575,6 +580,216 @@ describe("connecting at open", { timeout: 30_000 }, () => {
     );
   });
 });
+
+describe("a deadline on the whole connection", { timeout: 30_000 }, () => {
+  /**
+   * Mutation: give each request its own timeout and none to the whole (as before) — a list of four
+   * pages at 400 ms each takes 1.6 s against a 1 s deadline, and is offered.
+   */
+  it("gives up on a server whose pages together outlast the deadline, though each answers in time", async () => {
+    const slow = await startFakeMcpServer({
+      servers: {
+        tracker: ["a", "b", "c", "d"].map((name) => ({
+          name,
+          readOnly: true,
+        })),
+      },
+      pageSize: 1,
+      listDelayMs: 400,
+    });
+    try {
+      const startedAt = performance.now();
+      const connection = await Effect.runPromise(
+        connectMcp(
+          [
+            tracker({
+              url: `${slow.url}/tracker`,
+              tools: ["a", "b", "c", "d"],
+            }),
+          ],
+          { readOnly: false, connectTimeoutMs: 1_000 },
+        ),
+      );
+      await Effect.runPromise(connection.close);
+      expect(performance.now() - startedAt).toBeLessThan(5_000);
+      expect(connection.offered).toEqual([]);
+      expect(connection.problems[0]).toContain(
+        "it did not finish connecting and listing its tools within 1000 ms",
+      );
+    } finally {
+      await slow.close();
+    }
+  });
+
+  /** Mutation: drop the deadline — the connection waits on the silent server until the test times out. */
+  it("gives up on a server that accepts the connection and never answers", async () => {
+    const sockets: Socket[] = [];
+    const hole = createNetServer((socket) => {
+      sockets.push(socket);
+    });
+    hole.listen(0, "127.0.0.1");
+    await once(hole, "listening");
+    const address = hole.address();
+    if (address === null || typeof address === "string")
+      throw new Error("no port");
+    try {
+      const startedAt = performance.now();
+      const connection = await Effect.runPromise(
+        connectMcp(
+          [tracker({ url: `http://127.0.0.1:${address.port}/tracker` })],
+          { readOnly: false, connectTimeoutMs: 500 },
+        ),
+      );
+      expect(performance.now() - startedAt).toBeLessThan(5_000);
+      expect(sockets.length).toBeGreaterThan(0);
+      expect(connection.extension).toBeUndefined();
+      expect(connection.problems[0]).toContain("could not be reached");
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      hole.close();
+    }
+  });
+});
+
+describe("a server that loses the session", { timeout: 30_000 }, () => {
+  let stateful: FakeMcpServer;
+  beforeAll(async () => {
+    stateful = await startFakeMcpServer({
+      servers: {
+        tracker: [
+          { name: READ, readOnly: true, answer: () => "read-ok" },
+          { name: WRITE, answer: () => "write-ok" },
+        ],
+      },
+      sessions: true,
+    });
+  });
+  afterAll(async () => {
+    await stateful.close();
+  });
+
+  const linked = async () => {
+    const listing = await Effect.runPromise(
+      listMcp([tracker({ url: `${stateful.url}/tracker` })]),
+    );
+    const link = listing.servers[0]?.link;
+    if (link === undefined) throw new Error("not connected");
+    return { listing, link };
+  };
+  const text = (result: Awaited<ReturnType<typeof callOn>>) =>
+    JSON.stringify(result.content);
+  const callOn = (link: McpLink, tool: string, resend: boolean) =>
+    Effect.runPromise(
+      link.call(tool, { id: "ISS-1" }, { timeoutMs: 5_000, resend }),
+    );
+
+  /**
+   * Mutation: drop the re-initialise on `404` — the read after the restart fails with the server's
+   * 404, as every call would until the owner was reopened.
+   */
+  it("starts a new session and sends a read again, once the server has forgotten the old one", async () => {
+    const { listing, link } = await linked();
+    try {
+      expect(text(await callOn(link, READ, true))).toContain("read-ok");
+      const initializes = () =>
+        stateful.requests.filter((request) => request.rpc === "initialize")
+          .length;
+      const before = initializes();
+      stateful.expireSessions();
+      expect(text(await callOn(link, READ, true))).toContain("read-ok");
+      // One new session, and the read sent on it.
+      expect(initializes()).toBe(before + 1);
+      expect(stateful.calls.filter((call) => call.tool === READ)).toHaveLength(
+        2,
+      );
+    } finally {
+      await Effect.runPromise(listing.close);
+    }
+  });
+
+  /**
+   * Mutation: resend a write too — the server records the write after the restart. A write that
+   * fails here is the agent's to make again, and the next call works on a new session.
+   */
+  it("does not send a write again, and the next call works on a new session", async () => {
+    const { listing, link } = await linked();
+    try {
+      const writesBefore = stateful.calls.filter(
+        (call) => call.tool === WRITE,
+      ).length;
+      stateful.expireSessions();
+      const lost = await Effect.runPromiseExit(
+        link.call(WRITE, { id: "ISS-1" }, { timeoutMs: 5_000, resend: false }),
+      );
+      expect(Exit.isFailure(lost)).toBe(true);
+      expect(String(Exit.isFailure(lost) ? lost.cause : "")).toContain(
+        "the call was not sent again",
+      );
+      expect(stateful.calls.filter((call) => call.tool === WRITE)).toHaveLength(
+        writesBefore,
+      );
+      expect(text(await callOn(link, WRITE, false))).toContain("write-ok");
+    } finally {
+      await Effect.runPromise(listing.close);
+    }
+  });
+
+  /** Mutation: close the client alone (as before) — the server is never told, and keeps the session. */
+  it("ends the server's session when it closes", async () => {
+    const { listing } = await linked();
+    const initialized = stateful.requests.findLast(
+      (request) => request.rpc === "initialize",
+    );
+    expect(initialized).toBeDefined();
+    const session = stateful.requests.findLast(
+      (request) => request.session !== undefined,
+    )?.session;
+    expect(session).toBeDefined();
+    await Effect.runPromise(listing.close);
+    expect(
+      stateful.requests.some(
+        (request) => request.method === "DELETE" && request.session === session,
+      ),
+    ).toBe(true);
+  });
+});
+
+describe(
+  "offering from a listing made before the open",
+  { timeout: 30_000 },
+  () => {
+    /**
+     * Mutation: offer what the listing connected rather than what the open grants — the tool the
+     * open no longer grants is offered.
+     */
+    it("offers what the open grants now, and nothing it did not connect", async () => {
+      const listing = await Effect.runPromise(listMcp([tracker()]));
+      try {
+        const offered = offerMcp(
+          listing,
+          [
+            tracker({ tools: [READ] }),
+            { ...tracker(), name: "other", url: `${fake.url}/rogue` },
+          ],
+          { readOnly: false },
+        );
+        expect(offered.offered.map((tool) => tool.name)).toEqual([READ_NAME]);
+        expect(offered.problems).toEqual([
+          "MCP server other is not offered: it was not connected for this open, since what the session may reach of it changed while the open waited",
+        ]);
+        // A credential that changed is not the session the listing holds either.
+        const rotated = offerMcp(
+          listing,
+          [tracker({ headers: { Authorization: "Bearer rotated" } })],
+          { readOnly: false },
+        );
+        expect(rotated.offered).toEqual([]);
+      } finally {
+        await Effect.runPromise(listing.close);
+      }
+    });
+  },
+);
 
 describe("MCP_SERVERS, as a deployment writes it", () => {
   const parsed = (text: string) => Effect.runPromiseExit(parseMcpServers(text));

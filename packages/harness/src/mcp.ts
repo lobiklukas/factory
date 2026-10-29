@@ -45,7 +45,7 @@ import type {
   ContentBlock,
   Tool as McpTool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { Effect, Schema } from "effect";
+import { Effect, Schema, Semaphore } from "effect";
 import { SecretName } from "@repo/domain/Secret";
 import {
   approvalRequestId,
@@ -265,7 +265,7 @@ const parametersOf = (tool: McpTool) =>
   Type.Unsafe<Record<string, unknown>>(tool.inputSchema);
 
 const registrationOf = (
-  client: Client,
+  link: McpLink,
   server: McpServerAccess,
   tool: McpTool,
   name: string,
@@ -288,42 +288,43 @@ const registrationOf = (
     // sent twice, so an interrupted one settles as interrupted.
     replay: gated ? "unsafe" : "safe",
     execute: (args, _api, context) =>
-      client
-        .callTool({ name: tool.name, arguments: args }, undefined, {
-          timeout: callTimeoutMs,
-          ...(context.abortSignal === undefined
-            ? {}
-            : { signal: context.abortSignal }),
-        })
-        .then(
-          (result) => {
-            const blocks = Array.isArray(result.content)
-              ? (result.content as readonly ContentBlock[])
-              : [];
-            const content =
-              blocks.length > 0
-                ? blocks.map(contentOf)
-                : [
-                    {
-                      type: "text" as const,
-                      text:
-                        result.structuredContent === undefined
-                          ? "(the tool returned no content)"
-                          : JSON.stringify(result.structuredContent),
-                    },
-                  ];
-            return {
-              content,
-              isError: result.isError === true,
-              details: { server: server.name, tool: tool.name },
-            };
-          },
-          (cause: unknown) => {
-            throw new Error(
-              `the ${server.name} MCP server's ${tool.name} failed: ${describe(cause)}`,
-            );
-          },
+      Effect.runPromise(
+        Effect.result(
+          link.call(tool.name, args, {
+            timeoutMs: callTimeoutMs,
+            resend: readsOnly(tool),
+          }),
         ),
+        context.abortSignal === undefined
+          ? undefined
+          : { signal: context.abortSignal },
+      ).then((called) => {
+        if (called._tag === "Failure")
+          throw new Error(
+            `the ${server.name} MCP server's ${tool.name} failed: ${called.failure.message}`,
+          );
+        const result = called.success;
+        const blocks = Array.isArray(result.content)
+          ? (result.content as readonly ContentBlock[])
+          : [];
+        const content =
+          blocks.length > 0
+            ? blocks.map(contentOf)
+            : [
+                {
+                  type: "text" as const,
+                  text:
+                    result.structuredContent === undefined
+                      ? "(the tool returned no content)"
+                      : JSON.stringify(result.structuredContent),
+                },
+              ];
+        return {
+          content,
+          isError: result.isError === true,
+          details: { server: server.name, tool: tool.name },
+        };
+      }),
   });
 
 /**
@@ -347,19 +348,106 @@ const loadSdk = Effect.tryPromise(() =>
   ]).then(([client, transport]) => ({
     Client: client.Client,
     StreamableHTTPClientTransport: transport.StreamableHTTPClientTransport,
+    StreamableHTTPError: transport.StreamableHTTPError,
   })),
 );
 
+type Sdk = Effect.Success<typeof loadSdk>;
+
+/**
+ * A request to an MCP server that failed: it could not be sent, the server refused it, or no answer
+ * came in time. `sessionLost` says the server answered `404` — it no longer knows the session the
+ * client holds (Streamable HTTP's own word for an expired or forgotten session).
+ */
+export class McpRequestFailed extends Schema.TaggedError<McpRequestFailed>()(
+  "McpRequestFailed",
+  { message: Schema.String, sessionLost: Schema.Boolean },
+) {}
+
+/** A cause the SDK threw, as the request's failure. */
+const failedWith =
+  (sdk: Sdk) =>
+  (cause: unknown): McpRequestFailed =>
+    new McpRequestFailed({
+      message: describe(cause),
+      sessionLost:
+        cause instanceof sdk.StreamableHTTPError && cause.code === 404,
+    });
+
+const failed = (message: string): McpRequestFailed =>
+  new McpRequestFailed({ message, sessionLost: false });
+
+/** What a tool call answers, as the SDK's client returns it. */
+type McpCallResult = Awaited<ReturnType<Client["callTool"]>>;
+
+/** One initialised MCP session with a server: the client and the transport it holds. */
+type Live = {
+  readonly client: Client;
+  readonly transport: StreamableHTTPClientTransport;
+};
+
+/** How long closing waits for the server to end its session before letting go regardless. */
+const SESSION_END_GRACE_MS = 2_000;
+
+/**
+ * End a session: tell the server (`DELETE`, which a server without sessions answers `405`), bounded
+ * so a server that stopped answering cannot hold the close, then close the client, which aborts
+ * whatever it still has in flight. Never fails.
+ */
+const shutdown = (live: Live): Effect.Effect<void> =>
+  Effect.tryPromise({
+    try: () => live.transport.terminateSession(),
+    catch: (cause) => failed(describe(cause)),
+  }).pipe(
+    Effect.timeout(SESSION_END_GRACE_MS),
+    Effect.ignore,
+    Effect.andThen(
+      Effect.promise(() => live.client.close().catch(() => undefined)),
+    ),
+  );
+
+/** Connect to a server and initialise a session; whatever fails or is interrupted is shut down. */
+const openLive = (
+  sdk: Sdk,
+  server: McpServerAccess,
+  timeoutMs: number,
+): Effect.Effect<Live, McpRequestFailed> =>
+  Effect.try({
+    try: () => ({
+      client: new sdk.Client({ name: "factory", version: "0.0.0" }),
+      transport: new sdk.StreamableHTTPClientTransport(new URL(server.url), {
+        requestInit: { headers: { ...server.headers } },
+      }),
+    }),
+    catch: failedWith(sdk),
+  }).pipe(
+    Effect.flatMap((live) =>
+      Effect.tryPromise({
+        try: (signal) =>
+          live.client.connect(asTransport(live.transport), {
+            timeout: timeoutMs,
+            signal,
+          }),
+        catch: failedWith(sdk),
+      }).pipe(
+        Effect.onError(() => shutdown(live)),
+        Effect.as(live),
+      ),
+    ),
+  );
+
 /** Every tool a connected server lists, page by page. */
-const listTools = (client: Client, timeoutMs: number) =>
+const listTools = (sdk: Sdk, client: Client, timeoutMs: number) =>
   Effect.gen(function* () {
     const tools: McpTool[] = [];
     let cursor: string | undefined;
     for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
       const params = cursor === undefined ? {} : { cursor };
-      const listed = yield* Effect.tryPromise(() =>
-        client.listTools(params, { timeout: timeoutMs }),
-      );
+      const listed = yield* Effect.tryPromise({
+        try: (signal) =>
+          client.listTools(params, { timeout: timeoutMs, signal }),
+        catch: failedWith(sdk),
+      });
       tools.push(...listed.tools);
       cursor = listed.nextCursor;
       if (cursor === undefined) break;
@@ -367,58 +455,265 @@ const listTools = (client: Client, timeoutMs: number) =>
     return tools;
   });
 
-type ServerTools = {
-  readonly client: Client | undefined;
-  readonly tools: readonly ToolRegistration[];
-  readonly offered: readonly McpOfferedTool[];
-  readonly problems: readonly string[];
+/**
+ * The calls' way to one server, for as long as the session that listed it is open.
+ *
+ * A Streamable HTTP server may forget the session it gave this client — it expired it, or it
+ * restarted — and answers every later request `404`. The link then starts a new session for the
+ * next call. A read is sent again on it at once; a write is not: whether the server acted on the
+ * first is the server's to know, and a write is never sent twice (as on replay), so the call fails,
+ * saying so, and the agent may make it again.
+ */
+export type McpLink = {
+  readonly call: (
+    tool: string,
+    args: Record<string, unknown>,
+    options: { readonly timeoutMs: number; readonly resend: boolean },
+  ) => Effect.Effect<McpCallResult, McpRequestFailed>;
+  /** End the session with the server and close the client; idempotent, and never fails. */
+  readonly close: Effect.Effect<void>;
 };
 
-const connectServer = (
+const linkOf = (
+  sdk: Sdk,
   server: McpServerAccess,
-  options: ConnectMcpOptions,
-): Effect.Effect<ServerTools> =>
-  Effect.gen(function* () {
-    const connectTimeoutMs = options.connectTimeoutMs ?? MCP_CONNECT_TIMEOUT_MS;
-    const callTimeoutMs = options.callTimeoutMs ?? MCP_CALL_TIMEOUT_MS;
-    const unreachable = (cause: unknown): ServerTools => ({
-      client: undefined,
-      tools: [],
-      offered: [],
-      problems: [
-        `MCP server ${server.name} (${server.url}) could not be reached, so none of its tools is offered: ${describe(cause)}`,
-      ],
-    });
-    const sdk = yield* Effect.result(loadSdk);
-    if (sdk._tag === "Failure") return unreachable(sdk.failure.cause);
-    const client = new sdk.success.Client({
-      name: "factory",
-      version: "0.0.0",
-    });
-    const listed = yield* Effect.try(
-      () =>
-        new sdk.success.StreamableHTTPClientTransport(new URL(server.url), {
-          requestInit: { headers: { ...server.headers } },
+  first: Live,
+  connectTimeoutMs: number,
+): McpLink => {
+  let live: Live | undefined = first;
+  let closed = false;
+  // One new session at a time: two calls that both met the `404` share the one the first starts.
+  const reopening = Semaphore.makeUnsafe(1);
+  const current = reopening.withPermits(1)(
+    Effect.suspend(() => {
+      if (closed)
+        return Effect.fail(
+          failed(`the session's link to ${server.name} is closed`),
+        );
+      if (live !== undefined) return Effect.succeed(live);
+      return openLive(sdk, server, connectTimeoutMs).pipe(
+        Effect.flatMap((opened) => {
+          // Closed while it was opening: the new session is the close's too.
+          if (closed)
+            return shutdown(opened).pipe(
+              Effect.andThen(
+                Effect.fail(
+                  failed(`the session's link to ${server.name} is closed`),
+                ),
+              ),
+            );
+          live = opened;
+          return Effect.succeed(opened);
         }),
-    ).pipe(
-      Effect.flatMap((transport) =>
-        Effect.tryPromise(() =>
-          client.connect(asTransport(transport), {
-            timeout: connectTimeoutMs,
-          }),
+      );
+    }),
+  );
+  /** Drop a session the server no longer knows, so the next call starts a new one. */
+  const expire = (stale: Live) =>
+    Effect.suspend(() => {
+      if (live !== stale) return Effect.void;
+      live = undefined;
+      return shutdown(stale);
+    });
+  const send = (
+    on: Live,
+    tool: string,
+    args: Record<string, unknown>,
+    timeoutMs: number,
+  ) =>
+    Effect.tryPromise({
+      try: (signal) =>
+        on.client.callTool({ name: tool, arguments: args }, undefined, {
+          timeout: timeoutMs,
+          signal,
+        }),
+      catch: failedWith(sdk),
+    });
+  return {
+    call: (tool, args, { timeoutMs, resend }) =>
+      Effect.gen(function* () {
+        const on = yield* current;
+        const sent = yield* Effect.result(send(on, tool, args, timeoutMs));
+        if (sent._tag === "Success") return sent.success;
+        if (!sent.failure.sessionLost) return yield* sent.failure;
+        yield* expire(on);
+        if (!resend)
+          return yield* failed(
+            `${sent.failure.message} — the server no longer knows this session, so the call was not sent again (a write is never sent twice); the next call starts a new session`,
+          );
+        return yield* send(yield* current, tool, args, timeoutMs);
+      }),
+    close: Effect.suspend(() => {
+      closed = true;
+      const open = live;
+      live = undefined;
+      return open === undefined ? Effect.void : shutdown(open);
+    }),
+  };
+};
+
+/** One granted server as connecting to it came out: its tools and its link, or why there are none. */
+export type McpServerListing = {
+  /** The server as it was connected to: its grant and the headers it was given. */
+  readonly server: McpServerAccess;
+  readonly link: McpLink | undefined;
+  readonly tools: readonly McpTool[];
+  /** Why it offers nothing — it could not be reached in time — or `undefined`. */
+  readonly problem: string | undefined;
+};
+
+/**
+ * The servers a session's open connected to and the tools each listed: the network half of
+ * offering MCP tools (`listMcp`), done before the open so the open itself waits on nothing remote.
+ * Whoever holds it owns its sessions until it hands it to an open (`OpenSessionOptions.mcpListing`).
+ */
+export type McpListing = {
+  readonly servers: readonly McpServerListing[];
+  /** End every server's session; idempotent, and never fails. */
+  readonly close: Effect.Effect<void>;
+};
+
+/** Nothing connected. */
+export const NO_MCP_LISTING: McpListing = { servers: [], close: Effect.void };
+
+const unreachable = (
+  server: McpServerAccess,
+  cause: unknown,
+): McpServerListing => ({
+  server,
+  link: undefined,
+  tools: [],
+  problem: `MCP server ${server.name} (${server.url}) could not be reached, so none of its tools is offered: ${describe(cause)}`,
+});
+
+/**
+ * Connect to one server and list its tools, all of it within one deadline — however many pages its
+ * list runs to — after which it is a problem and its session is shut down.
+ */
+const listServer = (
+  sdk: Sdk,
+  server: McpServerAccess,
+  deadlineMs: number,
+): Effect.Effect<McpServerListing> =>
+  Effect.uninterruptibleMask((restore) =>
+    Effect.gen(function* () {
+      const live = yield* restore(openLive(sdk, server, deadlineMs));
+      const tools = yield* restore(
+        listTools(sdk, live.client, deadlineMs),
+      ).pipe(Effect.onError(() => shutdown(live)));
+      return {
+        server,
+        link: linkOf(sdk, server, live, deadlineMs),
+        tools,
+        problem: undefined,
+      } satisfies McpServerListing;
+    }),
+  ).pipe(
+    Effect.timeoutOrElse({
+      duration: deadlineMs,
+      orElse: () =>
+        Effect.fail(
+          failed(
+            `it did not finish connecting and listing its tools within ${deadlineMs} ms`,
+          ),
         ),
-      ),
-      Effect.andThen(listTools(client, connectTimeoutMs)),
-      Effect.result,
+    }),
+    Effect.catch((error) => Effect.succeed(unreachable(server, error))),
+  );
+
+/**
+ * Connect to every granted server and list its tools, concurrently, each within
+ * `connectTimeoutMs` all told. Never fails: a server that cannot be reached in time is a problem
+ * and offers nothing. Interrupted, it shuts down what it had connected.
+ */
+export const listMcp = (
+  servers: readonly McpServerAccess[],
+  options: { readonly connectTimeoutMs?: number } = {},
+): Effect.Effect<McpListing> =>
+  servers.length === 0
+    ? Effect.succeed(NO_MCP_LISTING)
+    : Effect.gen(function* () {
+        const deadlineMs = options.connectTimeoutMs ?? MCP_CONNECT_TIMEOUT_MS;
+        const sdk = yield* Effect.result(loadSdk);
+        if (sdk._tag === "Failure")
+          return {
+            servers: servers.map((server) =>
+              unreachable(server, sdk.failure.cause),
+            ),
+            close: Effect.void,
+          };
+        const listed = yield* Effect.forEach(
+          servers,
+          (server) => listServer(sdk.success, server, deadlineMs),
+          { concurrency: "unbounded" },
+        );
+        const closed = { done: false };
+        return {
+          servers: listed,
+          close: Effect.suspend(() => {
+            if (closed.done) return Effect.void;
+            closed.done = true;
+            return Effect.forEach(
+              listed,
+              (server) => server.link?.close ?? Effect.void,
+              { concurrency: "unbounded", discard: true },
+            );
+          }),
+        };
+      });
+
+const sameHeaders = (
+  a: Readonly<Record<string, string>> | undefined,
+  b: Readonly<Record<string, string>> | undefined,
+): boolean => {
+  const left = Object.entries(a ?? {});
+  const right = b ?? {};
+  return (
+    left.length === Object.keys(right).length &&
+    left.every(([key, value]) => right[key] === value)
+  );
+};
+
+export type OfferMcpOptions = {
+  /** A read-only stage's run (`./rolePolicy`): only the reads are offered. */
+  readonly readOnly: boolean;
+  readonly callTimeoutMs?: number;
+};
+
+/**
+ * What a session is offered of a listing: for each server it is granted, the tools the repository
+ * allows and the server listed — a read-only stage the reads only — as one extension, and the gates
+ * the policy asks on. Nothing remote: the listing was made before. A granted server the listing
+ * holds no session for under the same URL and credential (the grants changed while the open waited
+ * for the gate) is a problem, not a connection made here.
+ */
+export const offerMcp = (
+  listing: McpListing,
+  servers: readonly McpServerAccess[],
+  options: OfferMcpOptions,
+): McpConnection => {
+  const callTimeoutMs = options.callTimeoutMs ?? MCP_CALL_TIMEOUT_MS;
+  const problems: string[] = [];
+  const tools: ToolRegistration[] = [];
+  const offered: McpOfferedTool[] = [];
+  for (const server of servers) {
+    const listed = listing.servers.find(
+      (candidate) =>
+        candidate.server.name === server.name &&
+        candidate.server.url === server.url &&
+        sameHeaders(candidate.server.headers, server.headers),
     );
-    if (listed._tag === "Failure") {
-      yield* Effect.promise(() => client.close().catch(() => undefined));
-      return unreachable(listed.failure.cause);
+    if (listed === undefined) {
+      problems.push(
+        `MCP server ${server.name} is not offered: it was not connected for this open, since what the session may reach of it changed while the open waited`,
+      );
+      continue;
     }
-    const byName = new Map(listed.success.map((tool) => [tool.name, tool]));
-    const problems: string[] = [];
-    const tools: ToolRegistration[] = [];
-    const offered: McpOfferedTool[] = [];
+    if (listed.problem !== undefined || listed.link === undefined) {
+      if (listed.problem !== undefined) problems.push(listed.problem);
+      continue;
+    }
+    const byName = new Map(listed.tools.map((tool) => [tool.name, tool]));
     for (const allowed of server.tools) {
       const tool = byName.get(allowed);
       if (tool === undefined) {
@@ -445,17 +740,30 @@ const connectServer = (
       const gated =
         !readsOnly(tool) || server.approvalRequired.includes(tool.name);
       tools.push(
-        registrationOf(client, server, tool, name, gated, callTimeoutMs),
+        registrationOf(listed.link, server, tool, name, gated, callTimeoutMs),
       );
       offered.push({ name, server: server.name, tool: tool.name, gated });
     }
-    return { client, tools, offered, problems };
-  });
+  }
+  return {
+    extension:
+      tools.length === 0
+        ? undefined
+        : defineExtension({ name: MCP_EXTENSION, tools }),
+    offered,
+    gates: new Map(
+      offered
+        .filter((tool) => tool.gated)
+        .map((tool) => [tool.name, gateAction(tool.server, tool.tool)]),
+    ),
+    problems,
+    close: listing.close,
+  };
+};
 
 /**
- * Connect to every granted server and list its tools, concurrently: the tools the repository
- * allows and the server lists, as one extension, and the gates the policy asks on. Never fails — a
- * server that cannot be reached is a problem and offers nothing.
+ * Connect to every granted server, list its tools and offer them (`listMcp`, then `offerMcp`):
+ * for a caller with no listing made beforehand. Never fails.
  */
 export const connectMcp = (
   servers: readonly McpServerAccess[],
@@ -463,39 +771,25 @@ export const connectMcp = (
 ): Effect.Effect<McpConnection> =>
   servers.length === 0
     ? Effect.succeed(NO_MCP)
-    : Effect.gen(function* () {
-        const connected = yield* Effect.forEach(
+    : Effect.map(
+        listMcp(
           servers,
-          (server) => connectServer(server, options),
-          { concurrency: "unbounded" },
-        );
-        const tools = connected.flatMap((server) => server.tools);
-        const offered = connected.flatMap((server) => server.offered);
-        const clients = connected.flatMap((server) =>
-          server.client === undefined ? [] : [server.client],
-        );
-        const closed = { done: false };
-        return {
-          extension:
-            tools.length === 0
-              ? undefined
-              : defineExtension({ name: MCP_EXTENSION, tools }),
-          offered,
-          gates: new Map(
-            offered
-              .filter((tool) => tool.gated)
-              .map((tool) => [tool.name, gateAction(tool.server, tool.tool)]),
+          options.connectTimeoutMs === undefined
+            ? {}
+            : { connectTimeoutMs: options.connectTimeoutMs },
+        ),
+        (listing) =>
+          offerMcp(
+            listing,
+            servers,
+            options.callTimeoutMs === undefined
+              ? { readOnly: options.readOnly }
+              : {
+                  readOnly: options.readOnly,
+                  callTimeoutMs: options.callTimeoutMs,
+                },
           ),
-          problems: connected.flatMap((server) => server.problems),
-          close: Effect.suspend(() => {
-            if (closed.done) return Effect.void;
-            closed.done = true;
-            return Effect.promise(() =>
-              Promise.allSettled(clients.map((client) => client.close())),
-            );
-          }).pipe(Effect.asVoid),
-        };
-      });
+      );
 
 /**
  * Compose the MCP gates into a session's policy: a call to a gated MCP tool that the wrapped policy

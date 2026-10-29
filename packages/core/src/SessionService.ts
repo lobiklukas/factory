@@ -40,6 +40,7 @@ import {
   Path,
   Redacted,
   Ref,
+  References,
   Schedule,
   Schema,
   type Scope,
@@ -157,7 +158,9 @@ import {
   stageRefusalOf,
   repoPolicyWidening,
   resolveRole,
+  listMcp,
   mcpGrants,
+  type McpListing,
   type McpServerAccess,
   // `startMission` is the harness's: it creates the task and commits the documents. The service
   // method below resolves the workspace and the owner first, so the two names mark which layer
@@ -2653,7 +2656,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        */
       const mcpFor = (
         id: SessionId,
-        workspace: SessionWorkspace,
+        repo: RepoSlug | undefined,
+        released: boolean,
         repoPolicy: RepoPolicy,
       ): Effect.Effect<{
         readonly servers: readonly McpServerAccess[];
@@ -2664,9 +2668,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             policy.config.mcpServers ?? [],
             repoPolicy.mcp,
           );
-          if (grants.length === 0 || workspace.released !== undefined)
+          if (grants.length === 0 || released)
             return { servers: [], secrets: [] };
-          const repo = workspace.repo;
           const names = grants.flatMap((grant) =>
             grant.secret === undefined ? [] : [grant.secret],
           );
@@ -3365,6 +3368,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly secrets: InjectedSecrets;
         /** The MCP servers the run may call, with their credentials (S-agent-mcp-tools). */
         readonly mcp: readonly McpServerAccess[];
+        /** Their sessions, made before the gate (`mcpListingFor`); the open's from here. */
+        readonly mcpListing?: McpListing;
         /** How the run asks on its card (LOB-73); absent for a session with no card. */
         readonly ask?: AskOptions;
         /** How the run reads its card's thread (LOB-73); absent for a session with no card. */
@@ -3426,6 +3431,56 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly admission?: "resume" | "background" | "stop";
       };
 
+      /**
+       * The MCP servers' sessions an owner's open will offer tools from (S-agent-mcp-tools), made
+       * before the owners' gate like the base's fetch (`acquireOwnerWith`): connecting to a server
+       * and listing its tools is network, and a server that is slow or gone would otherwise hold
+       * every other session's open, interrupt and approval behind it for as long as its deadline.
+       *
+       * What it connects to is a guess, not the decision: the grants the open will make, from the
+       * policy the log pinned (or the base's, for a first open) and the secrets the store holds now,
+       * read here without the gate. The open reads both again under the gate and offers only what
+       * it grants then (`offerMcp`), so a grant that changed in between costs that server's tools
+       * for this open, never a tool the session is not allowed. Its warnings are the open's to say,
+       * so nothing here logs; anything that fails here only means nothing is connected ahead.
+       * `undefined`: no server to connect to.
+       */
+      const mcpListingFor = (
+        id: SessionId,
+        row: SessionRow,
+        acquisition: OwnerAcquisition,
+        fetchedStart: string | undefined,
+        fetchedReviewBase: string | undefined,
+      ): Effect.Effect<McpListing | undefined> =>
+        (policy.config.mcpServers ?? []).length === 0 || row.repo === null
+          ? Effect.undefined
+          : Effect.gen(function* () {
+              if ((yield* releaseOf(row)) !== undefined) return undefined;
+              const repoPolicy = yield* withReader(id, (storage) =>
+                Effect.gen(function* () {
+                  const recorded = yield* readPolicyRecord(storage);
+                  const review = yield* readRecordedReview(storage);
+                  return yield* repoPolicyFor(row, recorded, {
+                    fetchedStart,
+                    reviewBase: review?.target.base ?? acquisition.review?.base,
+                    fetchedReviewBase,
+                  });
+                }),
+              );
+              const repo =
+                row.repo === null ? undefined : yield* toRepoSlug(row.repo);
+              const { servers } = yield* mcpFor(
+                id,
+                repo,
+                false,
+                repoPolicy.repo,
+              );
+              return servers.length === 0 ? undefined : yield* listMcp(servers);
+            }).pipe(
+              Effect.provideService(References.MinimumLogLevel, "None"),
+              Effect.orElseSucceed(() => undefined),
+            );
+
       /** The part of an acquisition that is serialized: everything but the network (below). */
       const acquireUnderGate = (
         id: SessionId,
@@ -3434,255 +3489,288 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         acquisition: OwnerAcquisition,
         fetchedStart: string | undefined,
         fetchedReviewBase: string | undefined,
+        /** The MCP servers' sessions made before the gate (`mcpListingFor`); this acquisition's to end unless an open takes them. */
+        mcpListing: McpListing | undefined,
       ): Effect.Effect<LiveOwner, SessionError> => {
         /** The fence of the presence claim this acquisition took, once it has taken one (LOB-18). */
         let claimed: number | undefined;
-        return gate.withPermits(1)(
-          Effect.gen(function* () {
-            const now = yield* Clock.currentTimeMillis;
-            const owners = yield* Ref.get(live);
-            const existing = HashMap.get(owners, id);
-            if (Option.isSome(existing)) {
-              const touched = { ...existing.value, lastUsedAt: now };
-              yield* Ref.update(live, HashMap.set(id, touched));
-              return touched;
-            }
-            // One more owner (LOB-70): admitted on the slot its new session reserved, or on a free
-            // one, counted under this gate with the insert below so the count cannot be overtaken.
-            if (yield* needsSlot(acquisition))
-              yield* refuseOverCapacity(acquisition.admission !== "background");
+        /** Whether the listing went to an open, whose session it is from then (`OpenSessionOptions.mcpListing`). */
+        let listingHanded = false;
+        return gate
+          .withPermits(1)(
+            Effect.gen(function* () {
+              const now = yield* Clock.currentTimeMillis;
+              const owners = yield* Ref.get(live);
+              const existing = HashMap.get(owners, id);
+              if (Option.isSome(existing)) {
+                const touched = { ...existing.value, lastUsedAt: now };
+                yield* Ref.update(live, HashMap.set(id, touched));
+                return touched;
+              }
+              // One more owner (LOB-70): admitted on the slot its new session reserved, or on a free
+              // one, counted under this gate with the insert below so the count cannot be overtaken.
+              if (yield* needsSlot(acquisition))
+                yield* refuseOverCapacity(
+                  acquisition.admission !== "background",
+                );
 
-            // Read again under the gate rather than trusted from `row`: a release that committed
-            // after the caller read the row must not be undone by cutting the worktree back
-            // (LOB-268). A released session still opens — its log takes approvals, pages and a
-            // curator's charge — but in no directory, because there is none to work in.
-            const current = yield* requireSession(id);
-            const released = yield* releaseOf(current);
-            if (released !== undefined && acquisition.starts === true) {
-              yield* countRefusal("released");
-              return yield* releasedError(id, released);
-            }
-            // Claimed before anything is opened (LOB-18): a session another process owns is not
-            // opened a second time here, where both would write one log until Postgres poisoned one.
-            // A live claim of this process's own home — this host and session root, where the
-            // session's worktree is — is taken over rather than waited out: it is the process this
-            // one replaced (a SIGKILL, a crash), whose run, mission or parked approval would
-            // otherwise wait a TTL for nothing (LOB-25, LOB-231). Two live processes on one home is
-            // already the misconfiguration D12 names; this makes the newer one win.
-            const claim = yield* paper(
-              "claim the session",
-              presence.acquire("session", id, { takeoverHome: true }),
-            );
-            if (claim._tag === "HeldElsewhere") {
-              return yield* ownedElsewhereError(id, claim.lease);
-            }
-            claimed = claim.fence;
-            const fence = claim.fence;
-            yield* Ref.update(opening, HashMap.set(id, fence));
-            const storage = yield* openStorage(id, "owner");
-            const disposeOnError = <A, E>(effect: Effect.Effect<A, E>) =>
-              effect.pipe(
+              // Read again under the gate rather than trusted from `row`: a release that committed
+              // after the caller read the row must not be undone by cutting the worktree back
+              // (LOB-268). A released session still opens — its log takes approvals, pages and a
+              // curator's charge — but in no directory, because there is none to work in.
+              const current = yield* requireSession(id);
+              const released = yield* releaseOf(current);
+              if (released !== undefined && acquisition.starts === true) {
+                yield* countRefusal("released");
+                return yield* releasedError(id, released);
+              }
+              // Claimed before anything is opened (LOB-18): a session another process owns is not
+              // opened a second time here, where both would write one log until Postgres poisoned one.
+              // A live claim of this process's own home — this host and session root, where the
+              // session's worktree is — is taken over rather than waited out: it is the process this
+              // one replaced (a SIGKILL, a crash), whose run, mission or parked approval would
+              // otherwise wait a TTL for nothing (LOB-25, LOB-231). Two live processes on one home is
+              // already the misconfiguration D12 names; this makes the newer one win.
+              const claim = yield* paper(
+                "claim the session",
+                presence.acquire("session", id, { takeoverHome: true }),
+              );
+              if (claim._tag === "HeldElsewhere") {
+                return yield* ownedElsewhereError(id, claim.lease);
+              }
+              claimed = claim.fence;
+              const fence = claim.fence;
+              yield* Ref.update(opening, HashMap.set(id, fence));
+              const storage = yield* openStorage(id, "owner");
+              const disposeOnError = <A, E>(effect: Effect.Effect<A, E>) =>
+                effect.pipe(
+                  Effect.tapError(() =>
+                    Effect.promise(() => storage.dispose()),
+                  ),
+                );
+              // A review run (LOB-36) is the read-only reviewing stage, offered the review tool. Its
+              // target is in the log once the create wrote it, and in the acquisition before then.
+              const recordedReview = yield* disposeOnError(
+                readRecordedReview(storage),
+              );
+              const reviews =
+                acquisition.reviewing === true || recordedReview !== undefined;
+              // The repository's policy (S-factory-config-as-code): the one this log pinned, or the
+              // base's, read in the checkout the worktree is cut from — never the worktree, so a run
+              // cannot relax its own rules. Read before the worktree is cut: a config that would widen
+              // the deployment refuses the open, and leaves no worktree or branch behind it.
+              const repoPolicy = yield* disposeOnError(
+                readPolicyRecord(storage).pipe(
+                  Effect.flatMap((recorded) =>
+                    repoPolicyFor(row, recorded, {
+                      fetchedStart,
+                      reviewBase:
+                        recordedReview?.target.base ?? acquisition.review?.base,
+                      fetchedReviewBase,
+                      released: released !== undefined,
+                    }),
+                  ),
+                ),
+              );
+              const workspace = yield* disposeOnError(
+                workspaceFor(row, {
+                  cut: released === undefined,
+                  released,
+                  fetchedStart,
+                }),
+              );
+              if (released === undefined) {
+                yield* disposeOnError(
+                  Effect.mapError(
+                    fs.makeDirectory(workspace.path, { recursive: true }),
+                    (cause) =>
+                      new SessionErrorClass({
+                        code: "harness",
+                        message: `create ${workspace.path}: ${String(cause)}`,
+                      }),
+                  ),
+                );
+              }
+              // The run's prompt comes from its column (B6), read on every owner acquisition, at the
+              // versions the log pinned when the run first opened (D7, B2): a skill put since then
+              // reaches the next run, and a reopened one is told what it was told before. The open
+              // pins whatever it resolves that the log had not pinned yet (`@repo/harness`'s
+              // `factory.skills`).
+              const pins = yield* readSkillPins(storage).pipe(
                 Effect.tapError(() => Effect.promise(() => storage.dispose())),
               );
-            // A review run (LOB-36) is the read-only reviewing stage, offered the review tool. Its
-            // target is in the log once the create wrote it, and in the acquisition before then.
-            const recordedReview = yield* disposeOnError(
-              readRecordedReview(storage),
-            );
-            const reviews =
-              acquisition.reviewing === true || recordedReview !== undefined;
-            // The repository's policy (S-factory-config-as-code): the one this log pinned, or the
-            // base's, read in the checkout the worktree is cut from — never the worktree, so a run
-            // cannot relax its own rules. Read before the worktree is cut: a config that would widen
-            // the deployment refuses the open, and leaves no worktree or branch behind it.
-            const repoPolicy = yield* disposeOnError(
-              readPolicyRecord(storage).pipe(
-                Effect.flatMap((recorded) =>
-                  repoPolicyFor(row, recorded, {
-                    fetchedStart,
-                    reviewBase:
-                      recordedReview?.target.base ?? acquisition.review?.base,
-                    fetchedReviewBase,
-                    released: released !== undefined,
-                  }),
-                ),
-              ),
-            );
-            const workspace = yield* disposeOnError(
-              workspaceFor(row, {
-                cut: released === undefined,
-                released,
-                fetchedStart,
-              }),
-            );
-            if (released === undefined) {
-              yield* disposeOnError(
-                Effect.mapError(
-                  fs.makeDirectory(workspace.path, { recursive: true }),
-                  (cause) =>
-                    new SessionErrorClass({
-                      code: "harness",
-                      message: `create ${workspace.path}: ${String(cause)}`,
-                    }),
-                ),
+              const column = yield* runProfileFor(id, pins).pipe(
+                Effect.tapError(() => Effect.promise(() => storage.dispose())),
               );
-            }
-            // The run's prompt comes from its column (B6), read on every owner acquisition, at the
-            // versions the log pinned when the run first opened (D7, B2): a skill put since then
-            // reaches the next run, and a reopened one is told what it was told before. The open
-            // pins whatever it resolves that the log had not pinned yet (`@repo/harness`'s
-            // `factory.skills`).
-            const pins = yield* readSkillPins(storage).pipe(
-              Effect.tapError(() => Effect.promise(() => storage.dispose())),
-            );
-            const column = yield* runProfileFor(id, pins).pipe(
-              Effect.tapError(() => Effect.promise(() => storage.dispose())),
-            );
-            const run: RunProfile = reviews
-              ? { ...column, reviewing: true }
-              : column;
-            // The knowledge the prompt carries is read the same way, and for the same reason: a page
-            // curated since this session last ran reaches its next run, and a page deleted from
-            // `session_pages` stops being told. A session with none passes none, so its prompt has no
-            // `pages` section and its log records no page prompt (LOB-205).
-            const pages = yield* pagesFor(id);
-            // The run's `verify` tool measures the branch against what the PR step and the board
-            // measure it against (C17): the base the worktree was cut from, which is the fetched
-            // `refs/remotes/factory/<base>` when the operator's local base is behind the forge.
-            const verifyBase = yield* verifyBaseFor(workspace);
-            // What the repository tells the run (S-repo-instructions-and-skills), read at that same
-            // base on every acquisition, like the pages: an `AGENTS.md` merged since this session last
-            // ran reaches its next run, and an edit the run made on its own branch does not.
-            const repoContext = yield* repoContextFor(workspace, verifyBase);
-            // What the session's commands are given (S-agent-secrets): the names the repo's config
-            // declares at that same base as the session first resolved it — never the branch's, and
-            // never a ref moved since — and the store's values for them.
-            const granted = yield* secretsFor(id, workspace, verifyBase);
-            // The MCP servers the repository's pinned policy allows (S-agent-mcp-tools), with the
-            // credentials the control plane holds for them.
-            const mcp = yield* mcpFor(id, workspace, repoPolicy.repo);
-            // The card's thread and the means to add to it (B7, LOB-73), for a session that is a run
-            // of a card. A fork or a replay has no run row of its own, so it gets neither.
-            const card = yield* runTaskFor(id);
-            const body =
-              card === undefined ? undefined : yield* cardBodyFor(card);
-            const opened = yield* open({
-              storage,
-              cwd: workspace.path,
-              resume: released === undefined && acquisition.resume !== false,
-              // The deployment's policy, narrowed by what the run's column declares (C22): its
-              // gates added, its push scope applied. The same `run` the prompt came from, so the
-              // column a run is told about is the column whose autonomy it runs under.
-              // Under the column, the repository's policy (S-factory-config-as-code): the deployment's
-              // rules tightened by what the base's `.factory/config` declares, then by the column.
-              // The one branch it may push is the one its worktree is bound to (F15): a card's later
-              // run continues its first change run's `factory/<that id>` (C19).
-              policy: policy.forWorktree(
-                workspace.path,
+              const run: RunProfile = reviews
+                ? { ...column, reviewing: true }
+                : column;
+              // The knowledge the prompt carries is read the same way, and for the same reason: a page
+              // curated since this session last ran reaches its next run, and a page deleted from
+              // `session_pages` stops being told. A session with none passes none, so its prompt has no
+              // `pages` section and its log records no page prompt (LOB-205).
+              const pages = yield* pagesFor(id);
+              // The run's `verify` tool measures the branch against what the PR step and the board
+              // measure it against (C17): the base the worktree was cut from, which is the fetched
+              // `refs/remotes/factory/<base>` when the operator's local base is behind the forge.
+              const verifyBase = yield* verifyBaseFor(workspace);
+              // What the repository tells the run (S-repo-instructions-and-skills), read at that same
+              // base on every acquisition, like the pages: an `AGENTS.md` merged since this session last
+              // ran reaches its next run, and an edit the run made on its own branch does not.
+              const repoContext = yield* repoContextFor(workspace, verifyBase);
+              // What the session's commands are given (S-agent-secrets): the names the repo's config
+              // declares at that same base as the session first resolved it — never the branch's, and
+              // never a ref moved since — and the store's values for them.
+              const granted = yield* secretsFor(id, workspace, verifyBase);
+              // The MCP servers the repository's pinned policy allows (S-agent-mcp-tools), with the
+              // credentials the control plane holds for them.
+              const mcp = yield* mcpFor(
                 id,
-                run.autonomy,
+                workspace.repo,
+                workspace.released !== undefined,
                 repoPolicy.repo,
-                workspace.branch,
-              ),
-              policyRecord: repoPolicy,
-              run,
-              pages,
-              ...(repoContext === undefined ? {} : { repo: repoContext }),
-              verify: {
-                command: workspace.commands.verify,
-                baseRef: verifyBase,
-                secrets: granted.verify.values,
-                missingSecrets: granted.verify.missing,
-              },
-              secrets: [...granted.all, ...mcp.secrets],
-              mcp: mcp.servers,
-              ...(card === undefined
-                ? {}
-                : {
-                    ask: askFor(id, card),
-                    thread: threadFor(card),
-                    ...(body === undefined ? {} : { body }),
-                    spec: specFor(id, card, run.column),
-                    plan: planFor(id, card, run.column),
-                  }),
-              ...(reviews ? { review: reviewFor() } : {}),
+              );
+              // The card's thread and the means to add to it (B7, LOB-73), for a session that is a run
+              // of a card. A fork or a replay has no run row of its own, so it gets neither.
+              const card = yield* runTaskFor(id);
+              const body =
+                card === undefined ? undefined : yield* cardBodyFor(card);
+              // The servers' sessions were made before the gate (`mcpListingFor`); the open offers
+              // from them what `mcp` grants now, and owns them from here.
+              listingHanded = true;
+              const opened = yield* open({
+                storage,
+                cwd: workspace.path,
+                resume: released === undefined && acquisition.resume !== false,
+                // The deployment's policy, narrowed by what the run's column declares (C22): its
+                // gates added, its push scope applied. The same `run` the prompt came from, so the
+                // column a run is told about is the column whose autonomy it runs under.
+                // Under the column, the repository's policy (S-factory-config-as-code): the deployment's
+                // rules tightened by what the base's `.factory/config` declares, then by the column.
+                // The one branch it may push is the one its worktree is bound to (F15): a card's later
+                // run continues its first change run's `factory/<that id>` (C19).
+                policy: policy.forWorktree(
+                  workspace.path,
+                  id,
+                  run.autonomy,
+                  repoPolicy.repo,
+                  workspace.branch,
+                ),
+                policyRecord: repoPolicy,
+                run,
+                pages,
+                ...(repoContext === undefined ? {} : { repo: repoContext }),
+                verify: {
+                  command: workspace.commands.verify,
+                  baseRef: verifyBase,
+                  secrets: granted.verify.values,
+                  missingSecrets: granted.verify.missing,
+                },
+                secrets: [...granted.all, ...mcp.secrets],
+                mcp: mcp.servers,
+                ...(mcpListing === undefined ? {} : { mcpListing }),
+                ...(card === undefined
+                  ? {}
+                  : {
+                      ask: askFor(id, card),
+                      thread: threadFor(card),
+                      ...(body === undefined ? {} : { body }),
+                      spec: specFor(id, card, run.column),
+                      plan: planFor(id, card, run.column),
+                    }),
+                ...(reviews ? { review: reviewFor() } : {}),
+              }).pipe(
+                Effect.tapError(() => Effect.promise(() => storage.dispose())),
+              );
+              // The model the root is pinned to, onto the index row (LOB-269): on the open that created
+              // the root this is the first write, and on a later one it repairs a row older than the
+              // column. The log's `pi.agent` stays the truth `rebuildIndexes` refolds it from, so a
+              // failed write is a stale display field rather than a failed open: it is warned about,
+              // and the next open (or a rebuild) writes it again.
+              const model = modelKey(opened.model);
+              if (current.model !== model) {
+                yield* paper(
+                  "write session model",
+                  sql`UPDATE sessions SET model = ${model} WHERE id = ${id}`,
+                ).pipe(
+                  Effect.catch((error) =>
+                    Effect.logWarning(
+                      `session ${id}: the index row's model was not written: ${error.message}`,
+                    ),
+                  ),
+                );
+              }
+              // A run a dead process left behind carries on in this owner (LOB-25): said in the
+              // process's log, because nobody asked for it and an operator should see why it runs.
+              if (opened.resumed.length > 0) {
+                yield* Effect.logInfo(
+                  `session ${id}: resumed ${opened.resumed.length} unsettled submission(s) on reopen: ${opened.resumed.join(", ")}`,
+                );
+              }
+              yield* FiberMap.run(
+                projectors,
+                id,
+                liveSessionEvents(
+                  opened,
+                  refOf(id, row, workspace, model),
+                ).pipe(
+                  Stream.runForEach((event) => recordActivity(id, event)),
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning(
+                      `session ${id} activity projection stopped: ${String(cause)}`,
+                    ),
+                  ),
+                ),
+              );
+              const owner: LiveOwner = {
+                fence,
+                harness: opened.harness,
+                root: opened.root,
+                releaseEnvironment: opened.releaseEnvironment,
+                env: opened.env,
+                storage,
+                workspace,
+                model,
+                resumed: opened.resumed,
+                secrets: granted,
+                lastUsedAt: now,
+              };
+              // The reservation becomes this owner in the same step, so the slot is counted once.
+              yield* consumeSlot(acquisition.slot);
+              yield* Ref.update(live, HashMap.set(id, owner));
+              // Every owner added here is removed by exactly one `releaseOwner`, which takes it back off.
+              yield* shiftSessionsActive(1);
+              // Published first, so a replay's comparison finds the owner whose run it waits for. An
+              // owner opened on a replay is either its first open or the one that resumes its run, and
+              // either way the comparison is owed from here (LOB-199); on any other log it is one
+              // document read that finds nothing to do.
+              yield* armComparison(id);
+              return owner;
             }).pipe(
-              Effect.tapError(() => Effect.promise(() => storage.dispose())),
-            );
-            // The model the root is pinned to, onto the index row (LOB-269): on the open that created
-            // the root this is the first write, and on a later one it repairs a row older than the
-            // column. The log's `pi.agent` stays the truth `rebuildIndexes` refolds it from, so a
-            // failed write is a stale display field rather than a failed open: it is warned about,
-            // and the next open (or a rebuild) writes it again.
-            const model = modelKey(opened.model);
-            if (current.model !== model) {
-              yield* paper(
-                "write session model",
-                sql`UPDATE sessions SET model = ${model} WHERE id = ${id}`,
-              ).pipe(
-                Effect.catch((error) =>
-                  Effect.logWarning(
-                    `session ${id}: the index row's model was not written: ${error.message}`,
-                  ),
-                ),
-              );
-            }
-            // A run a dead process left behind carries on in this owner (LOB-25): said in the
-            // process's log, because nobody asked for it and an operator should see why it runs.
-            if (opened.resumed.length > 0) {
-              yield* Effect.logInfo(
-                `session ${id}: resumed ${opened.resumed.length} unsettled submission(s) on reopen: ${opened.resumed.join(", ")}`,
-              );
-            }
-            yield* FiberMap.run(
-              projectors,
-              id,
-              liveSessionEvents(opened, refOf(id, row, workspace, model)).pipe(
-                Stream.runForEach((event) => recordActivity(id, event)),
-                Effect.catchCause((cause) =>
-                  Effect.logWarning(
-                    `session ${id} activity projection stopped: ${String(cause)}`,
-                  ),
-                ),
+              // Whatever fails after the claim gives it back — still under the gate, so no other
+              // acquisition here has taken it meanwhile — and a failed open leaves the session to the
+              // next process that asks rather than to a lease nobody renews.
+              Effect.onError(() =>
+                claimed === undefined
+                  ? Effect.void
+                  : presence
+                      .release("session", id, claimed)
+                      .pipe(Effect.ignore),
               ),
-            );
-            const owner: LiveOwner = {
-              fence,
-              harness: opened.harness,
-              root: opened.root,
-              releaseEnvironment: opened.releaseEnvironment,
-              env: opened.env,
-              storage,
-              workspace,
-              model,
-              resumed: opened.resumed,
-              secrets: granted,
-              lastUsedAt: now,
-            };
-            // The reservation becomes this owner in the same step, so the slot is counted once.
-            yield* consumeSlot(acquisition.slot);
-            yield* Ref.update(live, HashMap.set(id, owner));
-            // Every owner added here is removed by exactly one `releaseOwner`, which takes it back off.
-            yield* shiftSessionsActive(1);
-            // Published first, so a replay's comparison finds the owner whose run it waits for. An
-            // owner opened on a replay is either its first open or the one that resumes its run, and
-            // either way the comparison is owed from here (LOB-199); on any other log it is one
-            // document read that finds nothing to do.
-            yield* armComparison(id);
-            return owner;
-          }).pipe(
-            // Whatever fails after the claim gives it back — still under the gate, so no other
-            // acquisition here has taken it meanwhile — and a failed open leaves the session to the
-            // next process that asks rather than to a lease nobody renews.
-            Effect.onError(() =>
-              claimed === undefined
-                ? Effect.void
-                : presence.release("session", id, claimed).pipe(Effect.ignore),
+              // Opened or not, the claim is no longer an opening one: `live` renews it from here.
+              Effect.ensuring(Ref.update(opening, HashMap.remove(id))),
             ),
-            // Opened or not, the claim is no longer an opening one: `live` renews it from here.
-            Effect.ensuring(Ref.update(opening, HashMap.remove(id))),
-          ),
-        );
+          )
+          .pipe(
+            // Outside the gate: sessions no open took — an owner was already open, or the
+            // acquisition failed before or during its open — are ended here (closing is idempotent).
+            Effect.onExit((exit) =>
+              mcpListing === undefined ||
+              (Exit.isSuccess(exit) && listingHanded)
+                ? Effect.void
+                : mcpListing.close,
+            ),
+          );
       };
 
       /**
@@ -3726,6 +3814,16 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             alreadyOpen || reviewBase === undefined
               ? undefined
               : yield* reviewBaseStartFor(row, reviewBase);
+          // The MCP servers' sessions, made here for the same reason (`mcpListingFor`).
+          const mcpListing = alreadyOpen
+            ? undefined
+            : yield* mcpListingFor(
+                id,
+                row,
+                acquisition,
+                fetchedStart,
+                fetchedReviewBase,
+              );
           return yield* acquireUnderGate(
             id,
             row,
@@ -3733,6 +3831,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             acquisition,
             fetchedStart,
             fetchedReviewBase,
+            mcpListing,
           );
         });
 
@@ -3755,6 +3854,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             verify,
             secrets,
             mcp,
+            mcpListing,
             ask,
             thread,
             body,
@@ -3789,6 +3889,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               verify,
               secrets,
               mcp,
+              ...(mcpListing === undefined ? {} : { mcpListing }),
               // A gated call (D15, LOB-52) records its ask through this session's approvals
               // service, so the request lands in the same log and index the pending list reads.
               approvalAsker: askerFor(id),
@@ -5697,6 +5798,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               verify,
               secrets,
               mcp,
+              mcpListing,
             }) =>
               Effect.acquireUseRelease(
                 openStorage(input.sessionId, "reader"),
@@ -5712,6 +5814,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                     verify,
                     secrets,
                     mcp,
+                    ...(mcpListing === undefined ? {} : { mcpListing }),
                     approvalAsker: askerFor(id),
                     ...(binding.repo === undefined ||
                     binding.baseRef === undefined
@@ -5820,6 +5923,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               verify,
               secrets,
               mcp,
+              mcpListing,
             }) =>
               replaySession({
                 source: origin,
@@ -5840,6 +5944,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 verify,
                 secrets,
                 mcp,
+                ...(mcpListing === undefined ? {} : { mcpListing }),
                 approvalAsker: askerFor(id),
                 // A replay keeps its source's cap, at no spend; an uncapped source's replay gets
                 // the default a create would (LOB-163).
