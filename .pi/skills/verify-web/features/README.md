@@ -27,6 +27,10 @@ worktree, API `:9501` / web `:3501`; there `drive.mjs` (119/119, its session-str
 own prompt into the form), `cost.sh` (12/12), `model.sh` (11/11), `spend.sh` (18/18) and `auth.sh`
 (6/6) re-passed beside it, as each opens the same form.
 
+`session-new.sh` re-passed **2026-10-29** from the `agent/F17-F19-F20` worktree (API `:9550` / web
+`:3550` / the GitHub fake `:9551`) with F17's "Open a PR when done" box and F19/F20's `[data-session-context]`
+line: **25/25** checks.
+
 `pr.sh` (Open pull request on the session pane and a card's run row, C7) last passed on 2026-10-28
 from the `agent/C7` worktree, API `:9570` / web `:3570` / the GitHub fake `:9571`, and
 `.pi/skills/verify-board`'s `drive.sh` opened its build run's PR in the browser there
