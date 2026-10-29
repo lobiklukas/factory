@@ -22,6 +22,11 @@ reads the default card's expected moves from its pinned definition over the API.
 failed only the busy-compaction race named
 under Known gaps.
 
+`notify-settings.sh` (the notification settings page, email and Web Push sinks, per-person routing, F21, and
+the retention sweep, F22) passed **24/24** on 2026-10-29 from the `agent/F21-F22` worktree, API `:9560` /
+web `:3560` / fake `:9561` / SMTP `:9562`, on a scratch database; `verify-api/notify.sh` (the Slack and ntfy drive) re-passed
+there beside it (API `:9563`, fake `:9564`). See [notifications.md](notifications.md).
+
 `session-new.sh` (the New session form, E6) last passed **16/16** on 2026-10-28 from the `agent/E6`
 worktree, API `:9501` / web `:3501`; there `drive.mjs` (119/119, its session-stream case now typing its
 own prompt into the form), `cost.sh` (12/12), `model.sh` (11/11), `spend.sh` (18/18) and `auth.sh`
@@ -100,6 +105,7 @@ re-passed there beside it, as the strip and the form sit on their pages.
 | Open pull request            | passing | [pr-open.md](pr-open.md) (`pr.sh`)                                            |
 | Spend by repo and actor      | passing | [spend.md](spend.md) (`spend.sh`)                                             |
 | Repositories                 | passing | [repos.md](repos.md) (`repos.sh`)                                             |
+| Notification settings        | passing | [notifications.md](notifications.md) (`notify-settings.sh`)                   |
 | Triggers                     | passing | [triggers.md](triggers.md) (`triggers.sh`)                                    |
 | New board (boards page)      | passing | [board-create.md](board-create.md) (`board-create.sh`)                        |
 | First run (checklist, `/`)   | passing | [first-run.md](first-run.md) (`first-run.sh`)                                 |

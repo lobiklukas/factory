@@ -23,6 +23,18 @@
  * (`failureLookbackMs`, a day by default): a notifier enabled today does not page anybody about last
  * month's failures, and a restart inside the day loses none.
  *
+ * **Who is told (F21).** Each event is about a card, a session or both, and has an owner: the
+ * actor that created the card, then the actor that started its run. An owner with a personal sink
+ * (`options.people`: an email address, a Web Push subscription they added on the settings page) is
+ * told there **only**; an event with no such owner goes to the shared sinks (`options.sinks`, the
+ * environment's Slack and ntfy). The kinds are read each pass too (`options.kinds` may be an effect,
+ * the settings page's stored toggles over `NOTIFY_TYPES`), so a toggle or a new sink needs no restart.
+ *
+ * **Retention (F22).** A delivered `notification_deliveries` row and a `run_failures` row older than
+ * `retentionMs` (30 days) are deleted, at most once an hour on the poll — never an undelivered row,
+ * never a delivered row whose event is still open (a card parked on a question for six weeks would be
+ * announced again the moment its row went), and never anything the failure lookback still reads.
+ *
  * **Exactly once per event and sink.** Every delivery is a `notification_deliveries` row keyed by
  * `(event id, sink id)`. A pass inserts the rows it has not seen (`ON CONFLICT DO NOTHING`), then
  * claims the undelivered ones and sends them; a sent one is stamped `delivered_at`. So a restart —
@@ -50,22 +62,15 @@
  * approval or a failure no card owns — the same targets the attention page links to.
  */
 import { createHash } from "node:crypto";
-import { Effect, Redacted, Schedule, Schema } from "effect";
+import { Clock, Effect, Redacted, Schedule, Schema } from "effect";
 import { HttpClient, HttpClientRequest } from "effect/http";
 import { SqlClient } from "effect/sql/SqlClient";
+import { NOTIFICATION_KINDS, NotificationKind } from "@repo/domain/Notify";
 import type { AttentionItem } from "@repo/domain/Task";
 import { TaskService } from "./TaskService";
 
-/** The kinds of event a person can be told about; `NOTIFY_TYPES` picks among them. */
-export const NotificationKind = Schema.Literals([
-  "question",
-  "approval",
-  "gate",
-  "failed",
-]);
-export type NotificationKind = typeof NotificationKind.Type;
-export const NOTIFICATION_KINDS: ReadonlyArray<NotificationKind> =
-  NotificationKind.literals;
+/** The kinds of event a person can be told about; `NOTIFY_TYPES` and the settings page pick among them. */
+export { NOTIFICATION_KINDS, NotificationKind };
 
 /** One message, as every sink receives it: what happened, in a line and a paragraph, and where to act. */
 export type Notification = {
@@ -115,10 +120,37 @@ export type NotifyPass = {
   readonly failed: number;
 };
 
+/** Personal sinks by the actor who owns them, as of this pass (`NotifySettings`' stored sinks). */
+export type PeopleSinks = ReadonlyMap<string, ReadonlyArray<NotificationSink>>;
+
+/** What one retention sweep deleted. */
+export type NotifySweep = {
+  readonly deliveries: number;
+  readonly failures: number;
+};
+
 export type NotifierOptions = {
+  /** The shared sinks: where an event with no owner who has a personal sink of their own goes. */
   readonly sinks: ReadonlyArray<NotificationSink>;
-  /** The kinds a deployment wants; any other kind is never recorded. */
-  readonly kinds: ReadonlySet<NotificationKind>;
+  /**
+   * The kinds a deployment wants; any other kind is never recorded. An effect is read at the start
+   * of every pass, which is how the settings page's toggle takes effect without a restart.
+   */
+  readonly kinds:
+    | ReadonlySet<NotificationKind>
+    | Effect.Effect<ReadonlySet<NotificationKind>, NotifyStorageError>;
+  /**
+   * Each person's own sinks, read at the start of every pass. Absent: nobody has any, and every
+   * event goes to the shared sinks.
+   */
+  readonly people?: Effect.Effect<PeopleSinks, NotifyStorageError>;
+  /**
+   * How old a delivered ledger row or a recorded failure must be before the retention sweep deletes
+   * it. Default 30 days, and never less than `failureLookbackMs`.
+   */
+  readonly retentionMs?: number;
+  /** How often the sweep runs, at most. Default an hour; the first pass sweeps. */
+  readonly sweepEveryMs?: number;
   /** The dashboard's origin, which every link starts with (`NOTIFY_LINK_BASE`). */
   readonly linkBase: string;
   /** How old a claim must be before a send that has not landed is tried again. Default a minute. */
@@ -138,6 +170,8 @@ const DEFAULT_RETRY_AFTER_MS = 60_000;
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_FAILURE_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_SEND_TIMEOUT_MS = 10_000;
+const DEFAULT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const DEFAULT_SWEEP_EVERY_MS = 60 * 60 * 1000;
 /** Sends one pass makes to one sink at most; the next pass goes on with the rest. */
 const MAX_SENDS_PER_PASS = 500;
 /** Why a retry was dropped instead of sent: what it announced is no longer open. */
@@ -316,6 +350,31 @@ export const notificationOfFailure = (
   };
 };
 
+/** What an event is about, which is how its owner is found: the card, the run, or both. */
+export type EventSubject = {
+  readonly taskId?: string;
+  readonly sessionId?: string;
+};
+
+/** The card and run an attention row is about. */
+export const subjectOfAttention = (item: AttentionItem): EventSubject => {
+  const taskId = item.task?.id;
+  const sessionId =
+    item.reason._tag === "approval" || item.reason._tag === "gate"
+      ? item.reason.sessionId
+      : undefined;
+  return {
+    ...(taskId === undefined ? {} : { taskId }),
+    ...(sessionId === undefined ? {} : { sessionId }),
+  };
+};
+
+/** The run, and the card that owns it if one does, that a failure is about. */
+export const subjectOfFailure = (failure: RunFailure): EventSubject => ({
+  sessionId: failure.sessionId,
+  ...(failure.card === undefined ? {} : { taskId: failure.card.taskId }),
+});
+
 /** A short, stable, one-way name for a destination: the ledger key must not carry the secret. */
 const fingerprint = (destination: string): string =>
   createHash("sha256").update(destination).digest("hex").slice(0, 16);
@@ -492,8 +551,21 @@ export const makeNotifier = (options: NotifierOptions) =>
         retryAfterMs > 0 ? retryAfterMs / 2 : Number.POSITIVE_INFINITY,
       ),
     );
-    const kinds = [...options.kinds];
+    const retentionMs = Math.max(
+      options.retentionMs ?? DEFAULT_RETENTION_MS,
+      lookbackMs,
+    );
+    const sweepEveryMs = options.sweepEveryMs ?? DEFAULT_SWEEP_EVERY_MS;
     const sinks = new Map(options.sinks.map((sink) => [sink.id, sink]));
+    const wantedKinds: Effect.Effect<
+      ReadonlySet<NotificationKind>,
+      NotifyStorageError
+    > = Effect.isEffect(options.kinds)
+      ? options.kinds
+      : Effect.succeed(options.kinds);
+    const people: Effect.Effect<PeopleSinks, NotifyStorageError> =
+      options.people ?? Effect.succeed(new Map());
+    let lastSweepAt = Number.NEGATIVE_INFINITY;
 
     const storage = <A, E>(
       what: string,
@@ -539,9 +611,16 @@ export const makeNotifier = (options: NotifierOptions) =>
       ),
     );
 
-    /** What needs a person now, as messages, in the attention view's order and then the failures'. */
-    const events: Effect.Effect<
-      ReadonlyArray<Notification>,
+    /**
+     * What needs a person now, of every kind, as messages with what each is about: the attention
+     * view's order and then the failures'. Kinds are filtered by the caller, because the retention
+     * sweep needs to know every open event, wanted or not.
+     */
+    const readEvents: Effect.Effect<
+      ReadonlyArray<{
+        readonly notification: Notification;
+        readonly subject: EventSubject;
+      }>,
       NotifyStorageError
     > = Effect.gen(function* () {
       const attention = yield* storage(
@@ -550,24 +629,110 @@ export const makeNotifier = (options: NotifierOptions) =>
       );
       const fromAttention = attention.flatMap((item) => {
         const notification = notificationOfAttention(item, options.linkBase);
-        return notification === undefined ? [] : [notification];
+        return notification === undefined
+          ? []
+          : [{ notification, subject: subjectOfAttention(item) }];
       });
-      const fromFailures = options.kinds.has("failed")
-        ? (yield* failures).map((failure) =>
-            notificationOfFailure(failure, options.linkBase),
-          )
-        : [];
-      return [...fromAttention, ...fromFailures].filter((notification) =>
-        options.kinds.has(notification.kind),
-      );
+      const fromFailures = (yield* failures).map((failure) => ({
+        notification: notificationOfFailure(failure, options.linkBase),
+        subject: subjectOfFailure(failure),
+      }));
+      return [...fromAttention, ...fromFailures];
     });
+
+    /** What needs a person now and is of a kind the deployment wants. */
+    const events: Effect.Effect<
+      ReadonlyArray<Notification>,
+      NotifyStorageError
+    > = Effect.gen(function* () {
+      const kinds = yield* wantedKinds;
+      return (yield* readEvents)
+        .map((event) => event.notification)
+        .filter((notification) => kinds.has(notification.kind));
+    });
+
+    /**
+     * Who owns each event, as the actors to try in order. A card's owner is the actor that created
+     * it, then the actor that started the run the event is about; an event on a session no card
+     * owns has only the second. Two reads, one per kind of subject.
+     */
+    const ownersOf = (
+      subjects: ReadonlyArray<EventSubject>,
+    ): Effect.Effect<
+      (subject: EventSubject) => ReadonlyArray<string>,
+      NotifyStorageError
+    > =>
+      Effect.gen(function* () {
+        const taskIds = [
+          ...new Set(subjects.flatMap((s) => (s.taskId ? [s.taskId] : []))),
+        ];
+        const sessionIds = [
+          ...new Set(
+            subjects.flatMap((s) => (s.sessionId ? [s.sessionId] : [])),
+          ),
+        ];
+        const creators = new Map<string, string>();
+        const starters = new Map<string, string>();
+        if (taskIds.length > 0) {
+          const rows = yield* storage(
+            "read the cards' creators",
+            sql<{ readonly taskId: string; readonly actor: string }>`
+              SELECT task_id, actor FROM task_events
+              WHERE kind = 'created' AND task_id IN ${sql.in(taskIds)}
+            `,
+          );
+          for (const row of rows) creators.set(row.taskId, row.actor);
+        }
+        if (sessionIds.length > 0) {
+          const rows = yield* storage(
+            "read the runs' actors",
+            sql<{ readonly id: string; readonly actor: string | null }>`
+              SELECT id, actor FROM sessions
+              WHERE actor IS NOT NULL AND id IN ${sql.in(sessionIds)}
+            `,
+          );
+          for (const row of rows) {
+            if (row.actor !== null) starters.set(row.id, row.actor);
+          }
+        }
+        return (subject) =>
+          [
+            ...(subject.taskId === undefined
+              ? []
+              : [creators.get(subject.taskId)]),
+            ...(subject.sessionId === undefined
+              ? []
+              : [starters.get(subject.sessionId)]),
+          ].flatMap((actor) => (actor === undefined ? [] : [actor]));
+      });
+
+    /**
+     * The sinks an event goes to: the first of its owners who has a personal sink — all of that
+     * person's, and nobody else's — else the shared sinks.
+     */
+    const routeOf = (
+      owners: ReadonlyArray<string>,
+      personal: PeopleSinks,
+    ): ReadonlyArray<NotificationSink> => {
+      for (const owner of owners) {
+        const own = personal.get(owner);
+        if (own !== undefined && own.length > 0) return own;
+      }
+      return [...sinks.values()];
+    };
 
     /** Insert a ledger row for every event and sink that has none; returns how many it inserted. */
     const record = (
-      notifications: ReadonlyArray<Notification>,
+      routed: ReadonlyArray<{
+        readonly notification: Notification;
+        readonly to: ReadonlyArray<NotificationSink>;
+      }>,
     ): Effect.Effect<number, NotifyStorageError> =>
       Effect.gen(function* () {
-        if (notifications.length === 0 || sinks.size === 0) return 0;
+        const notifications = routed
+          .filter((event) => event.to.length > 0)
+          .map((event) => event.notification);
+        if (notifications.length === 0) return 0;
         const seen = yield* storage(
           "read the ledger",
           sql<{ readonly eventId: string; readonly sink: string }>`
@@ -578,8 +743,8 @@ export const makeNotifier = (options: NotifierOptions) =>
         const have = new Set(
           seen.map((row) => `${row.sink}\u0000${row.eventId}`),
         );
-        const missing = notifications.flatMap((notification) =>
-          [...sinks.keys()].flatMap((sink) =>
+        const missing = routed.flatMap(({ notification, to }) =>
+          [...new Set(to.map((sink) => sink.id))].flatMap((sink) =>
             have.has(`${sink}\u0000${notification.eventId}`)
               ? []
               : [
@@ -618,6 +783,7 @@ export const makeNotifier = (options: NotifierOptions) =>
      */
     const claimOne = (
       sink: string,
+      kinds: ReadonlyArray<NotificationKind>,
       tried: ReadonlyArray<string>,
     ): Effect.Effect<ClaimedRow | undefined, NotifyStorageError> =>
       storage(
@@ -669,6 +835,7 @@ export const makeNotifier = (options: NotifierOptions) =>
      */
     const flushSink = (
       sink: NotificationSink,
+      kinds: ReadonlyArray<NotificationKind>,
       open: ReadonlySet<string>,
     ): Effect.Effect<
       { readonly delivered: number; readonly failed: number },
@@ -681,7 +848,7 @@ export const makeNotifier = (options: NotifierOptions) =>
         if (kinds.length === 0) return { delivered, failed };
         const tried: string[] = [];
         while (tried.length < MAX_SENDS_PER_PASS) {
-          const row = yield* claimOne(sink.id, tried);
+          const row = yield* claimOne(sink.id, kinds, tried);
           if (row === undefined) break;
           tried.push(row.eventId);
           if (row.attempts > 1 && !open.has(row.eventId)) {
@@ -749,12 +916,14 @@ export const makeNotifier = (options: NotifierOptions) =>
 
     /** Flush every sink on its own fiber, so one that hangs delays nobody else's messages. */
     const flush = (
+      every: ReadonlyArray<NotificationSink>,
+      kinds: ReadonlyArray<NotificationKind>,
       open: ReadonlySet<string>,
     ): Effect.Effect<
       { readonly delivered: number; readonly failed: number },
       NotifyStorageError
     > =>
-      Effect.forEach([...sinks.values()], (sink) => flushSink(sink, open), {
+      Effect.forEach(every, (sink) => flushSink(sink, kinds, open), {
         concurrency: "unbounded",
       }).pipe(
         Effect.map((results) =>
@@ -768,18 +937,93 @@ export const makeNotifier = (options: NotifierOptions) =>
         ),
       );
 
+    /**
+     * Delete what retention allows (F22): delivered ledger rows and recorded failures older than
+     * `retentionMs`, except a delivered row whose event is still open — `every` is every event of
+     * any kind that needs a person now, so a kind switched off for a while does not lose its
+     * memory — and never an undelivered row. Ledger first: a failure's row outlives its
+     * delivery's, so the failure is never read again after the row that remembers it is gone.
+     */
+    const sweepWith = (
+      every: ReadonlyArray<{ readonly notification: Notification }>,
+    ): Effect.Effect<NotifySweep, NotifyStorageError> =>
+      Effect.gen(function* () {
+        lastSweepAt = yield* Clock.currentTimeMillis;
+        const ids = every.map((event) => event.notification.eventId);
+        const deliveries = yield* storage(
+          "prune delivered notifications",
+          sql<{ readonly eventId: string }>`
+            DELETE FROM notification_deliveries
+            WHERE delivered_at IS NOT NULL
+              AND delivered_at < now() - make_interval(secs => ${retentionMs / 1000})
+              ${ids.length === 0 ? sql`` : sql`AND event_id NOT IN ${sql.in(ids)}`}
+            RETURNING event_id
+          `,
+        );
+        const failedRuns = yield* storage(
+          "prune run failures",
+          sql<{ readonly sessionId: string }>`
+            DELETE FROM run_failures
+            WHERE failed_at < now() - make_interval(secs => ${retentionMs / 1000})
+            RETURNING session_id
+          `,
+        );
+        const swept = {
+          deliveries: deliveries.length,
+          failures: failedRuns.length,
+        };
+        if (swept.deliveries > 0 || swept.failures > 0) {
+          yield* Effect.logInfo(
+            `notify: pruned ${swept.deliveries} delivered notifications and ${swept.failures} run failures older than ${Math.round(retentionMs / 86_400_000)} days`,
+          );
+        }
+        return swept;
+      });
+
+    /** The retention sweep, now, whether or not it is due. */
+    const sweep: Effect.Effect<NotifySweep, NotifyStorageError> =
+      Effect.flatMap(readEvents, sweepWith);
+
     const pass: Effect.Effect<NotifyPass, NotifyStorageError> = Effect.gen(
       function* () {
-        const open = yield* events;
-        const recorded = yield* record(open);
-        const { delivered, failed } = yield* flush(
-          new Set(open.map((notification) => notification.eventId)),
+        const kinds = yield* wantedKinds;
+        const personal = yield* people;
+        // One mailbox two people share is one sink (its id is its destination's), flushed once.
+        const everySink = [
+          ...new Map(
+            [...sinks.values(), ...[...personal.values()].flat()].map(
+              (sink) => [sink.id, sink],
+            ),
+          ).values(),
+        ];
+        const sweepDue =
+          (yield* Clock.currentTimeMillis) - lastSweepAt >= sweepEveryMs;
+        // Nobody to tell and nothing to prune: the attention view is not even read.
+        if (everySink.length === 0 && !sweepDue) {
+          return { recorded: 0, delivered: 0, failed: 0 };
+        }
+        const every = yield* readEvents;
+        const wanted = every.filter((event) =>
+          kinds.has(event.notification.kind),
         );
+        const owners = yield* ownersOf(wanted.map((event) => event.subject));
+        const recorded = yield* record(
+          wanted.map((event) => ({
+            notification: event.notification,
+            to: routeOf(owners(event.subject), personal),
+          })),
+        );
+        const { delivered, failed } = yield* flush(
+          everySink,
+          [...kinds],
+          new Set(wanted.map((event) => event.notification.eventId)),
+        );
+        if (sweepDue) yield* sweepWith(every);
         return { recorded, delivered, failed };
       },
     );
 
-    return { events, pass };
+    return { events, pass, sweep };
   });
 
 /**

@@ -46,5 +46,8 @@ export * from "./metrics";
 export * from "./outcomes";
 export * from "./admission";
 export * from "./Notifier";
+export * from "./NotifierEmail";
+export * from "./NotifierWebPush";
+export * from "./NotifySettings";
 export * from "./SecretService";
 export * from "./secretScan";

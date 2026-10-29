@@ -14,7 +14,9 @@ import { HttpClient } from "effect/http";
 import { RpcSerialization, RpcServer } from "effect/rpc";
 import { ApprovalsRpcHandlers } from "./Approvals";
 import { attributed } from "./Auth";
+import { NotifySettingsFromEnv } from "../Notifications";
 import { DoctorRpcHandlers } from "./Doctor";
+import { NotificationsRpcHandlers } from "./Notifications";
 import { SecretsRpcHandlers } from "./Secrets";
 import { ServerRpcHandlers } from "./Server";
 import { SkillsRpcHandlers } from "./Skills";
@@ -116,6 +118,7 @@ export const SessionRpcLive = RpcServer.layerHttp({
       DoctorRpcHandlers,
       SkillsRpcHandlers,
       SecretsRpcHandlers,
+      NotificationsRpcHandlers,
     ),
   ),
   Layer.provide(RpcSerialization.layerNdjson),
@@ -127,4 +130,6 @@ export const SessionRpcLive = RpcServer.layerHttp({
   Layer.provide(TriggerDeliveriesLive),
   Layer.provide(SkillServiceLive),
   Layer.provide(SecretServiceLive),
+  // The stored notification toggles and sinks, over the configuration the notifier daemon reads (F21).
+  Layer.provide(NotifySettingsFromEnv),
 );
