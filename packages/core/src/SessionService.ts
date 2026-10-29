@@ -103,6 +103,7 @@ import type {
   WorkspaceRelease,
   WorkspaceReleaseReason,
 } from "@repo/domain/Session";
+import type { SessionContext } from "@repo/domain/RepoContext";
 import {
   RepoCloneFailed,
   RepoNotFound,
@@ -212,6 +213,8 @@ import {
   readRecordedReview,
   readSetupRecord,
   readPolicyRecord,
+  readRepoPrompt,
+  readSettlePr,
   readSkillPins,
   readTranscriptPage,
   readVerifyRecords,
@@ -224,6 +227,7 @@ import {
   compareReplay,
   mirrorComparison,
   readPromptSubmission,
+  rootHasRequest,
   readReplayDocument,
   readReplayRun,
   readReplaySource,
@@ -248,6 +252,7 @@ import {
   writeApprovalRequested,
   writeApprovalUsed,
   writeActor,
+  writeSettlePr,
   commitBudget,
   formatDollars,
   writeBudget,
@@ -323,7 +328,20 @@ import { readRepoContext } from "./repoContext";
 import { readRepoPolicy } from "./repoPolicy";
 import { homeOf, makePresence, type Lease } from "./Presence";
 import { SessionBus, SessionBusPostgres } from "./SessionBus";
-import { atCapacity, runCapReached, SESSION_MAX_CONCURRENT } from "./admission";
+import {
+  atCapacity,
+  budgetExceeded,
+  runCapReached,
+  SESSION_MAX_CONCURRENT,
+} from "./admission";
+import {
+  checkSpendCaps,
+  hasSpendCaps,
+  NO_SPEND_CAPS,
+  raiseSpendAlerts,
+  syncSpendCapLimits,
+  type SpendCaps,
+} from "./spendCaps";
 import { checkRunCaps } from "./boardCaps";
 import { type CardBranch, cardBranchOf, changeColumnsOf } from "./cardBranch";
 import {
@@ -339,7 +357,6 @@ import { openPullRequest, type OpenPullRequestInput } from "./prStep";
 import {
   notOpenedText,
   settleDeclarationOf,
-  TRIGGER_PREFIX,
   type NotOpened,
   type SettleDecision,
   type SettledRun,
@@ -438,6 +455,14 @@ export type SessionServiceShape = {
   readonly history: (
     input: ReadSessionHistoryInput,
   ) => Effect.Effect<SessionHistoryPage, SessionError>;
+  /**
+   * What the session's repository told its last run (F19): the instruction file and the skills
+   * index, as the log records them. Read from the log, owned or not; `repo` is absent for a
+   * scratch session and for a log that never recorded one.
+   */
+  readonly context: (
+    sessionId: SessionId,
+  ) => Effect.Effect<SessionContext, SessionError>;
   readonly send: (
     input: SendMessageInput,
   ) => Effect.Effect<SendMessageResult, SessionError>;
@@ -834,10 +859,11 @@ export type SessionServiceShape = {
    * session with no PR until someone ran `factory pr`.
    *
    * The sessions are the ones the settle rule declares (`./prOnSettle`'s `settleDeclarationOf`: a
-   * trigger's session, a card's run in a column that requires a PR or continuing the card's PR) that
-   * record no PR, have no run or mission in flight, and whose worktree is under this process's
-   * session root and its own checkout — so a person's session, a fork, a replay, a released
-   * workspace and a parked run are never opened, and another instance's sessions are its own. Nor is
+   * trigger's session, a card's run in a column that requires a PR or continuing the card's PR, a
+   * person's session whose log records its opt-in, F17) that record no PR, have no run or mission in
+   * flight, and whose worktree is under this process's session root and its own checkout — so a
+   * person's session that did not ask, a fork, a released workspace and a parked run are never
+   * opened, and another instance's sessions are its own. Nor is
    * a card run a later run of the card took the branch over from (C19): it is superseded, and its
    * step would publish the later run's branch into its stale log. Nor a session this process saw a
    * run go busy in before the sweep finished (one `resumeRuns` continued, one a client started):
@@ -955,6 +981,16 @@ export type SessionServiceOptions = {
    * (`SESSION_MAX_CONCURRENT`).
    */
   readonly maxConcurrentSessions?: number;
+  /**
+   * Aggregate spend caps (S-aggregate-spend-caps, `./spendCaps`): the dollars a repository or an
+   * actor may spend in a UTC day or month. A `create`, a `startMission`, a `replay` or a `send` that
+   * would start a run (not a steer or follow-up into one under way) once the
+   * repository's or the actor's window has reached its limit is refused `budget_exceeded` before
+   * anything is written, and the spend that crosses 80% and 100% of a cap raises one alert each
+   * (the attention view, the notifier). Absent: no cap (`SPEND_CAPS` unset) and the recorded
+   * limits are left as they are; given (even with no entries) they are replaced by these.
+   */
+  readonly spendCaps?: SpendCaps;
   /**
    * What a session may do unattended (D11, `@repo/harness`'s `Policy`). Absent: D11's defaults, so
    * an unpoliced session is not reachable by omitting an argument.
@@ -1395,6 +1431,117 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             source: SESSION_MAX_CONCURRENT,
           });
         });
+      const spendCaps = options.spendCaps ?? NO_SPEND_CAPS;
+      // A deployment that states its caps (even none) says which alerts still stand: the attention
+      // view lists an alert only while its cap and limit are the configured ones.
+      if (options.spendCaps !== undefined) {
+        const recordCaps = syncSpendCapLimits(spendCaps).pipe(
+          Effect.provideService(SqlClient, sql),
+        );
+        // At a first boot the migrations may not have made the table yet: try again, off the boot,
+        // until they have. Until then no alert is listed, which is the safe side of "unknown".
+        yield* recordCaps.pipe(
+          Effect.catch((error) =>
+            Effect.logWarning(
+              `spend caps were not recorded yet, so spend alerts stay hidden until they are: ${String(error)}`,
+            ).pipe(
+              Effect.andThen(
+                Effect.retry(recordCaps, Schedule.spaced("2 seconds")).pipe(
+                  Effect.ignore,
+                  Effect.forkScoped,
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+      /**
+       * Aggregate spend caps (S-aggregate-spend-caps): refuse a run that would start for `who` once
+       * a repository's or an actor's window has reached its cap. Before anything is written, so a
+       * refused create leaves no row and takes no request id. The refusal also raises the cap's
+       * alerts, which a spend recorded before the cap was configured (or lowered) never did.
+       * With no cap configured, no read at all.
+       */
+      const refuseOverSpendCap = (who: {
+        readonly repo: string | undefined;
+        readonly actor: string | undefined;
+      }): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          if (!hasSpendCaps(spendCaps)) return;
+          const now = yield* Clock.currentTimeMillis;
+          const hit = yield* paper(
+            "check spend caps",
+            checkSpendCaps(spendCaps, who, now).pipe(
+              Effect.provideService(SqlClient, sql),
+            ),
+          );
+          if (hit === undefined) return;
+          yield* alertOnSpend(who, now);
+          yield* countRefusal("budget_exceeded");
+          return yield* budgetExceeded(hit);
+        });
+      /**
+       * The spend caps for a message to a session: refused only when it would start a run. A message
+       * to a session whose run is going (a steer, a follow-up) starts none — a run under way is not
+       * stopped by a cap, and neither is the person steering it — and a retry of a message the log
+       * already holds under its request id is answered by Pi Durable's own dedupe, so the first
+       * attempt's run (which may be the one that crossed the cap) is not turned into a refusal.
+       */
+      const refuseSendOverSpendCap = (
+        input: SendMessageInput,
+        row: SessionRow,
+      ): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          if (!hasSpendCaps(spendCaps)) return;
+          const requestId = input.requestId;
+          const owner = HashMap.get(yield* Ref.get(live), input.sessionId);
+          if (Option.isSome(owner)) {
+            const busy = yield* isBusy(
+              owner.value.harness,
+              owner.value.root,
+            ).pipe(Effect.orElseSucceed(() => false));
+            if (busy) return;
+          }
+          if (requestId !== undefined) {
+            const seen = yield* (
+              Option.isSome(owner)
+                ? rootHasRequest(owner.value.storage, requestId)
+                : withReader(input.sessionId, (storage) =>
+                    rootHasRequest(storage, requestId),
+                  )
+            ).pipe(Effect.orElseSucceed(() => false));
+            if (seen) return;
+          }
+          yield* refuseOverSpendCap({
+            repo: row.repo ?? undefined,
+            actor: row.actor ?? undefined,
+          });
+        });
+      /** Raise the alerts `who`'s spend has reached; a failure to is warned of, never the request's. */
+      const alertOnSpend = (
+        who: {
+          readonly repo: string | undefined;
+          readonly actor: string | undefined;
+        },
+        now: number,
+      ): Effect.Effect<void> =>
+        !hasSpendCaps(spendCaps)
+          ? Effect.void
+          : raiseSpendAlerts(spendCaps, who, now).pipe(
+              Effect.provideService(SqlClient, sql),
+              Effect.flatMap((raised) =>
+                Effect.forEach(raised, (alert) =>
+                  Effect.logWarning(
+                    `spend: ${alert.scope} ${alert.subject} reached ${alert.threshold}% of its ${alert.window} cap`,
+                  ),
+                ),
+              ),
+              Effect.catch((error) =>
+                Effect.logWarning(
+                  `spend alerts were not raised: ${String(error)}`,
+                ),
+              ),
+            );
       /**
        * Whether an acquisition must find a free slot: not one its new session already reserved, and
        * not a boot's resume of work admitted before the process died (`admission: "resume"`), and
@@ -4218,6 +4365,18 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // the lookup a replay does — before anything is written: a model this process cannot serve
           // is refused here, not registered as a repo, an index row and a log that never run.
           const model = yield* sessionModelFor(input.model);
+          if (
+            input.openPrOnSettle === true &&
+            (input.repo === undefined || input.taskId !== undefined)
+          ) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message:
+                input.taskId !== undefined
+                  ? "a card's run opens its PR by its column, so it takes no openPrOnSettle"
+                  : "openPrOnSettle needs a repo: a scratch session has no pull request to open",
+            });
+          }
           // The column the run starts in, before anything is written: it is what the run's prompt
           // and its autonomy are resolved from (B6, C22), so it has to be one the card's pinned
           // definition declares.
@@ -4225,6 +4384,17 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             input.taskId === undefined
               ? undefined
               : yield* startColumnFor(input.taskId, input.taskColumn);
+          // The aggregate spend caps (S-aggregate-spend-caps), on the repo the run works in — the
+          // card's, when it names none — and the actor the run is attributed to, before a slot is
+          // taken or anything is written: a create refused `budget_exceeded` leaves no row and takes
+          // no request id, so its retry is a fresh attempt.
+          if (hasSpendCaps(spendCaps)) {
+            const card = yield* cardBindingFor(input.taskId);
+            yield* refuseOverSpendCap({
+              repo: input.repo ?? card?.repo,
+              actor: input.actor,
+            });
+          }
           // A slot before anything is written (LOB-70): a create refused at capacity registers no
           // repo, writes no row and takes no request id, so its retry is a fresh attempt. Held until
           // the owner below is open, which takes it over; given back on any other exit.
@@ -4339,6 +4509,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               // The log keeps the actor too (LOB-162), so a rebuilt index still knows whose spend
               // this session is.
               yield* writeActor(owner.root, input.actor);
+            }
+            if (input.openPrOnSettle === true) {
+              // The opt-in is the log's (F17), so a restart and a rebuilt index keep it: the settle
+              // rule reads it from here (`settledRunOf`'s caller).
+              yield* writeSettlePr(owner.root);
             }
             if (input.taskId !== undefined && column !== undefined) {
               yield* writeTaskBinding(owner.root, {
@@ -4592,6 +4767,15 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           );
         });
 
+      const sessionContext = (
+        sessionId: SessionId,
+      ): Effect.Effect<SessionContext, SessionError> =>
+        Effect.gen(function* () {
+          yield* requireSession(sessionId);
+          const repo = yield* withReader(sessionId, readRepoPrompt);
+          return repo === undefined ? {} : { repo };
+        });
+
       /** The checks a message passes before anything is opened for it. */
       const refuseOversized = (input: SendMessageInput) =>
         Effect.gen(function* () {
@@ -4687,6 +4871,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* refuseOversized(input);
           const row = yield* requireSession(input.sessionId);
           yield* refuseUnservedModel(input.sessionId, row);
+          yield* refuseSendOverSpendCap(input, row);
           // A released session is refused by the acquisition, from the release it reads under the
           // owners' gate (LOB-268): a check here, on `row`, would miss one that commits in between.
           const owner = yield* acquireOwner(input.sessionId, row, {
@@ -4722,6 +4907,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* refuseOversized(input);
           const row = yield* requireSession(input.sessionId);
           yield* refuseUnservedModel(input.sessionId, row);
+          yield* refuseSendOverSpendCap(input, row);
           const owner = yield* acquireOwner(input.sessionId, row, {
             starts: true,
           });
@@ -5571,6 +5757,27 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const unchangedAt = new Map<SessionId, string>();
 
       /**
+       * `settledRunOf` with the log's half of the rule applied (F17): a person's session may have
+       * asked, at create, for its PR to open when a run settles, which is the log's, not the index's.
+       * It is read for the sessions the index leaves undeclared and that no card runs — one reader,
+       * for a repo session only — so the live settle and the boot sweep decide from the same answer.
+       */
+      const settledRunWithAsk = (sessionId: SessionId) =>
+        Effect.gen(function* () {
+          const indexed = yield* settledRunOf(sessionId);
+          const asked =
+            indexed !== undefined &&
+            indexed.taskId === undefined &&
+            indexed.run.repo !== null &&
+            settleDeclarationOf(indexed.run) === "undeclared"
+              ? yield* withReader(sessionId, readSettlePr)
+              : false;
+          return indexed === undefined || !asked
+            ? indexed
+            : { ...indexed, run: { ...indexed.run, openPrOnSettle: true } };
+        });
+
+      /**
        * The PR step a settled run takes with no operator (C18, `./prOnSettle`): run when this process
        * sees a session's run go idle, for a session that declares it, through the same `openPr` an
        * operator's call takes — the gate, the cap, the push, the record and the write-back are the
@@ -5590,7 +5797,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         forge: Context.Context<CredentialProvider | HttpClient.HttpClient>,
       ): Effect.Effect<void> => {
         const decide = Effect.gen(function* () {
-          const settled = yield* settledRunOf(sessionId);
+          const settled = yield* settledRunWithAsk(sessionId);
           const declaration =
             settled === undefined
               ? "undeclared"
@@ -5896,6 +6103,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ? {}
               : { baseRef: origin.binding.baseRef }),
           };
+          // A replay runs its source's task again and pays for it, so it is a run the aggregate spend
+          // caps refuse (S-aggregate-spend-caps), before any slot or row.
+          yield* refuseOverSpendCap({
+            repo: binding.repo,
+            actor: actor ?? undefined,
+          });
           // A slot before the row is written, after the refusals that need none (LOB-70).
           const slot = yield* admitted;
           const id = yield* mintSessionId;
@@ -6296,6 +6509,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const row = yield* requireSession(input.sessionId);
           yield* refuseReleased(row);
           yield* refuseUnservedModel(input.sessionId, row);
+          // A mission is the dearest run there is (workers, plan, implement and verify phases), so
+          // the aggregate spend caps refuse its start (S-aggregate-spend-caps).
+          yield* refuseOverSpendCap({
+            repo: row.repo ?? undefined,
+            actor: row.actor ?? undefined,
+          });
           // The checks are policed against the worktree's path, which needs no worktree: the one the
           // mission runs in is the owner's, cut under the gate.
           const planned = yield* workspaceFor(row, { cut: false });
@@ -7088,15 +7307,52 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       ): Effect.Effect<void> =>
         Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis;
-          yield* paper(
+          // The ledger row (S-aggregate-spend-caps) is the increase over the `cost_total` this write
+          // replaces, written in the statement that moves it. Writers of one session (a run's usage
+          // events, a curation or decomposition charge) are serialized by a per-session advisory
+          // lock held to the commit, so each reads the total the one before it left rather than a
+          // shared snapshot, and the total never moves backwards: a stale lower value is a no-op,
+          // not a decrease the next write would count again.
+          const who = yield* paper(
             "write session spend",
-            sql`
-              INSERT INTO session_activity (session_id, cost_total, last_activity_at)
-              VALUES (${sessionId}, ${costTotal}, to_timestamp(${now / 1000}))
-              ON CONFLICT (session_id) DO UPDATE
-              SET cost_total = EXCLUDED.cost_total, last_activity_at = EXCLUDED.last_activity_at
-            `,
+            sql.withTransaction(
+              Effect.gen(function* () {
+                yield* sql`SELECT pg_advisory_xact_lock(hashtextextended(${`session-spend:${sessionId}`}, 0))`;
+                return yield* sql<{
+                  repo: string | null;
+                  actor: string | null;
+                }>`
+                  WITH prev AS (
+                    SELECT COALESCE(
+                      (SELECT cost_total FROM session_activity WHERE session_id = ${sessionId}),
+                      0
+                    ) AS cost
+                  ),
+                  ledger AS (
+                    INSERT INTO spend_ledger (session_id, repo, actor, usd, at)
+                    SELECT s.id, s.repo, s.actor, ${costTotal}::double precision - prev.cost,
+                           to_timestamp(${now / 1000})
+                    FROM sessions s, prev
+                    WHERE s.id = ${sessionId} AND ${costTotal}::double precision > prev.cost
+                  ),
+                  activity AS (
+                    INSERT INTO session_activity (session_id, cost_total, last_activity_at)
+                    VALUES (${sessionId}, ${costTotal}, to_timestamp(${now / 1000}))
+                    ON CONFLICT (session_id) DO UPDATE
+                    SET cost_total = GREATEST(session_activity.cost_total, EXCLUDED.cost_total),
+                        last_activity_at = EXCLUDED.last_activity_at
+                  )
+                  SELECT repo, actor FROM sessions WHERE id = ${sessionId}
+                `;
+              }),
+            ),
           );
+          const row = who[0];
+          if (row !== undefined)
+            yield* alertOnSpend(
+              { repo: row.repo ?? undefined, actor: row.actor ?? undefined },
+              now,
+            );
         }).pipe(Effect.ignore);
 
       /**
@@ -8601,9 +8857,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       > = Effect.gen(function* () {
         const forge = options.pullRequestOnSettle;
         if (forge === undefined) return [];
-        // The settle rule's provenance, narrowed in SQL to what could be declared and owes a PR:
-        // `settleDeclarationOf` below is still the rule, this only keeps a boot from reading every
-        // row. A run or mission still in flight is `resumeRuns`' and `resumeMissions`', and its
+        // The settle rule's provenance, narrowed in SQL to what could owe a PR (a repo session with
+        // none recorded, no fork, no run in flight): `settleDeclarationOf` below is the rule — a
+        // card's run, a trigger's session, and a person's session whose log records the opt-in
+        // (F17) — so this only keeps a boot from stepping every row. A run or mission still in flight is `resumeRuns`' and `resumeMissions`', and its
         // settle takes the step as any live one does.
         const rows = yield* paper(
           "read settled sessions that may owe a PR",
@@ -8616,11 +8873,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             WHERE s.repo IS NOT NULL AND s.pr_url IS NULL
               AND s.workspace_released_at IS NULL AND s.forked_from IS NULL
               AND s.run_session_root IS NULL AND NOT s.mission_in_flight
-              AND (
-                EXISTS (SELECT 1 FROM task_runs tr WHERE tr.session_id = s.id)
-                OR (s.actor LIKE ${`${TRIGGER_PREFIX}%`}
-                    AND s.request_id LIKE ${`${TRIGGER_PREFIX}%`})
-              )
             ORDER BY s.id
           `,
         );
@@ -8645,6 +8897,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 .exists(path.join(directory, ".git"))
                 .pipe(Effect.orElseSucceed(() => false));
               if (!checkout) return undefined;
+              // Decided from the index (and, for a person's session, its log) before anything is
+              // opened: an undeclared or parked session is left exactly as it was.
+              const settled = yield* settledRunWithAsk(sessionId);
+              if (
+                settled === undefined ||
+                settleDeclarationOf(settled.run) !== "declared"
+              )
+                return undefined;
               // A card's run whose branch a later run of the card took over (C19) is superseded: its
               // worktree is on a detached HEAD, nothing can steer it again, and stepping it would
               // push the later run's branch and adopt the card's PR into this stale log.
@@ -8655,14 +8915,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   branch ?? `factory/${id}`,
                   directory,
                 )) !== undefined
-              )
-                return undefined;
-              // Decided from the index before anything is opened: an undeclared or parked session
-              // is left exactly as it was.
-              const settled = yield* settledRunOf(sessionId);
-              if (
-                settled === undefined ||
-                settleDeclarationOf(settled.run) !== "declared"
               )
                 return undefined;
               const tip = yield* resolveCommit(directory, "HEAD");
@@ -8879,6 +9131,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         create,
         get,
         history,
+        context: sessionContext,
         send,
         sendDeferringSetup,
         interrupt,

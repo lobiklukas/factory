@@ -27,6 +27,8 @@ export type RefusalReason =
   | "budget"
   /** A request that would open one more session than `SESSION_MAX_CONCURRENT` allows (LOB-70). */
   | "at_capacity"
+  /** A run refused because its repository's or actor's aggregate spend cap was reached (S-aggregate-spend-caps). */
+  | "budget_exceeded"
   /** A first message refused because its worktree's declared setup failed (S-env-setup). */
   | "setup_failed";
 

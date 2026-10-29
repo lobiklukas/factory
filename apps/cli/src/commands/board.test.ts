@@ -568,6 +568,32 @@ describe("attentionLines (LOB-264)", () => {
     ).toBe("  blocked needs_input since 2026-10-27T11:00:00.000Z");
   });
 
+  it("prints a spend cap with no card: the cap's subject stands where the title would, the facts under it", () => {
+    const row = (threshold: number) =>
+      attentionLines(
+        Schema.decodeSync(AttentionItem)({
+          reason: {
+            _tag: "spend",
+            scope: "repo",
+            subject: "acme/widget",
+            window: "day",
+            threshold,
+            limit: 20,
+            spent: threshold === 100 ? 20.25 : 16,
+            since: "2026-10-27T10:00:00.000Z",
+            resetsAt: "2026-10-28T00:00:00.000Z",
+          },
+        }),
+      );
+    expect(row(80)).toEqual([
+      "spend  -  -  -  -  repo acme/widget",
+      "  at 80% of its daily cap: $16.00 of $20.00 since 2026-10-27T10:00:00.000Z; new runs are refused once it is reached",
+    ]);
+    expect(row(100)[1]).toBe(
+      "  reached its daily cap: $20.25 of $20.00 since 2026-10-27T10:00:00.000Z; new runs are refused until 2026-10-28T00:00:00.000Z",
+    );
+  });
+
   it("prints a review's block and its note on one line (C21)", () => {
     const lines = attentionLines(
       item({

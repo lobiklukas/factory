@@ -160,6 +160,7 @@ describe("what the repository tells a run", () => {
         listed: [
           { name: "verify-api", path: ".pi/skills/verify-api/SKILL.md" },
         ],
+        nested: [],
         dropped: [],
         // The column binds `specify`, so the repo's skill of that name is left to it.
         shadowed: [".agents/skills/specify/SKILL.md"],
@@ -181,6 +182,7 @@ describe("what the repository tells a run", () => {
         tokens: 0,
         cap: REPO_SKILLS_TOKEN_CAP,
         listed: [],
+        nested: [],
         dropped: [],
         shadowed: [],
       },

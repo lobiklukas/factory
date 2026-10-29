@@ -178,7 +178,7 @@ drive() { # phase, topic
 # --- 1. both sinks: the four events, once each ----------------------------------------------------
 start_api NOTIFY_SLACK_WEBHOOK_URL="$FAKE_URL$WEBHOOK_PATH" NOTIFY_NTFY_TOPIC="$TOPIC" || exit 1
 check "the boot names both sinks, every kind, the interval and the links" \
-  "$(grep -q "notifications: question, approval, gate, failed to a Slack incoming webhook and ntfy at $FAKE_URL, every ${POLL_MS}ms, linking to $LINK_BASE" "$LOG" && echo 0 || echo 1)" \
+  "$(grep -q "notifications: question, approval, gate, failed, spend to a Slack incoming webhook and ntfy at $FAKE_URL, every ${POLL_MS}ms, linking to $LINK_BASE" "$LOG" && echo 0 || echo 1)" \
   "boot line"
 drive seed "$TOPIC"
 check "the API logged each delivery" \

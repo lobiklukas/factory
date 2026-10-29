@@ -228,8 +228,12 @@ as two capped sections: `repo_instructions` (the file verbatim, ahead of the col
 `repo_skills` (one line per skill — name, description, path — after them; the run reads a body on
 demand with its own tools, and the factory's skills table never holds it). A repo skill whose name the
 column binds is left out of the index: the factory's skill is authoritative. What both cost is the
-log's `factory.repo.prompt` record. Importing a repository's skill _into_ the factory (wave 2, below)
-is still a copy, `factory skill put --file`, and it is still unbuilt as a flow.
+log's `factory.repo.prompt` record, which an operator reads back (F19: `getSessionContext`, `factory show`'s
+`context` line, the session pane's line). The instruction file is the first of `AGENTS.md`, `CLAUDE.md`
+and `.github/copilot-instructions.md` the base has (F20, the record names the path read), and the
+`AGENTS.md` files nested in directories are listed by path in the skills index, never injected. Importing
+a repository's skill _into_ the factory (wave 2, below) is still a copy, `factory skill put --file`, and it
+is still unbuilt as a flow.
 
 **The tool policy** is a filter on what a run is _offered_: a read-only role is not given `write`,
 `edit` or `verify` at all (`STAGE_REFUSED_TOOLS`), so a call to one meets Pi Durable's

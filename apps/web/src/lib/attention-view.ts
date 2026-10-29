@@ -24,7 +24,7 @@ export type AttentionGroup = {
   readonly items: ReadonlyArray<AttentionItem>;
 };
 
-/** The groups in the order the server answers them: a run waiting live, a parked run, a review, a gate. */
+/** The groups in the order the server answers them: a run waiting live, a parked run, a review, a gate, a spend cap. */
 const GROUPS: ReadonlyArray<{
   readonly kind: AttentionKind;
   readonly title: string;
@@ -33,6 +33,7 @@ const GROUPS: ReadonlyArray<{
   { kind: "question", title: "Answer a run's question" },
   { kind: "review", title: "Address a review" },
   { kind: "gate", title: "Make a person's move" },
+  { kind: "spend", title: "Spend cap reached or near" },
 ];
 
 /**
@@ -83,6 +84,10 @@ export const attentionReasonText = (item: AttentionItem): string => {
       return reason.unmet === undefined || reason.unmet.length === 0
         ? `The ${task.column} run is idle; ${task.column} → ${reason.to} is the ${reason.gate}, a person's move`
         : `The ${task.column} run is idle without ${reason.unmet.join(", ")}; ${task.column} → ${reason.to} needs it before the ${reason.gate}`;
+    case "spend":
+      return reason.threshold >= 100
+        ? `Reached its ${reason.window === "day" ? "daily" : "monthly"} cap ($${reason.spent.toFixed(2)} of $${reason.limit.toFixed(2)}): new runs are refused until ${reason.resetsAt}`
+        : `At ${reason.threshold}% of its ${reason.window === "day" ? "daily" : "monthly"} cap ($${reason.spent.toFixed(2)} of $${reason.limit.toFixed(2)}): new runs are refused once it is reached`;
   }
 };
 
@@ -92,6 +97,9 @@ export const attentionReasonText = (item: AttentionItem): string => {
  */
 export const attentionTitle = (item: AttentionItem): string =>
   item.task?.title ??
+  (item.reason._tag === "spend"
+    ? `${item.reason.scope === "repo" ? "Repository" : "Actor"} ${item.reason.subject}`
+    : undefined) ??
   (item.sessionTitle === undefined || item.sessionTitle.trim() === ""
     ? item.reason._tag === "approval"
       ? item.reason.sessionId
@@ -114,7 +122,8 @@ export type AttentionLink =
       readonly hash?: typeof THREAD_ANCHOR;
     }
   | { readonly kind: "session"; readonly sessionId: SessionId }
-  | { readonly kind: "sessions" };
+  | { readonly kind: "sessions" }
+  | { readonly kind: "spend" };
 
 /**
  * Where a row's link goes: the card's own pane on its board; for an approval, the run that asked, so
@@ -126,6 +135,7 @@ export type AttentionLink =
  */
 export const attentionLink = (item: AttentionItem): AttentionLink => {
   const { task } = item;
+  if (item.reason._tag === "spend") return { kind: "spend" };
   if (task === undefined) {
     return item.reason._tag === "question" || item.reason._tag === "review"
       ? { kind: "sessions" }

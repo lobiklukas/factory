@@ -257,4 +257,132 @@ describe("the repository's instructions and skills in every run", () => {
       ),
     ).toBe(true);
   }, 120_000);
+
+  // F20. Mutation: read AGENTS.md only — the CLAUDE.md-only repo gets no section, and a repo with
+  // both could be told either.
+  it("falls back to CLAUDE.md for a repo with no AGENTS.md, lets AGENTS.md win when both exist, and lists nested AGENTS.md by path", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const claude = yield* register("claude-only", {
+          "CLAUDE.md": "# Claude rules\n\n- Use bun.\n",
+        });
+        const both = yield* register("agents-and-claude", {
+          "AGENTS.md": "# Agents rules\n",
+          "CLAUDE.md": "# Claude rules\n",
+          "packages/web/AGENTS.md": "# Web rules (nested)\n",
+        });
+        const claudeSession = yield* sessions.create({
+          repo: claude.repo,
+          title: "claude",
+        });
+        yield* run(claudeSession.id, "begin");
+        const bothSession = yield* sessions.create({
+          repo: both.repo,
+          title: "both",
+        });
+        yield* run(bothSession.id, "begin");
+        return {
+          claude: yield* logged(claudeSession.id),
+          claudeContext: yield* sessions.context(claudeSession.id),
+          both: yield* logged(bothSession.id),
+          bothContext: yield* sessions.context(bothSession.id),
+        };
+      }),
+    );
+
+    const claude = outcome.claude.sections["repo_instructions"] ?? "";
+    expect(claude).toContain(
+      "The repository's CLAUDE.md, as committed at main",
+    );
+    expect(claude).toContain("- Use bun.");
+    expect(outcome.claude.record?.instructions?.path).toBe("CLAUDE.md");
+    expect(outcome.claudeContext.repo?.instructions?.path).toBe("CLAUDE.md");
+    // With both, AGENTS.md is the one told, and the record says so; CLAUDE.md is not read in.
+    const both = outcome.both.sections["repo_instructions"] ?? "";
+    expect(both).toContain("The repository's AGENTS.md, as committed at main");
+    expect(both).toContain("# Agents rules");
+    expect(both).not.toContain("Claude rules");
+    expect(outcome.both.record?.instructions?.path).toBe("AGENTS.md");
+    // The nested file is named in the skills index, its text is not in the prompt.
+    const index = outcome.both.sections["repo_skills"] ?? "";
+    expect(index).toContain("- packages/web/AGENTS.md");
+    expect(JSON.stringify(outcome.both.sections)).not.toContain("Web rules");
+    expect(outcome.both.record?.skills.nested).toEqual([
+      "packages/web/AGENTS.md",
+    ]);
+  }, 120_000);
+
+  // F19. Mutations: answer `{}` for every session (no record is read); read the record with `owned`
+  // semantics only; drop `truncated` or the skills counts from the answer.
+  it("answers what the run was told for getSessionContext: the file, its size, truncation, skills; and nothing for a scratch session", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const told = yield* register("ctx-told", {
+          "AGENTS.md": AGENTS,
+          [SKILL_PATH]: `---\nname: ${SKILL_NAME}\ndescription: Use when the fixture needs its skill.\n---\n\n${SKILL_BODY}\n`,
+          ".agents/skills/other/SKILL.md": "No frontmatter.\n",
+        });
+        // A file far past the instructions cap: cut at a line boundary, and the record says so.
+        const longRules = Array.from(
+          { length: 3000 },
+          (_, line) => `- rule ${line}: keep the gate green`,
+        ).join("\n");
+        const long = yield* register("ctx-long", { "AGENTS.md": longRules });
+        const bare = yield* register("ctx-bare", { "README.md": "nothing\n" });
+        const open = (repo: typeof told.repo, title: string) =>
+          Effect.gen(function* () {
+            const created = yield* sessions.create({ repo, title });
+            yield* run(created.id, "begin");
+            return created.id;
+          });
+        const toldId = yield* open(told.repo, "told");
+        const longId = yield* open(long.repo, "long");
+        const bareId = yield* open(bare.repo, "bare");
+        const scratchId = (yield* sessions.create({ title: "scratch" })).id;
+        yield* run(scratchId, "begin");
+        // A session no process owns still answers: it is read from the log.
+        yield* sessions.close;
+        return {
+          told: yield* sessions.context(toldId),
+          long: yield* sessions.context(longId),
+          bare: yield* sessions.context(bareId),
+          scratch: yield* sessions.context(scratchId),
+        };
+      }),
+    );
+
+    expect(outcome.told.repo?.instructions).toEqual({
+      path: "AGENTS.md",
+      bytes: Buffer.byteLength(AGENTS),
+      tokens: expect.any(Number),
+      cap: expect.any(Number),
+      truncated: false,
+    });
+    expect(outcome.told.repo?.skills.listed.map((skill) => skill.path)).toEqual(
+      [SKILL_PATH, ".agents/skills/other/SKILL.md"],
+    );
+    expect(outcome.long.repo?.instructions?.truncated).toBe(true);
+    expect(outcome.long.repo?.instructions?.tokens).toBeLessThanOrEqual(
+      outcome.long.repo?.instructions?.cap ?? 0,
+    );
+    // A repo with neither file is a record of that, a scratch session has no record.
+    expect(outcome.bare.repo?.instructions).toBeNull();
+    expect(outcome.bare.repo?.skills.listed).toEqual([]);
+    expect(outcome.scratch.repo).toBeUndefined();
+  }, 120_000);
+
+  it("refuses an unknown session", async () => {
+    const error = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        return yield* Effect.flip(
+          sessions.context("ses_00000000000000000000000000" as SessionId),
+        );
+      }),
+    );
+
+    expect(error.code).toBe("not_found");
+  });
 });

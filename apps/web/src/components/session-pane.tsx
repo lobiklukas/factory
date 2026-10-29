@@ -48,6 +48,7 @@ import { CompactButton } from "@/components/compact-button";
 import { InterruptButton } from "@/components/interrupt-button";
 import { RaiseCap } from "@/components/raise-cap";
 import { PrControl, PrReason } from "@/components/open-pull-request";
+import { RepoContextLine } from "@/components/repo-context-line";
 import { TaskPanel } from "@/components/task-panel";
 import { TranscriptRow } from "@/components/transcript-entry";
 import { visibleEntries } from "@/lib/transcript-view";
@@ -567,6 +568,8 @@ export const SessionPane = ({
       </header>
       <PrReason session={prSession} />
       <CheckoutWarning warning={view?.workspaceWarning} />
+      {/* What the run was told about its repository (F19): the instruction file and the skills. */}
+      {view === null ? null : <RepoContextLine sessionId={sessionId} />}
 
       {/*
        * What the run is doing right now, before what it said (LOB-184). The list is the stream's

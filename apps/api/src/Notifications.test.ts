@@ -57,7 +57,7 @@ describe("the notifier's configuration", () => {
     ]);
     const line = describeNotifyPlan(resolved);
     expect(line).toBe(
-      `notifications: question, approval, gate, failed to a Slack incoming webhook and ntfy at http://127.0.0.1:3551, every 5000ms, linking to ${DASHBOARD}`,
+      `notifications: question, approval, gate, failed, spend to a Slack incoming webhook and ntfy at http://127.0.0.1:3551, every 5000ms, linking to ${DASHBOARD}`,
     );
     for (const secret of ["secret-part", "secret-topic", "tk_secret"]) {
       expect(line).not.toContain(secret);

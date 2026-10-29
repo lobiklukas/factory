@@ -2,7 +2,7 @@
  * Notifications (S-notifications): a person is told when a run needs them, instead of finding out
  * by polling the attention page.
  *
- * **What is an event.** Four kinds, each read from a row the factory already keeps, never from a
+ * **What is an event.** Five kinds, each read from a row the factory already keeps, never from a
  * stream only this process saw:
  *
  * - `question` — a card blocked `needs_input` (B7), as the attention view lists it (LOB-77). The
@@ -17,7 +17,12 @@
  *   model request Pi Durable gave up on, as the session's activity projection records it in
  *   `run_failures` (migration 0039): `failed:<session>:<entry>`.
  *
- * The first three are the attention view itself (`TaskService.attention`, every board), so "what
+ * - `spend` — an aggregate spend cap (S-aggregate-spend-caps) crossed 80% or reached 100% in its
+ *   window, as the attention view lists it: `spend:<scope>:<subject>:<window>:<period>:<limit>:<threshold>`,
+ *   so each threshold of each cap is told once per day or month, not once per run, and a cap raised
+ *   mid-window is told afresh at its own thresholds.
+ *
+ * The first three, and `spend`, are the attention view itself (`TaskService.attention`, every board), so "what
  * needs a person" has one definition and the notifier cannot disagree with the page. A failure is
  * history rather than a standing condition, so it is read over a bounded lookback
  * (`failureLookbackMs`, a day by default): a notifier enabled today does not page anybody about last
@@ -62,6 +67,7 @@ export const NotificationKind = Schema.Literals([
   "approval",
   "gate",
   "failed",
+  "spend",
 ]);
 export type NotificationKind = typeof NotificationKind.Type;
 export const NOTIFICATION_KINDS: ReadonlyArray<NotificationKind> =
@@ -252,6 +258,24 @@ export const notificationOfAttention = (
       // the notifier's kinds yet: `notification_deliveries.kind` admits these four (0039), and
       // GitHub already tells the PR's watchers of the review. A follow-up of C21.
       return undefined;
+    case "spend": {
+      const subject = `${reason.scope === "repo" ? "repository" : "actor"} ${reason.subject}`;
+      const window = reason.window === "day" ? "daily" : "monthly";
+      return {
+        eventId: `spend:${reason.scope}:${reason.subject}:${reason.window}:${reason.resetsAt}:${reason.limit}:${reason.threshold}`,
+        kind: "spend",
+        title:
+          reason.threshold >= 100
+            ? `Spend cap reached for ${subject}`
+            : `Spend at ${reason.threshold}% of the ${window} cap for ${subject}`,
+        body: clip(
+          reason.threshold >= 100
+            ? `$${reason.spent.toFixed(2)} of its $${reason.limit.toFixed(2)} ${window} cap: new runs are refused until ${reason.resetsAt} or the cap is raised.`
+            : `$${reason.spent.toFixed(2)} of its $${reason.limit.toFixed(2)} ${window} cap; new runs are refused once it is reached, until ${reason.resetsAt}.`,
+        ),
+        link: `${base(linkBase)}/spend`,
+      };
+    }
     case "gate":
       if (task === undefined) return undefined;
       return {
