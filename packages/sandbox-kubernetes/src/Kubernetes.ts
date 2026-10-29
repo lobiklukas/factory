@@ -276,7 +276,6 @@ export const make = (
                   entry.state.paused = before;
                 }),
               ),
-              Effect.mapError(fileError(sandbox)),
             );
             // The cluster took the change but did not report it done in time: its pod may be gone
             // or half up. Calls are refused as if paused, and the next pause or resume goes to
@@ -290,11 +289,10 @@ export const make = (
                   entry.state.unsettled = true;
                 }),
               ),
-              Effect.mapError(fileError(sandbox)),
             );
             entry.state.paused = pausing;
             entry.state.unsettled = false;
-          }),
+          }).pipe(Effect.mapError(fileError(sandbox))),
         );
       });
 
