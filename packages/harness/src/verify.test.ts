@@ -151,7 +151,14 @@ const onlyReport = (records: readonly VerifyRecord[]): VerifyReport => {
   return record;
 };
 
-describe("the verify tool, through a session's log", () => {
+/**
+ * Every case below builds a git checkout and runs a skill's `bash` scripts, with git measuring the
+ * change: 4 s alone at worst, and past vitest's 5 s default for a third of them beside a full `bun
+ * run test`, the slowest at 11 s. So they carry a budget sized to that load (DEFLAKE).
+ */
+const SPAWNING_CASES = { timeout: 60_000 };
+
+describe("the verify tool, through a session's log", SPAWNING_CASES, () => {
   it("runs the surface's fixture skill and records exit code 0 with its output", async () => {
     const root = checkout({
       [`${API_SKILL}/drive.sh`]:
@@ -304,7 +311,7 @@ const verifyIn = (cwd: string, options?: VerifyOptions) =>
     }),
   );
 
-describe("runVerify", () => {
+describe("runVerify", SPAWNING_CASES, () => {
   it("runs up.sh, the driver, then down.sh — and down.sh even when the driver fails", async () => {
     const root = checkout({
       [`${API_SKILL}/up.sh`]: "echo up\n",
@@ -390,7 +397,7 @@ describe("runVerify", () => {
     expect(result.code).toBe("timeout");
     // The shell may add its own line about the killed child; what the drive printed is kept.
     expect(result.output.startsWith("started\n")).toBe(true);
-  }, 15_000);
+  });
 
   it("runs down.sh on its own when the skill's script is stopped by a timeout", async () => {
     const root = checkout({
@@ -408,7 +415,7 @@ describe("runVerify", () => {
     // The group kill stopped the script before its own down.sh; the tool ran it after.
     expect(existsSync(join(root, API_SKILL, "down.ran"))).toBe(true);
     expect(result.output).toContain("running down.sh after timeout\ndown\n");
-  }, 15_000);
+  });
 
   it("runs a declared command once per call, told every surface the change named", async () => {
     const root = checkout({
@@ -559,7 +566,7 @@ describe("runVerify", () => {
     await expect(call).rejects.toThrow("verify aborted");
     expect(existsSync(join(root, API_SKILL, "down.ran"))).toBe(true);
     expect(output).toContain("running down.sh after");
-  }, 15_000);
+  });
 
   it("serializes verifications across calls, so two sessions never drive at once", async () => {
     const log = join(

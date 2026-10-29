@@ -16,6 +16,14 @@ process.env["GIT_CONFIG_NOSYSTEM"] = "1";
 // oxlint-disable-next-line effecttsgo/process-env -- as above.
 process.env["GIT_CONFIG_GLOBAL"] = "/dev/null";
 
+/**
+ * Each case spawns git a dozen times or more, and `bun run test` runs every package's suites at once,
+ * so a case's wall clock is mostly the machine's load: the slowest here took 3.5 s alone and 15 s beside a full
+ * `bun run test`. vitest's 5 s default is under that,
+ * so these cases carry a budget sized to the work instead (DEFLAKE).
+ */
+const GIT_CASES = { timeout: 60_000 };
+
 const roots: Array<string> = [];
 afterAll(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true });
@@ -61,7 +69,7 @@ const measure = (directory: string, head: string) =>
 const diffNames = (cwd: string, range: string): string =>
   git(cwd, "diff", "--name-only", range);
 
-describe("measureBaseOf", () => {
+describe("measureBaseOf", GIT_CASES, () => {
   /**
    * Mutation: measure against the local base whatever was fetched — the forge's B is counted as
    * the run's change, and an empty run measures non-empty.
@@ -145,7 +153,7 @@ describe("githubUrlOfRemote", () => {
   });
 });
 
-describe("forgeUrlFor", () => {
+describe("forgeUrlFor", GIT_CASES, () => {
   const repo = RepoSlug.make("acme/app");
   const withOrigin = (origin: string): string => {
     const root = mkdtempSync(join(tmpdir(), "factory-forge-url-"));

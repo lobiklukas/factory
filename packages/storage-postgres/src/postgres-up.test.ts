@@ -103,7 +103,9 @@ interface Scratch {
 const created: string[] = [];
 afterAll(() => {
   for (const root of created) rmSync(root, { recursive: true, force: true });
-});
+  // A scratch tree per case: removing them all outran vitest's 10 s hook default beside a full
+  // `bun run test` (DEFLAKE).
+}, 60_000);
 
 const mkScratch = (): Scratch => {
   const root = mkdtempSync(
