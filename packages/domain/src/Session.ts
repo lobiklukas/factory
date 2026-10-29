@@ -298,7 +298,9 @@ export type ToolCallRef = typeof ToolCallRef.Type;
  * a tool result's own flag, and on an assistant entry it marks a model request that failed; `error` is
  * then the provider's message for it, kept out of `text` so the failure is never read as an answer.
  * `inherited` is a line a fork copied from the session it was forked from that is history, not
- * its own (LOB-211): the parent's PR, which the fork does not have.
+ * its own (LOB-211): the parent's PR, which the fork does not have. `modelSwitch` is a run's role
+ * fallback moving the session onto another model after its own answered overloaded or unavailable
+ * (S-model-provider-breadth); its text names both models and the provider's error.
  */
 export const TranscriptEntryKind = Schema.Literals([
   "user",
@@ -310,6 +312,7 @@ export const TranscriptEntryKind = Schema.Literals([
   "title",
   "budget",
   "interrupted",
+  "modelSwitch",
   "inherited",
   "other",
 ]);

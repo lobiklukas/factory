@@ -25,8 +25,14 @@ import {
   type SessionError,
 } from "@repo/domain/Session";
 import {
+  checkModelAuth,
   createModelAccess,
   DEFAULT_AUTONOMY,
+  describeEndpoint,
+  OPENAI_COMPATIBLE_PROVIDER,
+  parseOpenAICompatible,
+  parseRoleFallbacks,
+  resolveRoleFallbacks,
   FAUX_COMMAND,
   FAUX_MODEL_ID,
   modelKey,
@@ -341,6 +347,34 @@ const DefaultModelConfig = Config.String("DEFAULT_MODEL").pipe(
   Config.withDefault(""),
 );
 
+/**
+ * A second model provider (S-model-provider-breadth, `@repo/harness`'s `./openaiCompatible`): an
+ * OpenAI-compatible endpoint registered beside the backend's provider, under either backend. Its
+ * models are `openai-compatible/<id>`, which a role row, `DEFAULT_MODEL` or a fallback chain names.
+ * `OPENAI_COMPATIBLE_MODELS` is a list of ids or a JSON array with each one's price and window; the
+ * key, when the endpoint has one, is `OPENAI_COMPATIBLE_API_KEY`, which pi-ai reads and this file
+ * never does. Both blank: no second provider. Half a configuration fails the boot.
+ */
+const OpenAICompatibleConfig = Config.all({
+  baseUrl: Config.String("OPENAI_COMPATIBLE_BASE_URL").pipe(
+    Config.withDefault(""),
+  ),
+  models: Config.String("OPENAI_COMPATIBLE_MODELS").pipe(
+    Config.withDefault(""),
+  ),
+});
+
+/**
+ * Which models a role's runs fall back to when their own answers overloaded or unavailable
+ * (S-model-provider-breadth): comma-separated `role=provider/modelId|provider/modelId`, tried in
+ * order, each switch recorded in the session's log. Resolved against the catalog at boot
+ * (`resolveRoleFallbacks`), so a chain naming a model the process cannot serve fails the boot. Blank:
+ * no role falls back, and an outage fails the run once Pi Durable's retries are spent.
+ */
+const RoleFallbacksConfig = Config.String("ROLE_FALLBACKS").pipe(
+  Config.withDefault(""),
+);
+
 /** The faux model ids `keys` name, which the faux backend has to publish to serve them. */
 const fauxModelIds = (keys: Iterable<string>): string[] =>
   [...keys]
@@ -638,6 +672,12 @@ const HttpLive = Effect.gen(function* () {
   const spendCaps = yield* parseSpendCaps(yield* SpendCapsConfig);
   const declaredRoles = yield* parseRoleModels(yield* RoleModelsConfig);
   const declaredDefault = (yield* DefaultModelConfig).trim();
+  const declaredFallbacks = yield* parseRoleFallbacks(
+    yield* RoleFallbacksConfig,
+  );
+  const openaiCompatible = yield* parseOpenAICompatible(
+    yield* OpenAICompatibleConfig,
+  );
   const docsSchedule = yield* DocsScheduleConfig;
   const sandboxChoice = yield* SandboxRuntimeConfig;
   const missionResume = yield* MissionResumeConfig;
@@ -714,6 +754,7 @@ const HttpLive = Effect.gen(function* () {
       FAUX_MODEL_ID,
       ...fauxModelIds([declaredDefault]),
       ...fauxModelIds(declaredRoles.values()),
+      ...fauxModelIds([...declaredFallbacks.values()].flat()),
     ]),
   ];
   const fauxModelScripts = yield* parseFauxModelScripts(
@@ -747,7 +788,22 @@ const HttpLive = Effect.gen(function* () {
     fauxMcpCalls,
     fauxModels,
     fauxModelScripts,
+    openaiCompatible,
   });
+  if (openaiCompatible !== undefined) {
+    const auth = yield* checkModelAuth({
+      ...backendAccess,
+      provider: OPENAI_COMPATIBLE_PROVIDER,
+    });
+    yield* Effect.logInfo(
+      `second provider: ${OPENAI_COMPATIBLE_PROVIDER} at ${describeEndpoint(openaiCompatible.baseUrl)} serving ${openaiCompatible.models
+        .map((entry) => entry.id)
+        .join(", ")} (OPENAI_COMPATIBLE_BASE_URL; auth: ${Option.match(auth, {
+        onNone: () => "none",
+        onSome: (found) => found.source,
+      })})`,
+    );
+  }
   // The deployment's default (LOB-274): `DEFAULT_MODEL` resolved against the backend's catalog, or
   // the backend's own model when it is blank. One outside the catalog fails the boot here.
   const modelAccess = yield* resolveDefaultModel(
@@ -760,6 +816,23 @@ const HttpLive = Effect.gen(function* () {
       : `default model: ${modelKey(modelAccess)} (DEFAULT_MODEL)`,
   );
   const roleModels = yield* resolveRoleModels(modelAccess, declaredRoles);
+  const roleFallbacks = yield* resolveRoleFallbacks(
+    modelAccess,
+    roleModels,
+    declaredFallbacks,
+  );
+  if (roleFallbacks.size > 0) {
+    yield* Effect.logInfo(
+      `role fallbacks: ${[...roleFallbacks]
+        .map(
+          ([role, chain]) =>
+            `${role} → ${chain.map((access) => modelKey(access)).join(" | ")}`,
+        )
+        .join(
+          ", ",
+        )} (ROLE_FALLBACKS; on an overloaded or unavailable model only)`,
+    );
+  }
   const declaredPolicies = yield* parseRolePolicies(yield* RolePoliciesConfig);
   const rolePolicies = extendRolePolicies(declaredPolicies);
   if (declaredPolicies.size > 0) {
@@ -838,6 +911,7 @@ const HttpLive = Effect.gen(function* () {
     choice: backendChoice,
     model: modelAccess,
     roleModels,
+    roleFallbacks,
     approvalRequired: autonomy.approvalRequired,
     defaultBudget,
     // Resolved here to armed-or-not, so the secrets' values never enter the service.
@@ -872,6 +946,7 @@ const HttpLive = Effect.gen(function* () {
           repoRemote,
           model: modelAccess,
           roleModels,
+          roleFallbacks,
           rolePolicies,
           sessionRoot: model.sessionRoot,
           sandbox,

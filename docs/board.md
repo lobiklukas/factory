@@ -191,6 +191,15 @@ follow that model's window, not today's row. One gap is the faux backend's: its 
 it leaves that run with no model to send to after a restart (a real backend's catalog holds every model,
 so it is not affected). Under faux, keep a row until the runs on it are done.
 
+A role may also have a fallback chain (S-model-provider-breadth): `ROLE_FALLBACKS`
+(`builder=openai-compatible/llama-3.1-70b|anthropic/claude-haiku-4-5`), resolved at boot like a row.
+When the run's model answers overloaded or unavailable, the run moves onto the next model of its
+chain — the agent reconfigured and a `factory.model.switched` entry committed together, so the
+transcript says which answers came from which model and why — and the session stays there. That
+recorded switch is the one exception to the pin above. A run created on a model of its own (below)
+never falls back. A second provider for a row or a chain to name
+is an OpenAI-compatible endpoint (`OPENAI_COMPATIBLE_BASE_URL`, `OPENAI_COMPATIBLE_MODELS`).
+
 A run can also be started on a model of its own (LOB-274): `createSession`'s `model`
 (`factory run --model`, the dashboard's New session picker) is resolved against the same catalog —
 an unserved one is `invalid_input` before anything is written — and pinned ahead of the role's row.
