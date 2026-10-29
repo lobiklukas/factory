@@ -28,7 +28,8 @@ import { fakeCluster, type FakeCluster } from "./testing";
 const scratch = realpathSync(
   mkdtempSync(join(tmpdir(), "factory-kubernetes-")),
 );
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+// A minute: the gate runs every package at once, and a loaded machine removes a tree slowly.
+afterAll(() => rmSync(scratch, { recursive: true, force: true }), 60_000);
 
 /** Whether process `pid` still exists on this host. */
 const alive = (pid: number): boolean => {

@@ -26,7 +26,8 @@ const DOCTOR = join(
   "../../../.pi/skills/verify-sandbox/doctor.sh",
 );
 const scratch = mkdtempSync(join(tmpdir(), "factory-doctor-"));
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+// A minute: the gate runs every package at once, and a loaded machine removes a tree slowly.
+afterAll(() => rmSync(scratch, { recursive: true, force: true }), 60_000);
 
 const which = (tool: string): string =>
   spawnSync("/bin/sh", ["-c", `command -v ${tool}`], {

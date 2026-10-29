@@ -22,7 +22,8 @@ import { buildRelay } from "./build";
 
 const context = BACKGROUND_CONTEXT;
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-relay-")));
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+// A minute: the gate runs every package at once, and a loaded machine removes a tree slowly.
+afterAll(() => rmSync(scratch, { recursive: true, force: true }), 60_000);
 // The relay as the image runs it: one bundled file, under Node.
 const RELAY = buildRelay(join(scratch, "relay.mjs"));
 
