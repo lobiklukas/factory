@@ -734,99 +734,101 @@ export const AutomationServiceLive = Layer.effect(
         // leaves a card filed (or a run opened) with the tick still `claimed`.
         return yield* Effect.uninterruptible(
           Effect.gen(function* () {
-          const filed = yield* tasks
-            .file({
-              boardId,
-              repo: row.repo,
-              title: cardTitle(row.name, tickAt, trigger),
-              body,
-              ...(row.baseRef === null ? {} : { baseRef: row.baseRef }),
-              externalRef: automationCardRef(id, tickAt),
-              actor: automationActorOf(id),
-            })
-            .pipe(Effect.result);
-          if (filed._tag === "Failure") {
-            return yield* failed(
-              `the board refused the card: ${filed.failure._tag}: ${filed.failure.message}`,
-            );
-          }
-          const card = filed.success.task;
-          const column = row.taskColumn ?? card.column;
-          const definition = yield* tasks.getBoard(card.boardId).pipe(
-            Effect.flatMap((view) =>
-              view.definition.version === card.definitionVersion
-                ? Effect.succeed(view.definition)
-                : tasks.getDefinition(
-                    view.instance.definitionId,
-                    card.definitionVersion,
-                  ),
-            ),
-            Effect.result,
-          );
-          const columnOf =
-            definition._tag === "Success"
-              ? definition.success.columns.find((entry) => entry.name === column)
-              : undefined;
-          const requestId = automationRequestId(id, tickAt);
-          const created = yield* sessions
-            .create({
-              title: card.title,
-              requestId,
-              taskId: card.id,
-              taskColumn: column,
-              actor: automationActorOf(id),
-              ...(row.budget === null ? {} : { budget: row.budget }),
-            })
-            .pipe(Effect.result);
-          if (created._tag === "Failure") {
-            const refused = `its run could not be opened: ${created.failure.code}: ${created.failure.message}`;
-            // A card this tick filed and no run took is canceled, not left for the next tick to pile
-            // another beside. A card an earlier attempt filed (a taken-over claim) is left as it is.
-            if (!filed.success.created) {
-              return yield* failed(`found card ${card.id}, but ${refused}`, {
-                taskId: card.id,
-              });
-            }
-            const canceled = yield* tasks
-              .move({
-                taskId: card.id,
-                expectedRevision: card.revision,
-                to: ABANDON_COLUMN,
+            const filed = yield* tasks
+              .file({
+                boardId,
+                repo: row.repo,
+                title: cardTitle(row.name, tickAt, trigger),
+                body,
+                ...(row.baseRef === null ? {} : { baseRef: row.baseRef }),
+                externalRef: automationCardRef(id, tickAt),
                 actor: automationActorOf(id),
               })
               .pipe(Effect.result);
-            return yield* failed(
-              canceled._tag === "Success"
-                ? `filed card ${card.id}, but ${refused}; the card was moved to ${ABANDON_COLUMN}`
-                : `filed card ${card.id}, but ${refused}; the card could not be moved to ${ABANDON_COLUMN} either (${canceled.failure._tag}: ${canceled.failure.message})`,
-              { taskId: card.id },
+            if (filed._tag === "Failure") {
+              return yield* failed(
+                `the board refused the card: ${filed.failure._tag}: ${filed.failure.message}`,
+              );
+            }
+            const card = filed.success.task;
+            const column = row.taskColumn ?? card.column;
+            const definition = yield* tasks.getBoard(card.boardId).pipe(
+              Effect.flatMap((view) =>
+                view.definition.version === card.definitionVersion
+                  ? Effect.succeed(view.definition)
+                  : tasks.getDefinition(
+                      view.instance.definitionId,
+                      card.definitionVersion,
+                    ),
+              ),
+              Effect.result,
             );
-          }
-          const sessionId = created.success.id;
-          const sent = yield* sessions
-            .sendDeferringSetup({
+            const columnOf =
+              definition._tag === "Success"
+                ? definition.success.columns.find(
+                    (entry) => entry.name === column,
+                  )
+                : undefined;
+            const requestId = automationRequestId(id, tickAt);
+            const created = yield* sessions
+              .create({
+                title: card.title,
+                requestId,
+                taskId: card.id,
+                taskColumn: column,
+                actor: automationActorOf(id),
+                ...(row.budget === null ? {} : { budget: row.budget }),
+              })
+              .pipe(Effect.result);
+            if (created._tag === "Failure") {
+              const refused = `its run could not be opened: ${created.failure.code}: ${created.failure.message}`;
+              // A card this tick filed and no run took is canceled, not left for the next tick to pile
+              // another beside. A card an earlier attempt filed (a taken-over claim) is left as it is.
+              if (!filed.success.created) {
+                return yield* failed(`found card ${card.id}, but ${refused}`, {
+                  taskId: card.id,
+                });
+              }
+              const canceled = yield* tasks
+                .move({
+                  taskId: card.id,
+                  expectedRevision: card.revision,
+                  to: ABANDON_COLUMN,
+                  actor: automationActorOf(id),
+                })
+                .pipe(Effect.result);
+              return yield* failed(
+                canceled._tag === "Success"
+                  ? `filed card ${card.id}, but ${refused}; the card was moved to ${ABANDON_COLUMN}`
+                  : `filed card ${card.id}, but ${refused}; the card could not be moved to ${ABANDON_COLUMN} either (${canceled.failure._tag}: ${canceled.failure.message})`,
+                { taskId: card.id },
+              );
+            }
+            const sessionId = created.success.id;
+            const sent = yield* sessions
+              .sendDeferringSetup({
+                sessionId,
+                content: runPrompt(card, columnOf),
+                requestId,
+              })
+              .pipe(Effect.result);
+            if (sent._tag === "Failure") {
+              return yield* failed(
+                `filed card ${card.id} and opened run ${sessionId}, but its first message was refused: ${sent.failure.code}: ${sent.failure.message}`,
+                { taskId: card.id, sessionId },
+              );
+            }
+            return yield* finish(row.id, tickAt, {
+              ...at,
+              status: "started",
+              reason: `${filed.success.created ? "filed" : "found"} card ${card.id} and started run ${sessionId} in ${column}, on ${base.ref}${
+                base.sha === undefined
+                  ? ` (its tip could not be read: ${base.note ?? "no reason given"})`
+                  : ` at ${short(base.sha)}`
+              }${sent.success === "after_setup" ? "; its first message waits for the worktree's setup" : ""}`,
+              taskId: card.id,
               sessionId,
-              content: runPrompt(card, columnOf),
-              requestId,
-            })
-            .pipe(Effect.result);
-          if (sent._tag === "Failure") {
-            return yield* failed(
-              `filed card ${card.id} and opened run ${sessionId}, but its first message was refused: ${sent.failure.code}: ${sent.failure.message}`,
-              { taskId: card.id, sessionId },
-            );
-          }
-          return yield* finish(row.id, tickAt, {
-            ...at,
-            status: "started",
-            reason: `${filed.success.created ? "filed" : "found"} card ${card.id} and started run ${sessionId} in ${column}, on ${base.ref}${
-              base.sha === undefined
-                ? ` (its tip could not be read: ${base.note ?? "no reason given"})`
-                : ` at ${short(base.sha)}`
-            }${sent.success === "after_setup" ? "; its first message waits for the worktree's setup" : ""}`,
-            taskId: card.id,
-            sessionId,
-          });
+            });
           }),
         );
       });
