@@ -6604,12 +6604,19 @@ describe("proposing child issues from a spec", () => {
       for (const { name } of tables) {
         const column = own[name];
         const rows =
-          column === undefined
-            ? yield* sql<{ readonly print: string }>`
+          name === "leases"
+            ? // A heartbeat moves only `renewed_at`/`expires_at` while the step runs; a lease taken,
+              // moved or dropped still changes the print.
+              yield* sql<{ readonly print: string }>`
+                SELECT count(*)::text || ':' || md5(coalesce(string_agg(t::text, E'\n' ORDER BY t::text), '')) AS print
+                FROM (SELECT kind, key, holder, home, fence FROM leases) t
+              `
+            : column === undefined
+              ? yield* sql<{ readonly print: string }>`
                 SELECT count(*)::text || ':' || md5(coalesce(string_agg(t::text, E'\n' ORDER BY t::text), '')) AS print
                 FROM ${sql(name)} t
               `
-            : yield* sql<{ readonly print: string }>`
+              : yield* sql<{ readonly print: string }>`
                 SELECT count(*)::text || ':' || md5(coalesce(string_agg(t::text, E'\n' ORDER BY t::text), '')) AS print
                 FROM ${sql(name)} t WHERE ${sql(column)} <> ${sessionId}
               `;

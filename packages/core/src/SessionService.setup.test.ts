@@ -764,7 +764,11 @@ describe("a worktree's declared setup", () => {
     expect(entries).toEqual(["the task", "and a person's note"]);
   }, 180_000);
 
-  /** Mutation: `tapError` for the open's cleanup, which an interrupted request skips. */
+  /**
+   * Mutations: `tapError` for the open's cleanup, which an interrupted request skips; the insert
+   * outside the step that registers the row's removal, which a deadline that lands while it is in
+   * flight leaves committed.
+   */
   it("leaves no index row behind when a replay request is interrupted in its open", async () => {
     const counts = await runtime.runPromise(
       Effect.gen(function* () {
@@ -789,8 +793,9 @@ describe("a worktree's declared setup", () => {
           );
         const outcomes: Array<{ interrupted: boolean; rows: number }> = [];
         // The request stops at a different step of the open each time: the cut is slow enough that
-        // some land after the index row is written.
-        for (const ms of [2, 10, 25, 60]) {
+        // some land after the index row is written. Every 2ms, so some land while the insert itself
+        // is in flight, which a few fixed deadlines hit only now and then.
+        for (const ms of Array.from({ length: 40 }, (_, step) => step * 2)) {
           const before = yield* rows();
           const finished = yield* sessions
             .replay({ sessionId: source.id })
