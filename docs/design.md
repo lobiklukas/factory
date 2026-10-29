@@ -22,6 +22,19 @@ agent harness of our own; we adopt one.
 event triggers), AutoWiki, Agent Readiness scoring, Slack/Linear/Jira delegation, security
 review, incident response.
 
+_Refined (S-general-automations):_ the first slice of Automations is built ahead of v2, because the
+2026 survey found scheduled work in every comparable product, and it is small on what exists: a
+schedule (`automations`: a cron in a time zone, or one instant; a prompt or a factory skill; a
+budget) whose each tick files one card through `TaskService.file` and starts one run on it, as a
+card-mode trigger and `factory board start` do. A tick is claimed in `automation_ticks` by the
+automation and its instant before anything happens, so a restart or a second process never fires it
+twice; a scheduled tick whose base tip (`SessionService.baseHead`) is the commit the last started
+tick ran on is recorded `skipped` with the reason. The docs schedule (`DOCS_SCHEDULE_MS`) keeps its
+own daemon and branch rule for now; folding it into automations is a follow-up. Webhook and event automations remain the trigger routes they are.
+_Rejected:_ ticking through the trigger seam (a tick is no outside delivery: it has no source to
+answer and must read the base before it decides), and one session per tick with no card (an
+automation's work is reviewed and gated on the board like any other).
+
 The reasoning behind deferring Missions: Pi Durable already supplies the primitives
 orchestration needs — `defineTask` with phases and `waiting`/`on`/`failFast`, an ownership
 tree with bottom-up `abort`, `defineDoc` for externalized state, and fresh-context subagents
@@ -167,7 +180,7 @@ assistant entries a run ended on is the fix if a dropped table must page again.
 `notification_deliveries` is not derived at all: it is the notifier's outbox and its memory of who
 was told what, control-plane state that is in no log, so dropping it re-sends every open event once.
 
-_As built (F21, F22)._ `notification_kinds` and `notification_sinks` (migration 0053) are the same
+_As built (F21, F22)._ `notification_kinds` and `notification_sinks` (migration 0054) are the same
 kind of state: what the settings page stores — a kind switched for the whole deployment over
 `NOTIFY_TYPES`, and a person's own email addresses and Web Push subscriptions — control-plane
 configuration in no log, left alone by `rebuildIndexes`, read by the notifier at the start of every

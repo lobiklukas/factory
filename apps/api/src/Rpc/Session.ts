@@ -1,4 +1,5 @@
 import {
+  AutomationServiceLive,
   CredentialProvider,
   PullRequestStatesLive,
   SecretServiceLive,
@@ -15,6 +16,7 @@ import { RpcSerialization, RpcServer } from "effect/rpc";
 import { ApprovalsRpcHandlers } from "./Approvals";
 import { attributed } from "./Auth";
 import { NotifySettingsFromEnv } from "../Notifications";
+import { AutomationsRpcHandlers } from "./Automations";
 import { DoctorRpcHandlers } from "./Doctor";
 import { NotificationsRpcHandlers } from "./Notifications";
 import { SecretsRpcHandlers } from "./Secrets";
@@ -120,9 +122,13 @@ export const SessionRpcLive = RpcServer.layerHttp({
       SkillsRpcHandlers,
       SecretsRpcHandlers,
       NotificationsRpcHandlers,
+      AutomationsRpcHandlers,
     ),
   ),
   Layer.provide(RpcSerialization.layerNdjson),
+  // The automations' service (S-general-automations), over the task and skill services provided
+  // below and the process's session layer.
+  Layer.provide(AutomationServiceLive),
   Layer.provide(TaskServiceLive),
   // The forge read a card's PR is followed with when no webhook told it (C20), over the credential
   // provider and the client the PR step's member already requires.

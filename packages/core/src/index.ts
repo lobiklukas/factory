@@ -52,3 +52,5 @@ export * from "./NotifierWebPush";
 export * from "./NotifySettings";
 export * from "./SecretService";
 export * from "./secretScan";
+export * from "./AutomationService";
+export * from "./automationSchedule";

@@ -13,6 +13,15 @@ import {
   SetNotificationSinkEnabledInput,
 } from "@repo/domain/Notify";
 import {
+  AddAutomationInput,
+  Automation,
+  AutomationErrorSchema,
+  AutomationIdInput,
+  AutomationTick,
+  ListAutomationsInput,
+  ListAutomationTicksInput,
+} from "@repo/domain/Automation";
+import {
   DeleteSecretInput,
   ListSecretsInput,
   SecretErrorSchema,
@@ -810,6 +819,63 @@ export class NotificationsRpc extends RpcGroup.make(
   }),
 ).middleware(ControlPlaneAuth) {}
 
+/**
+ * Scheduled automations (S-general-automations): a repo's cron or one-off schedules, each tick a card
+ * on its board with a run on it. Its own group: a schedule is neither a session nor a card, and the
+ * history it answers joins both.
+ */
+export class AutomationsRpc extends RpcGroup.make(
+  // A new automation, enabled. A schedule `effect/Cron` cannot read, a one-off in the past, a skill
+  // the library lacks or a repo with no board is `InvalidAutomation` naming the field; an
+  // unregistered repo `RepoNotFound`. Nothing is written for any of them.
+  Rpc.make("addAutomation", {
+    payload: AddAutomationInput,
+    success: Automation,
+    error: AutomationErrorSchema,
+  }),
+  // Every automation, or one repo's, oldest first, each with its next instant and its last tick.
+  Rpc.make("listAutomations", {
+    payload: ListAutomationsInput,
+    success: Schema.Array(Automation),
+    error: AutomationErrorSchema,
+  }),
+  Rpc.make("getAutomation", {
+    payload: AutomationIdInput,
+    success: Automation,
+    error: AutomationErrorSchema,
+  }),
+  // Stops further ticks; a tick already running finishes. Pausing a paused one changes nothing.
+  Rpc.make("pauseAutomation", {
+    payload: AutomationIdInput,
+    success: Automation,
+    error: AutomationErrorSchema,
+  }),
+  // Ticks again from now: an instant the schedule reached while it was paused does not fire.
+  Rpc.make("resumeAutomation", {
+    payload: AutomationIdInput,
+    success: Automation,
+    error: AutomationErrorSchema,
+  }),
+  // One tick now, paused or not, and never skipped: the answer is the tick as it ended.
+  Rpc.make("runAutomation", {
+    payload: AutomationIdInput,
+    success: AutomationTick,
+    error: AutomationErrorSchema,
+  }),
+  // Removed with its history; the cards and runs it made stay on the board.
+  Rpc.make("removeAutomation", {
+    payload: AutomationIdInput,
+    success: Automation,
+    error: AutomationErrorSchema,
+  }),
+  // Its ticks, newest first, each with its run's status and spend from `session_activity`.
+  Rpc.make("listAutomationTicks", {
+    payload: ListAutomationTicksInput,
+    success: Schema.Array(AutomationTick),
+    error: AutomationErrorSchema,
+  }),
+).middleware(ControlPlaneAuth) {}
+
 // Every group carries `ControlPlaneAuth` (LOB-20), so every member — `watchSession`'s stream too —
 // is refused as `Unauthenticated` without a credential the server knows, and a handler that records
 // an actor reads it from the `Caller` the middleware provides, not from the body.
@@ -821,4 +887,5 @@ export const RpcApi = SessionRpc.merge(ApprovalsRpc)
   .merge(DoctorRpc)
   .merge(SkillsRpc)
   .merge(SecretsRpc)
-  .merge(NotificationsRpc);
+  .merge(NotificationsRpc)
+  .merge(AutomationsRpc);
