@@ -390,26 +390,27 @@ describe("getServerInfo on a booted API (LOB-269)", () => {
     }
   }, 30_000);
 
-  it("refuses to boot on a fallback chain outside the catalog, or half an endpoint (S-model-provider-breadth)", async () => {
-    for (const [env, says] of [
-      [
-        {
-          MODEL_BACKEND: "faux",
-          ROLE_FALLBACKS: "builder=openai-compatible/x",
-        },
-        "builder's fallback chain names model openai-compatible/x",
-      ],
-      [
-        { MODEL_BACKEND: "faux", OPENAI_COMPATIBLE_MODELS: "compat-1" },
-        "OPENAI_COMPATIBLE_BASE_URL is not",
-      ],
-    ] as const) {
+  it.each([
+    [
+      "a fallback chain outside the catalog",
+      { MODEL_BACKEND: "faux", ROLE_FALLBACKS: "builder=openai-compatible/x" },
+      "builder's fallback chain names model openai-compatible/x",
+    ],
+    [
+      "half an endpoint",
+      { MODEL_BACKEND: "faux", OPENAI_COMPATIBLE_MODELS: "compat-1" },
+      "OPENAI_COMPATIBLE_BASE_URL is not",
+    ],
+  ])(
+    "refuses to boot on %s, naming it (S-model-provider-breadth)",
+    async (_name, env, says) => {
       const { code, output } = await boot(env);
       expect(code, output).not.toBe(0);
       expect(code, output).not.toBeNull();
       expect(output).toContain(says);
-    }
-  }, 60_000);
+    },
+    30_000,
+  );
 
   it("refuses to boot on a DEFAULT_MODEL outside the catalog, naming it", async () => {
     for (const [env, key] of [

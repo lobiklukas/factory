@@ -138,9 +138,9 @@ describe("statusLines", () => {
     expect(out).toContain(
       "role-fallback builder openai-compatible/compat-1 | faux/faux-2",
     );
-    expect(
-      lines(faux()).some((line) => line.startsWith("role-fallback")),
-    ).toBe(false);
+    expect(lines(faux()).some((line) => line.startsWith("role-fallback"))).toBe(
+      false,
+    );
   });
 
   /** Mutation: print `undefined` or an empty value where nothing is set. */
