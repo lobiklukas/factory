@@ -22,7 +22,8 @@ import { afterAll, describe, expect, it } from "vitest";
 
 const ENTRY = fileURLToPath(new URL("./index.ts", import.meta.url));
 const scratch = mkdtempSync(join(tmpdir(), "factory-api-boot-"));
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+// Removing the scratch tree outran vitest's 10 s hook default on a loaded machine (DEFLAKE).
+afterAll(() => rmSync(scratch, { recursive: true, force: true }), 60_000);
 
 /** The line the server logs once it is bound: the boot is over. */
 const LISTENING = "Listening on";

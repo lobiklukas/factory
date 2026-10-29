@@ -224,7 +224,9 @@ afterAll(async () => {
   // default on a loaded machine (DEFLAKE).
 }, 60_000);
 
-const CASE = { timeout: 60_000 };
+// Each case pushes to and fetches from an HTTP git remote: past the 60 s this was on a loaded
+// machine (DEFLAKE).
+const CASE = { timeout: 120_000 };
 
 describe("the PR step publishes the branch it names", CASE, () => {
   /**

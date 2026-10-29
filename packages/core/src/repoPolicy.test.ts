@@ -18,7 +18,8 @@ import { decodePolicy, readRepoPolicy } from "./repoPolicy";
 import { workTreePrefix } from "./workspace";
 
 const scratch = mkdtempSync(join(tmpdir(), "factory-core-repo-policy-"));
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+// Removing the scratch tree outran vitest's 10 s hook default on a loaded machine (DEFLAKE).
+afterAll(() => rmSync(scratch, { recursive: true, force: true }), 60_000);
 
 const git = (root: string, command: string) =>
   execSync(command, { cwd: root, stdio: "ignore" });
