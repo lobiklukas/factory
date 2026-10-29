@@ -18,5 +18,7 @@
     "**/generated/**",
     "**/.cache/**",
     "**/.turbo/**",
+    // A released manifest, vendored byte for byte: its checksum is in SHA256SUMS beside it.
+    "infra/kind/agent-sandbox/**",
   ],
 }

@@ -1,0 +1,27 @@
+{
+  "name": "@repo/sandbox-kubernetes",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --passWithNoTests",
+    "test:kind": "vitest run --config vitest.kind.config.ts",
+    "type-check": "tsc --noEmit",
+    "clean": "git clean -xdf .cache .turbo dist node_modules tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.0.3",
+    "@earendil-works/pi-durable": "1.0.3",
+    "@effect/platform-bun": "4.0.0",
+    "@repo/sandbox": "workspace:*",
+    "effect": "4.0.0"
+  },
+  "devDependencies": {
+    "@repo/config-typescript": "workspace:*",
+    "vitest": "^4.1.4"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
+  }
+}

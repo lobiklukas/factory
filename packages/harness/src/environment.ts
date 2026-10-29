@@ -12,10 +12,22 @@
  * sandbox is bound to that directory rather than created empty, and it is bound on first use, not
  * at open: a released session still opens, in a directory that is gone (LOB-268), and only a tool
  * that needs to run there should learn that.
+ *
+ * A runtime that cannot bind — the Kubernetes one (LOB-91), whose files are on a volume in the
+ * cluster, not on this host — gets a sandbox `create`d instead, on the same first use: the
+ * conversation's working directory then names its sandbox, not a directory, and its commands start
+ * at the sandbox's own workdir (D6). The credential filter still reaches every command, as each
+ * command's own variables, because such a runtime is not handed `shellEnv` when its sandbox starts.
  */
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { SessionError } from "@repo/domain/Session";
-import { type BindableSandboxRuntimeShape, InProcess } from "@repo/sandbox";
+import {
+  type BindableSandboxRuntimeShape,
+  InProcess,
+  type Sandbox,
+  type SandboxFileError,
+  type SandboxRuntimeShape,
+} from "@repo/sandbox";
 import { Effect, Exit, Scope } from "effect";
 
 export type SessionEnvironment = {
@@ -34,12 +46,42 @@ export type SessionEnvironment = {
 };
 
 /**
+ * `env` with `vars` under every command's own variables: the filter, applied per command for a
+ * sandbox that was created rather than bound with it.
+ */
+const withCommandEnv = (
+  env: ExecutionEnv,
+  vars: Readonly<Record<string, string>>,
+): ExecutionEnv =>
+  new Proxy(env, {
+    get: (target, property) => {
+      if (property === "exec") {
+        const exec: ExecutionEnv["exec"] = (command, options, context) =>
+          target.exec(
+            command,
+            { ...options, env: { ...vars, ...options?.env } },
+            context,
+          );
+        return exec;
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+    set: (target, property, value) =>
+      Reflect.set(target, property, value, target),
+  });
+
+const canBind = (
+  runtime: SandboxRuntimeShape | BindableSandboxRuntimeShape,
+): runtime is BindableSandboxRuntimeShape => "bind" in runtime;
+
+/**
  * The environments of one session's commands, from `runtime` or, when absent, an in-process
  * runtime of its own. `shellEnv` is read at each binding: the variables every command starts with,
  * over the runtime's.
  */
 export const openSessionEnvironment = (
-  runtime: BindableSandboxRuntimeShape | undefined,
+  runtime: SandboxRuntimeShape | BindableSandboxRuntimeShape | undefined,
   shellEnv: () => Readonly<Record<string, string>>,
 ): Effect.Effect<SessionEnvironment> =>
   Effect.gen(function* () {
@@ -53,10 +95,15 @@ export const openSessionEnvironment = (
 
     // Bound into the session's scope, so its release ends the sandbox; once released, the scope
     // runs the finalizer at once and the environment read after it fails, which is the refusal.
+    // The spill files stay: the transcript names them, and a later turn may read one after an
+    // idle release ended this sandbox and the session reopened in a new one.
+    const start = (cwd: string): Effect.Effect<Sandbox, SandboxFileError> =>
+      canBind(sandboxes)
+        ? sandboxes.bind(cwd, { env: shellEnv(), keepSpillFiles: true })
+        : sandboxes.create;
+
     const bind = (cwd: string): Effect.Effect<ExecutionEnv, SessionError> =>
-      // The spill files stay: the transcript names them, and a later turn may read one after an
-      // idle release ended this sandbox and the session reopened in a new one.
-      sandboxes.bind(cwd, { env: shellEnv(), keepSpillFiles: true }).pipe(
+      start(cwd).pipe(
         Effect.tap((sandbox) =>
           Scope.addFinalizer(
             scope,
@@ -69,6 +116,9 @@ export const openSessionEnvironment = (
           ),
         ),
         Effect.flatMap((sandbox) => sandboxes.executionEnv(sandbox)),
+        Effect.map((env) =>
+          canBind(sandboxes) ? env : withCommandEnv(env, shellEnv()),
+        ),
         Effect.mapError(
           (error) =>
             new SessionError({
