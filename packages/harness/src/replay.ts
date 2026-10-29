@@ -196,6 +196,11 @@ export type ReplayedSession = OpenedReplay & {
 /**
  * Open a replay: the replay's own session, its link to the source, then the source's prompt.
  *
+ * The factory's own `SessionService` does not call this: it composes `openReplay` and
+ * `submitReplayPrompt` itself so the worktree's setup runs between them (F23). This is that
+ * composition for a caller with nothing to run in between, and for the tests of the two halves
+ * together.
+ *
  * The link, the title, the repo binding, the cap and the actor are one commit, in the shape a fork copies its entries
  * in: a replay that exists at all exists with everything `rebuildIndexes` folds, so no window
  * leaves a log whose origin, title or binding a rebuild would have to guess. The prompt is the

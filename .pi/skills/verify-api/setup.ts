@@ -23,7 +23,7 @@
 //   readiness the registry answers each checkout's agent-readiness score on registration, and
 //             `listRepos` the same score.
 //
-// A second phase, `PHASE=timeout`, runs against an API booted with `SETUP_TIMEOUT_SECONDS=1` (F24):
+// A second phase, `PHASE=restarted`, runs against an API booted with `SETUP_TIMEOUT_SECONDS=1` (F24):
 //
 //   timeout   an install that sleeps 5 s is stopped at the deployment's bound. A card's first message
 //             is refused `setup_failed` with the step's `could not run (timeout)`, the card is blocked

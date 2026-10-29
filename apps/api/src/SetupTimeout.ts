@@ -11,9 +11,17 @@
 import { SETUP_TIMEOUT_SECONDS } from "@repo/harness";
 import { Config, Option, Schema } from "effect";
 
+/** The longest timeout Pi Durable's `exec` accepts, in seconds: a longer one is refused per call. */
+export const MAX_SETUP_TIMEOUT_SECONDS = 2_147_483.647;
+
 export const SetupTimeoutConfig = Config.option(
   Config.schema(
-    Schema.Finite.pipe(Schema.check(Schema.isGreaterThan(0))),
+    Schema.Finite.pipe(
+      Schema.check(
+        Schema.isGreaterThan(0),
+        Schema.isLessThanOrEqualTo(MAX_SETUP_TIMEOUT_SECONDS),
+      ),
+    ),
     "SETUP_TIMEOUT_SECONDS",
   ),
 );

@@ -42,8 +42,10 @@ administrative directory in the registered checkout (`<common>/worktrees/<name>/
 `workspace.ts`'s `stampCut`), which `git worktree remove` takes with the worktree; the record carries
 the id (`SetupRecord.cut`). A worktree whose directory went missing is cut again by the next send and
 has a new id, so the log's succeeded record no longer covers it (`setupCovers`) and the setup runs
-again; a worktree that is merely reopened has the same id and runs nothing. A record or a worktree
-with no id (written or cut before cuts were named, or a plain directory) is never read as stale.
+again; a worktree that is merely reopened has the same id and runs nothing. A worktree with no
+id (cut before cuts were named, or a plain directory) is covered by whatever succeeded record the log
+has; a record with no id (written before cuts were named) beside a worktree that has one is stale, because
+the worktree was cut since, so a session that predates this runs its setup once more when it is cut again.
 
 A replay is set up like a first run (F23). Its open no longer submits the source's prompt
 (`openReplay`); once the owner is open `promptAfterSetup` starts the setup (`startSetup`) and, with

@@ -5,7 +5,11 @@
 import { SETUP_TIMEOUT_SECONDS } from "@repo/harness";
 import { ConfigProvider, Effect, Exit } from "effect";
 import { describe, expect, it } from "vitest";
-import { effectiveSetupTimeout, SetupTimeoutConfig } from "./SetupTimeout";
+import {
+  effectiveSetupTimeout,
+  MAX_SETUP_TIMEOUT_SECONDS,
+  SetupTimeoutConfig,
+} from "./SetupTimeout";
 
 const read = (env: Record<string, string>) =>
   Effect.runPromiseExit(
@@ -44,5 +48,19 @@ describe("SETUP_TIMEOUT_SECONDS", () => {
       expect(Exit.isFailure(exit), `"${bad}" is refused`).toBe(true);
       expect(String(exit)).toContain("SETUP_TIMEOUT_SECONDS");
     }
+  });
+
+  /** Mutation: no upper bound, so 99999999 boots and every step is then refused by `exec`. */
+  it("refuses a value above what exec accepts, and takes the cap itself", async () => {
+    for (const bad of ["99999999", "2147484"]) {
+      const exit = await read({ SETUP_TIMEOUT_SECONDS: bad });
+      expect(Exit.isFailure(exit), `"${bad}" is refused`).toBe(true);
+      expect(String(exit)).toContain("SETUP_TIMEOUT_SECONDS");
+    }
+    expect(
+      await read({
+        SETUP_TIMEOUT_SECONDS: String(MAX_SETUP_TIMEOUT_SECONDS),
+      }),
+    ).toEqual(Exit.succeed(MAX_SETUP_TIMEOUT_SECONDS));
   });
 });

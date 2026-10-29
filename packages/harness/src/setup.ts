@@ -52,15 +52,18 @@ import {
 export const SETUP_DOC_KIND = "factory.setup";
 
 /**
- * Whether `record` is a setup of the worktree whose cut is `cut` (F23). A record or a worktree with
- * no cut cannot be told apart from the one it is compared with, so it is trusted: only two cuts
- * that are both named and differ say the worktree was made again since.
+ * Whether `record` is a setup of the worktree whose cut is `cut` (F23). A worktree with no cut is
+ * one nobody can tell from before (a plain directory, one cut before cuts were named), so its
+ * record is trusted. A worktree with a cut is covered only by a record naming that same cut: two
+ * different cuts say it was made again, and a record with no cut next to a worktree that has one
+ * says the same, because a worktree cut since cuts were named is stamped when it is made and its
+ * setup is recorded with the stamp. The worktree of a session that set up before cuts were named
+ * and was then cut again is set up once more, which is what it needs.
  */
 export const setupCovers = (
   record: SetupRecord,
   cut: string | undefined,
-): boolean =>
-  record.cut === undefined || cut === undefined || record.cut === cut;
+): boolean => cut === undefined || record.cut === cut;
 
 /** The steps a setup runs, in order: the `.factory/config` fields of the same names. */
 export const SETUP_STEPS = ["install", "build"] as const;
@@ -123,7 +126,8 @@ export const SetupRecord = Schema.Struct({
   /**
    * The cut of the worktree the steps ran in (F23, `readWorktreeCut`), when it had one: a record
    * for another cut is no setup of this worktree. Absent on a record written before cuts were named,
-   * and for a directory that is no cut worktree; neither is ever read as stale.
+   * and for a directory that is no cut worktree. Beside a worktree that has a cut, an absent one is
+   * stale (`setupCovers`).
    */
   cut: Schema.optionalKey(Schema.String),
 });

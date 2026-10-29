@@ -72,11 +72,13 @@ describe("a setup's cut (F23)", () => {
   });
 
   /** Mutation: compare only when both are present but treat a mismatch as covered (always true). */
-  it("covers the worktree it ran in and not one cut since, and never reads an unnamed cut as stale", () => {
+  it("covers the worktree it ran in and not one cut since, and reads a cutless record beside a named cut as stale", () => {
     expect(setupCovers(record("a"), "a")).toBe(true);
     expect(setupCovers(record("a"), "b")).toBe(false);
-    // Nothing to tell apart: written before cuts were named, or a directory with no cut.
-    expect(setupCovers(record(), "b")).toBe(true);
+    // A record from before cuts were named beside a worktree that has one: the worktree was cut
+    // since, so it is set up again.
+    expect(setupCovers(record(), "b")).toBe(false);
+    // Nothing to tell apart: a directory with no cut.
     expect(setupCovers(record("a"), undefined)).toBe(true);
     expect(setupCovers(record(), undefined)).toBe(true);
   });

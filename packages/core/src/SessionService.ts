@@ -4502,6 +4502,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* refuseOversized(input);
           const row = yield* requireSession(input.sessionId);
           yield* refuseUnservedModel(input.sessionId, row);
+          yield* awaitHeldPrompt(input.sessionId);
           // A released session is refused by the acquisition, from the release it reads under the
           // owners' gate (LOB-268): a check here, on `row`, would miss one that commits in between.
           const owner = yield* acquireOwner(input.sessionId, row, {
@@ -4537,6 +4538,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* refuseOversized(input);
           const row = yield* requireSession(input.sessionId);
           yield* refuseUnservedModel(input.sessionId, row);
+          yield* awaitHeldPrompt(input.sessionId);
           const owner = yield* acquireOwner(input.sessionId, row, {
             starts: true,
           });
@@ -5786,13 +5788,18 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               }),
             { slot },
           ).pipe(
-            Effect.tapError(() =>
+            // `onError`, not `tapError`: the open is a slow step (a mirror fetch, a worktree cut), and
+            // a request that is interrupted in it — its client gone — must not leave the row, or
+            // the held prompt that every later comparison of this replay would wait on forever.
+            Effect.onError(() =>
               paper(
                 "remove the refused replay's index row",
                 sql`DELETE FROM sessions WHERE id = ${id}`,
-              ).pipe(Effect.ignore),
+              ).pipe(
+                Effect.ignore,
+                Effect.andThen(releaseHeldPrompt(id, held)),
+              ),
             ),
-            Effect.tapError(() => releaseHeldPrompt(id, held)),
           );
           yield* promptAfterSetup(id, owner, origin, held).pipe(
             // Opened but not started: the refusal ends the replay as the open's own would.
@@ -5814,6 +5821,17 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* countSessionCreate("replay");
           return yield* describe(id, row);
         }).pipe(Effect.scoped);
+
+      /**
+       * Wait for a replay's own first prompt to be submitted (F23), when this process holds one: a
+       * message sent to the replay while its setup runs would otherwise wake on the same setup as
+       * the held prompt and could be placed first, as the run, with the source's task queued
+       * behind it. Nothing held, nothing waited for.
+       */
+      const awaitHeldPrompt = (sessionId: SessionId): Effect.Effect<void> => {
+        const held = heldPrompts.get(sessionId);
+        return held === undefined ? Effect.void : Deferred.await(held);
+      };
 
       const releaseHeldPrompt = (
         replay: SessionId,

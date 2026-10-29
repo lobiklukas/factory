@@ -315,6 +315,19 @@ describe("collectChecks", () => {
     );
   });
 
+  /** Mutation: require the field, so a doctor against an older API fails the whole deployment answer. */
+  it("says the setup bound is unknown when the API does not report it", async () => {
+    const older = Schema.decodeSync(DeploymentChecks)({
+      triggerRules: 2,
+      envFiles: [],
+      repos: [],
+    });
+    const lines = await run(fakeClient({ deployment: older }).client);
+    expect(lines).toContain(
+      "ok setup-timeout: unknown (this API does not report it)",
+    );
+  });
+
   /** Mutation: warn on 0 rules even where no webhook can deliver. */
   it("warns on zero trigger rules only when a webhook is armed", async () => {
     const armed = await run(

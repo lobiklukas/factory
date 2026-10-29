@@ -320,7 +320,9 @@ export const bootChecks = (
     // default is a choice, and the line is there so an operator reads which one is in force.
     ok(
       "setup-timeout",
-      `${deployment.setupTimeoutSeconds}s per setup step (SETUP_TIMEOUT_SECONDS)`,
+      deployment.setupTimeoutSeconds === undefined
+        ? "unknown (this API does not report it)"
+        : `${deployment.setupTimeoutSeconds}s per setup step (SETUP_TIMEOUT_SECONDS)`,
     ),
     ok(
       "env-files",
