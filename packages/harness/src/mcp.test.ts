@@ -18,6 +18,9 @@
  * Around them: the grants and the widening are decisions in a table; a read-only stage is offered
  * reads only; a read the repository gates asks; a server that cannot be reached at open is a problem
  * and not a failed open; `tools/list` is read page by page; and the open records what it offered.
+ *
+ * The suites that open a harness allow 30 s a case: the first connection imports the MCP SDK, which
+ * is loaded lazily and takes seconds on a loaded machine.
  */
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -349,7 +352,7 @@ describe("the MCP gate in the policy", () => {
   });
 });
 
-describe("MCP tools in a real harness", () => {
+describe("MCP tools in a real harness", { timeout: 30_000 }, () => {
   it("offers an allowed read tool, runs it unattended, and the call is in the transcript", async () => {
     const before = callsTo("/tracker", READ).length;
     const asker = recordingAsker(pending);
@@ -523,7 +526,7 @@ describe("MCP tools in a real harness", () => {
   });
 });
 
-describe("connecting at open", () => {
+describe("connecting at open", { timeout: 30_000 }, () => {
   it("reads every page of the tool list", async () => {
     const connection = await Effect.runPromise(
       connectMcp([tracker({ tools: [READ, WRITE, UNLISTED] })], {

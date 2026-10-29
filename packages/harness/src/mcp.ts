@@ -38,8 +38,8 @@ import { Type } from "@earendil-works/pi-ai";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type {
   ContentBlock,
@@ -334,6 +334,22 @@ const registrationOf = (
 const asTransport = (transport: StreamableHTTPClientTransport): Transport =>
   transport as Transport;
 
+/**
+ * The SDK, loaded the first time a session has a server to connect to: it brings zod and ajv with
+ * it, over a second of imports on a loaded machine, which every process that imports this package
+ * (the API, the CLI, each test) would otherwise pay at start whether or not it registers a server.
+ */
+const loadSdk = Effect.tryPromise(() =>
+  // The module loader keeps each module once, so a later open's import is the first one's.
+  Promise.all([
+    import("@modelcontextprotocol/sdk/client/index.js"),
+    import("@modelcontextprotocol/sdk/client/streamableHttp.js"),
+  ]).then(([client, transport]) => ({
+    Client: client.Client,
+    StreamableHTTPClientTransport: transport.StreamableHTTPClientTransport,
+  })),
+);
+
 /** Every tool a connected server lists, page by page. */
 const listTools = (client: Client, timeoutMs: number) =>
   Effect.gen(function* () {
@@ -365,7 +381,6 @@ const connectServer = (
   Effect.gen(function* () {
     const connectTimeoutMs = options.connectTimeoutMs ?? MCP_CONNECT_TIMEOUT_MS;
     const callTimeoutMs = options.callTimeoutMs ?? MCP_CALL_TIMEOUT_MS;
-    const client = new Client({ name: "factory", version: "0.0.0" });
     const unreachable = (cause: unknown): ServerTools => ({
       client: undefined,
       tools: [],
@@ -374,9 +389,15 @@ const connectServer = (
         `MCP server ${server.name} (${server.url}) could not be reached, so none of its tools is offered: ${describe(cause)}`,
       ],
     });
+    const sdk = yield* Effect.result(loadSdk);
+    if (sdk._tag === "Failure") return unreachable(sdk.failure.cause);
+    const client = new sdk.success.Client({
+      name: "factory",
+      version: "0.0.0",
+    });
     const listed = yield* Effect.try(
       () =>
-        new StreamableHTTPClientTransport(new URL(server.url), {
+        new sdk.success.StreamableHTTPClientTransport(new URL(server.url), {
           requestInit: { headers: { ...server.headers } },
         }),
     ).pipe(
