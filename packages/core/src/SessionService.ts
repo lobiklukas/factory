@@ -2773,7 +2773,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             const widening = repoPolicyWidening(policy.config, pinned);
             if (widening.length > 0)
               yield* Effect.logWarning(
-                `session ${row.id}: the policy it pinned from ${recorded.source.path} at ${recorded.source.ref} (${recorded.source.commit.slice(0, 12)}) names hosts this deployment no longer allows, so the run reaches none of them: ${widening.join("; ")}`,
+                `session ${row.id}: the policy it pinned from ${recorded.source.path} at ${recorded.source.ref} (${recorded.source.commit.slice(0, 12)}) names hosts or MCP servers this deployment no longer allows, so the run reaches none of them: ${widening.join("; ")}`,
               );
             return { source: recorded.source, repo: pinned };
           }
