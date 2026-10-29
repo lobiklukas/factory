@@ -71,7 +71,10 @@ export const generateVapidKeys = (): {
   ecdh.generateKeys();
   return {
     publicKey: b64u(ecdh.getPublicKey()),
-    privateKey: b64u(ecdh.getPrivateKey()),
+    // `getPrivateKey` drops leading zero bytes (about one key in 256); a VAPID key is always 32.
+    privateKey: b64u(
+      Buffer.concat([Buffer.alloc(32), ecdh.getPrivateKey()]).subarray(-32),
+    ),
   };
 };
 
