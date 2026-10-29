@@ -78,7 +78,8 @@ const program = Effect.gen(function* () {
         const client = yield* RpcClient.make(RpcApi);
         yield* client.registerRepo({
           repo,
-          url: REPO_URL === "" ? `https://example.invalid/${repo}.git` : REPO_URL,
+          url:
+            REPO_URL === "" ? `https://example.invalid/${repo}.git` : REPO_URL,
           localPath: REPO_ROOT,
         });
       }),

@@ -1,184 +1,100 @@
 # Next agent brief
 
-A self-contained starting brief for the next agent session. Paste it into a fresh session, or point
+A self-contained starting brief for the next stretch of work. Paste it into a fresh session, or point
 the agent at this file.
 
-**Written:** 2026-10-05, against `main` at `a40e2c9`. **Scope:** start milestone **B** — the board —
-with **LOB-42** (board domain: tasks, columns, transitions, gates) and then **LOB-48** (skills
-kernel). M2 is closed.
+**Written:** 2026-10-29, against `main` after the LOB-40 PR (the faux half of milestone L).
+**Scope:** close milestone **L** with the owner's live run of LOB-40, then milestone **S** (LOB-41,
+self-hosting), then the deferred tidy-up below.
 
-**It goes stale fast.** It is a brief for one stretch of work, not a document of record. When the
-stretch changes — the issues close, or priorities move — rewrite it from `docs/roadmap.md`, whose
-priority tiers and Linear project are the source of truth. Everything below that is _not_ specific to
-this stretch is already in `AGENTS.md` and `docs/handoff.md`, and those two are the ones to keep
-current.
+**It goes stale fast.** It is a brief for one stretch, not a document of record. When the stretch
+changes, rewrite it from `docs/roadmap.md`, whose priorities and Linear project are the source of
+truth. What is not specific to this stretch is in `AGENTS.md` and `docs/handoff.md`.
 
 ---
 
-## The brief
+## Where the repo stands
 
-You are continuing work in `/opt/dev/factory` — an internal, agent-native software development
-platform (Effect 4 control plane, Pi Durable harness, Kubernetes sandboxes). Delegate a task, get back
-a reviewable PR. Your stretch: **milestone B's first two issues**, exactly as scoped in the Linear
-project "Factory MVP".
+Everything the MVP roadmap asked of the code is merged: the board (B), triggers (T), the PR lifecycle
+(C17–C21), notifications, spend caps, automations, MCP tools, model fallback, the kind sandbox (LOB-13
+and its children) and DEFLAKE. The whole loop is proven end to end **in faux** by
+`.pi/skills/verify-workflow/` (`cycle.sh`: 41 checks, twice in a row from nothing): a Linear delegation
+through the real webhook and label rule, specify, plan approval by a person, a gated `git commit`
+whose approval survives an API restart, a real `git push` with the CredentialProvider token, one PR
+with its evidence (retry-safe), Linear write-back with no duplicate comment, review, merge, and the
+session list and spend pane. `docs/handoff.md` ("Milestone L") has the details.
 
-### Where the repo stands
+What is not proven is the same loop against the **real** Linear, GitHub and Anthropic.
 
-M2 closed on 2026-10-05 (`a40e2c9`). The session surface is complete and driven from three places:
-`.pi/skills/verify-api` (29 checks, plus `sigterm.sh` 10 and `degraded.sh` 11), `.pi/skills/verify-cli`
-(14, in tmux) and `.pi/skills/verify-web` (10, in a browser). A session names its repo and resolves a
-workspace, `listSessions` answers from a derived index, `factory run`/`watch`/`ls` work in a terminal,
-and the API has `/livez` + `/readyz`, a SIGTERM release that leaves a resumable session, and a 1 MiB
-request-body cap.
+## The stretch, in order
 
-What milestone **B** adds is the missing noun. Today a **session** is the unit of work and "what is
-this for, and where is it" lives in prose — `Rpc.ts` exposes sessions and `registerRepo` and nothing
-else. `docs/board.md` is the settled design: a task on a board, columns that bind roles and skills,
-runs, gates, and what is explicitly wave 2. Nothing in B is autonomous: a person starts every run,
-which is what keeps it small.
+### 1. LOB-40 (d): the owner's live run — a person's step, not an agent's
 
-### The two issues
+LOB-40 is In Progress and stays open until this is posted on it. It needs the owner's credentials, a
+scratch GitHub repo, a Linear label and webhook, and a tunnel; no agent runs it and no agent reads
+those credentials. Everything is in `.pi/skills/verify-workflow/SKILL.md`, "Live run": what to create
+first, the one command (`cycle.sh --live`), and the report it writes
+(`.verify/evidence/latest/workflow/report.md`: wall-clock time, cost, PR, issue) to post on LOB-40.
 
-**1. LOB-42 — board domain: tasks, columns, transitions and gates.** The next contract change, of the
-same rank as LOB-5's repo binding. Its description in Linear is the contract; in outline:
+An agent's part: if the owner's run fails, the failure is a finding. Reproduce it in faux if it can
+be, fix the product with a test, extend the faux drive so it would have caught it, and leave the live
+re-run to the owner. Do not "fix" the live drive by loosening a check: a model that never runs `git
+commit` never meets the gate, and that check failing is information.
 
-- `tasks` — id, board, column, title, body, repo, base ref, priority, definition version, revision,
-  blocked (typed reason + the column it blocked from), external refs (tracker issue, PR url), cost
-  rollup, created/updated with actor.
-- `task_events` — append-only `(task, seq, at, actor, kind, payload)`; every mutation writes its row
-  **and** its event in one transaction.
-- `task_runs` — task → run (session id), the column it ran in, outcome, timings. The run's log stays
-  the truth for what the run did (D7), and the session carries a `factory.task` document so the link
-  is **rebuildable** — the same move LOB-5 made for repos.
-- `board_definitions` + instances — a versioned definition (columns with `kind: resting | working |
-terminal`, `role`, `skills[]`, `requires[]`, declared transitions) and one instance per repository
-  from the existing `repos` table; a task pins the definition version it started under, and one
-  default definition ships in a migration.
-- Actions: create, move (actor + expected revision; refuses an undeclared transition, and refuses a
-  gate-crossing move unless the actor is a human), and whatever else the description names.
+### 2. LOB-41: self-hosting — three issues done by the factory
 
-**2. LOB-48 — skills kernel: registry and injection at session open.** A `skills` table seeded by
-migration with three written skills (specify, implement, review), a loader in `packages/harness` that
-resolves the run's column (`role` → model and tool policy, `skills[]` → prompt sections), and the
-injection point at `openSession` beside `CodingTools`. Its acceptance is behavioural: a run on a card
-in `specifying` receives the `specify` skill text and a run in `building` does not; editing a seeded
-body changes the next run's prompt with no code change; the injected section is bounded and its size
-measurable.
+Blocked by LOB-40. A person runs it, from the board; Claude Code worktrees, wave workflows and the
+ralph loop do **not** do the work. Read its description: three consecutive issues, each a card through
+specify → plan approval → build → review → a human merge, at least one with a steer, a policy refusal
+or a re-run, and the proof is a comment built from the board and the session logs. Anything the
+attempt turns out to need is its own issue that blocks LOB-41.
 
-### Read first, in this order
+### 3. The deferred list (agent work, any order)
 
-1. `AGENTS.md` — repo rules, the five gates, and the conventions that are not negotiable.
-2. `docs/board.md` — the design LOB-42 implements: tasks as the unit of work, columns binding roles
-   and skills, runs, gates, and the MVP/wave-2 cut. Read it before touching anything that models work.
-3. `docs/handoff.md` — the state of the work and the gotchas that have already cost hours. The
-   gotchas section is the cheapest thing you will read today.
-4. `docs/design.md` — D7 (the log is truth, index tables are droppable and rebuildable), D8/D11/D12,
-   and the milestone map. LOB-42 is a D7-shaped change: derive, do not duplicate.
-5. LOB-42's description in Linear (its acceptance criteria are the contract), then LOB-48's.
-6. `.pi/skills/verify-api/SKILL.md` and its `features/` directory — how this repo proves things. The
-   board's refusals (an undeclared transition, a gate crossed by an agent) want their own driver,
-   `.pi/skills/verify-board/`, in the same shape.
-7. `docs/parallel-work.md` — if you fan out slices.
+- **Harvest the follow-ups.** Waves 17–18 left "Follow-up (…)" comments on the umbrellas LOB-245
+  (board config), LOB-246 (first run), LOB-247 (repositories), LOB-248 (drive work from the UI),
+  LOB-249 (PR lifecycle), LOB-250 (triggers), LOB-251 (core market features) and LOB-13 (sandbox).
+  Read every comment, turn each live follow-up into a work item (a draft while Linear is full, see
+  below), and say on the umbrella which were taken, which were dropped, and why. LOB-40's own comments
+  name its follow-ups (a CI job for `cycle.sh` among them).
+- **LOB-252: the docs refresh.** `docs/board.md`, `docs/handoff.md`, this file and the README back in
+  line with the code. `docs/handoff.md`'s "Where things stand" table dates from 2026-10-05; its claims
+  are the ones most likely to be wrong.
+- **Close the umbrellas** once their follow-ups are harvested and every child is delivered.
+- **File the delivered drafts.** The Linear workspace is at the free plan's 250-issue limit (since
+  2026-10-28): `save_issue` cannot create. Freeing room is the owner's call (upgrade, or archive old
+  Done/Canceled issues; the MCP cannot archive). Once there is room, file each delivered draft as Done
+  with its PR link and each undelivered one as Todo, under its umbrella. Until then: build drafts
+  directly, put `Part of LOB-<umbrella>` only in the PR body (never in a title or branch: Linear's
+  GitHub integration would close the umbrella on merge), and record decisions as comments on the
+  umbrella.
 
-### Work tracking
+## Read first, in this order
 
-The Linear project **Factory MVP** (team `Lobiklukas`, workspace `lobiklukas`) is the backlog. If the
-`mcp__linear_*` tools are mounted, use them. If they are **not** mounted, the server is still reachable
-over HTTP with the cached `mcp-remote` OAuth token: `~/.mcp-auth/mcp-remote-v1/*_tokens.json` holds an
-`access_token` (scope `read write`), and `POST https://mcp.linear.app/mcp` with `Authorization: Bearer
-<token>`, `Content-Type: application/json`, `Accept: application/json, text/event-stream`, and
-`MCP-Protocol-Version: 2025-06-18` speaks JSON-RPC (`initialize`, then `tools/call` with `get_issue` /
-`save_issue` / `save_comment`). The server is stateless: it answers without an `mcp-session-id` header.
-`save_issue` takes `{"id": "LOB-42", "state": "In Review"}`. A comment is created by
-`save_comment` with `{"issueId": "LOB-42", "body": "…"}`; its own `id` updates an existing comment.
-Move each issue to In Progress when you start, and to In Review with a comment carrying your evidence
-when it is done. Never invent an issue number.
+1. `AGENTS.md` — the rules, the five gates, and what is not negotiable.
+2. `docs/handoff.md` — the state, "Milestone L", and the gotchas that have already cost hours.
+3. `.pi/skills/verify-workflow/SKILL.md` — the loop as it is proven today, and the live run.
+4. `docs/design.md` and `docs/board.md` before any architecture or board change.
+5. `docs/parallel-work.md` before fanning out: worktrees, per-worktree databases over TCP on 5442,
+   port blocks.
 
-**Where the MCP servers are configured.** The root `.mcp.json` is authoritative: `.pi/mcp.json` is a
-symlink to `../.mcp.json`, so pi's project-level read and every other client see one file and there is
-no second copy to drift out of step. The `linear` server is reached as
-`npx -y mcp-remote@<exact version>`, never as a bare `mcp-remote` — with no specifier `npx` installs
-whatever the registry calls `latest` on the day an agent starts, which is a different program from the
-one this repo was tested against. To bump it, change the version in `.mcp.json`'s `linear.args` **and**
-the two places in this repo's Linear MCP row that the guard reads — the strategy cell's
-`mcp-remote@<version>` and the sources cell's `(<version>, MIT, …)` — in one commit:
-`packages/storage-postgres/src/mcp-pin.test.ts` fails when any of the three disagrees. Then confirm
-the tools still mount with `pi mcp list`, which prints the server, its tool count and the pinned
-command line it resolved.
+## Constraints that will bite
 
-### Constraints that will bite
+- **Postgres on 5442 is part of the gate**, reached over TCP. On this machine it is Docker Desktop's
+  container; `lsof -nP -iTCP:5442 -sTCP:LISTEN` names it. Create per-worktree databases over TCP,
+  never with `docker exec`.
+- **Gate every change** with `bun run format:check`, `build`, `lint`, `test`, `type-check`; the Effect
+  diagnostics run with `denyWarnings`. A new test file in `packages/storage-postgres` goes on a
+  `case-budgets.test.ts` list.
+- **The verify skills share `.verify/run`.** verify-board and verify-workflow use the same instance
+  files; run one board instance at a time, each on its own ports and database.
+- **Local first, fakes for third parties.** No cloud resource, no real token and no real model
+  provider in an agent's run; `docs/testing-third-parties.md` names the fake for each.
+- **Pi Durable is consumed as an interface, never modified.**
 
-- **Postgres is part of the gate:** `docker compose up -d --wait postgres` (host port 5442). Reach
-  it over TCP, never through a Docker context: Docker Desktop and Colima can both run a
-  `factory-postgres-1` here, and `lsof -nP -iTCP:5442 -sTCP:LISTEN` names the one tests connect to.
-  Create per-worktree databases over that port (`docs/parallel-work.md`), not with `docker exec`.
-- **Gate every change:** `bun run format:check`, `build`, `lint`, `test`, `type-check` — all five,
-  green, before you claim anything works. The Effect diagnostics run with `denyWarnings`, so a warning
-  fails the build. `.verify/` is excluded from lint on purpose; `.pi/skills` is type-checked
-  (`.pi/tsconfig.json`, the root task `//#type-check:pi`) and linted bar what `.oxlintrc.json` ignores. `turbo` caches results:
-  `bunx turbo run test --force` when you need a real run.
-- **Another OMP session shares this checkout.** While this brief was written one was mid-flight in
-  `apps/web` (the UI aesthetic work: shadcn components, theme, nav rail), uncommitted. Commit by path,
-  never `git add -A`, re-read a file before editing it, and do not touch `apps/web` unless you mean to
-  take that work over.
-- **Effect 4, not Effect 3.** `Config.String`, `Effect.result`/`Result`, `Effect.gen`, `Layer.effect`
-  (there is no `Layer.scoped`), `Effect.forkChild`/`Effect.forkIn`, `Effect.andThen`, `Stream.unwrap`,
-  `Schema.Finite`/`Schema.Int` for counters, and `Schema.optional` (not `optionalKey`) for anything a
-  client can send. `docs/handoff.md` lists the rest.
-- **Lint bans `async` everywhere**, and bans `Date.now` / `Math.random` / `crypto.randomUUID` /
-  `JSON.parse` in library code — use `Clock`/`Random` in tests and `Schema.fromJsonString` for JSON
-  text.
-- **Pi Durable is consumed as an interface, never modified.** Its conformance suites are the oracle.
-  Its ids are branded numbers: `harness.submission(8)` works, `harness.submission("8")` does not.
-- **`MODEL_BACKEND=faux` for every drive run:** offline, deterministic, and still a real tool call.
-  `FAUX_COMMAND` overrides the command the faux script runs — `FAUX_COMMAND="sleep 8 && echo faux-ok"`
-  is how a run is held open long enough to be genuinely busy (that is how `verify-api/sigterm.sh`
-  catches a SIGTERM mid-run).
-- **One writer per checkout.** If you fan out, use isolated subagents (`isolated: true` per item —
-  isolation is on for this repo by `.omp/config.yml`) or separate `git worktree add` checkouts, and
-  give each parallel worktree its own database, created over TCP on port 5442 (see
-  `docs/parallel-work.md` §1), and its own port. A subagent spawned _without_ `isolated: true` edits
-  this checkout directly.
-- **The verify skills share `.verify/run/api.pid`** and each starts its own API, so run them one at a
-  time: `verify-api` on `:9200`, `verify-cli` on `:9300` (private tmux server), `verify-web` on `:9100`
-  - `:3100`. `verify-api/degraded.sh` stops the local Postgres container and always restarts it.
-- **A board change is a second contract on the session API.** The task tables are derived like
-  `sessions`/`session_activity`/`repos`: the log carries a `factory.task` document and
-  `rebuildIndexes` folds it back. Do not invent a second storage convention, and do not let a
-  projection failure fail a run.
+## Definition of done for this stretch
 
-### Definition of done
-
-- Each issue's acceptance criteria met, with the observable result it names — not a plausible subset.
-  For LOB-42 that includes the **refusals**: an undeclared transition and an agent crossing a gate
-  must both be refused, and those are the checks that matter.
-- Verification lives in the repo's own skills: create `.pi/skills/verify-board/` for LOB-42 (in the
-  shape of `.pi/skills/verify-api`), and extend `verify-api` for LOB-48's injection if it is observable
-  over the session surface. Evidence under `.verify/` that survives cleanup.
-- All five gates green, and you have run the thing you changed — a drive run, not only a unit test.
-- Linear issues moved to In Review with a comment: what shipped, the commands you ran, what is
-  provably done, and what is not proven.
-- `docs/handoff.md`'s "what to do next" rewritten for the agent after you. Touch `docs/features.md`,
-  `docs/roadmap.md`, or `docs/board.md` only where reality moved — a claim the code contradicts is a
-  doc bug.
-
-### Report back
-
-Short and evidence-first: what shipped, the exact commands and their results, what you could not
-prove, and which Linear issues you moved. If you hit something that changes the plan, say so
-explicitly rather than quietly narrowing scope.
-
----
-
-## After this stretch
-
-- **LOB-46** (the specifying stage) then **LOB-22** (the board UI), with **LOB-49** as milestone B's
-  gate. LOB-49 needs the PR path (LOB-11, LOB-12) before the `review` gate can be exercised at all.
-- **The M3 block** — LOB-8 (policy hooks) → LOB-9 (approvals) → LOB-10 (credentials) — runs in
-  parallel with B rather than after it: the first milestone where the agent is policed, with
-  `.pi/skills/verify-policy` proving the refusals rather than the happy path.
-- **Two cheap verification holes are still open** from M2 (`docs/handoff.md` item 6): steering and the
-  `busy` code at the RPC surface (now reachable — `FAUX_COMMAND` holds a turn open, which `sigterm.sh`
-  already does), and `usage.tools` (fix the per-tool cost claim or withdraw it — LOB-32).
-- All of it feeds milestone **L**, the local end-to-end run (LOB-40) that gates everything in Google
-  Cloud — driven from the CLI first (D9) and from the board once B lands.
+- LOB-40 Done: the owner's live run posted on it, with its time and cost.
+- LOB-41 Done by its own criterion.
+- Every umbrella's follow-ups harvested, LOB-252 merged, the umbrellas closed, and the drafts filed
+  once Linear has room.

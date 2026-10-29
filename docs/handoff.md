@@ -183,6 +183,25 @@ the pair of verification holes task 4 opened (steering at the RPC surface, `usag
 below. Then M3 (policy, approvals, credentials), with milestone **B** (the board, `docs/board.md`)
 running alongside it as the operator surface everything after is driven from.
 
+**Milestone L (LOB-40), 2026-10-29: the loop is proven end to end in faux; the live run is the
+owner's.** `.pi/skills/verify-workflow/` drives one card the whole way on verify-board's instance: a
+Linear issue labelled `factory` arrives through `POST /webhooks/linear` and the label-to-repo rule
+files exactly one card bound to the repo and `main` (a redelivery files none); a person moves it
+through specify (the run asks — in Linear too — and a person answers), planning (the run's own
+crossing refused at plan approval) and building; the builder's `git commit` is refused by policy and
+waits on an approval that survives a SIGKILL of the API; `factory approve` resumes it; the settled
+run pushes `factory/<session-id>` with the CredentialProvider's token to a loopback git forge (a real
+`git push`) and opens exactly one PR with its evidence block (a retry is `already-open`); Linear gets
+the PR attached, one comment and In Review, then Done after the merge with still one comment; the
+reviewer passes; and `listSessions`/`listSpend` show every run's status, repo, duration and cost.
+41/41 checks, twice in a row from nothing (`cycle.sh`), with `down.sh` leaving no process, port or
+scratch database. The faux loop surfaced no product gap; it needed seams in the verify tooling only
+(verify-board's `up.sh` can now restart its API in place, point at a live forge and model, and seed a
+named repo with a forge URL). Not proven: the real services. The `--live` mode of the same drive is
+built and refuses without the owner's variables (`verify-workflow-live.test.ts`); the owner's one
+command (`cycle.sh --live`), what to create first, and how to post the wall-clock time and cost are
+in the skill's SKILL.md. LOB-40 stays open until that run is posted on it (its item d).
+
 ### Done so far
 
 **1. ~~Resolve the streaming card.~~** The demo stream is gone, replaced by the session stream. Two

@@ -10,7 +10,7 @@ import { afterAll, describe, expect, it } from "vitest";
  *
  * The live run talks to Linear, GitHub and Anthropic with the owner's credentials, so no agent and no
  * CI ever runs it; what can be proven here is that it never starts half-configured. Every case runs
- * the real scripts — `up.sh --live`, `doctor.sh --live` and `drive.sh --live` — copied into a scratch
+ * the real scripts — `up.sh`, `doctor.sh`, `drive.sh` and `cycle.sh`, each with `--live` — copied into a scratch
  * repo layout, under an environment built from nothing (`PATH` and `HOME` alone, plus what the case
  * sets), so a developer's own `GITHUB_TOKEN` can neither satisfy nor leak into a case. The values the
  * cases set are placeholders; one of them is a sentinel that must never appear in what the scripts
@@ -33,7 +33,8 @@ const REQUIRED = [
   "WORKFLOW_GITHUB_REPO",
   "WORKFLOW_PUBLIC_URL",
 ] as const;
-const ANTHROPIC = "ANTHROPIC_API_KEY (or ANTHROPIC_OAUTH_TOKEN, or ANTHROPIC_AUTH_TOKEN)";
+const ANTHROPIC =
+  "ANTHROPIC_API_KEY (or ANTHROPIC_OAUTH_TOKEN, or ANTHROPIC_AUTH_TOKEN)";
 const SENTINEL = "sentinel-value-never-printed";
 
 const created: string[] = [];
@@ -43,11 +44,15 @@ afterAll(() => {
 
 /** A scratch repo holding the workflow skill, verify-board's doctor and the shared Postgres lib. */
 const stage = (): string => {
-  const root = mkdtempSync(path.join(tmpdir(), "factory-verify-workflow-live-"));
+  const root = mkdtempSync(
+    path.join(tmpdir(), "factory-verify-workflow-live-"),
+  );
   created.push(root);
   for (const dir of [SKILL, ".pi/skills/verify-board", ".pi/skills/lib"]) {
     mkdirSync(path.join(root, dir), { recursive: true });
-    cpSync(path.join(REPO_ROOT, dir), path.join(root, dir), { recursive: true });
+    cpSync(path.join(REPO_ROOT, dir), path.join(root, dir), {
+      recursive: true,
+    });
   }
   return root;
 };
@@ -92,7 +97,12 @@ const run = (root: string, script: string, env: Record<string, string>) => {
 };
 
 describe("verify-workflow --live without its variables", () => {
-  for (const script of ["up.sh", "doctor.sh", "drive.sh"] as const) {
+  for (const script of [
+    "up.sh",
+    "doctor.sh",
+    "drive.sh",
+    "cycle.sh",
+  ] as const) {
     it(
       `${script} --live refuses, naming every missing variable, and starts nothing`,
       { timeout: 90_000 },

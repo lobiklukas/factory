@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
-# The faux drive from nothing, N times in a row (LOB-40): `up.sh`, `drive.sh`, `down.sh`, and after
+# The drive from nothing, N times in a row (LOB-40): `up.sh`, `drive.sh`, `down.sh`, and after
 # each `down.sh` the proof that it left nothing behind — every process `up.sh` recorded is gone,
 # every port it bound is free, the scratch database is dropped and the run's workflow directory is
 # removed. Exits non-zero when a drive fails or anything is left.
 #
-#   ./cycle.sh        twice, the acceptance's "twice in a row"
-#   ./cycle.sh 1      once
+#   ./cycle.sh          twice, the acceptance's "twice in a row"
+#   ./cycle.sh 1        once
+#   ./cycle.sh --live   the owner's live run, once: `up.sh --live`, `drive.sh --live`, `down.sh` — the
+#                       one command SKILL.md's "Live run" names; refuses, naming each variable,
+#                       without live-env.sh's variables
+#
+# Each run's wall-clock time is counted from just before its `up.sh` (WORKFLOW_STARTED_AT, which
+# `drive.ts` reads for `report.md`).
 #
 # Takes what `up.sh` takes (DATABASE_URL, API_PORT, WEB_PORT, …). Each run's evidence is kept:
 # .verify/evidence/latest/workflow is the last run's, and workflow-run-<n> each run's;
@@ -18,7 +24,20 @@ RUN_DIR="$ROOT/.verify/run"
 WF_DIR="$RUN_DIR/workflow"
 EVIDENCE="${EVIDENCE_DIR:-$ROOT/.verify/evidence/latest}"
 BASE_URL="${DATABASE_URL:-postgres://factory:factory@localhost:5442/factory_ralph}"
-RUNS="${1:-2}"
+LIVE=""
+RUNS=2
+for arg in "$@"; do
+  case "$arg" in
+    --live) LIVE="--live" RUNS=1 ;;
+    *[!0-9]* | "") echo "usage: ./cycle.sh [N | --live]" >&2; exit 2 ;;
+    *) RUNS="$arg" ;;
+  esac
+done
+# shellcheck source=live-env.sh
+source "$SKILL/live-env.sh"
+if [ -n "$LIVE" ]; then
+  live_refusal "cycle.sh" || exit $?
+fi
 API_PORT="${API_PORT:-9610}"
 WEB_PORT="${WEB_PORT:-3610}"
 PORTS=("$API_PORT" "$WEB_PORT" "${GITHUB_PORT:-$((API_PORT + 1))}" "${LINEAR_PORT:-$((API_PORT + 2))}" "${GIT_PORT:-$((API_PORT + 3))}")
@@ -31,18 +50,22 @@ rows=()
 for run in $(seq 1 "$RUNS"); do
   echo "=== verify-workflow cycle $run of $RUNS"
   up=0 drive=1 down=1
-  "$SKILL/up.sh" || up=$?
-  pids=""
+  WORKFLOW_STARTED_AT="$(($(date +%s) * 1000))"
+  export WORKFLOW_STARTED_AT
+  "$SKILL/up.sh" $LIVE || up=$?
   db="$(cat "$WF_DIR/database" 2>/dev/null || true)"
-  for file in "$RUN_DIR"/api.pid "$RUN_DIR"/web.pid "$RUN_DIR"/github.pid "$WF_DIR"/linear.pid "$WF_DIR"/git.pid; do
-    [ -f "$file" ] && pids="$pids $(cat "$file")"
-  done
   if [ "$up" -eq 0 ]; then
-    "$SKILL/drive.sh"
+    "$SKILL/drive.sh" $LIVE
     drive=$?
     rm -rf "$EVIDENCE/workflow-run-$run"
     cp -R "$EVIDENCE/workflow" "$EVIDENCE/workflow-run-$run" 2>/dev/null || true
   fi
+  # Read just before down.sh, not after up.sh: the drive restarts the API, and the process down.sh
+  # must stop is the one that replaced it.
+  pids=""
+  for file in "$RUN_DIR"/api.pid "$RUN_DIR"/web.pid "$RUN_DIR"/github.pid "$WF_DIR"/linear.pid "$WF_DIR"/git.pid; do
+    [ -f "$file" ] && pids="$pids $(cat "$file")"
+  done
   "$SKILL/down.sh" && down=0
 
   # What down.sh must have left: nothing.

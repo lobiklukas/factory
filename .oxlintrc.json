@@ -23,6 +23,7 @@
         ".pi/skills/verify-api/*.ts",
         ".pi/skills/verify-board/*.ts",
         ".pi/skills/verify-cli/*.ts",
+        ".pi/skills/verify-workflow/*.ts",
         ".pi/skills/verify-board/*.mjs"
       ],
       "plugins": [],

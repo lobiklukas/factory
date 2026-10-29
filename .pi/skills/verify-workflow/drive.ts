@@ -54,7 +54,13 @@
 // `live-env.sh`, which `drive.sh --live` refuses without.
 import { spawnSync } from "node:child_process";
 import { createHmac, randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { SQL } from "bun";
@@ -63,7 +69,7 @@ import { RpcClient } from "effect/rpc";
 import { RpcApi } from "@repo/domain/Rpc";
 import { SessionId } from "@repo/domain/Session";
 import type { SessionSnapshot } from "@repo/domain/Session";
-import { TaskId } from "@repo/domain/Task";
+import { BoardInstanceId, TaskId } from "@repo/domain/Task";
 import type { Task } from "@repo/domain/Task";
 import { makeChecker, protocolFor } from "../verify-api/harness.ts";
 import type { CheckRecord } from "../verify-api/harness.ts";
@@ -130,6 +136,9 @@ const ISSUE_DESCRIPTION =
   "Delegated from Linear by verify-workflow: the whole loop on one card.";
 const ANSWER = "Postgres 16. Keep port 5442 — it is shared.";
 const MINUTE = 60_000;
+/** When the run began: `cycle.sh` sets it just before `up.sh`, so the report's time includes the launch. */
+const STARTED_AT =
+  Number(process.env["WORKFLOW_STARTED_AT"] ?? "") || Date.now();
 
 rmSync(EVIDENCE_DIR, { recursive: true, force: true });
 mkdirSync(EVIDENCE_DIR, { recursive: true });
@@ -222,7 +231,10 @@ const poll = <A, E, R>(
 
 type LinearIssue = {
   readonly state: string;
-  readonly comments: ReadonlyArray<{ readonly id: string; readonly body: string }>;
+  readonly comments: ReadonlyArray<{
+    readonly id: string;
+    readonly body: string;
+  }>;
   readonly attachments: ReadonlyArray<string>;
 };
 
@@ -237,7 +249,10 @@ type FakeLinearLedger = {
       readonly attachments: ReadonlyArray<{ readonly url: string }>;
     }
   >;
-  readonly agentSessions: ReadonlyArray<{ readonly id: string; readonly issueId: string }>;
+  readonly agentSessions: ReadonlyArray<{
+    readonly id: string;
+    readonly issueId: string;
+  }>;
   readonly activities: ReadonlyArray<{
     readonly agentSessionId: string;
     readonly content: Record<string, unknown>;
@@ -252,7 +267,9 @@ type FakeLinearLedger = {
 const markerOf = (body: string): string =>
   /factory:ses_[0-9a-z]{26}:[a-z-]+/.exec(body)?.[0] ?? "";
 
-const linearIssue = async (issueId: string): Promise<LinearIssue | undefined> => {
+const linearIssue = async (
+  issueId: string,
+): Promise<LinearIssue | undefined> => {
   if (!LIVE) {
     const ledger = readJson<FakeLinearLedger>(LINEAR_LEDGER);
     const issue = Object.values(ledger?.issues ?? {}).find(
@@ -262,7 +279,10 @@ const linearIssue = async (issueId: string): Promise<LinearIssue | undefined> =>
       ? undefined
       : {
           state: issue.state.name,
-          comments: issue.comments.map((body) => ({ id: markerOf(body), body })),
+          comments: issue.comments.map((body) => ({
+            id: markerOf(body),
+            body,
+          })),
           attachments: issue.attachments.map((attachment) => attachment.url),
         };
   }
@@ -357,7 +377,15 @@ const pullsFor = async (branch: string): Promise<ReadonlyArray<PullRow>> => {
 
 /** The sha the forge holds for `ref`: the loopback bare repository, or GitHub's ref. */
 const forgeSha = async (ref: string): Promise<string> => {
-  if (!LIVE) return git("--git-dir", FORGE_REPO, "rev-parse", "--verify", "--quiet", ref);
+  if (!LIVE)
+    return git(
+      "--git-dir",
+      FORGE_REPO,
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      ref,
+    );
   const response = await fetch(
     `https://api.github.com/repos/${REPO}/git/ref/${ref.replace(/^refs\//, "")}`,
     {
@@ -402,7 +430,10 @@ const issueEvent = (
 /** One delivery as Linear sends it: the raw body, its HMAC with the instance's secret, a fresh id. */
 const deliverLinear = async (step: string, body: unknown) => {
   const raw = JSON.stringify(body);
-  const secret = readFileSync(path.join(WF_DIR, "linear-secret"), "utf8").trim();
+  const secret = readFileSync(
+    path.join(WF_DIR, "linear-secret"),
+    "utf8",
+  ).trim();
   const delivery = randomUUID();
   const response = await fetch(`${API_URL}/webhooks/linear`, {
     method: "POST",
@@ -410,7 +441,9 @@ const deliverLinear = async (step: string, body: unknown) => {
       "content-type": "application/json; charset=utf-8",
       "linear-delivery": delivery,
       "linear-event": "Issue",
-      "linear-signature": createHmac("sha256", secret).update(raw).digest("hex"),
+      "linear-signature": createHmac("sha256", secret)
+        .update(raw)
+        .digest("hex"),
       "linear-timestamp": String(Date.now()),
       "user-agent": "Linear-Webhook",
     },
@@ -428,7 +461,10 @@ const deliverLinear = async (step: string, body: unknown) => {
 };
 
 /** How many log commits of `sessionId` hold `needle` (the log is the truth, D7). */
-const commitsHolding = async (sessionId: string, needle: string): Promise<number> => {
+const commitsHolding = async (
+  sessionId: string,
+  needle: string,
+): Promise<number> => {
   const sql = new SQL(SCRATCH_URL);
   try {
     const rows = (await sql`
@@ -468,7 +504,7 @@ const program = Effect.gen(function* () {
   /** Wait for a run to settle; a faux run takes seconds, a real one minutes. */
   const settle = (sessionId: SessionId) =>
     poll(getSession(sessionId), settled, LIVE ? 20 * MINUTE : 2 * MINUTE);
-  const cards = () => client.listTasks({ boardId: BOARD.boardId });
+  const cards = () => client.listTasks({ boardId: BoardInstanceId.make(BOARD.boardId) });
   /** A person's move, at the revision the card is at now. */
   const move = (step: string, taskId: TaskId, to: string, actor = PERSON) =>
     Effect.gen(function* () {
@@ -563,7 +599,9 @@ const program = Effect.gen(function* () {
     taskId = filed.value[0]?.id;
     check(
       "a Linear delegation files exactly one card in intake",
-      filed.met && filed.value.length === 1 && filed.value[0]?.column === "intake",
+      filed.met &&
+        filed.value.length === 1 &&
+        filed.value[0]?.column === "intake",
       `cards=${filed.value.length}`,
     );
     console.log(
@@ -579,7 +617,9 @@ const program = Effect.gen(function* () {
     );
   }
   if (taskId === undefined) {
-    return yield* Effect.die(new Error("no card: the rest of the loop proves nothing"));
+    return yield* Effect.die(
+      new Error("no card: the rest of the loop proves nothing"),
+    );
   }
   const TASK = taskId;
   const delegatedCard = yield* getTask(TASK);
@@ -600,7 +640,9 @@ const program = Effect.gen(function* () {
   );
 
   // --- 2: specify -------------------------------------------------------------------------------
-  console.log("\n# 2 specify: a person starts the card; it asks, a person answers");
+  console.log(
+    "\n# 2 specify: a person starts the card; it asks, a person answers",
+  );
   const toSpecifying = yield* move("move-specifying", TASK, "specifying");
   check(
     "a person moves the card to specifying",
@@ -629,7 +671,8 @@ const program = Effect.gen(function* () {
     if (!LIVE) {
       const ledger = readJson<FakeLinearLedger>(LINEAR_LEDGER);
       const agentSessions = (ledger?.agentSessions ?? []).filter(
-        (session) => session.issueId === ISSUE || session.issueId === `uuid-${ISSUE}`,
+        (session) =>
+          session.issueId === ISSUE || session.issueId === `uuid-${ISSUE}`,
       );
       const asked = (ledger?.activities ?? []).filter((activity) =>
         agentSessions.some((session) => session.id === activity.agentSessionId),
@@ -640,7 +683,9 @@ const program = Effect.gen(function* () {
           asked.length === 1 &&
           asked[0]?.content["type"] === "elicitation" &&
           question !== undefined &&
-          JSON.stringify(asked[0]?.content).includes(question.body.slice(0, 30)),
+          JSON.stringify(asked[0]?.content).includes(
+            question.body.slice(0, 30),
+          ),
         `agentSessions=${agentSessions.length} activities=${JSON.stringify(asked)}`,
       );
     }
@@ -681,7 +726,9 @@ const program = Effect.gen(function* () {
   );
 
   // --- 3: plan ---------------------------------------------------------------------------------
-  console.log("\n# 3 plan: the planner declares a plan; only a person approves it");
+  console.log(
+    "\n# 3 plan: the planner declares a plan; only a person approves it",
+  );
   const toPlanning = yield* move("move-planning", TASK, "planning");
   check(
     "a person moves the card to planning",
@@ -725,7 +772,9 @@ const program = Effect.gen(function* () {
   );
 
   // --- 4: build, the gate and the restart ---------------------------------------------------------
-  console.log("\n# 4 build: a gated call, an approval, the API restarted under it");
+  console.log(
+    "\n# 4 build: a gated call, an approval, the API restarted under it",
+  );
   const build = start(
     "start-build",
     TASK,
@@ -766,7 +815,8 @@ const program = Effect.gen(function* () {
   );
   check(
     "the run is parked on it: the call did not run and no PR was opened",
-    (LIVE || git("-C", worktree, "rev-list", "--count", "main..HEAD") === "0") &&
+    (LIVE ||
+      git("-C", worktree, "rev-list", "--count", "main..HEAD") === "0") &&
       gated.session.prUrl === undefined &&
       (yield* Effect.promise(() => pullsFor(branch))).length === 0,
     `commits=${git("-C", worktree, "rev-list", "--count", "main..HEAD")} pr=${gated.session.prUrl ?? "none"}`,
@@ -779,7 +829,8 @@ const program = Effect.gen(function* () {
     "the run works in its own worktree on factory/<session-id>, a checkout of the registered repo, not this tree",
     gated.workspace.branch === branch &&
       git("-C", worktree, "rev-parse", "--abbrev-ref", "HEAD") === branch &&
-      git("-C", worktree, "rev-parse", "--show-toplevel") === path.resolve(worktree) &&
+      git("-C", worktree, "rev-parse", "--show-toplevel") ===
+        path.resolve(worktree) &&
       commonDir === path.join(BOARD_REPO, ".git") &&
       path.resolve(worktree) !== ROOT,
     `worktree=${worktree} common=${commonDir}`,
@@ -792,11 +843,18 @@ const program = Effect.gen(function* () {
     apiPid: readFileSync(path.join(RUN_DIR, "api.pid"), "utf8").trim(),
   };
   summary["approvalBeforeRestart"] = before;
-  const restart = spawnSync(path.join(ROOT, ".pi/skills/verify-workflow/restart-api.sh"), ["KILL"], {
-    encoding: "utf8",
-    env: { ...process.env, DATABASE_URL: BASE_URL },
-  });
-  writeLater("restart-api.txt", `${restart.stdout}${restart.stderr}(exit ${restart.status})\n`);
+  const restart = spawnSync(
+    path.join(ROOT, ".pi/skills/verify-workflow/restart-api.sh"),
+    ["KILL"],
+    {
+      encoding: "utf8",
+      env: { ...process.env, DATABASE_URL: BASE_URL },
+    },
+  );
+  writeLater(
+    "restart-api.txt",
+    `${restart.stdout}${restart.stderr}(exit ${restart.status})\n`,
+  );
   const afterPid = readFileSync(path.join(RUN_DIR, "api.pid"), "utf8").trim();
   check(
     "the API is killed (SIGKILL) mid-run and a new process serves the instance",
@@ -805,7 +863,9 @@ const program = Effect.gen(function* () {
   );
   const listed = factory("approvals", ["approvals", "--session", BUILD]);
   const survived = yield* client.listApprovals({ sessionId: BUILD });
-  const commitsAfter = yield* Effect.promise(() => commitsHolding(BUILD, requestId));
+  const commitsAfter = yield* Effect.promise(() =>
+    commitsHolding(BUILD, requestId),
+  );
   check(
     "the approval survived the restart: still pending, still one request in the log",
     survived.approvals.length === 1 &&
@@ -835,8 +895,14 @@ const program = Effect.gen(function* () {
   );
 
   // --- 5: push and PR -------------------------------------------------------------------------
-  console.log("\n# 5 PR: the push, one PR with evidence, a retry, the Linear write-back");
-  const prSettled = probe("build.ts", { MODE: "settled", SESSION_ID: BUILD, TASK_ID: TASK });
+  console.log(
+    "\n# 5 PR: the push, one PR with evidence, a retry, the Linear write-back",
+  );
+  const prSettled = probe("build.ts", {
+    MODE: "settled",
+    SESSION_ID: BUILD,
+    TASK_ID: TASK,
+  });
   const prUrl = /^pr +(\S+)$/m.exec(prSettled.out)?.[1] ?? "";
   summary["prUrl"] = prUrl;
   check(
@@ -867,7 +933,9 @@ const program = Effect.gen(function* () {
         readonly credential: string;
       }>;
     }>(GIT_LEDGER);
-    const sent = (gitLedger?.requests ?? []).filter((row) => row.credential !== "none");
+    const sent = (gitLedger?.requests ?? []).filter(
+      (row) => row.credential !== "none",
+    );
     const pushes = sent.filter(
       (row) => row.method === "POST" && row.service === "git-receive-pack",
     );
@@ -926,7 +994,8 @@ const program = Effect.gen(function* () {
     "Linear has the PR: the issue moved to In Review, the PR attached, one comment carrying its link",
     inReview.met &&
       prUrl !== "" &&
-      (inReview.value?.attachments ?? []).filter((url) => url === prUrl).length === 1 &&
+      (inReview.value?.attachments ?? []).filter((url) => url === prUrl)
+        .length === 1 &&
       prComments.length === 1 &&
       (prComments[0]?.body ?? "").includes(marker),
     `state=${inReview.value?.state ?? "none"} attachments=${inReview.value?.attachments.length ?? 0} comments=${inReview.value?.comments.length ?? 0}`,
@@ -938,7 +1007,9 @@ const program = Effect.gen(function* () {
   );
 
   // --- 6: review and merge ---------------------------------------------------------------------
-  console.log("\n# 6 review: the run hands over, the reviewer passes, the merge completes the card");
+  console.log(
+    "\n# 6 review: the run hands over, the reviewer passes, the merge completes the card",
+  );
   const toReview = yield* move("move-review", TASK, "review", BUILD);
   check(
     "the build run moves its card on to review",
@@ -946,9 +1017,17 @@ const program = Effect.gen(function* () {
     toReview.out.trim().split("\n")[0] ?? "",
   );
   if (!LIVE) {
-    const head = git("--git-dir", FORGE_REPO, "rev-parse", `refs/heads/${branch}`);
+    const head = git(
+      "--git-dir",
+      FORGE_REPO,
+      "rev-parse",
+      `refs/heads/${branch}`,
+    );
     const base = git("--git-dir", FORGE_REPO, "rev-parse", "refs/heads/main");
-    const secret = readFileSync(path.join(RUN_DIR, "webhook-secret"), "utf8").trim();
+    const secret = readFileSync(
+      path.join(RUN_DIR, "webhook-secret"),
+      "utf8",
+    ).trim();
     const reviewed = probe("review.ts", {
       MODE: "review",
       GITHUB_WEBHOOK_SECRET: secret,
@@ -962,7 +1041,9 @@ const program = Effect.gen(function* () {
       EXPECT: "pass",
       LABEL: "workflow",
     });
-    const reviewer = sessionIdIn(/^reviewer (\S+)$/m.exec(reviewed.out)?.[1] ?? "");
+    const reviewer = sessionIdIn(
+      /^reviewer (\S+)$/m.exec(reviewed.out)?.[1] ?? "",
+    );
     if (reviewer !== undefined) runs.push(reviewer);
     check(
       "GitHub's pull_request opened starts a reviewer run that passes the PR's head (review.ts)",
@@ -989,7 +1070,11 @@ const program = Effect.gen(function* () {
     console.log(
       `\n>>> GitHub's webhook starts the reviewer. Once it has passed, merge ${prUrl} in GitHub (waiting up to 30 minutes).\n`,
     );
-    const done = yield* poll(getTask(TASK), (task) => task.column === "done", 30 * MINUTE);
+    const done = yield* poll(
+      getTask(TASK),
+      (task) => task.column === "done",
+      30 * MINUTE,
+    );
     check(
       "the merge in GitHub moves the card to done",
       done.met,
@@ -1014,8 +1099,11 @@ const program = Effect.gen(function* () {
   );
 
   // --- 7: the session list and the spend pane ------------------------------------------------------
-  console.log("\n# 7 list: status, repo, duration and cost of every run on the card");
-  const listedRuns = (yield* client.listSessions({ taskId: TASK, limit: 50 })).sessions;
+  console.log(
+    "\n# 7 list: status, repo, duration and cost of every run on the card",
+  );
+  const listedRuns = (yield* client.listSessions({ taskId: TASK, limit: 50 }))
+    .sessions;
   const rows = listedRuns.map((row) => ({
     sessionId: row.id,
     status: row.status,
@@ -1037,7 +1125,10 @@ const program = Effect.gen(function* () {
           (LIVE || row.costTotal > 0),
       ),
     rows
-      .map((row) => `${row.sessionId} ${row.status} ${row.durationMs}ms $${row.costTotal.toFixed(2)}`)
+      .map(
+        (row) =>
+          `${row.sessionId} ${row.status} ${row.durationMs}ms $${row.costTotal.toFixed(2)}`,
+      )
       .join("; "),
   );
   check(
@@ -1052,7 +1143,9 @@ const program = Effect.gen(function* () {
   summary["costRows"] = repoSpend;
   check(
     "the spend pane's rows for the repo add up to the session list's costs",
-    repoSpend.length > 0 && Math.abs(spent - listedCost) < 1e-9 && (LIVE || spent > 0),
+    repoSpend.length > 0 &&
+      Math.abs(spent - listedCost) < 1e-9 &&
+      (LIVE || spent > 0),
     `spend=$${spent.toFixed(4)} list=$${listedCost.toFixed(4)} rows=${repoSpend.length}`,
   );
   const ls = factory("ls", ["ls", "--limit", "50"]);
@@ -1097,8 +1190,35 @@ await writeFile(
   path.join(EVIDENCE_DIR, "observed.json"),
   `${JSON.stringify(observed, null, 2)}\n`,
 );
-const failed = Object.entries(observed.checks).filter(([, record]) => !record.passed);
+const failed = Object.entries(observed.checks).filter(
+  ([, record]) => !record.passed,
+);
 const total = Object.keys(observed.checks).length;
+// The run in a few lines: what the owner posts on LOB-40 after the live run (its item d).
+const said = (key: string): string => {
+  const value = summary[key];
+  return typeof value === "string" && value !== "" ? value : "none";
+};
+const seconds = Math.round((Date.now() - STARTED_AT) / 1000);
+const sessions = (summary["sessions"] ?? []) as ReadonlyArray<{
+  readonly costTotal: number;
+}>;
+const cost = sessions.reduce((sum, row) => sum + row.costTotal, 0);
+await writeFile(
+  path.join(EVIDENCE_DIR, "report.md"),
+  [
+    `**verify-workflow ${instance.mode} run, ${new Date().toISOString().slice(0, 10)}** (LOB-40)`,
+    "",
+    `- Result: ${total - failed.length}/${total} checks passed${failed.length === 0 ? "" : ` — failed: ${failed.map(([name]) => name).join("; ")}`}`,
+    `- Wall-clock: ${Math.floor(seconds / 60)}m ${seconds % 60}s (${process.env["WORKFLOW_STARTED_AT"] === undefined ? "the drive alone" : "from up.sh to the end of the drive"})`,
+    `- Cost: $${cost.toFixed(4)} across ${sessions.length} sessions on ${REPO} (listSessions; listSpend agrees: ${observed.checks["the spend pane's rows for the repo add up to the session list's costs"]?.passed === true ? "yes" : "no"})`,
+    `- Model backend: ${LIVE ? "anthropic" : "faux"}`,
+    `- PR: ${said("prUrl")}`,
+    `- Linear issue: ${said("linearIssue")}, PR comment ${said("linearCommentId")}`,
+    `- Card: ${said("taskId")}, build run ${said("buildSessionId")} on ${said("branch")}`,
+    "",
+  ].join("\n"),
+);
 console.log(
   failed.length === 0
     ? `\nverify-workflow (${instance.mode}): ${total}/${total} checks passed — evidence in ${EVIDENCE_DIR}`
