@@ -4,7 +4,8 @@
 # reaches those sinks once (and one for a card somebody else owns reaches neither); a kind switched
 # off on the page stops its events with no restart; a paused sink is skipped; and delivered
 # notifications and run failures older than the retention window are deleted on a restart's first
-# poll while undelivered, recent and in-window rows survive.
+# poll while recent and in-window rows survive (and an undelivered row to a sink nothing sends to,
+# older than the window, is deleted as dead).
 #
 # This script owns everything it drives: a scratch database minted on DATABASE_URL's server (so the
 # fakes' ledger holds this drive's messages and nothing else), the loopback fakes
@@ -210,6 +211,7 @@ query "INSERT INTO run_failures (session_id, entry_id, reason, detail, failed_at
 query "INSERT INTO notification_deliveries (event_id, sink, kind, title, body, link, created_at, attempts, delivered_at) VALUES
   ('failed:$OLD_SES:old', 'drive:retention', 'failed', 't', 'b', 'http://x/', now() - interval '40 days', 1, now() - interval '40 days'),
   ('failed:$OLD_SES:undelivered', 'drive:retention', 'failed', 't', 'b', 'http://x/', now() - interval '40 days', 1, NULL),
+  ('failed:$OLD_SES:pending', 'drive:retention', 'failed', 't', 'b', 'http://x/', now() - interval '2 days', 1, NULL),
   ('failed:$OLD_SES:recent', 'drive:retention', 'failed', 't', 'b', 'http://x/', now() - interval '2 days', 1, now() - interval '2 days')" >/dev/null
 BEFORE_MESSAGES="$(bun -e 'console.log(JSON.parse(await Bun.file(process.argv[1]).text()).messages.length)' "$LEDGER")"
 start_api NOTIFY_RETENTION_DAYS=30 || exit 1
@@ -225,8 +227,8 @@ LEDGER_ROWS="$(query "SELECT event_id, delivered_at IS NOT NULL AS delivered FRO
 FAILURE_ROWS="$(query "SELECT entry_id FROM run_failures WHERE session_id = '$OLD_SES' ORDER BY entry_id")"
 AFTER_MESSAGES="$(bun -e 'console.log(JSON.parse(await Bun.file(process.argv[1]).text()).messages.length)' "$LEDGER")"
 sleep 2
-check "the undelivered row and the two-day-old delivered row survive" \
-  "$(printf '%s' "$LEDGER_ROWS" | bun -e 'const rows = JSON.parse(await Bun.stdin.text()).map((x) => x.event_id.split(":").at(-1) + ":" + x.delivered).sort().join(","); process.exit(rows === "recent:true,undelivered:false" ? 0 : 1)' && echo 0 || echo 1)" \
+check "the two-day-old rows survive, and the forty-day-old undelivered row to a sink nothing sends to is deleted as dead" \
+  "$(printf '%s' "$LEDGER_ROWS" | bun -e 'const rows = JSON.parse(await Bun.stdin.text()).map((x) => x.event_id.split(":").at(-1) + ":" + x.delivered).sort().join(","); process.exit(rows === "pending:false,recent:true" ? 0 : 1)' && echo 0 || echo 1)" \
   "$(printf '%s' "$LEDGER_ROWS" | tr -d ' \n' | cut -c1-200)"
 check "run failures: the forty-day-old row is deleted, the two-day-old one stays" \
   "$(printf '%s' "$FAILURE_ROWS" | bun -e 'const r = JSON.parse(await Bun.stdin.text()).map(x => x.entry_id).join(","); process.exit(r === "recent" ? 0 : 1)' && echo 0 || echo 1)" \

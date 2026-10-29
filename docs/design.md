@@ -175,9 +175,12 @@ pass so a change needs no restart. An event is routed by its owner, the actor th
 and then the actor that started the run (both already rows), to that person's sinks only, and to the
 environment's shared sinks when no owner has one. The ledger's memory is now bounded: a delivered
 `notification_deliveries` row and a `run_failures` row older than `NOTIFY_RETENTION_DAYS` (30, never
-under the failure lookback) are deleted on the poll, but never an undelivered row and never a
-delivered row whose event is still open — that row is the only thing that stops a card parked for six
-weeks from being announced again.
+under the failure lookback) are deleted on the poll, and so is an undelivered row that can never be
+sent (out of attempts, or to a sink nothing sends to any more), but never a row still pending and never
+one whose event is still open — that row is the only thing that stops a card parked for six weeks from
+being announced again. An event already delivered to a person's own sink is not posted to the shared
+channel when they later pause it, and a Web Push subscription the push service answers 404/410 for is
+switched off and shown as expired, so the owner falls back to their other sinks or the shared ones.
 
 ### D8 — Read model: live when running, historical when not
 

@@ -43,9 +43,10 @@ the dashboard and `notify-settings.mjs`. Its checks are named in the script's he
 ## Retention (F22)
 
 The script's second half restarts the API over rows it seeded in SQL — a delivered ledger row and a run
-failure forty days old, an undelivered row forty days old, and a delivered row and a failure two days
-old — and requires the first poll to delete the two old delivered/failure rows, keep the other three,
-and send nothing for the removed event.
+failure forty days old, an undelivered row forty days old to a sink nothing sends to, and a delivered
+row, an undelivered row and a failure two days old — and requires the first poll to delete the old
+delivered row, the old failure and the dead undelivered row, keep the other three, and send nothing for
+the removed event.
 
 ## What it cannot prove
 
