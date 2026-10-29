@@ -319,5 +319,6 @@ describe("a session given a verify secret", () => {
     for (const written of storage.written) {
       expect(written).not.toContain(FAKE_KEY);
     }
-  }, 30_000);
+    // A session, a checkout and a verify drive: past the 30 s this was on a loaded machine (DEFLAKE).
+  }, 120_000);
 });

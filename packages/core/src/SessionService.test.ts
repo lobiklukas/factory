@@ -5213,7 +5213,10 @@ describe("session list", () => {
       "https://github.com/lobiklukas/factory.git",
     );
     expect(result.repos[0]?.defaultBaseRef).toBe("main");
-  });
+    // `rebuildIndexes` folds every log this file's database holds, so its cost grows with the file:
+    // past vitest's 5 s default on a loaded machine, where the case went on running after its
+    // timeout and its rebuild deleted the next cases' sessions, which had no commits yet (DEFLAKE).
+  }, 120_000);
 
   // The fold writes its index rows as one `INSERT … SELECT FROM unnest(…)` per batch rather than
   // one statement per row (LOB-115). That is a change of SQL shape with no change of meaning, and
@@ -5329,7 +5332,10 @@ describe("session list", () => {
       { slug: "lobiklukas/factory", defaultBaseRef: "main" },
       { slug: "lobiklukas/other", defaultBaseRef: "feature/board" },
     ]);
-  });
+    // `rebuildIndexes` folds every log this file's database holds, so its cost grows with the file:
+    // past vitest's 5 s default on a loaded machine, where the case went on running after its
+    // timeout and its rebuild deleted the next cases' sessions, which had no commits yet (DEFLAKE).
+  }, 120_000);
 });
 
 describe("approvals", () => {
@@ -10139,7 +10145,10 @@ describe("a gated call asks through the approvals service", () => {
     expect(askedAgain?.text).toContain("one has been asked for");
     expect(askedAgain?.text).toContain(`${outcome.requestId}-2`);
     expect(askedAgain?.text).not.toContain("gated-ran");
-  });
+    // `rebuildIndexes` folds every log this file's database holds, so its cost grows with the file:
+    // past vitest's 5 s default on a loaded machine, where the case went on running after its
+    // timeout and its rebuild deleted the next cases' sessions, which had no commits yet (DEFLAKE).
+  }, 120_000);
 
   /** A snapshot once the session is idle and its transcript holds `results` tool results. */
   const settledWith = (sessionId: SessionId, results: number) =>
