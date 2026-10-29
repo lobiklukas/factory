@@ -316,6 +316,13 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 `./admission.sh` **11/11** (8 driver checks, 3 shell checks), evidence
 `.verify/evidence/latest/api/admission*.json`. See [limits.md](limits.md).
 
+The aggregate-spend-cap checks (S-aggregate-spend-caps) were run from the `agent/S-aggregate-spend-caps`
+worktree on 2026-10-29 (a scratch database minted on the worktree's `factory_agent_s_aggregate_spend_caps`
+server, faux with `FAUX_COST=0.01`, the API on `SPEND_PORT=9520`, the fake on `SPEND_FAKE_PORT=9521`):
+`./spend-caps.sh` all checks passed, evidence
+`.verify/evidence/latest/api/spend-caps*.json`. The drive runs in the minutes before 00:00 UTC are the
+one place it can be flaky: its windows are the UTC day. See [limits.md](limits.md).
+
 | Feature                  | Status  | File                                         |
 | ------------------------ | ------- | -------------------------------------------- |
 | Create a session         | passing | [create.md](create.md)                       |
@@ -330,6 +337,7 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | Fork a session           | passing | [fork.md](fork.md)                           |
 | Replay a session         | passing | [replay.md](replay.md)                       |
 | Request limits           | passing | [limits.md](limits.md)                       |
+| Aggregate spend caps     | passing | [limits.md](limits.md)                       |
 | Probes and readiness     | passing | [probes.md](probes.md)                       |
 | Shutdown and recovery    | passing | [lifecycle.md](lifecycle.md)                 |
 | Errors over the wire     | passing | [errors.md](errors.md)                       |

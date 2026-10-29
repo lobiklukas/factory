@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import {
   AT_CAPACITY_RETRY_AFTER_S,
   atCapacity,
+  budgetExceeded,
   SESSION_MAX_CONCURRENT,
   triggerErrorOfSession,
   triggerFailureAnswer,
@@ -65,5 +66,48 @@ describe("the at_capacity refusal", () => {
     expect(broken.status).toBe(500);
     expect(broken.headers).toBeUndefined();
     expect(broken.body).toMatchObject({ ok: false, code: "session-create" });
+  });
+});
+
+describe("the budget_exceeded refusal (S-aggregate-spend-caps)", () => {
+  const cap = {
+    scope: "repo",
+    subject: "acme/web",
+    window: "day",
+    limit: 20,
+    spent: 20.5,
+    source: 'SPEND_CAPS repos["acme/web"].daily',
+    resetsAt: "2026-10-30T00:00:00.000Z",
+  } as const;
+
+  it("names the cap, what it counted, the spend, where it is configured and when it resets", () => {
+    const refused = budgetExceeded(cap);
+    expect(refused.code).toBe("budget_exceeded");
+    expect(refused.spendCap).toEqual(cap);
+    // Not an `at_capacity`: no concurrency cap is named.
+    expect(refused.cap).toBeUndefined();
+    for (const part of [
+      "repository acme/web",
+      "$20.5000 of its $20.0000 daily cap",
+      'SPEND_CAPS repos["acme/web"].daily',
+      "2026-10-30T00:00:00.000Z",
+    ]) {
+      expect(refused.message).toContain(part);
+    }
+    const actor = budgetExceeded({
+      ...cap,
+      scope: "actor",
+      subject: "alice",
+      window: "month",
+    });
+    expect(actor.message).toContain("actor alice");
+    expect(actor.message).toContain("monthly cap");
+  });
+
+  it("is a not-now in the trigger seam and on a route: the redelivery succeeds once the window rolls over", () => {
+    const mapped = triggerErrorOfSession(budgetExceeded(cap));
+    expect(mapped.code).toBe("at-capacity");
+    expect(mapped.message).toContain("budget exceeded");
+    expect(triggerFailureAnswer(mapped).status).toBe(503);
   });
 });

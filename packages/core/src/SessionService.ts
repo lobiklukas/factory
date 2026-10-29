@@ -316,7 +316,19 @@ import { readRepoContext } from "./repoContext";
 import { readRepoPolicy } from "./repoPolicy";
 import { homeOf, makePresence, type Lease } from "./Presence";
 import { SessionBus, SessionBusPostgres } from "./SessionBus";
-import { atCapacity, runCapReached, SESSION_MAX_CONCURRENT } from "./admission";
+import {
+  atCapacity,
+  budgetExceeded,
+  runCapReached,
+  SESSION_MAX_CONCURRENT,
+} from "./admission";
+import {
+  checkSpendCaps,
+  hasSpendCaps,
+  NO_SPEND_CAPS,
+  raiseSpendAlerts,
+  type SpendCaps,
+} from "./spendCaps";
 import { checkRunCaps } from "./boardCaps";
 import { type CardBranch, cardBranchOf, changeColumnsOf } from "./cardBranch";
 import {
@@ -943,6 +955,14 @@ export type SessionServiceOptions = {
    */
   readonly maxConcurrentSessions?: number;
   /**
+   * Aggregate spend caps (S-aggregate-spend-caps, `./spendCaps`): the dollars a repository or an
+   * actor may spend in a UTC day or month. A `create` or a `send` that would start a run once the
+   * repository's or the actor's window has reached its limit is refused `budget_exceeded` before
+   * anything is written, and the spend that crosses 80% and 100% of a cap raises one alert each
+   * (the attention view, the notifier). Absent: no cap (`SPEND_CAPS` unset).
+   */
+  readonly spendCaps?: SpendCaps;
+  /**
    * What a session may do unattended (D11, `@repo/harness`'s `Policy`). Absent: D11's defaults, so
    * an unpoliced session is not reachable by omitting an argument.
    */
@@ -1382,6 +1402,53 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             source: SESSION_MAX_CONCURRENT,
           });
         });
+      /**
+       * Aggregate spend caps (S-aggregate-spend-caps): refuse a run that would start for `who` once
+       * a repository's or an actor's window has reached its cap. Before anything is written, so a
+       * refused create leaves no row and takes no request id. The refusal also raises the cap's
+       * alerts, which a spend recorded before the cap was configured (or lowered) never did.
+       * With no cap configured, no read at all.
+       */
+      const spendCaps = options.spendCaps ?? NO_SPEND_CAPS;
+      const refuseOverSpendCap = (who: {
+        readonly repo: string | undefined;
+        readonly actor: string | undefined;
+      }): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          if (!hasSpendCaps(spendCaps)) return;
+          const now = yield* Clock.currentTimeMillis;
+          const hit = yield* paper(
+            "check spend caps",
+            checkSpendCaps(spendCaps, who, now).pipe(
+              Effect.provideService(SqlClient, sql),
+            ),
+          );
+          if (hit === undefined) return;
+          yield* alertOnSpend(who, now);
+          yield* countRefusal("budget_exceeded");
+          return yield* budgetExceeded(hit);
+        });
+      /** Raise the alerts `who`'s spend has reached; a failure to is logged, never the request's. */
+      const alertOnSpend = (
+        who: {
+          readonly repo: string | undefined;
+          readonly actor: string | undefined;
+        },
+        now: number,
+      ): Effect.Effect<void> =>
+        !hasSpendCaps(spendCaps)
+          ? Effect.void
+          : raiseSpendAlerts(spendCaps, who, now).pipe(
+              Effect.provideService(SqlClient, sql),
+              Effect.flatMap((raised) =>
+                Effect.forEach(raised, (alert) =>
+                  Effect.logWarning(
+                    `spend: ${alert.scope} ${alert.subject} reached ${alert.threshold}% of its ${alert.window} cap`,
+                  ),
+                ),
+              ),
+              Effect.ignore,
+            );
       /**
        * Whether an acquisition must find a free slot: not one its new session already reserved, and
        * not a boot's resume of work admitted before the process died (`admission: "resume"`), and
@@ -4029,6 +4096,17 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             input.taskId === undefined
               ? undefined
               : yield* startColumnFor(input.taskId, input.taskColumn);
+          // The aggregate spend caps (S-aggregate-spend-caps), on the repo the run works in — the
+          // card's, when it names none — and the actor the run is attributed to, before a slot is
+          // taken or anything is written: a create refused `budget_exceeded` leaves no row and takes
+          // no request id, so its retry is a fresh attempt.
+          if (hasSpendCaps(spendCaps)) {
+            const card = yield* cardBindingFor(input.taskId);
+            yield* refuseOverSpendCap({
+              repo: input.repo ?? card?.repo,
+              actor: input.actor,
+            });
+          }
           // A slot before anything is written (LOB-70): a create refused at capacity registers no
           // repo, writes no row and takes no request id, so its retry is a fresh attempt. Held until
           // the owner below is open, which takes it over; given back on any other exit.
@@ -4491,6 +4569,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* refuseOversized(input);
           const row = yield* requireSession(input.sessionId);
           yield* refuseUnservedModel(input.sessionId, row);
+          yield* refuseOverSpendCap({
+            repo: row.repo ?? undefined,
+            actor: row.actor ?? undefined,
+          });
           // A released session is refused by the acquisition, from the release it reads under the
           // owners' gate (LOB-268): a check here, on `row`, would miss one that commits in between.
           const owner = yield* acquireOwner(input.sessionId, row, {
@@ -4526,6 +4608,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* refuseOversized(input);
           const row = yield* requireSession(input.sessionId);
           yield* refuseUnservedModel(input.sessionId, row);
+          yield* refuseOverSpendCap({
+            repo: row.repo ?? undefined,
+            actor: row.actor ?? undefined,
+          });
           const owner = yield* acquireOwner(input.sessionId, row, {
             starts: true,
           });
@@ -5696,6 +5782,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ? {}
               : { baseRef: origin.binding.baseRef }),
           };
+          // A replay runs its source's task again and pays for it, so it is a run the aggregate spend
+          // caps refuse (S-aggregate-spend-caps), before any slot or row.
+          yield* refuseOverSpendCap({
+            repo: binding.repo,
+            actor: actor ?? undefined,
+          });
           // A slot before the row is written, after the refusals that need none (LOB-70).
           const slot = yield* admitted;
           const id = yield* mintSessionId;
@@ -6845,15 +6937,39 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       ): Effect.Effect<void> =>
         Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis;
-          yield* paper(
+          // One statement: the ledger row (S-aggregate-spend-caps) is the increase over the
+          // `cost_total` this write replaces, so the two cannot disagree for want of a second write.
+          const who = yield* paper(
             "write session spend",
-            sql`
-              INSERT INTO session_activity (session_id, cost_total, last_activity_at)
-              VALUES (${sessionId}, ${costTotal}, to_timestamp(${now / 1000}))
-              ON CONFLICT (session_id) DO UPDATE
-              SET cost_total = EXCLUDED.cost_total, last_activity_at = EXCLUDED.last_activity_at
+            sql<{ repo: string | null; actor: string | null }>`
+              WITH prev AS (
+                SELECT COALESCE(
+                  (SELECT cost_total FROM session_activity WHERE session_id = ${sessionId}),
+                  0
+                ) AS cost
+              ),
+              ledger AS (
+                INSERT INTO spend_ledger (session_id, repo, actor, usd, at)
+                SELECT s.id, s.repo, s.actor, ${costTotal}::double precision - prev.cost,
+                       to_timestamp(${now / 1000})
+                FROM sessions s, prev
+                WHERE s.id = ${sessionId} AND ${costTotal}::double precision > prev.cost
+              ),
+              activity AS (
+                INSERT INTO session_activity (session_id, cost_total, last_activity_at)
+                VALUES (${sessionId}, ${costTotal}, to_timestamp(${now / 1000}))
+                ON CONFLICT (session_id) DO UPDATE
+                SET cost_total = EXCLUDED.cost_total, last_activity_at = EXCLUDED.last_activity_at
+              )
+              SELECT repo, actor FROM sessions WHERE id = ${sessionId}
             `,
           );
+          const row = who[0];
+          if (row !== undefined)
+            yield* alertOnSpend(
+              { repo: row.repo ?? undefined, actor: row.actor ?? undefined },
+              now,
+            );
         }).pipe(Effect.ignore);
 
       /**

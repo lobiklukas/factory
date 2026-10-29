@@ -31,6 +31,20 @@ redelivery is processed once a slot is free. Each request's refusal counts as `f
 comparison commit refused at capacity does not.
 It is not `SESSION_BUDGET` (dollars per session) and not `SENTRY_RATE_LIMIT` (deliveries per window).
 
+**Aggregate spend caps (S-aggregate-spend-caps).** `SPEND_CAPS` (unset: none) is JSON,
+`{"repos": {"acme/web": {"daily": 20, "monthly": 300}}, "actors": {"alice": {"daily": 5}}}`, dollars per
+UTC day and month; an unknown key or a non-positive limit fails the boot. Once the spend a repo's or
+an actor's runs have recorded in the current window reaches a limit, `createSession`, `sendMessage` and
+`replaySession` for it fail with `SessionError{ code: "budget_exceeded" }` and a typed `spendCap`
+(`scope`, `subject`, `window`, `limit`, `spent`, `source`, `resetsAt`), before any row is written; a
+run already going is not stopped, so a run that starts under the cap may end over it. Other repos and
+other actors are unaffected. A trigger delivery refused this way is the `503 at-capacity` above.
+Crossing 80% and reaching 100% writes one alert each per window: an attention item (`spend`, the
+highest threshold per cap and window, until the window ends) and one `spend` notification. Counted
+`factory.refusals{reason="budget_exceeded"}`. `spend-caps.sh` boots its own API with a repo cap of
+$0.025 and an actor cap of $0.015 over a priced faux (a run costs $0.02) and the ntfy fake, and
+`spend-caps.ts` asserts each of the above, including that no refusal raises a second alert or message.
+
 **How the skill drives it.** `drive.ts` sends `"x".repeat(100_001)` to a session that exists and
 asserts the failure crosses the wire as `SessionError` with `code: "invalid_input"` — a client must be
 able to branch on the code rather than parse prose. It then posts 2 MiB of junk to `/rpc` and asserts

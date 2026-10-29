@@ -104,6 +104,55 @@ describe("the message an event becomes", () => {
     });
   });
 
+  it("a spend cap's crossing is an event per cap, window, period and threshold, linked to the spend page", () => {
+    const spend = (threshold: number) =>
+      attention({
+        reason: {
+          _tag: "spend",
+          scope: "repo",
+          subject: "acme/web",
+          window: "day",
+          threshold,
+          limit: 20,
+          spent: threshold === 100 ? 20.4 : 16.5,
+          since: "2026-10-28T10:00:00.000Z",
+          resetsAt: "2026-10-29T00:00:00.000Z",
+        },
+      });
+    const warned = notificationOfAttention(spend(80), `${BASE}/`);
+    const reached = notificationOfAttention(spend(100), BASE);
+    expect(warned).toEqual({
+      eventId: "spend:repo:acme/web:day:2026-10-29T00:00:00.000Z:80",
+      kind: "spend",
+      title: "Spend at 80% of the daily cap for repository acme/web",
+      body: "$16.50 of its $20.00 daily cap; new runs are refused once it is reached, until 2026-10-29T00:00:00.000Z.",
+      link: `${BASE}/spend`,
+    });
+    expect(reached?.title).toBe("Spend cap reached for repository acme/web");
+    expect(reached?.body).toContain(
+      "new runs are refused until 2026-10-29T00:00:00.000Z",
+    );
+    // The two thresholds are two events, so each is told once.
+    expect(reached?.eventId).not.toBe(warned?.eventId);
+    // The next day's crossing of the same threshold is a new event, not the one already sent.
+    const tomorrow = attention({
+      reason: {
+        _tag: "spend",
+        scope: "repo",
+        subject: "acme/web",
+        window: "day",
+        threshold: 80,
+        limit: 20,
+        spent: 16.5,
+        since: "2026-10-29T10:00:00.000Z",
+        resetsAt: "2026-10-30T00:00:00.000Z",
+      },
+    });
+    expect(notificationOfAttention(tomorrow, BASE)?.eventId).not.toBe(
+      warned?.eventId,
+    );
+  });
+
   it("an approval on a card links to the run that asked", () => {
     const item = attention({
       task: task("building"),
