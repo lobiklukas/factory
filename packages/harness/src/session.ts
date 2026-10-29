@@ -41,7 +41,10 @@ import { createRegistry } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
-import type { BindableSandboxRuntimeShape } from "@repo/sandbox";
+import type {
+  BindableSandboxRuntimeShape,
+  SandboxRuntimeShape,
+} from "@repo/sandbox";
 import { Effect, Option, Queue, Schema, Stream } from "effect";
 import type {
   PrEvidence,
@@ -389,8 +392,10 @@ export type OpenSessionOptions = {
    * selected by its configuration. Each conversation's environment is a sandbox it binds to the
    * conversation's working directory, `cwd` for the root. Absent: an in-process runtime of the
    * session's own, which runs them on the host as every session did before there was a choice.
+   * A runtime that cannot bind (Kubernetes, LOB-91) creates a sandbox per conversation instead,
+   * whose commands start at its own workdir, not at `cwd` (D6).
    */
-  readonly sandbox?: BindableSandboxRuntimeShape;
+  readonly sandbox?: SandboxRuntimeShape | BindableSandboxRuntimeShape;
   /**
    * What may run unattended here (D11, `./policy`). Absent: D11's defaults resolved for `cwd`, so a
    * session opened without a policy is still policed — an unpoliced session is not a default anyone

@@ -1,0 +1,16 @@
+# What the sandbox image's build context leaves out (BuildKit reads <Dockerfile>.dockerignore).
+# Credentials first: no .env file of any kind reaches an image.
+**/.env
+**/.env.*
+.git
+.verify
+.ralph
+.omp
+.factory
+**/node_modules
+**/dist
+**/.turbo
+**/.cache
+**/coverage
+**/test-results
+**/playwright-report

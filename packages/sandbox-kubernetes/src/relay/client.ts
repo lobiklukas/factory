@@ -65,6 +65,8 @@ export type RemoteExecutionEnvOptions = {
 
 type Pending = {
   readonly resolve: (result: WireResult) => void;
+  /** The caller's signal: a call it aborted is `aborted`, whatever became of the connection. */
+  readonly signal: AbortSignal | undefined;
   readonly onOutput?: (text: string, stream: "stdout" | "stderr", skipped: unknown) => void;
 };
 
@@ -114,7 +116,10 @@ export class RemoteExecutionEnv implements ExecutionEnv {
     for (const each of pending) {
       each.resolve({
         ok: false,
-        error: { kind: "file", code: "unknown", message: `the sandbox's environment is unreachable: ${reason}` },
+        error:
+          each.signal?.aborted === true
+            ? { kind: "file", code: "aborted", message: "aborted" }
+            : { kind: "file", code: "unknown", message: `the sandbox's environment is unreachable: ${reason}` },
       });
     }
   }
@@ -223,6 +228,7 @@ export class RemoteExecutionEnv implements ExecutionEnv {
         signal?.removeEventListener("abort", cancel);
         resolve(result);
       },
+      signal,
       ...(onOutput === undefined ? {} : { onOutput }),
     });
     link.connection.send(encode(message));

@@ -1,0 +1,4 @@
+#!/bin/sh
+# The environment relay (packages/sandbox-kubernetes/src/relay): a Kubernetes sandbox's
+# `ExecutionEnv`, served on stdin and stdout to the `kubectl exec -i` that started it.
+exec node /opt/factory/relay.mjs "$@"
