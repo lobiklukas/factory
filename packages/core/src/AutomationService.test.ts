@@ -89,7 +89,17 @@ const layer = () =>
 
 let runtime = ManagedRuntime.make(layer());
 
+/**
+ * This run's automations go with it: an enabled one left behind would be fired by the next run's
+ * `pass`, which reads every enabled automation in the database.
+ */
 afterAll(async () => {
+  await runtime.runPromise(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      yield* sql`DELETE FROM automations WHERE repo LIKE ${`automation-${runId}/%`}`;
+    }),
+  );
   await runtime.dispose();
 });
 
