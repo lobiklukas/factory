@@ -504,7 +504,8 @@ const program = Effect.gen(function* () {
   /** Wait for a run to settle; a faux run takes seconds, a real one minutes. */
   const settle = (sessionId: SessionId) =>
     poll(getSession(sessionId), settled, LIVE ? 20 * MINUTE : 2 * MINUTE);
-  const cards = () => client.listTasks({ boardId: BoardInstanceId.make(BOARD.boardId) });
+  const cards = () =>
+    client.listTasks({ boardId: BoardInstanceId.make(BOARD.boardId) });
   /** A person's move, at the revision the card is at now. */
   const move = (step: string, taskId: TaskId, to: string, actor = PERSON) =>
     Effect.gen(function* () {
