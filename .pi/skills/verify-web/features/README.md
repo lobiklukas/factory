@@ -88,7 +88,7 @@ web `:3541`) with each column's skills now links.
 `.pi/skills/verify-workflow/cycle.sh` (the whole loop on one card, milestone L, LOB-40: a Linear
 delegation through the webhook and the label rule, specify, plan approval, a gated `git commit` whose
 approval survives an API restart, a real `git push` with the token, one PR with its evidence, Linear
-write-back, review, merge, and the session list and spend) passed **41/41** twice in a row on
+write-back, review, merge, and the session list and spend) passed **42/42** twice in a row on
 2026-10-29 from the `agent/LOB-40` worktree, API `:9500` / web `:3500` / GitHub fake `:9501` / Linear
 fake `:9502` / git forge `:9503`, each on its own scratch database, each `down.sh` leaving nothing
 (`workflow-cycle.json`). It reads the run back over RPC and the CLI, not in the browser; its `--live`
