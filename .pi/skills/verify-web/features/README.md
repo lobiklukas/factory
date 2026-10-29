@@ -22,10 +22,19 @@ reads the default card's expected moves from its pinned definition over the API.
 failed only the busy-compaction race named
 under Known gaps.
 
+`notify-settings.sh` (the notification settings page, email and Web Push sinks, per-person routing, F21, and
+the retention sweep, F22) passed **24/24** on 2026-10-29 from the `agent/F21-F22` worktree, API `:9560` /
+web `:3560` / fake `:9561` / SMTP `:9562`, on a scratch database; `verify-api/notify.sh` (the Slack and ntfy drive) re-passed
+there beside it (API `:9563`, fake `:9564`). See [notifications.md](notifications.md).
+
 `session-new.sh` (the New session form, E6) last passed **16/16** on 2026-10-28 from the `agent/E6`
 worktree, API `:9501` / web `:3501`; there `drive.mjs` (119/119, its session-stream case now typing its
 own prompt into the form), `cost.sh` (12/12), `model.sh` (11/11), `spend.sh` (18/18) and `auth.sh`
 (6/6) re-passed beside it, as each opens the same form.
+
+`session-new.sh` re-passed **2026-10-29** from the `agent/F17-F19-F20` worktree (API `:9550` / web
+`:3550` / the GitHub fake `:9551`) with F17's "Open a PR when done" box and F19/F20's `[data-session-context]`
+line: **25/25** checks.
 
 `pr.sh` (Open pull request on the session pane and a card's run row, C7) last passed on 2026-10-28
 from the `agent/C7` worktree, API `:9570` / web `:3570` / the GitHub fake `:9571`, and
@@ -52,7 +61,9 @@ worktree, API `:9541` / web `:3541`, `FAUX_SLEEP_MS=4000`.
 
 `card-face.sh` (the card face's run status, PR link and cost, C10) last passed **10/10** on 2026-10-28
 from the `agent/C10` worktree, API `:9581` / web `:3581`, `FAUX_SLEEP_MS=5000`. `drive.mjs` re-passed there
-(120 checks, 0 failed) once `listBoardCards` joined its read allowlist.
+(120 checks, 0 failed) once `listBoardCards` joined its read allowlist. It then also proved the board's
+repository's readiness score on every card (F25) and passed **14/14** on 2026-10-29 from the `agent/F23-F24-F25`
+worktree, API `:9571` / web `:3571`.
 
 `exit-checklist.sh` (a column's exit checklist in the card pane, D9; planning's `plan_doc` and the Plan
 section, D10) last passed **16/16** on 2026-10-28 from the `agent/D10` worktree, API `:9550` / web `:3550`;
@@ -100,6 +111,7 @@ re-passed there beside it, as the strip and the form sit on their pages.
 | Open pull request            | passing | [pr-open.md](pr-open.md) (`pr.sh`)                                            |
 | Spend by repo and actor      | passing | [spend.md](spend.md) (`spend.sh`)                                             |
 | Repositories                 | passing | [repos.md](repos.md) (`repos.sh`)                                             |
+| Notification settings        | passing | [notifications.md](notifications.md) (`notify-settings.sh`)                   |
 | Triggers                     | passing | [triggers.md](triggers.md) (`triggers.sh`)                                    |
 | New board (boards page)      | passing | [board-create.md](board-create.md) (`board-create.sh`)                        |
 | First run (checklist, `/`)   | passing | [first-run.md](first-run.md) (`first-run.sh`)                                 |

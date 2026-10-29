@@ -37,6 +37,8 @@ export type SessionForm = {
   readonly budget: string;
   /** Cap at the predicted range's high instead of a typed budget (LOB-38). */
   readonly capped: boolean;
+  /** Open the session's pull request when its run settles with a change (F17); needs a repo. */
+  readonly openPr: boolean;
 };
 
 export const EMPTY_SESSION_FORM: SessionForm = {
@@ -46,6 +48,7 @@ export const EMPTY_SESSION_FORM: SessionForm = {
   model: SERVER_DEFAULT,
   budget: "",
   capped: false,
+  openPr: false,
 };
 
 /**
@@ -92,6 +95,8 @@ export type SessionStart = {
  * exists in the checkout is the server's to say, in its words, when it cuts the worktree. The budget
  * is either the predicted high (the cap box, which then must have a range to cap at) or the typed
  * amount, which must be a positive number of dollars as `SessionBudgetCap` is; blank sends none.
+ * "Open a PR when done" sends `openPrOnSettle` (F17), as `factory run --open-pr` does, and only with a
+ * repo: ticked and then the repo cleared, it sends nothing for it.
  */
 export const newSessionInput = (
   form: SessionForm,
@@ -121,6 +126,8 @@ export const newSessionInput = (
         ...(repo === undefined || baseRef === "" ? {} : { baseRef }),
         ...modelInput(form.model),
         ...budget.budget,
+        // Only with a repo: a scratch session has no PR to open, and the server refuses the ask.
+        ...(repo !== undefined && form.openPr ? { openPrOnSettle: true } : {}),
       },
       content: form.prompt,
     },

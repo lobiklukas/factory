@@ -1,0 +1,13 @@
+#!/bin/sh
+# Print the version of every tool the generic base promises (D13), and fail if one is missing.
+# The harness counts as present when Node can load it from the repository the image carries.
+set -eu
+printf 'bun %s\n' "$(bun --version)"
+printf 'node %s\n' "$(node --version)"
+printf '%s\n' "$(git --version)"
+printf '%s\n' "$(gh --version | head -n 1)"
+printf '%s\n' "$(rg --version | head -n 1)"
+cd /opt/factory
+printf 'pi-durable %s\n' "$(node -p 'require("./packages/harness/node_modules/@earendil-works/pi-durable/package.json").version')"
+printf 'harness %s\n' "$(bun -e 'const harness = await import("@repo/harness"); console.log(`loads, ${Object.keys(harness).length} exports`)')"
+printf 'relay %s\n' "$(test -s /opt/factory/relay.mjs && echo /opt/factory/relay.mjs)"

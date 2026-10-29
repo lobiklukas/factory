@@ -246,9 +246,11 @@ export const SkillPinsDoc = defineDoc({
 
 /**
  * What the repository told the session's last open (S-repo-instructions-and-skills, `./repoContext`):
- * the ref and commit its `AGENTS.md` and skills were read at, the instructions' size in bytes and in
+ * the ref and commit its instruction file (`AGENTS.md`, else `CLAUDE.md`, else the Copilot file, F20)
+ * and skills were read at, the instructions' path, size in bytes and in
  * prompt tokens (and whether the cap cut them), and the skills the index listed, dropped for the
- * budget, or left to the column's own skill of the same name.
+ * budget, or left to the column's own skill of the same name, and the nested `AGENTS.md` paths named
+ * beside them (F20).
  *
  * Written by every open of a session on a repository checkout, in the open's one commit, so "what did
  * this run's repo tell it, and what did that cost" is a read rather than a reconstruction; a
@@ -278,6 +280,7 @@ export const RepoPromptDoc = defineDoc({
       tokens: 0,
       cap: 0,
       listed: [] as Array<{ name: string; path: string }>,
+      nested: [] as string[],
       dropped: [] as string[],
       shadowed: [] as string[],
     },
@@ -298,7 +301,7 @@ export const RepoPromptDoc = defineDoc({
  * on its branch is never read, and a base that moved under a running session reaches its next run,
  * not this one. `source: null` is a session with no repository, or one whose base did not resolve.
  * `effective.allowedHosts` is what the run may reach; `effective.pushRefPrefixes` empty is a column
- * that pushes nothing (C22). It is the one document a generator of LOB-30's rulesets would read.
+ * that pushes nothing (C22); `effective.mcpTools` is the MCP tools the open offered (S-agent-mcp-tools). It is the one document a generator of LOB-30's rulesets would read.
  */
 export const PolicyDoc = defineDoc({
   kind: POLICY_DOC_KIND,
@@ -317,12 +320,25 @@ export const PolicyDoc = defineDoc({
       approvalRequired: [] as string[],
       denied: [] as string[],
       allowedHosts: null as string[] | null,
+      // The MCP servers and tools the repository allows (S-agent-mcp-tools); absent in a record
+      // written before there were any.
+      mcp: null as Record<
+        string,
+        { tools: string[]; approvalRequired: string[] }
+      > | null,
     },
     effective: {
       approvalRequired: [] as string[],
       denied: [] as string[],
       allowedHosts: [] as string[],
       pushRefPrefixes: [] as string[],
+      // The MCP tools the open offered, and whether each asks a person (S-agent-mcp-tools).
+      mcpTools: [] as Array<{
+        name: string;
+        server: string;
+        tool: string;
+        gated: boolean;
+      }>,
     },
   }),
 });

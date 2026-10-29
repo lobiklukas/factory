@@ -1,4 +1,5 @@
 import {
+  AutomationServiceLive,
   CredentialProvider,
   PullRequestStatesLive,
   SecretServiceLive,
@@ -14,7 +15,10 @@ import { HttpClient } from "effect/http";
 import { RpcSerialization, RpcServer } from "effect/rpc";
 import { ApprovalsRpcHandlers } from "./Approvals";
 import { attributed } from "./Auth";
+import { NotifySettingsFromEnv } from "../Notifications";
+import { AutomationsRpcHandlers } from "./Automations";
 import { DoctorRpcHandlers } from "./Doctor";
+import { NotificationsRpcHandlers } from "./Notifications";
 import { SecretsRpcHandlers } from "./Secrets";
 import { ServerRpcHandlers } from "./Server";
 import { SkillsRpcHandlers } from "./Skills";
@@ -45,6 +49,7 @@ const SessionRpcHandlers = SessionRpc.toLayer(
         attributed(input).pipe(Effect.flatMap(sessions.create)),
       getSession: (input) => sessions.get(input.sessionId),
       readSessionHistory: (input) => sessions.history(input),
+      getSessionContext: (input) => sessions.context(input.sessionId),
       sendMessage: (input) => sessions.send(input),
       withdrawMessage: (input) => sessions.withdraw(input),
       interruptSession: (input) => sessions.interrupt(input.sessionId),
@@ -116,9 +121,14 @@ export const SessionRpcLive = RpcServer.layerHttp({
       DoctorRpcHandlers,
       SkillsRpcHandlers,
       SecretsRpcHandlers,
+      NotificationsRpcHandlers,
+      AutomationsRpcHandlers,
     ),
   ),
   Layer.provide(RpcSerialization.layerNdjson),
+  // The automations' service (S-general-automations), over the task and skill services provided
+  // below and the process's session layer.
+  Layer.provide(AutomationServiceLive),
   Layer.provide(TaskServiceLive),
   // The forge read a card's PR is followed with when no webhook told it (C20), over the credential
   // provider and the client the PR step's member already requires.
@@ -127,4 +137,6 @@ export const SessionRpcLive = RpcServer.layerHttp({
   Layer.provide(TriggerDeliveriesLive),
   Layer.provide(SkillServiceLive),
   Layer.provide(SecretServiceLive),
+  // The stored notification toggles and sinks, over the configuration the notifier daemon reads (F21).
+  Layer.provide(NotifySettingsFromEnv),
 );

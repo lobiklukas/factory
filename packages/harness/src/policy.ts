@@ -110,7 +110,49 @@ export type AutonomyConfig = {
    * stops the accident and is not a boundary (D15).
    */
   readonly denied?: readonly string[];
+  /**
+   * The remote MCP servers this deployment registers for its agents (S-agent-mcp-tools): the admin's
+   * allowlist of servers, each a name, a Streamable HTTP endpoint and the repository secret its
+   * credential is read from. Registering one offers nothing: a repository's `.factory/config` names
+   * the servers and the tools of each its runs are offered (`RepoPolicy.mcp`). Empty by default.
+   */
+  readonly mcpServers?: readonly McpServerDeclaration[];
 };
+
+/**
+ * One remote MCP server a deployment registers (S-agent-mcp-tools, `MCP_SERVERS`).
+ *
+ * The control plane is the MCP client, not the sandbox: the server is reached from the control
+ * plane's process when the agent calls one of its tools, so its endpoint is not on the session's
+ * egress allowlist and its credential never enters the shell environment.
+ */
+export type McpServerDeclaration = {
+  /** How a repository's config and the agent's tool names (`mcp__<name>__<tool>`) name it. */
+  readonly name: string;
+  /** The server's Streamable HTTP endpoint. */
+  readonly url: string;
+  /**
+   * The repository secret (S-agent-secrets) whose value is sent as the bearer token, read for the
+   * session's repository when the session opens. Absent: the server is called without one.
+   */
+  readonly secret?: string | undefined;
+};
+
+/** A server's name: lower-case letters, digits and dashes, short enough to prefix a tool name. */
+export const MCP_SERVER_NAME = /^[a-z0-9][a-z0-9-]{0,23}$/;
+
+/**
+ * What a repository's `.factory/config` allows of one registered MCP server (S-agent-mcp-tools):
+ * the tools its runs are offered, by the server's own names, and the ones among them that ask a
+ * person even though the server says they only read. Every tool not named is not offered.
+ */
+export type RepoMcpServer = {
+  readonly tools: readonly string[];
+  readonly approvalRequired: readonly string[];
+};
+
+/** A repository's MCP allowlist, by server name. */
+export type RepoMcp = Readonly<Record<string, RepoMcpServer>>;
 
 /** D11's boundary as configuration. */
 export const DEFAULT_AUTONOMY: AutonomyConfig = {
@@ -2183,6 +2225,11 @@ export type RepoPolicy = {
   readonly approvalRequired: readonly string[];
   readonly denied: readonly string[];
   readonly allowedHosts?: readonly string[] | undefined;
+  /**
+   * The registered MCP servers its runs may call, and which of their tools (S-agent-mcp-tools).
+   * Absent: no MCP tool is offered.
+   */
+  readonly mcp?: RepoMcp | undefined;
 };
 
 /** A repository that declares no policy: the deployment's, unchanged. */
@@ -2190,9 +2237,9 @@ export const NO_REPO_POLICY: RepoPolicy = { approvalRequired: [], denied: [] };
 
 /**
  * What `policy` would widen of `config`, one sentence per thing: a host the deployment does not
- * allow. Empty when the policy only tightens. A repository's policy that widens anything is refused
- * whole (`@repo/core`'s `RepoPolicyRejected`) rather than applied in part, because the part that was
- * dropped is the part its author thought was in force.
+ * allow, an MCP server it does not register. Empty when the policy only tightens. A repository's
+ * policy that widens anything is refused whole (`@repo/core`'s `RepoPolicyRejected`) rather than
+ * applied in part, because the part that was dropped is the part its author thought was in force.
  */
 export const repoPolicyWidening = (
   config: AutonomyConfig,
@@ -2201,12 +2248,20 @@ export const repoPolicyWidening = (
   const allowed = new Set(
     config.allowedHosts.map((host) => host.toLowerCase()),
   );
-  return (policy.allowedHosts ?? [])
+  const hosts = (policy.allowedHosts ?? [])
     .filter((host) => !allowed.has(host.toLowerCase()))
     .map(
       (host) =>
         `allowedHosts names ${host}, which this deployment does not allow (it allows ${config.allowedHosts.length === 0 ? "no host" : config.allowedHosts.join(", ")})`,
     );
+  const registered = (config.mcpServers ?? []).map((server) => server.name);
+  const servers = Object.keys(policy.mcp ?? {})
+    .filter((name) => !registered.includes(name))
+    .map(
+      (name) =>
+        `mcp names server ${name}, which this deployment does not register (it registers ${registered.length === 0 ? "no MCP server" : registered.join(", ")})`,
+    );
+  return [...hosts, ...servers];
 };
 
 /**

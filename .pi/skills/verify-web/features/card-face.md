@@ -18,6 +18,13 @@ instead of `listTasks`, polled every `BOARD_POLL` (2 s) with the rest of the boa
 - **Cost** is the sum of every run's `session_activity.cost_total`, worded as `/spend` words it
   (`$0.7500`; `no cost reported` for a provider that reports none, as faux does).
 
+- **Readiness** (F25) is the board's repository's agent-readiness score, the Repositories page's own
+  wording (`readinessView`): `ready 1/4` beside the card's id, with the failing checks' reasons in
+  its title. A board is on one repo, so `BoardLanesView` reads `getRepo(board.repo)` once
+  (`repoAtom`, polled with the registry) and hands the row to every card: nine cards cost the
+  repo reads three do. A repo with no checkout (or a slug the registry has no row for) has no score
+  and shows none. It is not part of the run row, so a card with no run still renders none.
+
 **How a user reaches it.** Open a board: `[data-card=<id>] [data-card-runs]` holds
 `[data-card-run-status]`, `a[data-card-pr]` and `[data-card-cost]`.
 
@@ -34,12 +41,16 @@ exact `href` within one poll interval, not nested in the card's link, on one car
 card goes `idle` when the run settles. The page's RPC tags (counted from its own requests) hold
 `getServerInfo`, `getBoard`, `listBoardCards`, `listAttention` and none of `getTask`, `listTaskRuns`,
 `getSession`, `listSessions`, `listTasks`; after six more cards the tags and the per-window count
-are the same.
+are the same. Readiness: the first board (no checkout) shows no score; a second board on a
+registered checkout shows `ready <score>` on all three cards, equal to `getRepo`'s own readiness, with
+every failing check's reason in each title, and `getRepo` is read as often with nine cards as with
+three.
 
 ## Gotchas
 
 - **One PR per card on the face.** A card whose runs opened several PRs shows the newest; the card
   pane lists every run's own.
-- **Unit cases.** `card-face-view.test.ts` (wording, `javascript:` refused) and
+- **Unit cases.** `card-face-view.test.ts` (wording, `javascript:` refused, the readiness chip and
+  its absence) and
   `TaskService.test.ts` ("lists a board's cards…", against Postgres) hold the cases a seeded board
   cannot reach.

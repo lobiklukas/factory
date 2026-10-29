@@ -34,6 +34,16 @@ export const RoleModelRow = Schema.Struct({
 export type RoleModelRow = typeof RoleModelRow.Type;
 
 /**
+ * One `ROLE_FALLBACKS` row (S-model-provider-breadth): the models a role's runs move onto, in order,
+ * when their own answers overloaded or unavailable, each `provider/modelId`.
+ */
+export const RoleFallbackRow = Schema.Struct({
+  role: Schema.String,
+  models: Schema.Array(Schema.String),
+});
+export type RoleFallbackRow = typeof RoleFallbackRow.Type;
+
+/**
  * How the model backend authenticates: pi-ai's label for the source (`ANTHROPIC_API_KEY`,
  * `workload identity federation`) and the credential's type. A name, never a value.
  */
@@ -107,6 +117,11 @@ export const ServerInfo = Schema.Struct({
   /** The `ROLE_MODELS` rows, resolved against the catalog at boot, by role. */
   roleModels: Schema.Array(RoleModelRow),
   /**
+   * The `ROLE_FALLBACKS` rows, resolved against the catalog at boot, by role
+   * (S-model-provider-breadth). Optional on the wire so a client reads a server older than it.
+   */
+  roleFallbacks: Schema.optional(Schema.Array(RoleFallbackRow)),
+  /**
    * Every model the catalog serves, `provider/modelId`, sorted: what a replay or `createSession`'s
    * `model` (and so the dashboard's and the CLI's model choosers) may name (LOB-274).
    */
@@ -172,6 +187,12 @@ export const DeploymentChecks = Schema.Struct({
   triggerRules: Schema.Int,
   /** The absolute paths of the env files the process loaded, never their contents. */
   envFiles: Schema.Array(Schema.String),
+  /**
+   * How long each step of a worktree's setup may run, in seconds (F24): `SETUP_TIMEOUT_SECONDS`,
+   * or the default when the deployment sets none. Absent from an API that predates it, so a
+   * `factory doctor` of a newer version still reads the rest of the answer.
+   */
+  setupTimeoutSeconds: Schema.optional(Schema.Finite),
   /** One row per registered repo, by slug. Empty when the registry could not be read. */
   repos: Schema.Array(RepoCheck),
   /** Why the registry could not be read (Postgres down), when it could not. */

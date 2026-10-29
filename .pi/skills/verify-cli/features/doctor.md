@@ -16,6 +16,7 @@ It prints one line per check, `ok|warn|fail <check>: <detail> [-- fix: <what to 
 | `repo <repo>`, `base-ref <repo>`, `config` | the checkout is git (a URL-only repo is cloned now), the base ref resolves in it, `.factory/config` exists   |
 | `webhook <source>`                         | each route armed or not, with the variable that arms it                                                      |
 | `trigger-rules`, `env-files`               | how many `TRIGGER_RULES` the boot mapped, and the env files it loaded (paths only)                           |
+| `setup-timeout`                            | how long each worktree setup step may run (`SETUP_TIMEOUT_SECONDS`, default 1800 s), from `checkDeployment`  |
 | `live-model`                               | only with `--live`: one minimal request to the default model, with its cost                                  |
 
 `factory doctor owner/name` limits the per-repo checks to that repo. The exit is non-zero when any check

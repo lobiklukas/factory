@@ -24,6 +24,8 @@
         "FAUX_COMMAND",
         "FAUX_EVERY_TURN",
         "APPROVAL_REQUIRED",
+        "MCP_SERVERS",
+        "FAUX_MCP_CALLS",
         "FAUX_ASK",
         "FAUX_SPEC",
         "FAUX_DECOMPOSITION",
@@ -34,6 +36,9 @@
         "ROLE_MODELS",
         "ROLE_POLICIES",
         "DEFAULT_MODEL",
+        "ROLE_FALLBACKS",
+        "OPENAI_COMPATIBLE_BASE_URL",
+        "OPENAI_COMPATIBLE_MODELS",
         "FAUX_VERIFY",
         "FAUX_SLEEP_MS",
         "FAUX_FAIL",
@@ -41,6 +46,8 @@
         "SESSION_ROOT",
         "SESSION_IDLE_TIMEOUT_MS",
         "SESSION_MAX_CONCURRENT",
+        "SETUP_TIMEOUT_SECONDS",
+        "SPEND_CAPS",
         "SANDBOX_RUNTIME",
         "PR_CAP_MAX_FILES",
         "PR_CAP_MAX_LINES",
@@ -58,6 +65,7 @@
         "GITHUB_API_URL",
         "DOCS_SCHEDULE_MS",
         "DOCS_SCHEDULE_REPO",
+        "AUTOMATIONS_POLL_MS",
         "MISSION_RESUME",
         "TRIGGER_RULES",
         "TRIGGER_SECRET_HEADER",
@@ -93,7 +101,12 @@
         "NOTIFY_NTFY_URL",
         "NOTIFY_TYPES",
         "NOTIFY_LINK_BASE",
-        "NOTIFY_POLL_MS"
+        "NOTIFY_POLL_MS",
+        "NOTIFY_SMTP_FROM",
+        "NOTIFY_VAPID_PUBLIC_KEY",
+        "NOTIFY_VAPID_SUBJECT",
+        "NOTIFY_PUSH_ALLOW_INSECURE",
+        "NOTIFY_RETENTION_DAYS"
       ],
       // A secret: it must reach the process but must not enter the task hash or the cache key.
       // The ANTHROPIC_* names are every variable pi-ai's Anthropic provider authenticates from, which
@@ -110,6 +123,9 @@
         "ANTHROPIC_SERVICE_ACCOUNT_ID",
         "ANTHROPIC_WORKSPACE_ID",
         "CLAUDE_CODE_OAUTH_TOKEN",
+        // The OpenAI-compatible endpoint's key (S-model-provider-breadth), read by pi-ai through the
+        // provider's auth, never by `Config`, so the scanning guard cannot see it either.
+        "OPENAI_COMPATIBLE_API_KEY",
         "GITHUB_TOKEN",
         "GITHUB_APP_PRIVATE_KEY",
         "GITHUB_REVIEWER_TOKEN",
@@ -132,6 +148,10 @@
         "NOTIFY_SLACK_WEBHOOK_URL",
         "NOTIFY_NTFY_TOPIC",
         "NOTIFY_NTFY_TOKEN",
+        // Personal sinks (F21): an SMTP URL holds the mail password, and a VAPID private key signs as
+        // this deployment to every push service.
+        "NOTIFY_SMTP_URL",
+        "NOTIFY_VAPID_PRIVATE_KEY",
         // The key the repos' secrets are encrypted under (S-agent-secrets, `@repo/core`'s
         // SecretService): the one value that opens every stored secret.
         "FACTORY_SECRETS_KEY"

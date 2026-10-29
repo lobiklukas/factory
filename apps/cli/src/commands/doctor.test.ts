@@ -125,6 +125,7 @@ const deployment = (
   Schema.decodeSync(DeploymentChecks)({
     triggerRules: 2,
     envFiles: ["/work/.env"],
+    setupTimeoutSeconds: 1800,
     repos: [],
     ...extra,
   });
@@ -301,6 +302,30 @@ describe("collectChecks", () => {
     const lines = await run(fakeClient({}).client);
     expect(lines).toContain("ok trigger-rules: 2 mapped");
     expect(lines).toContain("ok env-files: /work/.env");
+  });
+
+  /** Mutation: print the default, not the value the server reports, or leave the line out. */
+  it("says how long each setup step may run, as the server reports it", async () => {
+    const lines = await run(
+      fakeClient({ deployment: deployment({ setupTimeoutSeconds: 5400 }) })
+        .client,
+    );
+    expect(lines).toContain(
+      "ok setup-timeout: 5400s per setup step (SETUP_TIMEOUT_SECONDS)",
+    );
+  });
+
+  /** Mutation: require the field, so a doctor against an older API fails the whole deployment answer. */
+  it("says the setup bound is unknown when the API does not report it", async () => {
+    const older = Schema.decodeSync(DeploymentChecks)({
+      triggerRules: 2,
+      envFiles: [],
+      repos: [],
+    });
+    const lines = await run(fakeClient({ deployment: older }).client);
+    expect(lines).toContain(
+      "ok setup-timeout: unknown (this API does not report it)",
+    );
   });
 
   /** Mutation: warn on 0 rules even where no webhook can deliver. */

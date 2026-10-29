@@ -10,6 +10,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -22,6 +23,7 @@ import {
   type BindableSandboxRuntimeShape,
   InProcess,
   type Sandbox,
+  type SandboxRuntimeShape,
 } from "@repo/sandbox";
 import { Effect } from "effect";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
@@ -73,7 +75,7 @@ const turn = (session: OpenSession, message: string) =>
 const open = (
   cwd: string,
   command: string,
-  sandbox?: BindableSandboxRuntimeShape,
+  sandbox?: SandboxRuntimeShape | BindableSandboxRuntimeShape,
 ) =>
   openSession({
     storage: new MemoryStorage(),
@@ -170,7 +172,9 @@ describe("a session's commands see the server's environment less its credentials
   const probe =
     'printf "token=[%s] plain=[%s]" "$FACTORY_ENVIRONMENT_TEST_TOKEN" "$FACTORY_ENVIRONMENT_TEST_PLAIN"';
 
-  const observe = (sandbox?: BindableSandboxRuntimeShape) =>
+  const observe = (
+    sandbox?: SandboxRuntimeShape | BindableSandboxRuntimeShape,
+  ) =>
     Effect.gen(function* () {
       // oxlint-disable-next-line effecttsgo/process-env-in-effect -- the server's environment is what the case varies.
       process.env["FACTORY_ENVIRONMENT_TEST_TOKEN"] = "must not reach";
@@ -196,7 +200,38 @@ describe("a session's commands see the server's environment less its credentials
     );
     expect(text).toContain("token=[] plain=[reaches]");
   }, 60_000);
+
+  it("through a runtime that creates its sandboxes, as each command's own variables", async () => {
+    const text = await Effect.runPromise(
+      Effect.gen(function* () {
+        return yield* observe(createOnly(yield* InProcess.make()));
+      }).pipe(Effect.scoped),
+    );
+    expect(text).toContain("token=[] plain=[reaches]");
+  }, 60_000);
 });
+
+/**
+ * The in-process runtime without its `bind`: a runtime that can only `create`, as the Kubernetes one
+ * (LOB-91) can, every `create` and `destroy` it served recorded.
+ */
+const createOnly = (
+  runtime: BindableSandboxRuntimeShape,
+  created: Sandbox[] = [],
+  destroyed: Sandbox[] = [],
+): SandboxRuntimeShape => {
+  const { bind: _bind, ...shape } = runtime;
+  return {
+    ...shape,
+    create: shape.create.pipe(
+      Effect.tap((sandbox) => Effect.sync(() => created.push(sandbox))),
+    ),
+    destroy: (sandbox) =>
+      shape
+        .destroy(sandbox)
+        .pipe(Effect.tap(() => Effect.sync(() => destroyed.push(sandbox)))),
+  };
+};
 
 /** The runtime given, with every `bind` and `destroy` it served recorded. */
 const recording = (runtime: BindableSandboxRuntimeShape) => {
@@ -245,6 +280,50 @@ describe("a configured runtime", () => {
     expect(observed.beforeClose).toBe(0);
     expect(observed.destroyed).toEqual(observed.bound);
     expect(existsSync(join(cwd, "marker.txt"))).toBe(true);
+  }, 60_000);
+});
+
+describe("a runtime that cannot bind", () => {
+  it("creates the session's sandbox on first use, runs its commands there and not in the host worktree, and destroys it on close", async () => {
+    const cwd = worktree({ "marker.txt": "the host's worktree" });
+    const observed = await Effect.runPromise(
+      Effect.gen(function* () {
+        const created: Sandbox[] = [];
+        const destroyed: Sandbox[] = [];
+        const runtime = createOnly(yield* InProcess.make(), created, destroyed);
+        const session = yield* open(
+          cwd,
+          "printf in-the-sandbox > marker.txt; pwd -P",
+          runtime,
+        );
+        const atOpen = created.length;
+        const results = yield* turn(session, "mark");
+        yield* turn(session, "mark again");
+        const sandbox = created[0];
+        const marker =
+          sandbox === undefined
+            ? undefined
+            : new TextDecoder().decode(
+                yield* runtime.readFile(sandbox, "marker.txt"),
+              );
+        const beforeClose = destroyed.length;
+        yield* closeSession(session);
+        return { atOpen, results, created, marker, beforeClose, destroyed };
+      }).pipe(Effect.scoped),
+    );
+    expect(observed.atOpen).toBe(0);
+    // One sandbox for the session, created by the first command and served to the second.
+    expect(observed.created).toHaveLength(1);
+    const workdir = observed.created[0]?.workdir ?? "";
+    expect(observed.results[0]?.text).toContain(workdir);
+    expect(workdir).not.toBe(realpathSync(cwd));
+    // The marker is the command's, in the sandbox; the host's worktree is untouched.
+    expect(observed.marker).toBe("in-the-sandbox");
+    expect(readFileSync(join(cwd, "marker.txt"), "utf8")).toBe(
+      "the host's worktree",
+    );
+    expect(observed.beforeClose).toBe(0);
+    expect(observed.destroyed).toEqual(observed.created);
   }, 60_000);
 });
 

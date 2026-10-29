@@ -17,7 +17,9 @@ to each configured sink — a Slack incoming webhook, an ntfy topic, or both —
   `ntfySink` (ntfy's JSON publish to the server's root). Their ids fingerprint the destination, so the
   URL and the topic never reach the ledger or the log.
 - Event ids: `question:<card>:<blocked since>`, `approval:<session>:<request>`,
-  `gate:<card>:<column>:<run>`, `failed:<session>:<entry>`.
+  `gate:<card>:<column>:<run>`, `failed:<session>:<entry>`, and (S-aggregate-spend-caps)
+  `spend:<scope>:<subject>:<window>:<period end>:<threshold>`, a repo's or actor's spend at 80% or
+  100% of its `SPEND_CAPS` limit, linked to `/spend` and driven by `spend-caps.sh`.
 - Links: a question opens the card's thread (`/boards/<board>?card=<card>#thread`); an approval, a
   gate and a failure the card with the run (`&run=<session>`); an approval or a failure no card owns
   the session (`/sessions/<session>`).
@@ -34,7 +36,7 @@ to each configured sink — a Slack incoming webhook, an ntfy topic, or both —
 
 Set `NOTIFY_SLACK_WEBHOOK_URL` and/or `NOTIFY_NTFY_TOPIC` (`NOTIFY_NTFY_URL` for a server other than
 `https://ntfy.sh`, `NOTIFY_NTFY_TOKEN` for a protected topic), optionally `NOTIFY_TYPES` (a subset of
-`question,approval,gate,failed`), `NOTIFY_LINK_BASE` (the dashboard's origin; the first
+`question,approval,gate,failed,spend`), `NOTIFY_LINK_BASE` (the dashboard's origin; the first
 `ALLOWED_ORIGINS` entry by default) and `NOTIFY_POLL_MS` (5000). The ntfy phone app is the mobile
 path.
 
@@ -77,3 +79,13 @@ Slack adapter's `SlackWriteBack` replies in a thread) is not a sink: an incoming
 token and no channel id. A process that dies between a sink accepting a message and the ledger's
 stamp sends it again after the retry interval (a minute). There is no per-person routing: every
 message goes to every sink.
+
+## Personal sinks, routing, settings and retention (F21, F22)
+
+The Slack and ntfy sinks above are the _shared_ channel: with a person's own sinks configured (an email
+address, a Web Push subscription — added on the dashboard's Notifications page) an event is routed by its
+owner to that person's sinks only, and falls back here when no owner has one. This drive is unchanged by
+it — `notify.sh` re-passed with the routing in place — and `notify-fake.ts` now also answers `POST /push/<id>`
+and, with `NOTIFY_FAKE_SMTP_PORT`, SMTP, which is what the web drive
+([notifications.md](../../verify-web/features/notifications.md), `verify-web/notify-settings.sh`) proves them on:
+the settings page, per-person routing, a toggle with no restart and the retention sweep.

@@ -26,9 +26,14 @@
  *   session was created for (its request id, `trigger:<delivery>`) as well as its actor
  *   (`trigger:<source>`): a replay copies its source's actor but is created for no delivery, so the
  *   actor alone would let a replay of a trigger's session open a second PR for the same work.
- * - **Nothing else.** A person's session (`factory run`, the dashboard's New session) keeps its PR the
- *   person's call: the "Open pull request" control and `factory pr` open it. A fork or a replay is
- *   another lineage of work someone chose to try, so its PR is chosen too.
+ * - **A person's session that asked for it** (F17): `factory run --open-pr`, the New session form's
+ *   "Open a PR when done". The ask is `createSession`'s `openPrOnSettle`, committed to the session's
+ *   log (`factory.settlePr`), so a restart or an index rebuild keeps it; a card's run never reads it,
+ *   because its column is the declaration.
+ * - **Nothing else.** A person's session (`factory run`, the dashboard's New session) that did not ask
+ *   keeps its PR the person's call: the "Open pull request" control and `factory pr` open it. A fork
+ *   or a replay is another lineage of work someone chose to try, so its PR is chosen too, whatever
+ *   its source asked.
  *
  * Only a run that **finished** opens its PR. One that ended parked — an undecided approval, a card
  * blocked on its question — stopped to wait on a person; one an operator interrupted (C8), its budget
@@ -89,6 +94,11 @@ export type SettledRun = {
    * it was started in. Absent reads as no.
    */
   readonly continuesCardPr?: boolean;
+  /**
+   * Whether the person who started the session asked for its PR to open when a run settles (F17,
+   * the log's `factory.settlePr`). Only a session that is no card's run reads it. Absent reads as no.
+   */
+  readonly openPrOnSettle?: boolean;
 };
 
 /**
@@ -120,10 +130,11 @@ export const settleDeclarationOf = (run: SettledRun): SettleDeclaration => {
     run.columnRequires !== undefined
       ? run.columnRequires.includes(PR_LINK_REQUIREMENT) ||
         run.continuesCardPr === true
-      : run.actor !== null &&
-        run.actor.startsWith(TRIGGER_PREFIX) &&
-        run.requestId !== null &&
-        run.requestId.startsWith(TRIGGER_PREFIX);
+      : run.openPrOnSettle === true ||
+        (run.actor !== null &&
+          run.actor.startsWith(TRIGGER_PREFIX) &&
+          run.requestId !== null &&
+          run.requestId.startsWith(TRIGGER_PREFIX));
   if (!declares) return "undeclared";
   return run.waiting ? "parked" : "declared";
 };

@@ -346,6 +346,73 @@ describe("getServerInfo on a booted API (LOB-269)", () => {
     );
   }, 60_000);
 
+  it("serves an OpenAI-compatible endpoint's models beside the backend's, and the ROLE_FALLBACKS chains, without reading its key (S-model-provider-breadth)", async () => {
+    const COMPAT_KEY = "dummy-compat-key-boot-s-model-provider-breadth";
+    const { code, output, asked } = await boot(
+      {
+        MODEL_BACKEND: "faux",
+        OPENAI_COMPATIBLE_BASE_URL: "http://user:pw@127.0.0.1:1/v1?key=q",
+        OPENAI_COMPATIBLE_MODELS: "compat-1,compat-2",
+        OPENAI_COMPATIBLE_API_KEY: COMPAT_KEY,
+        ROLE_MODELS: "builder=openai-compatible/compat-1",
+        ROLE_FALLBACKS:
+          "builder=faux/faux-backup|openai-compatible/compat-2,reviewer=openai-compatible/compat-1",
+      },
+      getServerInfo,
+    );
+    expect(code, output).toBeNull();
+    if (asked === undefined) throw new Error("the boot never answered");
+    expect(asked.info.models).toEqual([
+      "faux/faux-1",
+      "faux/faux-backup",
+      "openai-compatible/compat-1",
+      "openai-compatible/compat-2",
+    ]);
+    expect(asked.info.roleModels).toEqual([
+      { role: "builder", model: "openai-compatible/compat-1" },
+    ]);
+    expect(asked.info.roleFallbacks).toEqual([
+      {
+        role: "builder",
+        models: ["faux/faux-backup", "openai-compatible/compat-2"],
+      },
+      { role: "reviewer", models: ["openai-compatible/compat-1"] },
+    ]);
+    // The boot names the endpoint without its userinfo or query, and the key by its variable.
+    expect(output).toContain(
+      "second provider: openai-compatible at http://127.0.0.1:1/v1 serving compat-1, compat-2 (OPENAI_COMPATIBLE_BASE_URL; auth: OPENAI_COMPATIBLE_API_KEY)",
+    );
+    expect(output).toContain(
+      "role fallbacks: builder → faux/faux-backup | openai-compatible/compat-2, reviewer → openai-compatible/compat-1",
+    );
+    for (const text of [output, asked.wire]) {
+      expect(text).not.toContain(COMPAT_KEY);
+      expect(text).not.toContain("user:pw");
+    }
+  }, 30_000);
+
+  it.each([
+    [
+      "a fallback chain outside the catalog",
+      { MODEL_BACKEND: "faux", ROLE_FALLBACKS: "builder=openai-compatible/x" },
+      "builder's fallback chain names model openai-compatible/x",
+    ],
+    [
+      "half an endpoint",
+      { MODEL_BACKEND: "faux", OPENAI_COMPATIBLE_MODELS: "compat-1" },
+      "OPENAI_COMPATIBLE_BASE_URL is not",
+    ],
+  ])(
+    "refuses to boot on %s, naming it (S-model-provider-breadth)",
+    async (_name, env, says) => {
+      const { code, output } = await boot(env);
+      expect(code, output).not.toBe(0);
+      expect(code, output).not.toBeNull();
+      expect(output).toContain(says);
+    },
+    30_000,
+  );
+
   it("refuses to boot on a DEFAULT_MODEL outside the catalog, naming it", async () => {
     for (const [env, key] of [
       [
@@ -420,7 +487,29 @@ describe("checkDeployment on a booted API (E8)", () => {
     expect(exit.value.repos).toEqual([]);
     expect(typeof exit.value.reposError).toBe("string");
     expect(asked).not.toContain(TOKEN);
+    // No `SETUP_TIMEOUT_SECONDS`: the harness's default bound.
+    expect(exit.value.setupTimeoutSeconds).toBe(1_800);
   }, 30_000);
+
+  it("reports the SETUP_TIMEOUT_SECONDS the deployment set, and refuses a malformed one at boot (F24)", async () => {
+    const { code, output, asked } = await boot(
+      { MODEL_BACKEND: "faux", SETUP_TIMEOUT_SECONDS: "5400" },
+      checkDeployment,
+    );
+    expect(code, output).toBeNull();
+    const line = asked?.split("\n").find((text) => text.includes('"Exit"'));
+    expect(JSON.parse(line ?? "{}").exit.value.setupTimeoutSeconds).toBe(5400);
+    for (const bad of ["0", "soon", "-1"]) {
+      const refused = await boot({
+        MODEL_BACKEND: "faux",
+        SETUP_TIMEOUT_SECONDS: bad,
+      });
+      expect(refused.code, refused.output).not.toBeNull();
+      expect(refused.code, refused.output).not.toBe(0);
+      expect(refused.output).toContain("SETUP_TIMEOUT_SECONDS");
+      expect(refused.output).not.toContain(LISTENING);
+    }
+  }, 90_000);
 });
 
 /**

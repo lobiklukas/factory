@@ -23,6 +23,17 @@ were cut, and the skills listed, dropped by the budget, or shadowed. A repositor
 gets no section and a record saying `instructions: null`; a scratch session (no repository) gets
 neither, so it runs exactly as before. Forks and replays read their own worktree's base the same way.
 
+**Fallbacks and nested files (F20).** `repo_instructions` is the first of `AGENTS.md`, `CLAUDE.md`,
+`.github/copilot-instructions.md` the base commit has, at the same caps and with the same symlink rule;
+the record's `instructions.path` names the file read, and the section's preamble does too. An unusable
+candidate (a link out of the repository) or an empty one is passed over for the next. The paths of
+`AGENTS.md` files nested in directories are listed after the skills in `repo_skills` (never injected,
+at most 20, within the index's cap) and recorded as `skills.nested`.
+
+**Reading it back (F19).** `getSessionContext` (RPC), `factory show`'s `context` line and the session pane's
+line report the record; see verify-cli's [show.md](../../verify-cli/features/show.md) and verify-web's
+[session-new.md](../../verify-web/features/session-new.md).
+
 **How a user reaches it.** Commit an `AGENTS.md` or a `.pi/skills/<name>/SKILL.md` to the repo's
 base branch; the next run on that repo is told it.
 

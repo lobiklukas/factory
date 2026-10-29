@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ApprovalsRouteImport } from './routes/approvals'
 import { Route as AttentionRouteImport } from './routes/attention'
+import { Route as NotificationsRouteImport } from './routes/notifications'
 import { Route as ReposRouteImport } from './routes/repos'
 import { Route as SandboxesRouteImport } from './routes/sandboxes'
 import { Route as SessionsRouteImport } from './routes/sessions'
@@ -39,6 +40,11 @@ const ApprovalsRoute = ApprovalsRouteImport.update({
 const AttentionRoute = AttentionRouteImport.update({
   id: '/attention',
   path: '/attention',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const NotificationsRoute = NotificationsRouteImport.update({
+  id: '/notifications',
+  path: '/notifications',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ReposRoute = ReposRouteImport.update({
@@ -112,6 +118,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/approvals': typeof ApprovalsRoute
   '/attention': typeof AttentionRoute
+  '/notifications': typeof NotificationsRoute
   '/repos': typeof ReposRoute
   '/sandboxes': typeof SandboxesRoute
   '/sessions': typeof SessionsRouteWithChildren
@@ -130,6 +137,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/approvals': typeof ApprovalsRoute
   '/attention': typeof AttentionRoute
+  '/notifications': typeof NotificationsRoute
   '/repos': typeof ReposRoute
   '/sandboxes': typeof SandboxesRoute
   '/spend': typeof SpendRoute
@@ -148,6 +156,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/approvals': typeof ApprovalsRoute
   '/attention': typeof AttentionRoute
+  '/notifications': typeof NotificationsRoute
   '/repos': typeof ReposRoute
   '/sandboxes': typeof SandboxesRoute
   '/sessions': typeof SessionsRouteWithChildren
@@ -168,6 +177,7 @@ export interface FileRouteTypes {
     | '/'
     | '/approvals'
     | '/attention'
+    | '/notifications'
     | '/repos'
     | '/sandboxes'
     | '/sessions'
@@ -186,6 +196,7 @@ export interface FileRouteTypes {
     | '/'
     | '/approvals'
     | '/attention'
+    | '/notifications'
     | '/repos'
     | '/sandboxes'
     | '/spend'
@@ -203,6 +214,7 @@ export interface FileRouteTypes {
     | '/'
     | '/approvals'
     | '/attention'
+    | '/notifications'
     | '/repos'
     | '/sandboxes'
     | '/sessions'
@@ -222,6 +234,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ApprovalsRoute: typeof ApprovalsRoute
   AttentionRoute: typeof AttentionRoute
+  NotificationsRoute: typeof NotificationsRoute
   ReposRoute: typeof ReposRoute
   SandboxesRoute: typeof SandboxesRoute
   SessionsRoute: typeof SessionsRouteWithChildren
@@ -256,6 +269,13 @@ declare module '@tanstack/react-router' {
       path: '/attention'
       fullPath: '/attention'
       preLoaderRoute: typeof AttentionRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/notifications': {
+      id: '/notifications'
+      path: '/notifications'
+      fullPath: '/notifications'
+      preLoaderRoute: typeof NotificationsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/repos': {
@@ -370,6 +390,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ApprovalsRoute: ApprovalsRoute,
   AttentionRoute: AttentionRoute,
+  NotificationsRoute: NotificationsRoute,
   ReposRoute: ReposRoute,
   SandboxesRoute: SandboxesRoute,
   SessionsRoute: SessionsRouteWithChildren,

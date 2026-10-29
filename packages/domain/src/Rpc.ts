@@ -1,6 +1,26 @@
 import { Schema } from "effect";
 import { Rpc, RpcGroup } from "effect/rpc";
 import { ControlPlaneAuth } from "@repo/domain/Auth";
+import { SessionContext } from "@repo/domain/RepoContext";
+import {
+  AddNotificationSinkInput,
+  GetNotificationSettingsInput,
+  NotificationErrorSchema,
+  NotificationSettings,
+  NotificationSinkRefInput,
+  NotificationSinkSummary,
+  SetNotificationKindInput,
+  SetNotificationSinkEnabledInput,
+} from "@repo/domain/Notify";
+import {
+  AddAutomationInput,
+  Automation,
+  AutomationErrorSchema,
+  AutomationIdInput,
+  AutomationTick,
+  ListAutomationsInput,
+  ListAutomationTicksInput,
+} from "@repo/domain/Automation";
 import {
   DeleteSecretInput,
   ListSecretsInput,
@@ -207,6 +227,13 @@ export class SessionRpc extends RpcGroup.make(
   Rpc.make("readSessionHistory", {
     payload: ReadSessionHistoryInput,
     success: SessionHistoryPage,
+    error: SessionError,
+  }),
+  // What the session's run was told about its repository (F19): the instruction file, its size and
+  // whether it was cut, and the skills indexed. Read from the log, owned or not.
+  Rpc.make("getSessionContext", {
+    payload: SessionIdInput,
+    success: SessionContext,
     error: SessionError,
   }),
   Rpc.make("sendMessage", {
@@ -753,6 +780,102 @@ export class SecretsRpc extends RpcGroup.make(
   }),
 ).middleware(ControlPlaneAuth) {}
 
+/**
+ * Notification settings (F21): the per-kind toggles and a person's own sinks. Its own group: it is
+ * the dashboard's settings page, and what it stores the notifier reads on every pass, so a change
+ * needs no restart.
+ */
+export class NotificationsRpc extends RpcGroup.make(
+  // The effective toggles, the caller's sinks and what this control plane can send.
+  Rpc.make("getNotificationSettings", {
+    payload: GetNotificationSettingsInput,
+    success: NotificationSettings,
+    error: NotificationErrorSchema,
+  }),
+  // A kind switched on or off for the whole deployment; answers the settings as they now stand.
+  Rpc.make("setNotificationKind", {
+    payload: SetNotificationKindInput,
+    success: NotificationSettings,
+    error: NotificationErrorSchema,
+  }),
+  // The caller's own sink. A malformed address or subscription is `InvalidNotificationSink`, a type
+  // this control plane cannot send `NotificationChannelUnavailable`; nothing is written for either.
+  Rpc.make("addNotificationSink", {
+    payload: AddNotificationSinkInput,
+    success: NotificationSinkSummary,
+    error: NotificationErrorSchema,
+  }),
+  // Pause or resume one of the caller's sinks without losing it.
+  Rpc.make("setNotificationSinkEnabled", {
+    payload: SetNotificationSinkEnabledInput,
+    success: NotificationSinkSummary,
+    error: NotificationErrorSchema,
+  }),
+  // Removed for good. A sink that is not the caller's is `NotificationSinkNotFound`.
+  Rpc.make("removeNotificationSink", {
+    payload: NotificationSinkRefInput,
+    success: NotificationSinkSummary,
+    error: NotificationErrorSchema,
+  }),
+).middleware(ControlPlaneAuth) {}
+
+/**
+ * Scheduled automations (S-general-automations): a repo's cron or one-off schedules, each tick a card
+ * on its board with a run on it. Its own group: a schedule is neither a session nor a card, and the
+ * history it answers joins both.
+ */
+export class AutomationsRpc extends RpcGroup.make(
+  // A new automation, enabled. A schedule `effect/Cron` cannot read, a one-off in the past, a skill
+  // the library lacks or a repo with no board is `InvalidAutomation` naming the field; an
+  // unregistered repo `RepoNotFound`. Nothing is written for any of them.
+  Rpc.make("addAutomation", {
+    payload: AddAutomationInput,
+    success: Automation,
+    error: AutomationErrorSchema,
+  }),
+  // Every automation, or one repo's, oldest first, each with its next instant and its last tick.
+  Rpc.make("listAutomations", {
+    payload: ListAutomationsInput,
+    success: Schema.Array(Automation),
+    error: AutomationErrorSchema,
+  }),
+  Rpc.make("getAutomation", {
+    payload: AutomationIdInput,
+    success: Automation,
+    error: AutomationErrorSchema,
+  }),
+  // Stops further ticks; a tick already running finishes. Pausing a paused one changes nothing.
+  Rpc.make("pauseAutomation", {
+    payload: AutomationIdInput,
+    success: Automation,
+    error: AutomationErrorSchema,
+  }),
+  // Ticks again from now: an instant the schedule reached while it was paused does not fire.
+  Rpc.make("resumeAutomation", {
+    payload: AutomationIdInput,
+    success: Automation,
+    error: AutomationErrorSchema,
+  }),
+  // One tick now, paused or not, and never skipped: the answer is the tick as it ended.
+  Rpc.make("runAutomation", {
+    payload: AutomationIdInput,
+    success: AutomationTick,
+    error: AutomationErrorSchema,
+  }),
+  // Removed with its history; the cards and runs it made stay on the board.
+  Rpc.make("removeAutomation", {
+    payload: AutomationIdInput,
+    success: Automation,
+    error: AutomationErrorSchema,
+  }),
+  // Its ticks, newest first, each with its run's status and spend from `session_activity`.
+  Rpc.make("listAutomationTicks", {
+    payload: ListAutomationTicksInput,
+    success: Schema.Array(AutomationTick),
+    error: AutomationErrorSchema,
+  }),
+).middleware(ControlPlaneAuth) {}
+
 // Every group carries `ControlPlaneAuth` (LOB-20), so every member — `watchSession`'s stream too —
 // is refused as `Unauthenticated` without a credential the server knows, and a handler that records
 // an actor reads it from the `Caller` the middleware provides, not from the body.
@@ -763,4 +886,6 @@ export const RpcApi = SessionRpc.merge(ApprovalsRpc)
   .merge(ServerRpc)
   .merge(DoctorRpc)
   .merge(SkillsRpc)
-  .merge(SecretsRpc);
+  .merge(SecretsRpc)
+  .merge(NotificationsRpc)
+  .merge(AutomationsRpc);

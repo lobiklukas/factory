@@ -26,6 +26,7 @@ import {
   Clock,
   Context,
   DateTime,
+  Deferred,
   Duration,
   Effect,
   Exit,
@@ -38,7 +39,9 @@ import {
   Layer,
   Option,
   Path,
+  Redacted,
   Ref,
+  References,
   Schedule,
   Schema,
   type Scope,
@@ -101,6 +104,7 @@ import type {
   WorkspaceRelease,
   WorkspaceReleaseReason,
 } from "@repo/domain/Session";
+import type { SessionContext } from "@repo/domain/RepoContext";
 import {
   RepoCloneFailed,
   RepoNotFound,
@@ -131,6 +135,7 @@ import type {
   OpenSession,
   PlanOptions,
   RoleModels,
+  RoleFallbacks,
   RolePolicies,
   RunColumn,
   RepoContext,
@@ -156,6 +161,10 @@ import {
   stageRefusalOf,
   repoPolicyWidening,
   resolveRole,
+  listMcp,
+  mcpGrants,
+  type McpListing,
+  type McpServerAccess,
   // `startMission` is the harness's: it creates the task and commits the documents. The service
   // method below resolves the workspace and the owner first, so the two names mark which layer
   // owns which half.
@@ -204,7 +213,11 @@ import {
   readPinnedModelKey,
   readRecordedReview,
   readSetupRecord,
+  setupCovers,
+  submitReplayPrompt,
   readPolicyRecord,
+  readRepoPrompt,
+  readSettlePr,
   readSkillPins,
   readTranscriptPage,
   readVerifyRecords,
@@ -217,11 +230,13 @@ import {
   compareReplay,
   mirrorComparison,
   readPromptSubmission,
+  rootHasRequest,
   readReplayDocument,
   readReplayRun,
   readReplaySource,
+  type ReplaySource,
   readSpec,
-  replaySession,
+  openReplay,
   waitForPrompt,
   writeReplayComparison,
   requestCuration,
@@ -241,6 +256,7 @@ import {
   writeApprovalRequested,
   writeApprovalUsed,
   writeActor,
+  writeSettlePr,
   commitBudget,
   formatDollars,
   writeBudget,
@@ -316,7 +332,20 @@ import { readRepoContext } from "./repoContext";
 import { readRepoPolicy } from "./repoPolicy";
 import { homeOf, makePresence, type Lease } from "./Presence";
 import { SessionBus, SessionBusPostgres } from "./SessionBus";
-import { atCapacity, runCapReached, SESSION_MAX_CONCURRENT } from "./admission";
+import {
+  atCapacity,
+  budgetExceeded,
+  runCapReached,
+  SESSION_MAX_CONCURRENT,
+} from "./admission";
+import {
+  checkSpendCaps,
+  hasSpendCaps,
+  NO_SPEND_CAPS,
+  raiseSpendAlerts,
+  syncSpendCapLimits,
+  type SpendCaps,
+} from "./spendCaps";
 import { checkRunCaps } from "./boardCaps";
 import { type CardBranch, cardBranchOf, changeColumnsOf } from "./cardBranch";
 import {
@@ -332,7 +361,6 @@ import { openPullRequest, type OpenPullRequestInput } from "./prStep";
 import {
   notOpenedText,
   settleDeclarationOf,
-  TRIGGER_PREFIX,
   type NotOpened,
   type SettleDecision,
   type SettledRun,
@@ -369,6 +397,7 @@ import {
   workTreeRoot,
 } from "./repos";
 import {
+  readWorktreeCut,
   removeWorkspace,
   resolveWorkspace,
   sessionDirectory,
@@ -417,6 +446,13 @@ export const approvalResumeMessage = (
 export const approvalResumeRequestId = (requestId: string): string =>
   `approval-resume:${requestId}`;
 
+/** `baseHead`'s answer: the ref read, and its tip — or, when no git could say, why not. */
+export type RepoBaseHead = {
+  readonly ref: string;
+  readonly sha?: string;
+  readonly note?: string;
+};
+
 export type SessionServiceShape = {
   readonly create: (
     input?: CreateSessionInput,
@@ -431,6 +467,14 @@ export type SessionServiceShape = {
   readonly history: (
     input: ReadSessionHistoryInput,
   ) => Effect.Effect<SessionHistoryPage, SessionError>;
+  /**
+   * What the session's repository told its last run (F19): the instruction file and the skills
+   * index, as the log records them. Read from the log, owned or not; `repo` is absent for a
+   * scratch session and for a log that never recorded one.
+   */
+  readonly context: (
+    sessionId: SessionId,
+  ) => Effect.Effect<SessionContext, SessionError>;
   readonly send: (
     input: SendMessageInput,
   ) => Effect.Effect<SendMessageResult, SessionError>;
@@ -564,6 +608,18 @@ export type SessionServiceShape = {
   readonly getRepo: (
     input: GetRepoInput,
   ) => Effect.Effect<RepoSummary, SessionError | RepoNotFound>;
+  /**
+   * Where a registered repo's base is now (S-general-automations): the commit a session cut from
+   * `baseRef` (default: the repo's default base ref) would start at, read the way that cut reads it —
+   * the factory's clone of a URL-only repo synced, the base of a checkout with a forge fetched into
+   * it (falling back to the checkout's own refs when the fetch fails), and otherwise the checkout's
+   * `<base>` or `origin/<base>`. `sha` is absent, with `note` saying why, when no git could say.
+   * `RepoNotFound` for a slug the registry has no row for.
+   */
+  readonly baseHead: (input: {
+    readonly repo: RepoSlug;
+    readonly baseRef?: string | undefined;
+  }) => Effect.Effect<RepoBaseHead, SessionError | RepoNotFound>;
   /**
    * A session's events: live from the harness while this process owns it; live from its log while
    * another process does (LOB-18), ending when that ownership does; a single historical snapshot
@@ -827,10 +883,11 @@ export type SessionServiceShape = {
    * session with no PR until someone ran `factory pr`.
    *
    * The sessions are the ones the settle rule declares (`./prOnSettle`'s `settleDeclarationOf`: a
-   * trigger's session, a card's run in a column that requires a PR or continuing the card's PR) that
-   * record no PR, have no run or mission in flight, and whose worktree is under this process's
-   * session root and its own checkout — so a person's session, a fork, a replay, a released
-   * workspace and a parked run are never opened, and another instance's sessions are its own. Nor is
+   * trigger's session, a card's run in a column that requires a PR or continuing the card's PR, a
+   * person's session whose log records its opt-in, F17) that record no PR, have no run or mission in
+   * flight, and whose worktree is under this process's session root and its own checkout — so a
+   * person's session that did not ask, a fork, a released workspace and a parked run are never
+   * opened, and another instance's sessions are its own. Nor is
    * a card run a later run of the card took the branch over from (C19): it is superseded, and its
    * step would publish the later run's branch into its stale log. Nor a session this process saw a
    * run go busy in before the sweep finished (one `resumeRuns` continued, one a client started):
@@ -884,6 +941,12 @@ export type SessionServiceOptions = {
    * fails the boot rather than a run. Absent: every run talks to `model`.
    */
   readonly roleModels?: RoleModels;
+  /**
+   * The deployment's role → fallback chain table (S-model-provider-breadth, `@repo/harness`'s
+   * `resolveRoleFallbacks` over `ROLE_FALLBACKS`): a run whose role has a row moves onto the next
+   * model of its chain when its own answers overloaded or unavailable. Absent: no run falls back.
+   */
+  readonly roleFallbacks?: RoleFallbacks;
   /**
    * What each role may do (D10): the factory's role policy table with the deployment's rows added
    * (`@repo/harness`'s `extendRolePolicies` over `ROLE_POLICIES`). Absent: the factory's own.
@@ -942,6 +1005,16 @@ export type SessionServiceOptions = {
    * (`SESSION_MAX_CONCURRENT`).
    */
   readonly maxConcurrentSessions?: number;
+  /**
+   * Aggregate spend caps (S-aggregate-spend-caps, `./spendCaps`): the dollars a repository or an
+   * actor may spend in a UTC day or month. A `create`, a `startMission`, a `replay` or a `send` that
+   * would start a run (not a steer or follow-up into one under way) once the
+   * repository's or the actor's window has reached its limit is refused `budget_exceeded` before
+   * anything is written, and the spend that crosses 80% and 100% of a cap raises one alert each
+   * (the attention view, the notifier). Absent: no cap (`SPEND_CAPS` unset) and the recorded
+   * limits are left as they are; given (even with no entries) they are replaced by these.
+   */
+  readonly spendCaps?: SpendCaps;
   /**
    * What a session may do unattended (D11, `@repo/harness`'s `Policy`). Absent: D11's defaults, so
    * an unpoliced session is not reachable by omitting an argument.
@@ -1390,6 +1463,117 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             source: SESSION_MAX_CONCURRENT,
           });
         });
+      const spendCaps = options.spendCaps ?? NO_SPEND_CAPS;
+      // A deployment that states its caps (even none) says which alerts still stand: the attention
+      // view lists an alert only while its cap and limit are the configured ones.
+      if (options.spendCaps !== undefined) {
+        const recordCaps = syncSpendCapLimits(spendCaps).pipe(
+          Effect.provideService(SqlClient, sql),
+        );
+        // At a first boot the migrations may not have made the table yet: try again, off the boot,
+        // until they have. Until then no alert is listed, which is the safe side of "unknown".
+        yield* recordCaps.pipe(
+          Effect.catch((error) =>
+            Effect.logWarning(
+              `spend caps were not recorded yet, so spend alerts stay hidden until they are: ${String(error)}`,
+            ).pipe(
+              Effect.andThen(
+                Effect.retry(recordCaps, Schedule.spaced("2 seconds")).pipe(
+                  Effect.ignore,
+                  Effect.forkScoped,
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+      /**
+       * Aggregate spend caps (S-aggregate-spend-caps): refuse a run that would start for `who` once
+       * a repository's or an actor's window has reached its cap. Before anything is written, so a
+       * refused create leaves no row and takes no request id. The refusal also raises the cap's
+       * alerts, which a spend recorded before the cap was configured (or lowered) never did.
+       * With no cap configured, no read at all.
+       */
+      const refuseOverSpendCap = (who: {
+        readonly repo: string | undefined;
+        readonly actor: string | undefined;
+      }): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          if (!hasSpendCaps(spendCaps)) return;
+          const now = yield* Clock.currentTimeMillis;
+          const hit = yield* paper(
+            "check spend caps",
+            checkSpendCaps(spendCaps, who, now).pipe(
+              Effect.provideService(SqlClient, sql),
+            ),
+          );
+          if (hit === undefined) return;
+          yield* alertOnSpend(who, now);
+          yield* countRefusal("budget_exceeded");
+          return yield* budgetExceeded(hit);
+        });
+      /**
+       * The spend caps for a message to a session: refused only when it would start a run. A message
+       * to a session whose run is going (a steer, a follow-up) starts none — a run under way is not
+       * stopped by a cap, and neither is the person steering it — and a retry of a message the log
+       * already holds under its request id is answered by Pi Durable's own dedupe, so the first
+       * attempt's run (which may be the one that crossed the cap) is not turned into a refusal.
+       */
+      const refuseSendOverSpendCap = (
+        input: SendMessageInput,
+        row: SessionRow,
+      ): Effect.Effect<void, SessionError> =>
+        Effect.gen(function* () {
+          if (!hasSpendCaps(spendCaps)) return;
+          const requestId = input.requestId;
+          const owner = HashMap.get(yield* Ref.get(live), input.sessionId);
+          if (Option.isSome(owner)) {
+            const busy = yield* isBusy(
+              owner.value.harness,
+              owner.value.root,
+            ).pipe(Effect.orElseSucceed(() => false));
+            if (busy) return;
+          }
+          if (requestId !== undefined) {
+            const seen = yield* (
+              Option.isSome(owner)
+                ? rootHasRequest(owner.value.storage, requestId)
+                : withReader(input.sessionId, (storage) =>
+                    rootHasRequest(storage, requestId),
+                  )
+            ).pipe(Effect.orElseSucceed(() => false));
+            if (seen) return;
+          }
+          yield* refuseOverSpendCap({
+            repo: row.repo ?? undefined,
+            actor: row.actor ?? undefined,
+          });
+        });
+      /** Raise the alerts `who`'s spend has reached; a failure to is warned of, never the request's. */
+      const alertOnSpend = (
+        who: {
+          readonly repo: string | undefined;
+          readonly actor: string | undefined;
+        },
+        now: number,
+      ): Effect.Effect<void> =>
+        !hasSpendCaps(spendCaps)
+          ? Effect.void
+          : raiseSpendAlerts(spendCaps, who, now).pipe(
+              Effect.provideService(SqlClient, sql),
+              Effect.flatMap((raised) =>
+                Effect.forEach(raised, (alert) =>
+                  Effect.logWarning(
+                    `spend: ${alert.scope} ${alert.subject} reached ${alert.threshold}% of its ${alert.window} cap`,
+                  ),
+                ),
+              ),
+              Effect.catch((error) =>
+                Effect.logWarning(
+                  `spend alerts were not raised: ${String(error)}`,
+                ),
+              ),
+            );
       /**
        * Whether an acquisition must find a free slot: not one its new session already reserved, and
        * not a boot's resume of work admitted before the process died (`admission: "resume"`), and
@@ -1615,6 +1799,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        */
       const deferredSends = yield* FiberMap.make<string, void, never>();
       let deferredSendCount = 0;
+      /**
+       * The replays whose first prompt waits for their worktree's setup (F23), each open until the
+       * prompt is submitted or will not be. `reconcileReplay` waits on it, because a replay with no
+       * prompt in its log yet would be compared as one that never ran.
+       */
+      const heldPrompts = new Map<SessionId, Deferred.Deferred<void>>();
       /** One activity projection per owned session; releasing an owner interrupts its fiber. */
       const projectors = yield* FiberMap.make<SessionId, void, never>();
       /**
@@ -1798,28 +1988,34 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        * acquisition. Only the sweep honours a hold: a release the call asks for, a lost lease and
        * the shutdown close an owner whatever holds it.
        */
+      const takeHold = (sessionId: SessionId): Effect.Effect<void> =>
+        Ref.update(holds, (counts) =>
+          HashMap.set(
+            counts,
+            sessionId,
+            Option.getOrElse(HashMap.get(counts, sessionId), () => 0) + 1,
+          ),
+        );
+      const dropHold = (sessionId: SessionId): Effect.Effect<void> =>
+        Ref.update(holds, (counts) => {
+          const left =
+            Option.getOrElse(HashMap.get(counts, sessionId), () => 1) - 1;
+          return left > 0
+            ? HashMap.set(counts, sessionId, left)
+            : HashMap.remove(counts, sessionId);
+        }).pipe(Effect.andThen(touch(sessionId)));
       const holding = <A, E, R>(
         sessionId: SessionId,
         effect: Effect.Effect<A, E, R>,
       ): Effect.Effect<A, E, R> =>
         Effect.acquireUseRelease(
-          Ref.update(holds, (counts) =>
-            HashMap.set(
-              counts,
-              sessionId,
-              Option.getOrElse(HashMap.get(counts, sessionId), () => 0) + 1,
-            ),
-          ),
+          takeHold(sessionId),
           () => effect,
-          () =>
-            Ref.update(holds, (counts) => {
-              const left =
-                Option.getOrElse(HashMap.get(counts, sessionId), () => 1) - 1;
-              return left > 0
-                ? HashMap.set(counts, sessionId, left)
-                : HashMap.remove(counts, sessionId);
-            }).pipe(Effect.andThen(touch(sessionId))),
+          () => dropHold(sessionId),
         );
+      /** A hold that lasts until the enclosing scope closes, for a body that is already a scoped gen. */
+      const holdForScope = (sessionId: SessionId) =>
+        Effect.acquireRelease(takeHold(sessionId), () => dropHold(sessionId));
 
       /**
        * The column the run started in, as the card's pinned definition declares it (B6).
@@ -2674,6 +2870,78 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         });
 
       /**
+       * The MCP servers a session's run may call (S-agent-mcp-tools): the deployment's
+       * registrations (`AutonomyConfig.mcpServers`) the repository's pinned policy allows, each
+       * with the bearer token read from the repository secret its registration names. The token
+       * is a header on the control plane's own client, never in the session's commands; it is
+       * also handed back to be masked in every tool result, in case a server echoes it.
+       *
+       * A server whose secret the store does not hold for the repo — no store, no such secret, or
+       * one this key cannot read — is not offered, with a warning: a call without its credential
+       * would fail, or be made as nobody the operator chose. A released session runs no work, so
+       * it connects to nothing.
+       */
+      const mcpFor = (
+        id: SessionId,
+        repo: RepoSlug | undefined,
+        released: boolean,
+        repoPolicy: RepoPolicy,
+      ): Effect.Effect<{
+        readonly servers: readonly McpServerAccess[];
+        readonly secrets: InjectedSecrets;
+      }> =>
+        Effect.gen(function* () {
+          const grants = mcpGrants(
+            policy.config.mcpServers ?? [],
+            repoPolicy.mcp,
+          );
+          if (grants.length === 0 || released)
+            return { servers: [], secrets: [] };
+          const names = grants.flatMap((grant) =>
+            grant.secret === undefined ? [] : [grant.secret],
+          );
+          const revealed =
+            names.length === 0 ||
+            secretStore === undefined ||
+            repo === undefined
+              ? { values: [], unreadable: [] }
+              : yield* secretStore
+                  .reveal(repo, names)
+                  .pipe(
+                    Effect.catch((error) =>
+                      Effect.logWarning(
+                        `session ${id}: the MCP servers' secrets could not be read (${error.message})`,
+                      ).pipe(Effect.as({ values: [], unreadable: [] })),
+                    ),
+                  );
+          const servers: McpServerAccess[] = [];
+          const secrets: Array<InjectedSecrets[number]> = [];
+          for (const grant of grants) {
+            if (grant.secret === undefined) {
+              servers.push(grant);
+              continue;
+            }
+            const secret = revealed.values.find(
+              (value) => value.name === grant.secret,
+            );
+            if (secret === undefined) {
+              yield* Effect.logWarning(
+                `session ${id}: MCP server ${grant.name} is not offered: its credential is the secret ${grant.secret}, which ${repo ?? "the session's repo"} does not hold${revealed.unreadable.includes(grant.secret) ? " in a form this server's FACTORY_SECRETS_KEY can read" : ""}`,
+              );
+              continue;
+            }
+            servers.push({
+              ...grant,
+              headers: {
+                Authorization: `Bearer ${Redacted.value(secret.value)}`,
+              },
+            });
+            secrets.push(secret);
+          }
+          return { servers, secrets };
+        });
+
+      /**
        * The repository's policy a session's open runs under (S-factory-config-as-code,
        * `./repoPolicy`), and where it came from.
        *
@@ -2730,11 +2998,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ...(recorded.repo.allowedHosts === null
                 ? {}
                 : { allowedHosts: recorded.repo.allowedHosts }),
+              ...(recorded.repo.mcp == null ? {} : { mcp: recorded.repo.mcp }),
             };
             const widening = repoPolicyWidening(policy.config, pinned);
             if (widening.length > 0)
               yield* Effect.logWarning(
-                `session ${row.id}: the policy it pinned from ${recorded.source.path} at ${recorded.source.ref} (${recorded.source.commit.slice(0, 12)}) names hosts this deployment no longer allows, so the run reaches none of them: ${widening.join("; ")}`,
+                `session ${row.id}: the policy it pinned from ${recorded.source.path} at ${recorded.source.ref} (${recorded.source.commit.slice(0, 12)}) names hosts or MCP servers this deployment no longer allows, so the run reaches none of them: ${widening.join("; ")}`,
               );
             return { source: recorded.source, repo: pinned };
           }
@@ -3268,6 +3537,61 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           return yield* repoSummary(row);
         });
 
+      const baseHead = (input: {
+        readonly repo: RepoSlug;
+        readonly baseRef?: string | undefined;
+      }): Effect.Effect<RepoBaseHead, SessionError | RepoNotFound> =>
+        Effect.gen(function* () {
+          const row = (yield* paper("read repo", readRepo(input.repo)))[0];
+          if (row === undefined) {
+            return yield* new RepoNotFound({
+              repo: input.repo,
+              message: `repo ${input.repo} is not registered`,
+            });
+          }
+          const ref = input.baseRef ?? row.defaultBaseRef;
+          if (isCommitId(ref)) return { ref, sha: ref };
+          const unknown = (note: string): RepoBaseHead => ({ ref, note });
+          const mirrored = mirrorOf(row);
+          if (mirrored !== undefined) {
+            return yield* mirrored.mirror
+              .sync({ repo: input.repo, url: mirrored.url, baseRef: ref })
+              .pipe(
+                Effect.map((tip): RepoBaseHead => ({ ref, sha: tip.sha })),
+                Effect.catch((error) => Effect.succeed(unknown(error.message))),
+              );
+          }
+          const checkout = row.localPath;
+          if (checkout === null) {
+            return unknown(
+              `repo ${input.repo} has no checkout and no clone to read ${ref} in`,
+            );
+          }
+          const remote = options.repoRemote;
+          if (remote !== undefined && isSafeBranchName(ref)) {
+            const url = yield* forgeUrlFor(input.repo, row.url, checkout);
+            if (url !== undefined) {
+              const fetched = yield* remote
+                .fetchBase({ repo: input.repo, url, checkout, branch: ref })
+                .pipe(
+                  Effect.map((tip) => tip.sha),
+                  Effect.catch((error) =>
+                    Effect.logWarning(
+                      `repo ${input.repo}: could not fetch ${ref} from its forge, so its base is read from the checkout: ${error.message}`,
+                    ).pipe(Effect.as(undefined)),
+                  ),
+                );
+              if (fetched !== undefined) return { ref, sha: fetched };
+            }
+          }
+          const sha =
+            (yield* resolveCommit(checkout, ref)) ??
+            (yield* resolveCommit(checkout, `refs/remotes/origin/${ref}`));
+          return sha === undefined
+            ? unknown(`no commit named ${ref} in ${checkout}`)
+            : { ref, sha };
+        });
+
       const listRepos: Effect.Effect<ListReposOutput, SessionError> =
         Effect.gen(function* () {
           const rows = yield* paper("list repos", readRepos);
@@ -3324,6 +3648,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly verify: VerifyOptions;
         /** Every secret value the session's commands are given, masked in its log (S-agent-secrets). */
         readonly secrets: InjectedSecrets;
+        /** The MCP servers the run may call, with their credentials (S-agent-mcp-tools). */
+        readonly mcp: readonly McpServerAccess[];
+        /** Their sessions, made before the gate (`mcpListingFor`); the open's from here. */
+        readonly mcpListing?: McpListing;
         /** How the run asks on its card (LOB-73); absent for a session with no card. */
         readonly ask?: AskOptions;
         /** How the run reads its card's thread (LOB-73); absent for a session with no card. */
@@ -3385,6 +3713,56 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         readonly admission?: "resume" | "background" | "stop";
       };
 
+      /**
+       * The MCP servers' sessions an owner's open will offer tools from (S-agent-mcp-tools), made
+       * before the owners' gate like the base's fetch (`acquireOwnerWith`): connecting to a server
+       * and listing its tools is network, and a server that is slow or gone would otherwise hold
+       * every other session's open, interrupt and approval behind it for as long as its deadline.
+       *
+       * What it connects to is a guess, not the decision: the grants the open will make, from the
+       * policy the log pinned (or the base's, for a first open) and the secrets the store holds now,
+       * read here without the gate. The open reads both again under the gate and offers only what
+       * it grants then (`offerMcp`), so a grant that changed in between costs that server's tools
+       * for this open, never a tool the session is not allowed. Its warnings are the open's to say,
+       * so nothing here logs; anything that fails here only means nothing is connected ahead.
+       * `undefined`: no server to connect to.
+       */
+      const mcpListingFor = (
+        id: SessionId,
+        row: SessionRow,
+        acquisition: OwnerAcquisition,
+        fetchedStart: string | undefined,
+        fetchedReviewBase: string | undefined,
+      ): Effect.Effect<McpListing | undefined> =>
+        (policy.config.mcpServers ?? []).length === 0 || row.repo === null
+          ? Effect.undefined
+          : Effect.gen(function* () {
+              if ((yield* releaseOf(row)) !== undefined) return undefined;
+              const repoPolicy = yield* withReader(id, (storage) =>
+                Effect.gen(function* () {
+                  const recorded = yield* readPolicyRecord(storage);
+                  const review = yield* readRecordedReview(storage);
+                  return yield* repoPolicyFor(row, recorded, {
+                    fetchedStart,
+                    reviewBase: review?.target.base ?? acquisition.review?.base,
+                    fetchedReviewBase,
+                  });
+                }),
+              );
+              const repo =
+                row.repo === null ? undefined : yield* toRepoSlug(row.repo);
+              const { servers } = yield* mcpFor(
+                id,
+                repo,
+                false,
+                repoPolicy.repo,
+              );
+              return servers.length === 0 ? undefined : yield* listMcp(servers);
+            }).pipe(
+              Effect.provideService(References.MinimumLogLevel, "None"),
+              Effect.orElseSucceed(() => undefined),
+            );
+
       /** The part of an acquisition that is serialized: everything but the network (below). */
       const acquireUnderGate = (
         id: SessionId,
@@ -3393,254 +3771,291 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         acquisition: OwnerAcquisition,
         fetchedStart: string | undefined,
         fetchedReviewBase: string | undefined,
+        /** The MCP servers' sessions made before the gate (`mcpListingFor`); this acquisition's to end unless an open takes them. */
+        mcpListing: McpListing | undefined,
       ): Effect.Effect<LiveOwner, SessionError> => {
         /** The fence of the presence claim this acquisition took, once it has taken one (LOB-18). */
         let claimed: number | undefined;
-        return gate.withPermits(1)(
-          Effect.gen(function* () {
-            const now = yield* Clock.currentTimeMillis;
-            const owners = yield* Ref.get(live);
-            const existing = HashMap.get(owners, id);
-            if (Option.isSome(existing)) {
-              const touched = { ...existing.value, lastUsedAt: now };
-              yield* Ref.update(live, HashMap.set(id, touched));
-              return touched;
-            }
-            // One more owner (LOB-70): admitted on the slot its new session reserved, or on a free
-            // one, counted under this gate with the insert below so the count cannot be overtaken.
-            if (yield* needsSlot(acquisition))
-              yield* refuseOverCapacity(acquisition.admission !== "background");
+        /** Whether the listing went to an open, whose session it is from then (`OpenSessionOptions.mcpListing`). */
+        let listingHanded = false;
+        return gate
+          .withPermits(1)(
+            Effect.gen(function* () {
+              const now = yield* Clock.currentTimeMillis;
+              const owners = yield* Ref.get(live);
+              const existing = HashMap.get(owners, id);
+              if (Option.isSome(existing)) {
+                const touched = { ...existing.value, lastUsedAt: now };
+                yield* Ref.update(live, HashMap.set(id, touched));
+                return touched;
+              }
+              // One more owner (LOB-70): admitted on the slot its new session reserved, or on a free
+              // one, counted under this gate with the insert below so the count cannot be overtaken.
+              if (yield* needsSlot(acquisition))
+                yield* refuseOverCapacity(
+                  acquisition.admission !== "background",
+                );
 
-            // Read again under the gate rather than trusted from `row`: a release that committed
-            // after the caller read the row must not be undone by cutting the worktree back
-            // (LOB-268). A released session still opens — its log takes approvals, pages and a
-            // curator's charge — but in no directory, because there is none to work in.
-            const current = yield* requireSession(id);
-            const released = yield* releaseOf(current);
-            if (released !== undefined && acquisition.starts === true) {
-              yield* countRefusal("released");
-              return yield* releasedError(id, released);
-            }
-            // Claimed before anything is opened (LOB-18): a session another process owns is not
-            // opened a second time here, where both would write one log until Postgres poisoned one.
-            // A live claim of this process's own home — this host and session root, where the
-            // session's worktree is — is taken over rather than waited out: it is the process this
-            // one replaced (a SIGKILL, a crash), whose run, mission or parked approval would
-            // otherwise wait a TTL for nothing (LOB-25, LOB-231). Two live processes on one home is
-            // already the misconfiguration D12 names; this makes the newer one win.
-            const claim = yield* paper(
-              "claim the session",
-              presence.acquire("session", id, { takeoverHome: true }),
-            );
-            if (claim._tag === "HeldElsewhere") {
-              return yield* ownedElsewhereError(id, claim.lease);
-            }
-            claimed = claim.fence;
-            const fence = claim.fence;
-            yield* Ref.update(opening, HashMap.set(id, fence));
-            const storage = yield* openStorage(id, "owner");
-            const disposeOnError = <A, E>(effect: Effect.Effect<A, E>) =>
-              effect.pipe(
+              // Read again under the gate rather than trusted from `row`: a release that committed
+              // after the caller read the row must not be undone by cutting the worktree back
+              // (LOB-268). A released session still opens — its log takes approvals, pages and a
+              // curator's charge — but in no directory, because there is none to work in.
+              const current = yield* requireSession(id);
+              const released = yield* releaseOf(current);
+              if (released !== undefined && acquisition.starts === true) {
+                yield* countRefusal("released");
+                return yield* releasedError(id, released);
+              }
+              // Claimed before anything is opened (LOB-18): a session another process owns is not
+              // opened a second time here, where both would write one log until Postgres poisoned one.
+              // A live claim of this process's own home — this host and session root, where the
+              // session's worktree is — is taken over rather than waited out: it is the process this
+              // one replaced (a SIGKILL, a crash), whose run, mission or parked approval would
+              // otherwise wait a TTL for nothing (LOB-25, LOB-231). Two live processes on one home is
+              // already the misconfiguration D12 names; this makes the newer one win.
+              const claim = yield* paper(
+                "claim the session",
+                presence.acquire("session", id, { takeoverHome: true }),
+              );
+              if (claim._tag === "HeldElsewhere") {
+                return yield* ownedElsewhereError(id, claim.lease);
+              }
+              claimed = claim.fence;
+              const fence = claim.fence;
+              yield* Ref.update(opening, HashMap.set(id, fence));
+              const storage = yield* openStorage(id, "owner");
+              const disposeOnError = <A, E>(effect: Effect.Effect<A, E>) =>
+                effect.pipe(
+                  Effect.tapError(() =>
+                    Effect.promise(() => storage.dispose()),
+                  ),
+                );
+              // A review run (LOB-36) is the read-only reviewing stage, offered the review tool. Its
+              // target is in the log once the create wrote it, and in the acquisition before then.
+              const recordedReview = yield* disposeOnError(
+                readRecordedReview(storage),
+              );
+              const reviews =
+                acquisition.reviewing === true || recordedReview !== undefined;
+              // The repository's policy (S-factory-config-as-code): the one this log pinned, or the
+              // base's, read in the checkout the worktree is cut from — never the worktree, so a run
+              // cannot relax its own rules. Read before the worktree is cut: a config that would widen
+              // the deployment refuses the open, and leaves no worktree or branch behind it.
+              const repoPolicy = yield* disposeOnError(
+                readPolicyRecord(storage).pipe(
+                  Effect.flatMap((recorded) =>
+                    repoPolicyFor(row, recorded, {
+                      fetchedStart,
+                      reviewBase:
+                        recordedReview?.target.base ?? acquisition.review?.base,
+                      fetchedReviewBase,
+                      released: released !== undefined,
+                    }),
+                  ),
+                ),
+              );
+              const workspace = yield* disposeOnError(
+                workspaceFor(row, {
+                  cut: released === undefined,
+                  released,
+                  fetchedStart,
+                }),
+              );
+              if (released === undefined) {
+                yield* disposeOnError(
+                  Effect.mapError(
+                    fs.makeDirectory(workspace.path, { recursive: true }),
+                    (cause) =>
+                      new SessionErrorClass({
+                        code: "harness",
+                        message: `create ${workspace.path}: ${String(cause)}`,
+                      }),
+                  ),
+                );
+              }
+              // The run's prompt comes from its column (B6), read on every owner acquisition, at the
+              // versions the log pinned when the run first opened (D7, B2): a skill put since then
+              // reaches the next run, and a reopened one is told what it was told before. The open
+              // pins whatever it resolves that the log had not pinned yet (`@repo/harness`'s
+              // `factory.skills`).
+              const pins = yield* readSkillPins(storage).pipe(
                 Effect.tapError(() => Effect.promise(() => storage.dispose())),
               );
-            // A review run (LOB-36) is the read-only reviewing stage, offered the review tool. Its
-            // target is in the log once the create wrote it, and in the acquisition before then.
-            const recordedReview = yield* disposeOnError(
-              readRecordedReview(storage),
-            );
-            const reviews =
-              acquisition.reviewing === true || recordedReview !== undefined;
-            // The repository's policy (S-factory-config-as-code): the one this log pinned, or the
-            // base's, read in the checkout the worktree is cut from — never the worktree, so a run
-            // cannot relax its own rules. Read before the worktree is cut: a config that would widen
-            // the deployment refuses the open, and leaves no worktree or branch behind it.
-            const repoPolicy = yield* disposeOnError(
-              readPolicyRecord(storage).pipe(
-                Effect.flatMap((recorded) =>
-                  repoPolicyFor(row, recorded, {
-                    fetchedStart,
-                    reviewBase:
-                      recordedReview?.target.base ?? acquisition.review?.base,
-                    fetchedReviewBase,
-                    released: released !== undefined,
-                  }),
-                ),
-              ),
-            );
-            const workspace = yield* disposeOnError(
-              workspaceFor(row, {
-                cut: released === undefined,
-                released,
-                fetchedStart,
-              }),
-            );
-            if (released === undefined) {
-              yield* disposeOnError(
-                Effect.mapError(
-                  fs.makeDirectory(workspace.path, { recursive: true }),
-                  (cause) =>
-                    new SessionErrorClass({
-                      code: "harness",
-                      message: `create ${workspace.path}: ${String(cause)}`,
-                    }),
-                ),
+              const column = yield* runProfileFor(id, pins).pipe(
+                Effect.tapError(() => Effect.promise(() => storage.dispose())),
               );
-            }
-            // The run's prompt comes from its column (B6), read on every owner acquisition, at the
-            // versions the log pinned when the run first opened (D7, B2): a skill put since then
-            // reaches the next run, and a reopened one is told what it was told before. The open
-            // pins whatever it resolves that the log had not pinned yet (`@repo/harness`'s
-            // `factory.skills`).
-            const pins = yield* readSkillPins(storage).pipe(
-              Effect.tapError(() => Effect.promise(() => storage.dispose())),
-            );
-            const column = yield* runProfileFor(id, pins).pipe(
-              Effect.tapError(() => Effect.promise(() => storage.dispose())),
-            );
-            const run: RunProfile = reviews
-              ? { ...column, reviewing: true }
-              : column;
-            // The knowledge the prompt carries is read the same way, and for the same reason: a page
-            // curated since this session last ran reaches its next run, and a page deleted from
-            // `session_pages` stops being told. A session with none passes none, so its prompt has no
-            // `pages` section and its log records no page prompt (LOB-205).
-            const pages = yield* pagesFor(id);
-            // The run's `verify` tool measures the branch against what the PR step and the board
-            // measure it against (C17): the base the worktree was cut from, which is the fetched
-            // `refs/remotes/factory/<base>` when the operator's local base is behind the forge.
-            const verifyBase = yield* verifyBaseFor(workspace);
-            // What the repository tells the run (S-repo-instructions-and-skills), read at that same
-            // base on every acquisition, like the pages: an `AGENTS.md` merged since this session last
-            // ran reaches its next run, and an edit the run made on its own branch does not.
-            const repoContext = yield* repoContextFor(workspace, verifyBase);
-            // What the session's commands are given (S-agent-secrets): the names the repo's config
-            // declares at that same base as the session first resolved it — never the branch's, and
-            // never a ref moved since — and the store's values for them.
-            const granted = yield* secretsFor(id, workspace, verifyBase);
-            // The card's thread and the means to add to it (B7, LOB-73), for a session that is a run
-            // of a card. A fork or a replay has no run row of its own, so it gets neither.
-            const card = yield* runTaskFor(id);
-            const body =
-              card === undefined ? undefined : yield* cardBodyFor(card);
-            const opened = yield* open({
-              storage,
-              cwd: workspace.path,
-              resume: released === undefined && acquisition.resume !== false,
-              // The deployment's policy, narrowed by what the run's column declares (C22): its
-              // gates added, its push scope applied. The same `run` the prompt came from, so the
-              // column a run is told about is the column whose autonomy it runs under.
-              // Under the column, the repository's policy (S-factory-config-as-code): the deployment's
-              // rules tightened by what the base's `.factory/config` declares, then by the column.
-              // The one branch it may push is the one its worktree is bound to (F15): a card's later
-              // run continues its first change run's `factory/<that id>` (C19).
-              policy: policy.forWorktree(
-                workspace.path,
+              const run: RunProfile = reviews
+                ? { ...column, reviewing: true }
+                : column;
+              // The knowledge the prompt carries is read the same way, and for the same reason: a page
+              // curated since this session last ran reaches its next run, and a page deleted from
+              // `session_pages` stops being told. A session with none passes none, so its prompt has no
+              // `pages` section and its log records no page prompt (LOB-205).
+              const pages = yield* pagesFor(id);
+              // The run's `verify` tool measures the branch against what the PR step and the board
+              // measure it against (C17): the base the worktree was cut from, which is the fetched
+              // `refs/remotes/factory/<base>` when the operator's local base is behind the forge.
+              const verifyBase = yield* verifyBaseFor(workspace);
+              // What the repository tells the run (S-repo-instructions-and-skills), read at that same
+              // base on every acquisition, like the pages: an `AGENTS.md` merged since this session last
+              // ran reaches its next run, and an edit the run made on its own branch does not.
+              const repoContext = yield* repoContextFor(workspace, verifyBase);
+              // What the session's commands are given (S-agent-secrets): the names the repo's config
+              // declares at that same base as the session first resolved it — never the branch's, and
+              // never a ref moved since — and the store's values for them.
+              const granted = yield* secretsFor(id, workspace, verifyBase);
+              // The MCP servers the repository's pinned policy allows (S-agent-mcp-tools), with the
+              // credentials the control plane holds for them.
+              const mcp = yield* mcpFor(
                 id,
-                run.autonomy,
+                workspace.repo,
+                workspace.released !== undefined,
                 repoPolicy.repo,
-                workspace.branch,
-              ),
-              policyRecord: repoPolicy,
-              run,
-              pages,
-              ...(repoContext === undefined ? {} : { repo: repoContext }),
-              verify: {
-                command: workspace.commands.verify,
-                baseRef: verifyBase,
-                secrets: granted.verify.values,
-                missingSecrets: granted.verify.missing,
-              },
-              secrets: granted.all,
-              ...(card === undefined
-                ? {}
-                : {
-                    ask: askFor(id, card),
-                    thread: threadFor(card),
-                    ...(body === undefined ? {} : { body }),
-                    spec: specFor(id, card, run.column),
-                    plan: planFor(id, card, run.column),
-                  }),
-              ...(reviews ? { review: reviewFor() } : {}),
+              );
+              // The card's thread and the means to add to it (B7, LOB-73), for a session that is a run
+              // of a card. A fork or a replay has no run row of its own, so it gets neither.
+              const card = yield* runTaskFor(id);
+              const body =
+                card === undefined ? undefined : yield* cardBodyFor(card);
+              // The servers' sessions were made before the gate (`mcpListingFor`); the open offers
+              // from them what `mcp` grants now, and owns them from here.
+              listingHanded = true;
+              const opened = yield* open({
+                storage,
+                cwd: workspace.path,
+                resume: released === undefined && acquisition.resume !== false,
+                // The deployment's policy, narrowed by what the run's column declares (C22): its
+                // gates added, its push scope applied. The same `run` the prompt came from, so the
+                // column a run is told about is the column whose autonomy it runs under.
+                // Under the column, the repository's policy (S-factory-config-as-code): the deployment's
+                // rules tightened by what the base's `.factory/config` declares, then by the column.
+                // The one branch it may push is the one its worktree is bound to (F15): a card's later
+                // run continues its first change run's `factory/<that id>` (C19).
+                policy: policy.forWorktree(
+                  workspace.path,
+                  id,
+                  run.autonomy,
+                  repoPolicy.repo,
+                  workspace.branch,
+                ),
+                policyRecord: repoPolicy,
+                run,
+                pages,
+                ...(repoContext === undefined ? {} : { repo: repoContext }),
+                verify: {
+                  command: workspace.commands.verify,
+                  baseRef: verifyBase,
+                  secrets: granted.verify.values,
+                  missingSecrets: granted.verify.missing,
+                },
+                secrets: [...granted.all, ...mcp.secrets],
+                mcp: mcp.servers,
+                ...(mcpListing === undefined ? {} : { mcpListing }),
+                ...(card === undefined
+                  ? {}
+                  : {
+                      ask: askFor(id, card),
+                      thread: threadFor(card),
+                      ...(body === undefined ? {} : { body }),
+                      spec: specFor(id, card, run.column),
+                      plan: planFor(id, card, run.column),
+                    }),
+                ...(reviews ? { review: reviewFor() } : {}),
+              }).pipe(
+                Effect.tapError(() => Effect.promise(() => storage.dispose())),
+              );
+              // The model the root is pinned to, onto the index row (LOB-269): on the open that created
+              // the root this is the first write, and on a later one it repairs a row older than the
+              // column. The log's `pi.agent` stays the truth `rebuildIndexes` refolds it from, so a
+              // failed write is a stale display field rather than a failed open: it is warned about,
+              // and the next open (or a rebuild) writes it again.
+              const model = modelKey(opened.model);
+              if (current.model !== model) {
+                yield* paper(
+                  "write session model",
+                  sql`UPDATE sessions SET model = ${model} WHERE id = ${id}`,
+                ).pipe(
+                  Effect.catch((error) =>
+                    Effect.logWarning(
+                      `session ${id}: the index row's model was not written: ${error.message}`,
+                    ),
+                  ),
+                );
+              }
+              // A run a dead process left behind carries on in this owner (LOB-25): said in the
+              // process's log, because nobody asked for it and an operator should see why it runs.
+              if (opened.resumed.length > 0) {
+                yield* Effect.logInfo(
+                  `session ${id}: resumed ${opened.resumed.length} unsettled submission(s) on reopen: ${opened.resumed.join(", ")}`,
+                );
+              }
+              yield* FiberMap.run(
+                projectors,
+                id,
+                liveSessionEvents(
+                  opened,
+                  refOf(id, row, workspace, model),
+                ).pipe(
+                  Stream.runForEach((event) => recordActivity(id, event)),
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning(
+                      `session ${id} activity projection stopped: ${String(cause)}`,
+                    ),
+                  ),
+                ),
+              );
+              const owner: LiveOwner = {
+                fence,
+                harness: opened.harness,
+                root: opened.root,
+                releaseEnvironment: opened.releaseEnvironment,
+                env: opened.env,
+                storage,
+                workspace,
+                model,
+                resumed: opened.resumed,
+                secrets: granted,
+                // Read again rather than `now`: an open can take longer than the idle timeout (a
+                // worktree cut, a long log's fold), and an owner stamped with its start would be idle
+                // the moment it is published.
+                lastUsedAt: yield* Clock.currentTimeMillis,
+              };
+              // The reservation becomes this owner in the same step, so the slot is counted once.
+              yield* consumeSlot(acquisition.slot);
+              yield* Ref.update(live, HashMap.set(id, owner));
+              // Every owner added here is removed by exactly one `releaseOwner`, which takes it back off.
+              yield* shiftSessionsActive(1);
+              // Published first, so a replay's comparison finds the owner whose run it waits for. An
+              // owner opened on a replay is either its first open or the one that resumes its run, and
+              // either way the comparison is owed from here (LOB-199); on any other log it is one
+              // document read that finds nothing to do.
+              yield* armComparison(id);
+              return owner;
             }).pipe(
-              Effect.tapError(() => Effect.promise(() => storage.dispose())),
-            );
-            // The model the root is pinned to, onto the index row (LOB-269): on the open that created
-            // the root this is the first write, and on a later one it repairs a row older than the
-            // column. The log's `pi.agent` stays the truth `rebuildIndexes` refolds it from, so a
-            // failed write is a stale display field rather than a failed open: it is warned about,
-            // and the next open (or a rebuild) writes it again.
-            const model = modelKey(opened.model);
-            if (current.model !== model) {
-              yield* paper(
-                "write session model",
-                sql`UPDATE sessions SET model = ${model} WHERE id = ${id}`,
-              ).pipe(
-                Effect.catch((error) =>
-                  Effect.logWarning(
-                    `session ${id}: the index row's model was not written: ${error.message}`,
-                  ),
-                ),
-              );
-            }
-            // A run a dead process left behind carries on in this owner (LOB-25): said in the
-            // process's log, because nobody asked for it and an operator should see why it runs.
-            if (opened.resumed.length > 0) {
-              yield* Effect.logInfo(
-                `session ${id}: resumed ${opened.resumed.length} unsettled submission(s) on reopen: ${opened.resumed.join(", ")}`,
-              );
-            }
-            yield* FiberMap.run(
-              projectors,
-              id,
-              liveSessionEvents(opened, refOf(id, row, workspace, model)).pipe(
-                Stream.runForEach((event) => recordActivity(id, event)),
-                Effect.catchCause((cause) =>
-                  Effect.logWarning(
-                    `session ${id} activity projection stopped: ${String(cause)}`,
-                  ),
-                ),
+              // Whatever fails after the claim gives it back — still under the gate, so no other
+              // acquisition here has taken it meanwhile — and a failed open leaves the session to the
+              // next process that asks rather than to a lease nobody renews.
+              Effect.onError(() =>
+                claimed === undefined
+                  ? Effect.void
+                  : presence
+                      .release("session", id, claimed)
+                      .pipe(Effect.ignore),
               ),
-            );
-            const owner: LiveOwner = {
-              fence,
-              harness: opened.harness,
-              root: opened.root,
-              releaseEnvironment: opened.releaseEnvironment,
-              env: opened.env,
-              storage,
-              workspace,
-              model,
-              resumed: opened.resumed,
-              secrets: granted,
-              // Read again rather than `now`: an open can take longer than the idle timeout (a
-              // worktree cut, a long log's fold), and an owner stamped with its start would be idle
-              // the moment it is published.
-              lastUsedAt: yield* Clock.currentTimeMillis,
-            };
-            // The reservation becomes this owner in the same step, so the slot is counted once.
-            yield* consumeSlot(acquisition.slot);
-            yield* Ref.update(live, HashMap.set(id, owner));
-            // Every owner added here is removed by exactly one `releaseOwner`, which takes it back off.
-            yield* shiftSessionsActive(1);
-            // Published first, so a replay's comparison finds the owner whose run it waits for. An
-            // owner opened on a replay is either its first open or the one that resumes its run, and
-            // either way the comparison is owed from here (LOB-199); on any other log it is one
-            // document read that finds nothing to do.
-            yield* armComparison(id);
-            return owner;
-          }).pipe(
-            // Whatever fails after the claim gives it back — still under the gate, so no other
-            // acquisition here has taken it meanwhile — and a failed open leaves the session to the
-            // next process that asks rather than to a lease nobody renews.
-            Effect.onError(() =>
-              claimed === undefined
-                ? Effect.void
-                : presence.release("session", id, claimed).pipe(Effect.ignore),
+              // Opened or not, the claim is no longer an opening one: `live` renews it from here.
+              Effect.ensuring(Ref.update(opening, HashMap.remove(id))),
             ),
-            // Opened or not, the claim is no longer an opening one: `live` renews it from here.
-            Effect.ensuring(Ref.update(opening, HashMap.remove(id))),
-          ),
-        );
+          )
+          .pipe(
+            // Outside the gate: sessions no open took — an owner was already open, or the
+            // acquisition failed before or during its open — are ended here (closing is idempotent).
+            Effect.onExit((exit) =>
+              mcpListing === undefined ||
+              (Exit.isSuccess(exit) && listingHanded)
+                ? Effect.void
+                : mcpListing.close,
+            ),
+          );
       };
 
       /**
@@ -3684,6 +4099,16 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             alreadyOpen || reviewBase === undefined
               ? undefined
               : yield* reviewBaseStartFor(row, reviewBase);
+          // The MCP servers' sessions, made here for the same reason (`mcpListingFor`).
+          const mcpListing = alreadyOpen
+            ? undefined
+            : yield* mcpListingFor(
+                id,
+                row,
+                acquisition,
+                fetchedStart,
+                fetchedReviewBase,
+              );
           return yield* acquireUnderGate(
             id,
             row,
@@ -3691,6 +4116,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             acquisition,
             fetchedStart,
             fetchedReviewBase,
+            mcpListing,
           );
         });
 
@@ -3712,6 +4138,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             repo,
             verify,
             secrets,
+            mcp,
+            mcpListing,
             ask,
             thread,
             body,
@@ -3732,6 +4160,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ...(options.roleModels === undefined
                 ? {}
                 : { roles: options.roleModels }),
+              // And moves onto its role's next model when its own is down (S-model-provider-breadth).
+              ...(options.roleFallbacks === undefined
+                ? {}
+                : { fallbacks: options.roleFallbacks }),
               // What the run's role may do (D10): the factory's table, with the deployment's rows.
               ...(options.rolePolicies === undefined
                 ? {}
@@ -3745,6 +4177,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ...(repo === undefined ? {} : { repo }),
               verify,
               secrets,
+              mcp,
+              ...(mcpListing === undefined ? {} : { mcpListing }),
               // A gated call (D15, LOB-52) records its ask through this session's approvals
               // service, so the request lands in the same log and index the pending list reads.
               approvalAsker: askerFor(id),
@@ -4062,6 +4496,18 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // the lookup a replay does — before anything is written: a model this process cannot serve
           // is refused here, not registered as a repo, an index row and a log that never run.
           const model = yield* sessionModelFor(input.model);
+          if (
+            input.openPrOnSettle === true &&
+            (input.repo === undefined || input.taskId !== undefined)
+          ) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message:
+                input.taskId !== undefined
+                  ? "a card's run opens its PR by its column, so it takes no openPrOnSettle"
+                  : "openPrOnSettle needs a repo: a scratch session has no pull request to open",
+            });
+          }
           // The column the run starts in, before anything is written: it is what the run's prompt
           // and its autonomy are resolved from (B6, C22), so it has to be one the card's pinned
           // definition declares.
@@ -4069,6 +4515,17 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             input.taskId === undefined
               ? undefined
               : yield* startColumnFor(input.taskId, input.taskColumn);
+          // The aggregate spend caps (S-aggregate-spend-caps), on the repo the run works in — the
+          // card's, when it names none — and the actor the run is attributed to, before a slot is
+          // taken or anything is written: a create refused `budget_exceeded` leaves no row and takes
+          // no request id, so its retry is a fresh attempt.
+          if (hasSpendCaps(spendCaps)) {
+            const card = yield* cardBindingFor(input.taskId);
+            yield* refuseOverSpendCap({
+              repo: input.repo ?? card?.repo,
+              actor: input.actor,
+            });
+          }
           // A slot before anything is written (LOB-70): a create refused at capacity registers no
           // repo, writes no row and takes no request id, so its retry is a fresh attempt. Held until
           // the owner below is open, which takes it over; given back on any other exit.
@@ -4183,6 +4640,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               // The log keeps the actor too (LOB-162), so a rebuilt index still knows whose spend
               // this session is.
               yield* writeActor(owner.root, input.actor);
+            }
+            if (input.openPrOnSettle === true) {
+              // The opt-in is the log's (F17), so a restart and a rebuilt index keep it: the settle
+              // rule reads it from here (`settledRunOf`'s caller).
+              yield* writeSettlePr(owner.root);
             }
             if (input.taskId !== undefined && column !== undefined) {
               yield* writeTaskBinding(owner.root, {
@@ -4444,6 +4906,15 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           );
         });
 
+      const sessionContext = (
+        sessionId: SessionId,
+      ): Effect.Effect<SessionContext, SessionError> =>
+        Effect.gen(function* () {
+          yield* requireSession(sessionId);
+          const repo = yield* withReader(sessionId, readRepoPrompt);
+          return repo === undefined ? {} : { repo };
+        });
+
       /** The checks a message passes before anything is opened for it. */
       const refuseOversized = (input: SendMessageInput) =>
         Effect.gen(function* () {
@@ -4539,6 +5010,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* refuseOversized(input);
           const row = yield* requireSession(input.sessionId);
           yield* refuseUnservedModel(input.sessionId, row);
+          yield* awaitHeldPrompt(input.sessionId);
+          yield* refuseSendOverSpendCap(input, row);
           // A released session is refused by the acquisition, from the release it reads under the
           // owners' gate (LOB-268): a check here, on `row`, would miss one that commits in between.
           const owner = yield* acquireOwner(input.sessionId, row, {
@@ -4580,6 +5053,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* refuseOversized(input);
           const row = yield* requireSession(input.sessionId);
           yield* refuseUnservedModel(input.sessionId, row);
+          yield* awaitHeldPrompt(input.sessionId);
+          yield* refuseSendOverSpendCap(input, row);
           const owner = yield* acquireOwner(input.sessionId, row, {
             starts: true,
           });
@@ -4758,14 +5233,24 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 owner.harness,
                 owner.root,
               );
-              if (recorded?.outcome === "succeeded") return undefined;
+              // A success is for the worktree it ran in: one cut again since (its directory went
+              // missing and the acquisition cut a new one) has no install, so it is set up again.
+              // A failure is not a worktree's: it ended the card's run, whatever was cut after.
+              if (
+                recorded?.outcome === "succeeded" &&
+                setupCovers(
+                  recorded,
+                  yield* readWorktreeCut(workspace.path, { fs, path }),
+                )
+              )
+                return undefined;
               if (
                 recorded === undefined &&
                 (yield* rootEverSubmitted(owner.storage))
               )
                 return undefined;
               if (
-                recorded !== undefined &&
+                recorded?.outcome === "failed" &&
                 (yield* runTaskFor(sessionId)) !== undefined
               ) {
                 yield* countRefusal("setup_failed");
@@ -4804,9 +5289,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 message: `session ${sessionId}: its worktree ${workspace.path} cannot run its setup: ${cause instanceof Error ? cause.message : String(cause)}`,
               }),
           });
+          const cut = yield* readWorktreeCut(workspace.path, { fs, path });
           const record = yield* runSetup({
             env,
             commands: workspace.commands,
+            ...(cut === undefined ? {} : { cut }),
             secrets: owner.secrets.setup.values,
             missingSecrets: owner.secrets.setup.missing,
             ...(options.setupTimeoutSeconds === undefined
@@ -5429,6 +5916,27 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const unchangedAt = new Map<SessionId, string>();
 
       /**
+       * `settledRunOf` with the log's half of the rule applied (F17): a person's session may have
+       * asked, at create, for its PR to open when a run settles, which is the log's, not the index's.
+       * It is read for the sessions the index leaves undeclared and that no card runs — one reader,
+       * for a repo session only — so the live settle and the boot sweep decide from the same answer.
+       */
+      const settledRunWithAsk = (sessionId: SessionId) =>
+        Effect.gen(function* () {
+          const indexed = yield* settledRunOf(sessionId);
+          const asked =
+            indexed !== undefined &&
+            indexed.taskId === undefined &&
+            indexed.run.repo !== null &&
+            settleDeclarationOf(indexed.run) === "undeclared"
+              ? yield* withReader(sessionId, readSettlePr)
+              : false;
+          return indexed === undefined || !asked
+            ? indexed
+            : { ...indexed, run: { ...indexed.run, openPrOnSettle: true } };
+        });
+
+      /**
        * The PR step a settled run takes with no operator (C18, `./prOnSettle`): run when this process
        * sees a session's run go idle, for a session that declares it, through the same `openPr` an
        * operator's call takes — the gate, the cap, the push, the record and the write-back are the
@@ -5448,7 +5956,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         forge: Context.Context<CredentialProvider | HttpClient.HttpClient>,
       ): Effect.Effect<void> => {
         const decide = Effect.gen(function* () {
-          const settled = yield* settledRunOf(sessionId);
+          const settled = yield* settledRunWithAsk(sessionId);
           const declaration =
             settled === undefined
               ? "undeclared"
@@ -5655,76 +6163,76 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // with no log is invisible to the list — which joins the activity index — and would wait
           // for a rebuild to be swept, so it is not left behind. Held to the answer, as a create's
           // owner is (`holding`): the describe reads the owner the sweep could otherwise release.
-          return yield* holding(
+          yield* holdForScope(id);
+          yield* acquireOwnerWith(
             id,
-            Effect.gen(function* () {
-              yield* acquireOwnerWith(
-                id,
-                row,
-                ({
-                  storage,
-                  cwd,
-                  policy: sessionPolicy,
-                  run,
-                  pages,
-                  repo,
-                  verify,
-                  secrets,
-                }) =>
-                  Effect.acquireUseRelease(
-                    openStorage(input.sessionId, "reader"),
-                    (parentStorage) =>
-                      forkSession({
-                        parent: parentStorage,
-                        child: storage,
-                        ...(input.at === undefined ? {} : { at: input.at }),
-                        lineage: input.sessionId,
-                        run,
-                        pages,
-                        ...(repo === undefined ? {} : { repo }),
-                        verify,
-                        secrets,
-                        approvalAsker: askerFor(id),
-                        ...(binding.repo === undefined ||
-                        binding.baseRef === undefined
-                          ? {}
-                          : {
-                              binding: {
-                                repo: binding.repo,
-                                baseRef: binding.baseRef,
-                              },
-                            }),
-                        // The fork's actor (the caller's, or its parent's), committed with the lineage.
-                        ...(actor === null ? {} : { actor }),
-                        model: options.model,
-                        cwd,
-                        ...(options.sandbox === undefined
-                          ? {}
-                          : { sandbox: options.sandbox }),
-                        policy: sessionPolicy,
-                        // A fork keeps its parent's cap and carries its spend; an uncapped parent's
-                        // fork gets the default a create would (LOB-163).
-                        ...(options.defaultBudget === undefined
-                          ? {}
-                          : { defaultBudget: options.defaultBudget }),
-                      }),
-                    (parentStorage) =>
-                      Effect.promise(() => parentStorage.dispose()),
-                  ).pipe(
-                    Effect.tapError(() =>
-                      paper(
-                        "remove the refused fork's index row",
-                        sql`DELETE FROM sessions WHERE id = ${id}`,
-                      ).pipe(Effect.ignore),
-                    ),
-                  ),
-                { slot },
-              );
-              yield* touchActivity(id);
-              yield* countSessionCreate("fork");
-              return yield* describe(id, row);
-            }),
+            row,
+            ({
+              storage,
+              cwd,
+              policy: sessionPolicy,
+              run,
+              pages,
+              repo,
+              verify,
+              secrets,
+              mcp,
+              mcpListing,
+            }) =>
+              Effect.acquireUseRelease(
+                openStorage(input.sessionId, "reader"),
+                (parentStorage) =>
+                  forkSession({
+                    parent: parentStorage,
+                    child: storage,
+                    ...(input.at === undefined ? {} : { at: input.at }),
+                    lineage: input.sessionId,
+                    run,
+                    pages,
+                    ...(repo === undefined ? {} : { repo }),
+                    verify,
+                    secrets,
+                    mcp,
+                    ...(mcpListing === undefined ? {} : { mcpListing }),
+                    approvalAsker: askerFor(id),
+                    ...(binding.repo === undefined ||
+                    binding.baseRef === undefined
+                      ? {}
+                      : {
+                          binding: {
+                            repo: binding.repo,
+                            baseRef: binding.baseRef,
+                          },
+                        }),
+                    // The fork's actor (the caller's, or its parent's), committed with the lineage.
+                    ...(actor === null ? {} : { actor }),
+                    model: options.model,
+                    cwd,
+                    ...(options.sandbox === undefined
+                      ? {}
+                      : { sandbox: options.sandbox }),
+                    policy: sessionPolicy,
+                    // A fork keeps its parent's cap and carries its spend; an uncapped parent's
+                    // fork gets the default a create would (LOB-163).
+                    ...(options.defaultBudget === undefined
+                      ? {}
+                      : { defaultBudget: options.defaultBudget }),
+                  }),
+                (parentStorage) =>
+                  Effect.promise(() => parentStorage.dispose()),
+              ).pipe(
+                Effect.tapError(() =>
+                  paper(
+                    "remove the refused fork's index row",
+                    sql`DELETE FROM sessions WHERE id = ${id}`,
+                  ).pipe(Effect.ignore),
+                ),
+              ),
+            { slot },
           );
+          yield* touchActivity(id);
+          yield* countSessionCreate("fork");
+          return yield* describe(id, row);
         }).pipe(Effect.scoped);
 
       /**
@@ -5756,6 +6264,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ? {}
               : { baseRef: origin.binding.baseRef }),
           };
+          // A replay runs its source's task again and pays for it, so it is a run the aggregate spend
+          // caps refuse (S-aggregate-spend-caps), before any slot or row.
+          yield* refuseOverSpendCap({
+            repo: binding.repo,
+            actor: actor ?? undefined,
+          });
           // A slot before the row is written, after the refusals that need none (LOB-70).
           const slot = yield* admitted;
           const id = yield* mintSessionId;
@@ -5779,67 +6293,166 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           };
           // The replay's transcript is its own run, so nothing is copied in: the log opens empty,
           // the title and the binding are written with the lineage, and the source's prompt is what
-          // starts it. A failure after the row is written removes the row again — an index row with
-          // no log is invisible to the list and would wait for a rebuild to be swept (as a refused
-          // fork's does). Held to the answer, as a create's owner is (`holding`).
-          return yield* holding(
+          // starts it — once the worktree is set up (F23), so the open leaves the prompt for after.
+          // A failure after the row is written removes the row again — an index row with no log is
+          // invisible to the list and would wait for a rebuild to be swept (as a refused fork's does).
+          // Held to the answer, as a create's owner is (`holding`).
+          yield* holdForScope(id);
+          const held = yield* Deferred.make<void>();
+          heldPrompts.set(id, held);
+          const owner = yield* acquireOwnerWith(
             id,
-            Effect.gen(function* () {
-              yield* acquireOwnerWith(
-                id,
-                row,
-                ({
-                  storage,
-                  cwd,
-                  policy: sessionPolicy,
-                  run,
-                  repo,
-                  verify,
-                  secrets,
-                }) =>
-                  replaySession({
-                    source: origin,
-                    sourceId: input.sessionId,
-                    replayId: id,
-                    target: storage,
-                    model: target,
-                    title: source.title,
-                    // The replay's actor (the caller's, or its source's), committed with the lineage.
-                    ...(actor === null ? {} : { actor }),
-                    cwd,
-                    ...(options.sandbox === undefined
-                      ? {}
-                      : { sandbox: options.sandbox }),
-                    policy: sessionPolicy,
-                    run,
-                    ...(repo === undefined ? {} : { repo }),
-                    verify,
-                    secrets,
-                    approvalAsker: askerFor(id),
-                    // A replay keeps its source's cap, at no spend; an uncapped source's replay gets
-                    // the default a create would (LOB-163).
-                    ...(options.defaultBudget === undefined
-                      ? {}
-                      : { defaultBudget: options.defaultBudget }),
-                  }),
-                { slot },
+            row,
+            ({
+              storage,
+              cwd,
+              policy: sessionPolicy,
+              run,
+              repo,
+              verify,
+              secrets,
+              mcp,
+              mcpListing,
+            }) =>
+              openReplay({
+                source: origin,
+                sourceId: input.sessionId,
+                replayId: id,
+                target: storage,
+                model: target,
+                title: source.title,
+                // The replay's actor (the caller's, or its source's), committed with the lineage.
+                ...(actor === null ? {} : { actor }),
+                cwd,
+                ...(options.sandbox === undefined
+                  ? {}
+                  : { sandbox: options.sandbox }),
+                policy: sessionPolicy,
+                run,
+                ...(repo === undefined ? {} : { repo }),
+                verify,
+                secrets,
+                mcp,
+                ...(mcpListing === undefined ? {} : { mcpListing }),
+                approvalAsker: askerFor(id),
+                // A replay keeps its source's cap, at no spend; an uncapped source's replay gets
+                // the default a create would (LOB-163).
+                ...(options.defaultBudget === undefined
+                  ? {}
+                  : { defaultBudget: options.defaultBudget }),
+              }),
+            { slot },
+          ).pipe(
+            // `onError`, not `tapError`: the open is a slow step (a mirror fetch, a worktree cut), and
+            // a request that is interrupted in it — its client gone — must not leave the row, or
+            // the held prompt that every later comparison of this replay would wait on forever.
+            Effect.onError(() =>
+              paper(
+                "remove the refused replay's index row",
+                sql`DELETE FROM sessions WHERE id = ${id}`,
               ).pipe(
-                Effect.tapError(() =>
+                Effect.ignore,
+                Effect.andThen(releaseHeldPrompt(id, held)),
+              ),
+            ),
+          );
+          yield* promptAfterSetup(id, owner, origin, held).pipe(
+            // Opened but not started: the refusal ends the replay as the open's own would.
+            Effect.tapError(() =>
+              releaseIdleOwner(id, owner).pipe(
+                Effect.andThen(
                   paper(
                     "remove the refused replay's index row",
                     sql`DELETE FROM sessions WHERE id = ${id}`,
                   ).pipe(Effect.ignore),
                 ),
-              );
-              // The prompt is admitted, so the run is under way: opening the owner armed the comparison
-              // (`reconcileReplay`), which waits for it in the background, and the caller gets the replay
-              // now, as it always has.
-              yield* touchActivity(id);
-              yield* countSessionCreate("replay");
-              return yield* describe(id, row);
-            }),
+              ),
+            ),
           );
+          // The prompt is admitted, or waits only for the setup that is running, so the run is under
+          // way: opening the owner armed the comparison (`reconcileReplay`), which waits for it in the
+          // background, and the caller gets the replay now, as it always has.
+          yield* touchActivity(id);
+          yield* countSessionCreate("replay");
+          return yield* describe(id, row);
         }).pipe(Effect.scoped);
+
+      /**
+       * Wait for a replay's own first prompt to be submitted (F23), when this process holds one: a
+       * message sent to the replay while its setup runs would otherwise wake on the same setup as
+       * the held prompt and could be placed first, as the run, with the source's task queued
+       * behind it. Nothing held, nothing waited for.
+       */
+      const awaitHeldPrompt = (sessionId: SessionId): Effect.Effect<void> => {
+        const held = heldPrompts.get(sessionId);
+        return held === undefined ? Effect.void : Deferred.await(held);
+      };
+
+      const releaseHeldPrompt = (
+        replay: SessionId,
+        held: Deferred.Deferred<void>,
+      ): Effect.Effect<void> =>
+        Effect.sync(() => heldPrompts.delete(replay)).pipe(
+          Effect.andThen(Deferred.succeed(held, undefined)),
+          Effect.asVoid,
+        );
+
+      /**
+       * Submit a replay's prompt once its worktree is set up (F23). A replay's run used to start
+       * inside its open, before any `send` could set the worktree up, so a repo that declares an
+       * install step ran its replay on a worktree with no dependencies, while the session it
+       * replays had them. Nothing owed (no step declared, or none needed): the prompt is submitted
+       * here, as it always was. A setup running or started here: the prompt is submitted by a fiber
+       * in `deferredSends`, in the layer's scope, once that setup succeeds — as a trigger's message
+       * is (`sendDeferringSetup`) — so the replay is answered now rather than after an install.
+       * A setup that fails or is stopped submits nothing and says so in the log: the replay has no
+       * run, its comparison reads it `unanswered`, and the setup's failure is in its `factory.setup`
+       * record.
+       */
+      const promptAfterSetup = (
+        replay: SessionId,
+        owner: LiveOwner,
+        origin: ReplaySource,
+        held: Deferred.Deferred<void>,
+      ): Effect.Effect<void, SessionError> => {
+        const submit = submitReplayPrompt({
+          root: owner.root,
+          source: origin,
+        }).pipe(Effect.asVoid);
+        return Effect.gen(function* () {
+          // A failure to decide is no reason to run on an unprepared worktree silently: the replay
+          // is refused, and its row removed with the open's other failures.
+          const pending = yield* startSetup(replay, owner);
+          if (pending === undefined) {
+            yield* submit;
+            return yield* releaseHeldPrompt(replay, held);
+          }
+          yield* FiberMap.run(
+            deferredSends,
+            `${replay}#replay`,
+            Effect.gen(function* () {
+              const exit = yield* Fiber.await(pending);
+              const refusal = yield* setupRefusalOf(replay, exit);
+              if (refusal !== undefined) {
+                return yield* Effect.logWarning(
+                  `session ${replay}: the replay's prompt was not sent, its worktree's setup did not finish: ${refusal.message.split("\n")[0]}`,
+                );
+              }
+              yield* submit.pipe(
+                Effect.catch((error) =>
+                  Effect.logWarning(
+                    `session ${replay}: the replay's prompt was not sent after its worktree's setup: ${error.message}`,
+                  ),
+                ),
+              );
+            }).pipe(
+              Effect.ensuring(releaseHeldPrompt(replay, held)),
+              Effect.withSpan("SessionService.replayPrompt"),
+            ),
+            { onlyIfMissing: true },
+          );
+        }).pipe(Effect.onError(() => releaseHeldPrompt(replay, held)));
+      };
 
       /**
        * Bring one replay's comparison up to date with its logs (LOB-199): what is owed is read off
@@ -5864,6 +6477,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        */
       const reconcileReplay = (replay: SessionId): Effect.Effect<void> =>
         Effect.gen(function* () {
+          const held = heldPrompts.get(replay);
+          if (held !== undefined) yield* Deferred.await(held);
           const document = yield* withReader(replay, readReplayDocument);
           const link = document.link;
           if (link === undefined || !Schema.is(SessionIdSchema)(link.source))
@@ -6157,6 +6772,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           const row = yield* requireSession(input.sessionId);
           yield* refuseReleased(row);
           yield* refuseUnservedModel(input.sessionId, row);
+          // A mission is the dearest run there is (workers, plan, implement and verify phases), so
+          // the aggregate spend caps refuse its start (S-aggregate-spend-caps).
+          yield* refuseOverSpendCap({
+            repo: row.repo ?? undefined,
+            actor: row.actor ?? undefined,
+          });
           // The checks are policed against the worktree's path, which needs no worktree: the one the
           // mission runs in is the owner's, cut under the gate.
           const planned = yield* workspaceFor(row, { cut: false });
@@ -6702,17 +7323,56 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         sessionId: SessionId,
         entry: TranscriptEntry,
       ): Effect.Effect<void> =>
-        entry.kind === "budget"
-          ? Effect.logWarning(
-              `session ${sessionId} stopped by its budget: ${entry.text}`,
-            ).pipe(
-              Effect.andThen(countRefusal("budget")),
-              Effect.andThen(
-                recordRunFailure(sessionId, entry.id, "budget", entry.text),
-              ),
+        entry.kind === "modelSwitch"
+          ? Effect.logWarning(`session ${sessionId}: ${entry.text}`).pipe(
+              Effect.andThen(refreshSessionModel(sessionId)),
               Effect.andThen(touchActivity(sessionId)),
             )
-          : touchActivity(sessionId);
+          : entry.kind === "budget"
+            ? Effect.logWarning(
+                `session ${sessionId} stopped by its budget: ${entry.text}`,
+              ).pipe(
+                Effect.andThen(countRefusal("budget")),
+                Effect.andThen(
+                  recordRunFailure(sessionId, entry.id, "budget", entry.text),
+                ),
+                Effect.andThen(touchActivity(sessionId)),
+              )
+            : touchActivity(sessionId);
+
+      /**
+       * The session's model after a recorded model switch (S-model-provider-breadth): the log's
+       * `pi.agent` moved onto the fallback, so the live owner's model and the index row are both
+       * taken from it, as an open takes them. Best-effort: a stale value is a display field the next
+       * open (or a rebuild) repairs.
+       */
+      const refreshSessionModel = (sessionId: SessionId): Effect.Effect<void> =>
+        withReader(sessionId, readPinnedModelKey).pipe(
+          Effect.flatMap((model) =>
+            model === undefined
+              ? Effect.void
+              : Ref.update(live, (owners) =>
+                  Option.match(HashMap.get(owners, sessionId), {
+                    onNone: () => owners,
+                    onSome: (owner) =>
+                      HashMap.set(owners, sessionId, { ...owner, model }),
+                  }),
+                ).pipe(
+                  Effect.andThen(
+                    paper(
+                      "write session model",
+                      sql`UPDATE sessions SET model = ${model} WHERE id = ${sessionId}`,
+                    ),
+                  ),
+                  Effect.asVoid,
+                ),
+          ),
+          Effect.catch((error) =>
+            Effect.logWarning(
+              `session ${sessionId}: the index row's model was not written after a model switch: ${error.message}`,
+            ),
+          ),
+        );
 
       /**
        * One failed run, indexed for the notifier (`run_failures`, S-notifications): keyed by the entry
@@ -6910,15 +7570,52 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       ): Effect.Effect<void> =>
         Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis;
-          yield* paper(
+          // The ledger row (S-aggregate-spend-caps) is the increase over the `cost_total` this write
+          // replaces, written in the statement that moves it. Writers of one session (a run's usage
+          // events, a curation or decomposition charge) are serialized by a per-session advisory
+          // lock held to the commit, so each reads the total the one before it left rather than a
+          // shared snapshot, and the total never moves backwards: a stale lower value is a no-op,
+          // not a decrease the next write would count again.
+          const who = yield* paper(
             "write session spend",
-            sql`
-              INSERT INTO session_activity (session_id, cost_total, last_activity_at)
-              VALUES (${sessionId}, ${costTotal}, to_timestamp(${now / 1000}))
-              ON CONFLICT (session_id) DO UPDATE
-              SET cost_total = EXCLUDED.cost_total, last_activity_at = EXCLUDED.last_activity_at
-            `,
+            sql.withTransaction(
+              Effect.gen(function* () {
+                yield* sql`SELECT pg_advisory_xact_lock(hashtextextended(${`session-spend:${sessionId}`}, 0))`;
+                return yield* sql<{
+                  repo: string | null;
+                  actor: string | null;
+                }>`
+                  WITH prev AS (
+                    SELECT COALESCE(
+                      (SELECT cost_total FROM session_activity WHERE session_id = ${sessionId}),
+                      0
+                    ) AS cost
+                  ),
+                  ledger AS (
+                    INSERT INTO spend_ledger (session_id, repo, actor, usd, at)
+                    SELECT s.id, s.repo, s.actor, ${costTotal}::double precision - prev.cost,
+                           to_timestamp(${now / 1000})
+                    FROM sessions s, prev
+                    WHERE s.id = ${sessionId} AND ${costTotal}::double precision > prev.cost
+                  ),
+                  activity AS (
+                    INSERT INTO session_activity (session_id, cost_total, last_activity_at)
+                    VALUES (${sessionId}, ${costTotal}, to_timestamp(${now / 1000}))
+                    ON CONFLICT (session_id) DO UPDATE
+                    SET cost_total = GREATEST(session_activity.cost_total, EXCLUDED.cost_total),
+                        last_activity_at = EXCLUDED.last_activity_at
+                  )
+                  SELECT repo, actor FROM sessions WHERE id = ${sessionId}
+                `;
+              }),
+            ),
           );
+          const row = who[0];
+          if (row !== undefined)
+            yield* alertOnSpend(
+              { repo: row.repo ?? undefined, actor: row.actor ?? undefined },
+              now,
+            );
         }).pipe(Effect.ignore);
 
       /**
@@ -8423,9 +9120,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       > = Effect.gen(function* () {
         const forge = options.pullRequestOnSettle;
         if (forge === undefined) return [];
-        // The settle rule's provenance, narrowed in SQL to what could be declared and owes a PR:
-        // `settleDeclarationOf` below is still the rule, this only keeps a boot from reading every
-        // row. A run or mission still in flight is `resumeRuns`' and `resumeMissions`', and its
+        // The settle rule's provenance, narrowed in SQL to what could owe a PR (a repo session with
+        // none recorded, no fork, no run in flight): `settleDeclarationOf` below is the rule — a
+        // card's run, a trigger's session, and a person's session whose log records the opt-in
+        // (F17) — so this only keeps a boot from stepping every row. A run or mission still in flight is `resumeRuns`' and `resumeMissions`', and its
         // settle takes the step as any live one does.
         const rows = yield* paper(
           "read settled sessions that may owe a PR",
@@ -8438,11 +9136,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             WHERE s.repo IS NOT NULL AND s.pr_url IS NULL
               AND s.workspace_released_at IS NULL AND s.forked_from IS NULL
               AND s.run_session_root IS NULL AND NOT s.mission_in_flight
-              AND (
-                EXISTS (SELECT 1 FROM task_runs tr WHERE tr.session_id = s.id)
-                OR (s.actor LIKE ${`${TRIGGER_PREFIX}%`}
-                    AND s.request_id LIKE ${`${TRIGGER_PREFIX}%`})
-              )
             ORDER BY s.id
           `,
         );
@@ -8467,6 +9160,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 .exists(path.join(directory, ".git"))
                 .pipe(Effect.orElseSucceed(() => false));
               if (!checkout) return undefined;
+              // Decided from the index (and, for a person's session, its log) before anything is
+              // opened: an undeclared or parked session is left exactly as it was.
+              const settled = yield* settledRunWithAsk(sessionId);
+              if (
+                settled === undefined ||
+                settleDeclarationOf(settled.run) !== "declared"
+              )
+                return undefined;
               // A card's run whose branch a later run of the card took over (C19) is superseded: its
               // worktree is on a detached HEAD, nothing can steer it again, and stepping it would
               // push the later run's branch and adopt the card's PR into this stale log.
@@ -8477,14 +9178,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   branch ?? `factory/${id}`,
                   directory,
                 )) !== undefined
-              )
-                return undefined;
-              // Decided from the index before anything is opened: an undeclared or parked session
-              // is left exactly as it was.
-              const settled = yield* settledRunOf(sessionId);
-              if (
-                settled === undefined ||
-                settleDeclarationOf(settled.run) !== "declared"
               )
                 return undefined;
               const tip = yield* resolveCommit(directory, "HEAD");
@@ -8711,6 +9404,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         create,
         get: (sessionId) => holding(sessionId, get(sessionId)),
         history,
+        context: sessionContext,
         send,
         sendDeferringSetup: held(sendDeferringSetup),
         interrupt: (sessionId) => holding(sessionId, interrupt(sessionId)),
@@ -8729,6 +9423,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         listRepos,
         getRepo,
         syncRepo,
+        baseHead,
         events,
         requestApproval: held(requestApproval),
         decideApproval: held(decideApproval),

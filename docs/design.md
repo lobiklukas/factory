@@ -22,6 +22,19 @@ agent harness of our own; we adopt one.
 event triggers), AutoWiki, Agent Readiness scoring, Slack/Linear/Jira delegation, security
 review, incident response.
 
+_Refined (S-general-automations):_ the first slice of Automations is built ahead of v2, because the
+2026 survey found scheduled work in every comparable product, and it is small on what exists: a
+schedule (`automations`: a cron in a time zone, or one instant; a prompt or a factory skill; a
+budget) whose each tick files one card through `TaskService.file` and starts one run on it, as a
+card-mode trigger and `factory board start` do. A tick is claimed in `automation_ticks` by the
+automation and its instant before anything happens, so a restart or a second process never fires it
+twice; a scheduled tick whose base tip (`SessionService.baseHead`) is the commit the last started
+tick ran on is recorded `skipped` with the reason. The docs schedule (`DOCS_SCHEDULE_MS`) keeps its
+own daemon and branch rule for now; folding it into automations is a follow-up. Webhook and event automations remain the trigger routes they are.
+_Rejected:_ ticking through the trigger seam (a tick is no outside delivery: it has no source to
+answer and must read the base before it decides), and one session per tick with no card (an
+automation's work is reviewed and gated on the board like any other).
+
 The reasoning behind deferring Missions: Pi Durable already supplies the primitives
 orchestration needs — `defineTask` with phases and `waiting`/`on`/`failFast`, an ownership
 tree with bottom-up `abort`, `defineDoc` for externalized state, and fresh-context subagents
@@ -115,6 +128,15 @@ sandbox is the in-process special case. A capability flag is not needed for that
 has `bind` or the control plane creates. A session's bound sandbox keeps its exec spill files when
 it ends (`BindOptions.keepSpillFiles`), because the session's transcript names them (Pi Durable's
 bash tool reports `Full output: <path>`) and outlives the sandbox through an idle release.
+_As built (LOB-91):_ `OpenSessionOptions.sandbox` now takes `SandboxRuntimeShape` too: with a
+runtime that has no `bind` (the Kubernetes one), the conversation's sandbox is `create`d on first use
+and its commands start at that sandbox's workdir, with the credential filter passed per command.
+`SessionServiceOptions.sandbox` and apps/api still require `bind`, until the control plane cuts the
+worktree inside the sandbox it creates. Two gaps are latent until then, and are that work's to close:
+the session's release (an idle sweep included) destroys a created sandbox and its PVC rather than
+pausing it, so a reopened session starts on an empty volume, and each distinct conversation `cwd`
+(a subagent's) gets its own sandbox rather than the session's one. `pause` and `resume` fail with a
+typed `SandboxFileError` when the backend cannot do them, as `create` does, never a defect.
 
 ### D7 — Storage: append-only log is truth, projections are derived
 
@@ -166,6 +188,21 @@ leaves the table alone; refolding it from the `factory.budget.stopped` entries a
 assistant entries a run ended on is the fix if a dropped table must page again.
 `notification_deliveries` is not derived at all: it is the notifier's outbox and its memory of who
 was told what, control-plane state that is in no log, so dropping it re-sends every open event once.
+
+_As built (F21, F22)._ `notification_kinds` and `notification_sinks` (migration 0054) are the same
+kind of state: what the settings page stores — a kind switched for the whole deployment over
+`NOTIFY_TYPES`, and a person's own email addresses and Web Push subscriptions — control-plane
+configuration in no log, left alone by `rebuildIndexes`, read by the notifier at the start of every
+pass so a change needs no restart. An event is routed by its owner, the actor that created the card
+and then the actor that started the run (both already rows), to that person's sinks only, and to the
+environment's shared sinks when no owner has one. The ledger's memory is now bounded: a delivered
+`notification_deliveries` row and a `run_failures` row older than `NOTIFY_RETENTION_DAYS` (30, never
+under the failure lookback) are deleted on the poll, and so is an undelivered row that can never be
+sent (out of attempts, or to a sink nothing sends to any more), but never a row still pending and never
+one whose event is still open — that row is the only thing that stops a card parked for six weeks from
+being announced again. An event already delivered to a person's own sink is not posted to the shared
+channel when they later pause it, and a Web Push subscription the push service answers 404/410 for is
+switched off and shown as expired, so the owner falls back to their other sinks or the shared ones.
 
 ### D8 — Read model: live when running, historical when not
 
@@ -224,6 +261,10 @@ control plane's.
 _Refined (C18):_ nobody has to ask for it. A run that settles in a session that declares its PR — a
 card's run in a column that requires one, a session a trigger opened — runs the PR step with no
 operator call; a person's session keeps `factory pr` and the dashboard's control.
+_Refined (F17):_ a person's session can ask at create (`openPrOnSettle`: `factory run --open-pr`, the
+New session form's checkbox), recorded in its log as `factory.settlePr`, and then declares the step
+as a trigger's session does; one that did not ask keeps `factory pr`. The boot sweep (F16) covers
+it, reading the same log record, so a settle no process saw still gets its PR.
 _Refined (F14, F16):_ the PR follows its session's branch. A recorded PR whose branch moved past the
 commit it was published at is pushed onto — measured, capped and pushed as an open is, never forced,
 answered `updated` — by `factory pr` and by every later settle, so a session's later commits reach
@@ -358,6 +399,17 @@ agent could write into the checkout's shared `.git/config` pinned on its command
 credential patterns apply to every repo, with or without a store; a line opts out of them with
 `factory-secret-scan:allow` only in a file that carries the marker at that base, so a marker the
 branch writes, or one in a commit message, exempts nothing.
+
+_Refined (S-agent-mcp-tools):_ a remote MCP server's bearer token is a repository secret used a
+third way, and still never in the session's shell. The control plane is the MCP client: the token is
+a header on its own requests, sent only to the URL the deployment registered the server under
+(`MCP_SERVERS`, which names the secret), and only for a session whose repository's `.factory/config`
+`policy.mcp` allows that server; it is masked in every tool result, in case a server echoes it. It is
+read through the same `SecretService` store as the setup and verify secrets, not `CredentialProvider`:
+that seam mints the forge's credential for the factory's own identity, while this is a value the
+repository's owner set for a third-party service, scoped per repo, write-only and rotated with
+`factory secrets set`. A server whose secret the repo does not hold, or holds in a form this key
+cannot read, is not offered, with a warning, rather than called with no credential.
 _Limits:_ masking is literal, so a command that prints a value encoded leaks it, and the scan is
 literal too, so a value committed encoded passes it; a line added to a file the base already marks
 is exempt from the patterns (never from a stored value); a repo the factory
@@ -601,6 +653,21 @@ card pane's Start run (a Budget field) put `budget` on the `createSession` that 
 _As built (LOB-162)._ Spend is keyed by repo and actor. It is committed as `factory.actor` and
 indexed as `sessions.actor`. `listSpend` groups the list's own `cost_total` by the pair, and the
 dashboard's `/spend` shows it per repo, per actor and per pair.
+_As built (S-aggregate-spend-caps)._ Spend has ceilings above a session. `SPEND_CAPS` (JSON, deployment
+config: a repo's own `.factory/config` could be edited by whoever can push to it, so it does not set its
+own ceiling) gives a repo and an actor a `daily` and a `monthly` limit in dollars, counted over the
+current UTC day and month from `spend_ledger`, a row per increase of a session's `cost_total` written in
+the statement that moves it (`cost_total` alone cannot say what was spent today). `createSession`,
+`sendMessage` (one that would start a run), `startMission` and `replaySession` on a subject whose window has reached its limit are refused
+`budget_exceeded` before anything is written, with a typed `spendCap` naming the scope, window, limit,
+spend, `SPEND_CAPS` entry and when the window resets; a run under way is not stopped (it has its own
+budget), so a cap is held against the _next_ run. A webhook delivery refused this way is the same
+`503 at-capacity` as LOB-70's, with `Retry-After` the time to the window's end. Crossing 80% and 100% writes one `spend_alerts` row each per window and limit (a cap raised
+mid-window alerts afresh; the view lists an alert only while its cap and limit are the configured
+ones, `spend_cap_limits`),
+which the attention view lists (`spend` reason, the highest threshold per cap and window) and the
+notifier sends (`spend` kind). Counted per actor as the session's recorded actor, so a message sent by
+someone else to a session is charged to its creator.
 _As built (LOB-38)._ The spend history predicts what the next session will cost. `predictCost`
 classifies the prompt's first line into a task shape, then takes the completed sessions most like it.
 The comparables come from the first tier with three sessions: repo+model+shape, then repo+model,

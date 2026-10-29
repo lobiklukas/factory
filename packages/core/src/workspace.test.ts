@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { RepoSlug } from "@repo/domain/Session";
-import { resolveWorkspace } from "./workspace";
+import { readWorktreeCut, resolveWorkspace } from "./workspace";
 
 /**
  * Each case cuts worktrees with git a dozen times or more, and `bun run test` runs every package's
@@ -183,4 +183,63 @@ describe("resolveWorkspace hands a card's branch to its newest run (C19)", () =>
     expect(Exit.isFailure(refused)).toBe(true);
     expect(git(mine, "rev-parse", "--abbrev-ref", "HEAD")).toBe("feature/mine");
   }, 60_000);
+});
+
+describe("a worktree's cut id (F23)", () => {
+  const cutOf = (directory: string) =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        return yield* readWorktreeCut(directory, { fs, path });
+      }).pipe(Effect.provide(BunServices.layer)),
+    );
+
+  /**
+   * Mutation: stamp nothing (every worktree reads `undefined`, so no setup is ever redone), or stamp
+   * on every resolve (a reopened worktree reads a new id, so its install is redone each time).
+   */
+  it("names a worktree when it is cut, keeps the name when it is reopened, and gives a worktree cut again a new one", async () => {
+    const local = join(root, "checkout-cut");
+    git(root, "init", "-q", "-b", "main", local);
+    writeFileSync(join(local, "README.md"), "seed\n");
+    git(local, "add", "README.md");
+    git(local, "commit", "-q", "-m", "seed");
+
+    const first = await cut(local, "ses_cut_id", "main");
+    if (!Exit.isSuccess(first)) throw new Error(String(first));
+    const id = await cutOf(first.value.path);
+    expect(id).toBeTruthy();
+    // The id is no file of the worktree: the agent's `git status` is clean.
+    expect(git(first.value.path, "status", "--porcelain")).toBe("");
+
+    // Resolved again with the directory in place: the same worktree, the same cut.
+    const reopened = await cut(local, "ses_cut_id", "main");
+    if (!Exit.isSuccess(reopened)) throw new Error(String(reopened));
+    expect(await cutOf(reopened.value.path)).toBe(id);
+
+    // The directory deleted, as a pruned scratch disk would: the next resolve cuts a new worktree.
+    rmSync(first.value.path, { recursive: true, force: true });
+    expect(await cutOf(first.value.path)).toBeUndefined();
+    const recut = await cut(local, "ses_cut_id", "main");
+    if (!Exit.isSuccess(recut)) throw new Error(String(recut));
+    const next = await cutOf(recut.value.path);
+    expect(next).toBeTruthy();
+    expect(next).not.toBe(id);
+  });
+
+  it("is absent for a plain directory and a worktree cut before cuts were named", async () => {
+    const plain = join(root, "plain-dir");
+    mkdirSync(plain, { recursive: true });
+    expect(await cutOf(plain)).toBeUndefined();
+
+    const local = join(root, "checkout-legacy");
+    git(root, "init", "-q", "-b", "main", local);
+    writeFileSync(join(local, "README.md"), "seed\n");
+    git(local, "add", "README.md");
+    git(local, "commit", "-q", "-m", "seed");
+    const legacy = join(root, "legacy-worktree");
+    git(local, "worktree", "add", "-q", "-b", "legacy", legacy);
+    expect(await cutOf(legacy)).toBeUndefined();
+  });
 });

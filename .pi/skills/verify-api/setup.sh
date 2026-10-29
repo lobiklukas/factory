@@ -6,8 +6,11 @@
 # installing anything; a failing install refuses the first message `setup_failed`, parks the card
 # with that reason and the output's tail, keeps the tail in the log, and calls no model; and the
 # registry answers each checkout's readiness score; a webhook delivery is answered before its
-# session's install finishes, and its prompt sent after; and a session on a clone of this repo runs
-# the repo's own `bun install`. See `features/setup.md`.
+# session's install finishes, and its prompt sent after; a session on a clone of this repo runs
+# the repo's own `bun install`; a replay is set up before its first model call (F23); and, once the
+# API is restarted with `SETUP_TIMEOUT_SECONDS=1`, a session whose worktree directory was deleted is
+# cut and set up again, and an install that sleeps 5 s fails with the timeout and parks its card
+# (F23, F24). See `features/setup.md`.
 #
 # Its own API (./up.sh, on API_PORT, with its own run directory), the faux model scripted to probe
 # for `node_modules` and then call `verify`, and fixture repos with no remote under
@@ -73,4 +76,31 @@ else
   echo "FAIL  factory board show prints the setup_failed block and its note (see setup-board-show.txt)" >&2
   RC=1
 fi
+
+# --- the restarted API: SETUP_TIMEOUT_SECONDS=1, and no owner holding any session (F23, F24) -------
+# A fresh process holds no owner, which is what lets the drive delete a session's worktree directory
+# and have its next send cut it again; and the bound is the deployment's setting, so the API is
+# started the way `bun run dev` starts it (API_VIA_TURBO=1, whose strict env mode strips a variable
+# apps/api/turbo.json does not declare) with SETUP_TIMEOUT_SECONDS=1.
+cp "$RUN_DIR/api.log" "$EVIDENCE_DIR/setup-api-first-boot.log" 2>/dev/null || true
+# Not ./down.sh: it removes the session root, and the sessions (their worktrees among them) are
+# what the restarted phase drives.
+if [ -f "$RUN_DIR/api.pid" ]; then
+  pid="$(cat "$RUN_DIR/api.pid")"
+  kill "$pid" 2>/dev/null || true
+  for _ in $(seq 1 40); do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
+  kill -9 "$pid" 2>/dev/null || true
+  rm -f "$RUN_DIR/api.pid"
+fi
+VERIFY_RUN_DIR="$RUN_DIR" API_PORT="$API_PORT" SETUP_TIMEOUT_SECONDS=1 API_VIA_TURBO=1 ./up.sh || exit 1
+env \
+  PHASE=restarted \
+  API_URL="http://localhost:$API_PORT" \
+  DATABASE_URL="${DATABASE_URL:?setup needs DATABASE_URL from the run}" \
+  SETUP_REPOS="$RUN_DIR/repos" \
+  EVIDENCE_DIR="$EVIDENCE_DIR" \
+  bun "$ROOT/.pi/skills/verify-api/setup.ts" 2>&1 | tee "$RUN_DIR/driver-restarted.log"
+RESTARTED_RC=${PIPESTATUS[0]}
+cp "$RUN_DIR/driver-restarted.log" "$EVIDENCE_DIR/setup-restarted.log" 2>/dev/null || true
+[ "$RESTARTED_RC" -eq 0 ] || RC=1
 exit "$RC"

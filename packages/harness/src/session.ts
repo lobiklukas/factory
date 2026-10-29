@@ -7,6 +7,7 @@
  * Pi Durable is Promise-based, so every call into it is wrapped at this boundary; everything that
  * leaves this module is an Effect, like the rest of the repo.
  */
+import { RepoPromptRecord as RepoPromptRecordFields } from "@repo/domain/RepoContext";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord";
 import type {
@@ -41,7 +42,10 @@ import { createRegistry } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
-import type { BindableSandboxRuntimeShape } from "@repo/sandbox";
+import type {
+  BindableSandboxRuntimeShape,
+  SandboxRuntimeShape,
+} from "@repo/sandbox";
 import { Effect, Option, Queue, Schema, Stream } from "effect";
 import type {
   PrEvidence,
@@ -94,6 +98,7 @@ import {
 import {
   compactionPolicyFor,
   modelAccessFor,
+  modelKey,
   type ModelAccess,
 } from "./models";
 // The typed document tokens (`factory.pr` among them) live in one module so the kind strings and
@@ -146,6 +151,13 @@ import {
   type BudgetSource,
 } from "./budget";
 import {
+  fallbackExtension,
+  SESSION_MODEL_DOC_KIND,
+  SESSION_RETRY_POLICY,
+  SessionModelDoc,
+  type RoleFallbacks,
+} from "./fallback";
+import {
   verifyCallsIn,
   verifyExtension,
   type VerifyOptions,
@@ -174,6 +186,15 @@ import {
   type ReviewTarget,
 } from "./review";
 import {
+  connectMcp,
+  mcpPolicy,
+  offerMcp,
+  type McpConnection,
+  type McpListing,
+  type McpOfferedTool,
+  type McpServerAccess,
+} from "./mcp";
+import {
   autonomyPolicy,
   columnWriteScope,
   DEFAULT_AUTONOMY,
@@ -182,6 +203,7 @@ import {
   readOnlyStagePolicy,
   type ApprovalAsker,
   type AutonomyRules,
+  type RepoMcp,
   type RepoPolicy,
   type SessionPolicy,
 } from "./policy";
@@ -210,6 +232,7 @@ import {
   usageCostTotal,
   SESSION_DOC_KIND,
   ACTOR_DOC_KIND,
+  SETTLE_PR_DOC_KIND,
   TASK_DOC_KIND,
   SPEC_DOC_KIND,
   PLAN_DOC_KIND,
@@ -278,6 +301,21 @@ export const ActorDoc = defineDoc({
   history: "latest",
   fork: "current",
   initial: () => ({ actor: "" }),
+});
+
+/**
+ * That the session opens its PR when its run settles (F17), committed to the log so the opt-in
+ * outlives the process and a rebuild of the index. Written once at create, only when asked; a
+ * session that never opted in has no document. A fork or a replay starts from the seed: its PR is
+ * a choice of its own, and the settle rule leaves them out whatever the log says.
+ */
+export const SettlePrDoc = defineDoc({
+  kind: SETTLE_PR_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  initial: () => ({ openOnSettle: false as boolean }),
 });
 
 /** A task's binding, committed to the log so a rebuild can recover it (LOB-60). */
@@ -382,6 +420,13 @@ export type OpenSessionOptions = {
    * to. Absent: the role's model, else `model`.
    */
   readonly sessionModel?: ModelAccess;
+  /**
+   * The deployment's role → fallback chain table (S-model-provider-breadth, `./fallback`), resolved
+   * against `model`'s catalog: a run whose role has a row moves onto the next model of its chain when
+   * its own answers overloaded or unavailable, recorded in the log as a model switch. Absent: no run
+   * falls back.
+   */
+  readonly fallbacks?: RoleFallbacks;
   /** The session's working directory, which must exist. One per session, so sessions share no files. */
   readonly cwd: string;
   /**
@@ -389,8 +434,10 @@ export type OpenSessionOptions = {
    * selected by its configuration. Each conversation's environment is a sandbox it binds to the
    * conversation's working directory, `cwd` for the root. Absent: an in-process runtime of the
    * session's own, which runs them on the host as every session did before there was a choice.
+   * A runtime that cannot bind (Kubernetes, LOB-91) creates a sandbox per conversation instead,
+   * whose commands start at its own workdir, not at `cwd` (D6).
    */
-  readonly sandbox?: BindableSandboxRuntimeShape;
+  readonly sandbox?: SandboxRuntimeShape | BindableSandboxRuntimeShape;
   /**
    * What may run unattended here (D11, `./policy`). Absent: D11's defaults resolved for `cwd`, so a
    * session opened without a policy is still policed — an unpoliced session is not a default anyone
@@ -410,6 +457,21 @@ export type OpenSessionOptions = {
    * gated call is blocked with a sentence saying there is nobody to ask, never run ungated.
    */
   readonly approvalAsker?: ApprovalAsker;
+  /**
+   * The remote MCP servers the run may call (S-agent-mcp-tools, `./mcp`): the deployment's
+   * registrations the repository's `.factory/config` allows, each with the tools it allows and the
+   * headers the control plane resolved for it. The open connects to each and offers the tools it
+   * lists that the repository allows — a read-only stage the reads only — and a write asks a person
+   * through the policy's hook. Absent or empty: no MCP tool is offered.
+   */
+  readonly mcp?: readonly McpServerAccess[];
+  /**
+   * The servers' sessions and tool lists, made before the open (`listMcp`) so the open waits on
+   * nothing remote: what `mcp` is offered from. A granted server it holds no session for is not
+   * offered, with a warning. The open owns it from the call on — it ends with the session, or with
+   * a failed open. Absent: the open connects to `mcp` itself.
+   */
+  readonly mcpListing?: McpListing;
   /**
    * What the run's column gives it (B6, `./loader`): the skill bodies its prompt carries, resolved
    * by the control plane from the card's pinned board definition. Absent: no card, or a column that
@@ -609,15 +671,45 @@ export const openSession = (
   // session whose worktree is gone still opens. An open that fails after this releases it.
   openSessionEnvironment(options.sandbox, sessionShellEnv).pipe(
     Effect.flatMap((environment) =>
-      openSessionIn(options, environment).pipe(
+      // The run's MCP servers (S-agent-mcp-tools): offered before the registry is built, since their
+      // tools are registrations like any other — from the listing the caller made before the open
+      // when it made one (`mcpListing`), so the open itself waits on nothing remote, and connected
+      // and listed here otherwise. A read-only stage's run is offered their reads only. An open
+      // that fails after this ends the servers' sessions.
+      mcpOf(options).pipe(
+        Effect.tap((mcp) =>
+          Effect.forEach(mcp.problems, (problem) =>
+            Effect.logWarning(`session open: ${problem}`),
+          ),
+        ),
+        Effect.flatMap((mcp) =>
+          openSessionIn(options, environment, mcp).pipe(
+            Effect.onError(() => mcp.close),
+          ),
+        ),
         Effect.onError(() => environment.release),
       ),
     ),
+    // The listing is the open's from the call on: one that fails before it is offered ends it too.
+    Effect.onError(() => options.mcpListing?.close ?? Effect.void),
   );
+
+/** The MCP tools an open offers (`openSession`): from the caller's listing, or connected here. */
+const mcpOf = (options: OpenSessionOptions): Effect.Effect<McpConnection> => {
+  const readOnly =
+    resolveRole(options.run, options.model, options.roles, options.rolePolicies)
+      .stage !== undefined;
+  return options.mcpListing === undefined
+    ? connectMcp(options.mcp ?? [], { readOnly })
+    : Effect.succeed(
+        offerMcp(options.mcpListing, options.mcp ?? [], { readOnly }),
+      );
+};
 
 const openSessionIn = (
   options: OpenSessionOptions,
   environment: SessionEnvironment,
+  mcp: McpConnection,
 ): Effect.Effect<OpenSession, SessionError> =>
   Effect.gen(function* () {
     const registry = createRegistry();
@@ -628,6 +720,7 @@ const openSessionIn = (
       options.model,
       options.roles,
       options.rolePolicies,
+      options.fallbacks,
     );
     // The agent is pinned when the root is created, and only then (`harness.root` below writes it
     // into a root that does not exist yet), so a reopened run keeps talking to the model it started
@@ -646,6 +739,14 @@ const openSessionIn = (
       options.repo === undefined
         ? yield* readRepoPrompt(options.storage)
         : undefined;
+    // Whether the session was created on a model of its own (LOB-274): this open's when it creates
+    // the root, the record the creating open left otherwise (S-model-provider-breadth).
+    const createdOnOwnModel =
+      pinned === undefined
+        ? options.sessionModel !== undefined
+        : ((yield* readDocument(options.storage, SESSION_MODEL_DOC_KIND))?.[
+            "model"
+          ] ?? "") !== "";
     const chosen = options.sessionModel ?? role.model;
     const model =
       pinned === undefined
@@ -716,6 +817,8 @@ const openSessionIn = (
     if (options.review !== undefined && role.writesReview) {
       registry.install(reviewExtension(options.review));
     }
+    // The MCP tools the repository allows (S-agent-mcp-tools): what the servers listed at this open.
+    if (mcp.extension !== undefined) registry.install(mcp.extension);
     // The tasks the control plane starts on a session's behalf, installed like any other extension:
     // that is what makes the kind resolvable when a caller creates the task.
     const tasks = options.tasks ?? [];
@@ -752,11 +855,16 @@ const openSessionIn = (
     // or one whose tool list was configured since, offers `write` and `edit` again, and the hook is
     // what refuses them there (`policy.hook.test.ts`). Every other call meets `tool_unavailable`.
     const stage = role.stage;
+    // Outermost, the MCP gates (S-agent-mcp-tools): a write tool's call that everything above allows
+    // asks a person, through the same asker and the same once-per-call memo as a gated command.
     registry.install(
       policyExtension(
-        stage === undefined
-          ? columnPolicy
-          : readOnlyStagePolicy(columnPolicy, stage),
+        mcpPolicy(
+          stage === undefined
+            ? columnPolicy
+            : readOnlyStagePolicy(columnPolicy, stage),
+          mcp.gates,
+        ),
         options.approvalAsker,
       ),
     );
@@ -765,7 +873,19 @@ const openSessionIn = (
     // conversation, which exists only once the harness below is open — and no request can be sent
     // before then, so the hook reads it late rather than taking it here.
     let opened: BudgetSession | undefined;
+    let openedHarness: Harness | undefined;
     registry.install(budgetExtension(() => opened));
+    // The role's fallback chain (S-model-provider-breadth), headed by the role's model. A session
+    // created on a model of its own (LOB-274) never falls back, whichever model that is: the open
+    // that creates its root records the choice in the same commit (`SessionModelDoc`), and every
+    // later open reads it back. A reopened session that already switched is on a link of the chain,
+    // and moves on only past it.
+    const chain = createdOnOwnModel ? [] : [role.model, ...role.fallbacks];
+    if (chain.length > 1) {
+      registry.install(
+        fallbackExtension(chain, () => openedHarness, SESSION_RETRY_POLICY),
+      );
+    }
     // Every command the session runs, its tools' and the control plane's setup alike, has the values
     // it was given masked in its output before anything sees it (S-agent-secrets).
     const sessionEnv = (cwd: string): Promise<ExecutionEnv> =>
@@ -785,8 +905,14 @@ const openSessionIn = (
             // Long sessions compact (B4). The thresholds follow the model's context window
             // (`compactionPolicyFor`), so a small-window model compacts where it can instead of
             // never, and a large one keeps pi-durable's pinned defaults. `model` is the root's
-            // pinned model on a reopen, so the window is the one the requests actually go to.
-            compaction: compactionPolicyFor(model.contextWindow),
+            // pinned model on a reopen. A run with a fallback chain can move, inside this open, onto
+            // any link after the one it is on, and a live harness keeps the thresholds it opened
+            // with: the window is the smallest of those it can reach, so a large-window primary that
+            // falls back onto a small-window model has compacted for the small one already.
+            compaction: compactionPolicyFor(reachableWindow(model, chain)),
+            // Named rather than left to Pi Durable's default, because the fallback hook reads the
+            // same policy to know whether a failed request is sent again (`isRetried`).
+            retry: SESSION_RETRY_POLICY,
           },
         },
         BACKGROUND_CONTEXT,
@@ -820,9 +946,20 @@ const openSessionIn = (
             ...(withheld.length === 0 ? {} : { tools: { remove: withheld } }),
             cwd: options.cwd,
           },
+          // A model of its own is recorded with the root it pins, so no later open can mistake the
+          // session for one its role's fallback chain applies to.
+          ...(options.sessionModel === undefined
+            ? {}
+            : {
+                init: (tx, conversationId) =>
+                  tx.doc(SessionModelDoc, conversationId).then((document) => {
+                    document.model = modelKey(model);
+                  }),
+              }),
         }),
       );
       opened = { root, harness };
+      openedHarness = harness;
 
       // What the section came to, committed beside it: a page the budget dropped is a fact about this
       // open, and a fact about a prompt that is not in the log is not a fact anyone can check later.
@@ -849,7 +986,7 @@ const openSessionIn = (
         // only where the hooks narrow writes: the record says what the run may run and reach.
         options.policyRecord === undefined
           ? undefined
-          : policyRecordOf(options.policyRecord, policy.rules),
+          : policyRecordOf(options.policyRecord, policy.rules, mcp.offered),
       );
 
       // Last, once the harness is fully set up (LOB-25): a run a dead process left in the log carries
@@ -861,12 +998,30 @@ const openSessionIn = (
         harness,
         root,
         model,
-        releaseEnvironment: environment.release,
+        // The MCP clients are the session's like its sandboxes, and end with them.
+        releaseEnvironment: Effect.andThen(mcp.close, environment.release),
         env: sessionEnv,
         resumed,
       };
     }).pipe(Effect.onError(() => Effect.exit(closeHarness(harness))));
   });
+
+/**
+ * The smallest context window a run on `model` can be sent to inside one open: its own, and, when it
+ * is on a fallback chain, every link after it (S-model-provider-breadth). A window of `0` is one the
+ * catalog does not know and says nothing; none known is `0`, which `compactionPolicyFor` reads as
+ * Pi Durable's defaults.
+ */
+export const reachableWindow = (
+  model: ModelAccess,
+  chain: readonly ModelAccess[],
+): number => {
+  const at = chain.findIndex((link) => modelKey(link) === modelKey(model));
+  const windows = [model, ...(at < 0 ? [] : chain.slice(at + 1))]
+    .map((access) => access.contextWindow)
+    .filter((window) => window > 0);
+  return windows.length === 0 ? 0 : Math.min(...windows);
+};
 
 /**
  * The model the session's root conversation is pinned to, read from its committed `pi.agent`; absent
@@ -989,6 +1144,7 @@ export const writePagePrompt = (
                       tokens: 0,
                       cap: 0,
                       listed: [],
+                      nested: [],
                       dropped: [],
                       shadowed: [],
                     };
@@ -1009,6 +1165,7 @@ export const writePagePrompt = (
                           path,
                         }),
                       ),
+                      nested: [...repoPrompt.skills.nested],
                       dropped: [...repoPrompt.skills.dropped],
                       shadowed: [...repoPrompt.skills.shadowed],
                     };
@@ -1027,6 +1184,22 @@ export const writePagePrompt = (
                       policyRecord.repo.allowedHosts === null
                         ? null
                         : [...policyRecord.repo.allowedHosts],
+                    mcp:
+                      policyRecord.repo.mcp == null
+                        ? null
+                        : Object.fromEntries(
+                            Object.entries(policyRecord.repo.mcp).map(
+                              ([server, allowed]) => [
+                                server,
+                                {
+                                  tools: [...allowed.tools],
+                                  approvalRequired: [
+                                    ...allowed.approvalRequired,
+                                  ],
+                                },
+                              ],
+                            ),
+                          ),
                   };
                   doc.effective = {
                     approvalRequired: [
@@ -1037,6 +1210,9 @@ export const writePagePrompt = (
                     pushRefPrefixes: [
                       ...policyRecord.effective.pushRefPrefixes,
                     ],
+                    mcpTools: (policyRecord.effective.mcpTools ?? []).map(
+                      (tool) => ({ ...tool }),
+                    ),
                   };
                 }),
           ]).then(() => undefined),
@@ -1125,12 +1301,22 @@ export type PolicyRecord = {
     readonly denied: readonly string[];
     /** `null`: the repository does not narrow the deployment's allowlist. */
     readonly allowedHosts: readonly string[] | null;
+    /**
+     * The MCP servers and tools it allows (S-agent-mcp-tools); `null` when it names none. Absent in
+     * a record written before MCP tools existed, which allowed none.
+     */
+    readonly mcp?: RepoMcp | null | undefined;
   };
   readonly effective: {
     readonly approvalRequired: readonly string[];
     readonly denied: readonly string[];
     readonly allowedHosts: readonly string[];
     readonly pushRefPrefixes: readonly string[];
+    /**
+     * The MCP tools this open offered the run, and whether each asks (S-agent-mcp-tools). Absent in
+     * a record written before MCP tools existed.
+     */
+    readonly mcpTools?: readonly McpOfferedTool[] | undefined;
   };
 };
 
@@ -1138,22 +1324,31 @@ export type PolicyRecord = {
 export const policyRecordOf = (
   input: PolicyRecordInput,
   rules: AutonomyRules,
+  mcpTools: readonly McpOfferedTool[] = [],
 ): PolicyRecord => ({
   source: input.source,
   repo: {
     approvalRequired: input.repo.approvalRequired,
     denied: input.repo.denied,
     allowedHosts: input.repo.allowedHosts ?? null,
+    mcp: input.repo.mcp ?? null,
   },
   effective: {
     approvalRequired: rules.approvalRequired,
     denied: rules.denied,
     allowedHosts: rules.allowedHosts,
     pushRefPrefixes: rules.pushRefPrefixes,
+    mcpTools,
   },
 });
 
 const Strings = Schema.Array(Schema.String);
+
+/** A repository's MCP allowlist as the record holds it. */
+const RepoMcpSchema = Schema.Record(
+  Schema.String,
+  Schema.Struct({ tools: Strings, approvalRequired: Strings }),
+);
 
 /** The record's shape, as a reader of the log checks it (`readPolicyRecord`). */
 const PolicyRecordSchema = Schema.Struct({
@@ -1169,12 +1364,23 @@ const PolicyRecordSchema = Schema.Struct({
     approvalRequired: Strings,
     denied: Strings,
     allowedHosts: Schema.NullOr(Strings),
+    mcp: Schema.optional(Schema.NullOr(RepoMcpSchema)),
   }),
   effective: Schema.Struct({
     approvalRequired: Strings,
     denied: Strings,
     allowedHosts: Strings,
     pushRefPrefixes: Strings,
+    mcpTools: Schema.optional(
+      Schema.Array(
+        Schema.Struct({
+          name: Schema.String,
+          server: Schema.String,
+          tool: Schema.String,
+          gated: Schema.Boolean,
+        }),
+      ),
+    ),
   }),
 });
 
@@ -1207,32 +1413,25 @@ export const readRepoPrompt = (
   Effect.map(readDocument(storage, REPO_PROMPT_DOC_KIND), (value) => {
     if (value === undefined) return undefined;
     const decoded = Schema.decodeUnknownOption(RepoPromptRecordSchema)(value);
-    return Option.isNone(decoded) || decoded.value.skills.cap === 0
-      ? undefined
-      : decoded.value;
+    if (Option.isNone(decoded) || decoded.value.skills.cap === 0)
+      return undefined;
+    const { skills } = decoded.value;
+    // A record written before nested files were listed (F20) has no such field: none were listed.
+    return {
+      ...decoded.value,
+      skills: { ...skills, nested: skills.nested ?? [] },
+    };
   });
 
-/** The record's shape, as a reader of the log checks it (`readRepoPrompt`). */
+/**
+ * The record's shape, as a reader of the log checks it (`readRepoPrompt`): the domain's, with
+ * `nested` optional because a record written before nested files were listed (F20) has none.
+ */
 const RepoPromptRecordSchema = Schema.Struct({
-  ref: Schema.String,
-  commit: Schema.String,
-  instructions: Schema.NullOr(
-    Schema.Struct({
-      path: Schema.String,
-      bytes: Schema.Finite,
-      tokens: Schema.Finite,
-      cap: Schema.Finite,
-      truncated: Schema.Boolean,
-    }),
-  ),
+  ...RepoPromptRecordFields.fields,
   skills: Schema.Struct({
-    tokens: Schema.Finite,
-    cap: Schema.Finite,
-    listed: Schema.Array(
-      Schema.Struct({ name: Schema.String, path: Schema.String }),
-    ),
-    dropped: Schema.Array(Schema.String),
-    shadowed: Schema.Array(Schema.String),
+    ...RepoPromptRecordFields.fields.skills.fields,
+    nested: Schema.optional(Schema.Array(Schema.String)),
   }),
 });
 
@@ -1489,6 +1688,32 @@ export const writeActor = (
         }),
       BACKGROUND_CONTEXT,
     ),
+  );
+
+/** Commit that the session opens its PR when its run settles (F17). */
+export const writeSettlePr = (
+  conversation: Conversation,
+): Effect.Effect<void, SessionError> =>
+  attempt("write settle PR opt-in", () =>
+    conversation.commit(
+      (tx) =>
+        tx.doc(SettlePrDoc, conversation.id).then((doc) => {
+          doc.openOnSettle = true;
+        }),
+      BACKGROUND_CONTEXT,
+    ),
+  );
+
+/**
+ * Whether the session's log records the opt-in to a PR on settle (F17), read without owning the
+ * log. A log with no document, or one that is not the record's shape, did not opt in.
+ */
+export const readSettlePr = (
+  storage: Storage,
+): Effect.Effect<boolean, SessionError> =>
+  Effect.map(
+    readDocument(storage, SETTLE_PR_DOC_KIND),
+    (value) => value?.["openOnSettle"] === true,
   );
 
 export type TaskBinding = {
@@ -2459,6 +2684,22 @@ export const readPromptSubmission = (
   });
 
 /**
+ * Whether the root already took a submission under `requestId`: a retried `send` is answered from
+ * it by Pi Durable's own dedupe, so it starts nothing new (S-aggregate-spend-caps).
+ */
+export const rootHasRequest = (
+  storage: Storage,
+  requestId: string,
+): Effect.Effect<boolean, SessionError> =>
+  attempt("find submission by request", () =>
+    storage.submissionByRequest(
+      ROOT_CONVERSATION_ID,
+      requestId,
+      BACKGROUND_CONTEXT,
+    ),
+  ).pipe(Effect.map((record) => record !== undefined));
+
+/**
  * Withdraw a queued message (LOB-166): Pi Durable settles the submission `unanswered` with reason
  * `aborted` and removes its inbox item in one commit, so the message never reaches the transcript
  * and every watcher sees the queue shrink.
@@ -2927,6 +3168,10 @@ export type ForkSessionOptions = {
   readonly policy?: SessionPolicy;
   /** How the fork's gated calls ask a person (D15, LOB-52); see `OpenSessionOptions.approvalAsker`. */
   readonly approvalAsker?: ApprovalAsker;
+  /** The MCP servers its run may call (S-agent-mcp-tools), as `OpenSessionOptions.mcp`. */
+  readonly mcp?: readonly McpServerAccess[];
+  /** Their sessions, made before the open, as `OpenSessionOptions.mcpListing`. */
+  readonly mcpListing?: McpListing;
   /**
    * What the run's column gives the fork's prompt (B6). A fork carries no task binding, so this is
    * `EMPTY_RUN_PROFILE` in practice; it is a parameter so a fork opens exactly as any other session
@@ -2993,6 +3238,10 @@ export const forkSession = (
       ...(options.repo === undefined ? {} : { repo: options.repo }),
       ...(options.verify === undefined ? {} : { verify: options.verify }),
       ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
+      ...(options.mcp === undefined ? {} : { mcp: options.mcp }),
+      ...(options.mcpListing === undefined
+        ? {}
+        : { mcpListing: options.mcpListing }),
     });
     const lineage = yield* attempt(
       "copy the parent's entries",
