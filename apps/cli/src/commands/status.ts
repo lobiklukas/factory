@@ -58,6 +58,10 @@ export const statusLines = (info: ServerInfo): readonly string[] => {
     ...info.warnings.map((warning) => `warning ${warning}`),
     `default-model ${info.defaultModel}`,
     ...info.roleModels.map((row) => `role-model ${row.role} ${row.model}`),
+    // A role's fallback chain (S-model-provider-breadth), in the order a run moves down it.
+    ...(info.roleFallbacks ?? []).map(
+      (row) => `role-fallback ${row.role} ${row.models.join(" | ")}`,
+    ),
     `models ${list(info.models)}`,
     `approval-required ${list(info.approvalRequired)}`,
     `default-budget ${info.defaultBudget === undefined ? "none" : formatDollars(info.defaultBudget)}`,

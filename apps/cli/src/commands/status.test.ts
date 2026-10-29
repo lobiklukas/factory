@@ -123,6 +123,26 @@ describe("statusLines", () => {
     expect(out).toContain("default-budget $3.0000");
   });
 
+  /** Mutation: drop the fallback chains, or print them out of order (S-model-provider-breadth). */
+  it("prints each role's fallback chain in order, and none when there is none", () => {
+    const out = lines(
+      faux({
+        roleFallbacks: [
+          {
+            role: "builder",
+            models: ["openai-compatible/compat-1", "faux/faux-2"],
+          },
+        ],
+      }),
+    );
+    expect(out).toContain(
+      "role-fallback builder openai-compatible/compat-1 | faux/faux-2",
+    );
+    expect(
+      lines(faux()).some((line) => line.startsWith("role-fallback")),
+    ).toBe(false);
+  });
+
   /** Mutation: print `undefined` or an empty value where nothing is set. */
   it("says `none` where nothing is set, never an empty value", () => {
     const out = lines(
