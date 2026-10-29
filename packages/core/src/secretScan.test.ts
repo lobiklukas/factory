@@ -30,7 +30,8 @@ const pemHeader = () => `-----BEGIN RSA ${"PRIVATE"} KEY-----`;
 const dirs: string[] = [];
 afterAll(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
-});
+  // Removing every case's git checkouts outran vitest's 10 s hook default on a loaded machine (DEFLAKE).
+}, 60_000);
 
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", args, {
@@ -270,7 +271,9 @@ describe("scanAddedLines", () => {
 });
 
 // Each case runs a handful of real git commands, which a loaded machine can take seconds over.
-describe("scanBranchForSecrets", { timeout: 30_000 }, () => {
+// Each case builds a branch with git and scans it with git: past the 30 s this was on a loaded
+// machine (DEFLAKE).
+describe("scanBranchForSecrets", { timeout: 60_000 }, () => {
   it("passes a branch that adds no secret", async () => {
     const root = repo();
     commit(root, { "a.txt": "hello\n" });

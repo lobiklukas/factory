@@ -201,7 +201,8 @@ const link = (answer: PullRequestStep) => {
 
 beforeAll(async () => {
   remote = await startGitRemote(join(root, "forge"), TOKEN);
-});
+  // The forge's bare repository is made with git: budgeted as the cases are (DEFLAKE).
+}, 60_000);
 
 afterAll(async () => {
   // The rows point at a session root this suite deletes, so they leave with it rather than waiting
@@ -219,9 +220,13 @@ afterAll(async () => {
   await runtime.dispose();
   remote?.server.close();
   rmSync(root, { recursive: true, force: true });
-});
+  // Its deletes, the runtime's close and removing every case's checkouts outran vitest's 10 s hook
+  // default on a loaded machine (DEFLAKE).
+}, 60_000);
 
-const CASE = { timeout: 60_000 };
+// Each case pushes to and fetches from an HTTP git remote: past the 60 s this was on a loaded
+// machine (DEFLAKE).
+const CASE = { timeout: 120_000 };
 
 describe("the PR step publishes the branch it names", CASE, () => {
   /**

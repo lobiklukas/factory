@@ -2270,7 +2270,9 @@ describe("compact", () => {
   }, 120_000);
 });
 
-describe("repo binding", () => {
+// Each case registers a checkout git has to inspect, and most cut a worktree: past vitest's 5 s
+// default on a loaded machine (DEFLAKE).
+describe("repo binding", { timeout: 60_000 }, () => {
   it("binds a session to a repo and resolves its workspace from the repo's config", async () => {
     const result = await program(
       Effect.gen(function* () {
@@ -5211,7 +5213,10 @@ describe("session list", () => {
       "https://github.com/lobiklukas/factory.git",
     );
     expect(result.repos[0]?.defaultBaseRef).toBe("main");
-  });
+    // `rebuildIndexes` folds every log this file's database holds, so its cost grows with the file:
+    // past vitest's 5 s default on a loaded machine, where the case went on running after its
+    // timeout and its rebuild deleted the next cases' sessions, which had no commits yet (DEFLAKE).
+  }, 120_000);
 
   // The fold writes its index rows as one `INSERT … SELECT FROM unnest(…)` per batch rather than
   // one statement per row (LOB-115). That is a change of SQL shape with no change of meaning, and
@@ -5327,7 +5332,10 @@ describe("session list", () => {
       { slug: "lobiklukas/factory", defaultBaseRef: "main" },
       { slug: "lobiklukas/other", defaultBaseRef: "feature/board" },
     ]);
-  });
+    // `rebuildIndexes` folds every log this file's database holds, so its cost grows with the file:
+    // past vitest's 5 s default on a loaded machine, where the case went on running after its
+    // timeout and its rebuild deleted the next cases' sessions, which had no commits yet (DEFLAKE).
+  }, 120_000);
 });
 
 describe("approvals", () => {
@@ -10137,7 +10145,10 @@ describe("a gated call asks through the approvals service", () => {
     expect(askedAgain?.text).toContain("one has been asked for");
     expect(askedAgain?.text).toContain(`${outcome.requestId}-2`);
     expect(askedAgain?.text).not.toContain("gated-ran");
-  });
+    // `rebuildIndexes` folds every log this file's database holds, so its cost grows with the file:
+    // past vitest's 5 s default on a loaded machine, where the case went on running after its
+    // timeout and its rebuild deleted the next cases' sessions, which had no commits yet (DEFLAKE).
+  }, 120_000);
 
   /** A snapshot once the session is idle and its transcript holds `results` tool results. */
   const settledWith = (sessionId: SessionId, results: number) =>
@@ -11955,7 +11966,8 @@ describe("the verify tool reads the session's workspace", () => {
     );
     git("git add -A");
     git("git commit -m base");
-  });
+    // Git spawned in a hook: past vitest's 10 s hook default on a loaded machine (DEFLAKE).
+  }, 60_000);
 
   it("runs the declared command, not the skill, over the change committed on the branch", async () => {
     const faux = createFauxModelAccess({
@@ -12201,11 +12213,13 @@ describe("a repo registered with only a URL (LOB-265)", () => {
     git(upstream, "add", "README.md");
     git(upstream, "commit", "-q", "-m", "seed");
     git(cloneRoot, "clone", "-q", "--bare", upstream, bareUpstream);
-  });
+    // Git spawned in a hook: past vitest's 10 s hook default on a loaded machine (DEFLAKE).
+  }, 60_000);
 
   afterAll(() => {
     rmSync(cloneRoot, { recursive: true, force: true });
-  });
+    // Removing the clones: past vitest's 10 s hook default on a loaded machine (DEFLAKE).
+  }, 60_000);
 
   const runtimeWith = (mirror: RepoMirror | undefined) =>
     ManagedRuntime.make(
@@ -14368,7 +14382,8 @@ describe("a session's workspace outlives its owner (LOB-268)", () => {
     git(keptRepoRoot, "git config user.email t@t.com");
     git(keptRepoRoot, "git config user.name t");
     git(keptRepoRoot, "git commit --allow-empty -m base");
-  });
+    // Git spawned in a hook: past vitest's 10 s hook default on a loaded machine (DEFLAKE).
+  }, 60_000);
 
   const keptRuntime = (
     extra: {
@@ -14474,6 +14489,50 @@ describe("a session's workspace outlives its owner (LOB-268)", () => {
       // The next run started on it, not on a fresh branch at the base.
       expect(outcome.seen).toContain(SUBJECT);
       expect(outcome.seen).toContain(NOTES);
+    } finally {
+      await runtime.dispose();
+    }
+  }, 120_000);
+
+  /**
+   * The sweep never closes an owner under a call still using it (`holding` in the service). A send
+   * acquires the owner, then checks its handoff and setup and writes its title before it submits:
+   * with an idle timeout shorter than that, a sweep that went by `lastUsedAt` alone released the
+   * owner in between, and the submit failed `Session is closed` — what this file's idle-sweep case
+   * above met under a loaded gate, at 200 ms. A create is held the same way, from before its owner
+   * is published through its first log writes and its answer: `sessionWithWork` creates one whose
+   * title and repo binding are written after its owner is published, under the same 1 ms timeout.
+   *
+   * Mutation checked: dropping the sweep's `holds` check — the first send fails `submit message:
+   * Session is closed`, or a later one does.
+   */
+  it("never releases an owner while a call still uses it, however short the idle timeout", async () => {
+    const runtime = keptRuntime({ idleTimeoutMs: 1, sweepIntervalMs: 1 });
+    try {
+      const outcome = await runtime.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* SessionService;
+          const work = yield* sessionWithWork();
+          // Each a run of its own: the owner is released between them and opened again by the next.
+          const seen = [];
+          for (let round = 0; round < 3; round += 1)
+            seen.push(yield* nextRunSees(work.id));
+          // And the sweep still releases the owner once nothing is using it.
+          yield* waitUntil(
+            Effect.map(
+              sessions.get(work.id),
+              (snapshot) => snapshot.session.mode === "historical",
+            ),
+            "the idle owner's release",
+          );
+          yield* sessions.close;
+          return { seen };
+        }),
+      );
+      for (const seen of outcome.seen) {
+        expect(seen).toContain(SUBJECT);
+        expect(seen).toContain(NOTES);
+      }
     } finally {
       await runtime.dispose();
     }

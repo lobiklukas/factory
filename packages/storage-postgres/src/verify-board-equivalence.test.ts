@@ -35,7 +35,8 @@ const SCRIPT = ".pi/skills/verify-board/equivalence.sh";
 const created: string[] = [];
 afterAll(() => {
   for (const root of created) rmSync(root, { recursive: true, force: true });
-});
+  // Past vitest's 10 s hook default on a loaded machine, as the cases' bounds are (DEFLAKE).
+}, 60_000);
 
 const writeExecutable = (file: string, body: string): void => {
   mkdirSync(path.dirname(file), { recursive: true });
@@ -110,9 +111,12 @@ const run = (
     ),
   );
   writeFileSync(staged.journal, "");
+  // The phase runs nine fake scripts, each its own `bash`: beside a full `bun run test` it outran the
+  // 20 s this bound was, and the kill left a journal a step or more short (DEFLAKE). A kill is said
+  // as one, below, rather than read as a phase that skipped its steps.
   const result = spawnSync("bash", [path.join(staged.root, SCRIPT)], {
     encoding: "utf8",
-    timeout: 20_000,
+    timeout: 90_000,
     env: {
       ...inherited,
       PATH: `${staged.bin}${path.delimiter}${inherited["PATH"] ?? ""}`,
@@ -120,6 +124,7 @@ const run = (
       ...env,
     },
   });
+  expect(result.signal, `the phase was killed: ${result.stderr}`).toBeNull();
   const lines = readFileSync(staged.journal, "utf8")
     .split("\n")
     .filter((line) => line !== "");
@@ -142,7 +147,7 @@ const PORTS = {
 describe("verify-board's equivalence phase", () => {
   it(
     "runs verify-cli, verify-web and the board drive, one instance at a time, and passes when all do",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     () => {
       // Mutation checked: dropping the `surface web` line reddens the order assertion (the phase
       // would no longer run verify-web), and running a surface's down.sh before its drive reddens it
@@ -194,7 +199,7 @@ describe("verify-board's equivalence phase", () => {
 
   it(
     "exits non-zero when one surface's drive fails, and still runs the others",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     () => {
       // Mutation checked: dropping `failed=1` from run_step makes the phase exit 0 here, and
       // stopping at the first failure drops the board's steps from the journal.
@@ -233,7 +238,7 @@ describe("verify-board's equivalence phase", () => {
 
   it(
     "does not drive a surface whose instance did not come up, and still brings it down",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     () => {
       // Mutation checked: running the drive whatever up.sh returned puts `board-drive` in the
       // journal; skipping down.sh after a failed up drops `board-down` — a half-started instance
@@ -252,7 +257,7 @@ describe("verify-board's equivalence phase", () => {
 
   it(
     "refuses to start without a database, or while another instance is up",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     () => {
       // Mutation checked: removing either guard runs the fakes, and the journal is no longer empty.
       const staged = stage();

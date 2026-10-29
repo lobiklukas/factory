@@ -100,10 +100,15 @@ interface Scratch {
   readonly listenerPid: string;
 }
 
+// Every case's budget, and every spawn's bound, is sized for the load a gate puts on a machine
+// rather than for the case's own work (DEFLAKE): beside a full `bun run test` a case here outran
+// the 30 s both used to be.
 const created: string[] = [];
 afterAll(() => {
   for (const root of created) rmSync(root, { recursive: true, force: true });
-});
+  // A scratch tree per case: removing them all outran vitest's 10 s hook default beside a full
+  // `bun run test` (DEFLAKE).
+}, 60_000);
 
 const mkScratch = (): Scratch => {
   const root = mkdtempSync(
@@ -411,7 +416,7 @@ const ensurePostgres = (
     cwd: scratch.root,
     encoding: "utf8",
     env: { ...childEnv(scratch, port, extra), PG_LIB: LIB },
-    timeout: 30_000,
+    timeout: 90_000,
   });
 
 /**
@@ -530,7 +535,7 @@ const colimaHome = async (): Promise<{
 describe("the verify-* skills' Postgres precondition", () => {
   it(
     "leaves a database that already answers alone, without calling docker",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       const scratch = mkScratch();
       writeFakeDocker(scratch, 1);
@@ -570,7 +575,7 @@ describe("the verify-* skills' Postgres precondition", () => {
     } finally {
       await stopOpenedListener(scratch, port);
     }
-  }, 30_000);
+  }, 120_000);
 
   it("fails loudly when compose reports success but nothing answers on the port", async () => {
     const scratch = mkScratch();
@@ -599,7 +604,7 @@ describe("the verify-* skills' Postgres precondition", () => {
       "compose ps -aq --status created postgres",
       "rm -f faux-created",
     ]);
-  }, 30_000);
+  }, 120_000);
 
   it("fails loudly and removes nothing when a compose that reported success left no container", async () => {
     const scratch = mkScratch();
@@ -631,11 +636,11 @@ describe("the verify-* skills' Postgres precondition", () => {
     for (const call of composeCalls(scratch)) {
       expect(recordOf(scratch, call).cwd, call).toBe(path.resolve(REPO_ROOT));
     }
-  }, 30_000);
+  }, 120_000);
 
   it(
     "fails loudly on the command to run, and removes the container a failed start created",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       const scratch = mkScratch();
       writeFakeDocker(scratch, 1);
@@ -665,7 +670,7 @@ describe("the verify-* skills' Postgres precondition", () => {
 
   it(
     "does not delete a container the failed start did not create",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       const scratch = mkScratch();
       writeFakeDocker(scratch, 1);
@@ -702,7 +707,7 @@ describe("the verify-* skills' Postgres precondition", () => {
           cwd: scratch.root,
           encoding: "utf8",
           env: childEnv(scratch, database.port),
-          timeout: 30_000,
+          timeout: 90_000,
         });
         expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
         // Mutation checked: the same one-line revert as the first case — dropping
@@ -714,7 +719,7 @@ describe("the verify-* skills' Postgres precondition", () => {
         await database.close();
       }
     },
-    30_000,
+    120_000,
   );
 
   it.each(UP_SCRIPTS)(
@@ -736,7 +741,7 @@ describe("the verify-* skills' Postgres precondition", () => {
           cwd: scratch.root,
           encoding: "utf8",
           env: childEnv(scratch, port),
-          timeout: 30_000,
+          timeout: 90_000,
         });
         expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
         expect(composeCalls(scratch)).toEqual([
@@ -754,7 +759,7 @@ describe("the verify-* skills' Postgres precondition", () => {
         await stopOpenedListener(scratch, port);
       }
     },
-    30_000,
+    120_000,
   );
 
   it("answers on the port the compose it started opened, and on no other, then releases it", async () => {
@@ -789,11 +794,11 @@ describe("the verify-* skills' Postgres precondition", () => {
       // Idempotent, and a no-op once the port refuses: the case cannot leak one either way.
       await stopOpenedListener(scratch, port);
     }
-  }, 30_000);
+  }, 120_000);
 
   it(
     "defaults the port to the one compose.yaml publishes, under a caller's strict shell",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       const scratch = mkScratch();
       writeFakeDocker(scratch, 0);
@@ -807,7 +812,7 @@ describe("the verify-* skills' Postgres precondition", () => {
           cwd: scratch.root,
           encoding: "utf8",
           env: { ...envWithoutPort(scratch), PG_LIB: LIB },
-          timeout: 30_000,
+          timeout: 90_000,
         },
       );
       const published = /- "(\d+):5432"/.exec(
@@ -826,7 +831,7 @@ describe("the verify-* skills' Postgres precondition", () => {
           cwd: scratch.root,
           encoding: "utf8",
           env: { ...envWithoutPort(scratch), PG_LIB: LIB },
-          timeout: 30_000,
+          timeout: 90_000,
         },
       );
       expect(nounset.status, nounset.stderr).toBe(0);
@@ -837,7 +842,7 @@ describe("the verify-* skills' Postgres precondition", () => {
 
   it(
     "treats a port that accepts and hangs up as an answered database",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       const scratch = mkScratch();
       writeFakeDocker(scratch, 1);
@@ -858,7 +863,7 @@ describe("the verify-* skills' Postgres precondition", () => {
 
   it(
     "names one owner when several containers publish the port, and nothing when none does",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       const scratch = mkScratch();
       writeFakeDocker(scratch, 0);
@@ -867,7 +872,7 @@ describe("the verify-* skills' Postgres precondition", () => {
           cwd: scratch.root,
           encoding: "utf8",
           env: { ...childEnv(scratch, 5442, extra), PG_LIB: LIB },
-          timeout: 30_000,
+          timeout: 90_000,
         });
 
       // degraded.sh passes this straight to `docker stop`, so a two-line answer would be one
@@ -887,7 +892,7 @@ describe("the verify-* skills' Postgres precondition", () => {
 
   it(
     "does nothing on a second run while the port still answers",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       const scratch = mkScratch();
       writeFakeDocker(scratch, 1);
@@ -918,7 +923,7 @@ describe("the verify-* skills' Postgres precondition", () => {
         cwd: scratch.root,
         encoding: "utf8",
         env: childEnv(scratch, port),
-        timeout: 30_000,
+        timeout: 90_000,
       });
       // Acceptance criterion 2, at the caller: with Postgres genuinely stopped the script stops,
       // names the command to run, and has not launched an API or touched a container.
@@ -936,7 +941,7 @@ describe("the verify-* skills' Postgres precondition", () => {
         "compose ps -aq --status created postgres",
       ]);
     },
-    30_000,
+    120_000,
   );
 
   it.each(UP_SCRIPTS)(
@@ -958,7 +963,7 @@ describe("the verify-* skills' Postgres precondition", () => {
         cwd: scratch.root,
         encoding: "utf8",
         env: childEnv(scratch, port, { FAKE_DOCKER_CREATED: "faux-created" }),
-        timeout: 30_000,
+        timeout: 90_000,
       });
       expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
       expect(result.stderr).toContain(
@@ -979,7 +984,7 @@ describe("the verify-* skills' Postgres precondition", () => {
         "rm -f faux-created",
       ]);
     },
-    30_000,
+    120_000,
   );
 
   it("defers to the port when its own compose failed but the port answers by then", async () => {
@@ -1007,7 +1012,7 @@ describe("the verify-* skills' Postgres precondition", () => {
     } finally {
       await stopOpenedListener(scratch, port);
     }
-  }, 30_000);
+  }, 120_000);
 
   it("survives its own failed compose in a caller that runs `set -euo pipefail` without guarding the call", async () => {
     const scratch = mkScratch();
@@ -1034,7 +1039,7 @@ describe("the verify-* skills' Postgres precondition", () => {
           cwd: scratch.root,
           encoding: "utf8",
           env: { ...childEnv(scratch, port), PG_LIB: LIB },
-          timeout: 30_000,
+          timeout: 90_000,
         },
       );
       // The line after the call ran, so the shell was not aborted by the compose failure — and the
@@ -1047,7 +1052,7 @@ describe("the verify-* skills' Postgres precondition", () => {
     } finally {
       await stopOpenedListener(scratch, port);
     }
-  }, 30_000);
+  }, 120_000);
 
   it.each(UP_SCRIPTS)(
     "lets %s/up.sh start after a compose that failed while another agent took the port",
@@ -1069,7 +1074,7 @@ describe("the verify-* skills' Postgres precondition", () => {
           cwd: scratch.root,
           encoding: "utf8",
           env: childEnv(scratch, port),
-          timeout: 30_000,
+          timeout: 90_000,
         });
         expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
         // One attempt, and no cleanup of a container that is not this call's: the port answers.
@@ -1084,12 +1089,12 @@ describe("the verify-* skills' Postgres precondition", () => {
         await stopOpenedListener(scratch, port);
       }
     },
-    30_000,
+    120_000,
   );
 
   it(
     "lets degraded.sh refuse loudly when the port answers but no container publishes it",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       const scratch = mkScratch();
       // No `FAKE_DOCKER_PS`: the port is served by something docker does not know about — a native
@@ -1104,7 +1109,7 @@ describe("the verify-* skills' Postgres precondition", () => {
           cwd: scratch.root,
           encoding: "utf8",
           env: childEnv(scratch, database.port),
-          timeout: 30_000,
+          timeout: 90_000,
         });
         expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
         expect(result.stderr).toContain(
@@ -1138,7 +1143,7 @@ describe("the verify-* skills' Postgres precondition", () => {
           FAKE_DOCKER_PS: "factory-postgres-1",
           FAKE_DOCKER_STATE: state,
         }),
-        timeout: 30_000,
+        timeout: 90_000,
       });
       expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
       const calls = subcommands(scratch);
@@ -1163,7 +1168,7 @@ describe("the verify-* skills' Postgres precondition", () => {
     } finally {
       await database.close();
     }
-  }, 30_000);
+  }, 120_000);
 
   it("falls back to colima's socket when the active context cannot answer", async () => {
     const scratch = mkScratch();
@@ -1193,7 +1198,7 @@ describe("the verify-* skills' Postgres precondition", () => {
       await home.close();
       await stopOpenedListener(scratch, port);
     }
-  }, 30_000);
+  }, 120_000);
 
   it("leaves DOCKER_HOST alone when the active context answers", async () => {
     const scratch = mkScratch();
@@ -1215,7 +1220,7 @@ describe("the verify-* skills' Postgres precondition", () => {
       await home.close();
       await stopOpenedListener(scratch, port);
     }
-  }, 30_000);
+  }, 120_000);
 
   it("never second-guesses an explicit DOCKER_HOST", async () => {
     const scratch = mkScratch();
@@ -1239,11 +1244,11 @@ describe("the verify-* skills' Postgres precondition", () => {
       await home.close();
       await stopOpenedListener(scratch, port);
     }
-  }, 30_000);
+  }, 120_000);
 
   it(
     "drives docker only through the shim on PATH, and starts nothing but its own runtime",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       const scratch = mkScratch();
       const port = await closedPort();
@@ -1256,7 +1261,7 @@ describe("the verify-* skills' Postgres precondition", () => {
         cwd: scratch.root,
         encoding: "utf8",
         env: childEnv(scratch, port),
-        timeout: 30_000,
+        timeout: 90_000,
       });
       expect(resolved.stdout.trim()).toBe(path.join(scratch.bin, "docker"));
       expect(
@@ -1355,11 +1360,11 @@ describe("the verify-* skills' Postgres precondition", () => {
       writeFileSync(scratch.listenerPid, String(deadPid));
       await stopOpenedListener(scratch, port);
     }
-  }, 30_000);
+  }, 120_000);
 
   it(
     "keeps the compose call inside the one helper the callers share",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     () => {
       // The bug existed in five copies of the same stanza. This is the drift guard: a new `up.sh`
       // that copy-pastes `docker compose up` re-introduces it, and the cases above would not see a
@@ -1375,7 +1380,7 @@ describe("the verify-* skills' Postgres precondition", () => {
 
   it(
     "reaches docker nowhere but through the helper and the library",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     () => {
       // `not.toContain("docker compose up")` above misses `docker  compose up`, `pg_docker compose
       // up` and `docker ps`. Strip the comments and the quoted strings — a message that mentions
@@ -1397,7 +1402,7 @@ describe("the verify-* skills' Postgres precondition", () => {
 
   it(
     "leaves no case unaccounted for in the mutation note every case carries",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     () => {
       // The header's claim is a property of this file, so it is checked like one: a case declares
       // itself on a line that starts with `it(` or `test(`, and its mutation note is a comment line
@@ -1440,17 +1445,17 @@ describe("the verify-* skills' Postgres precondition", () => {
 
   it(
     "gives every case a budget, so none relies on vitest's 5 s default",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     () => {
-      // Mutation checked: deleting the `timeout: 30_000` from this case's own options makes
+      // Mutation checked: deleting the `timeout: 120_000` from this case's own options makes
       // the guard below redden with this case's line number.
-      // Mutation: delete `{ timeout: 30_000 },` from any case above — the guard reads the file
+      // Mutation: delete `{ timeout: 120_000 },` from any case above — the guard reads the file
       // back and fails, naming the case that lost its budget. Without this case a future edit
       // could silently drop a budget and the gate would go red intermittently under parallel
       // load, which is the failure this issue exists to prevent.
       //
       // The guard enforces this file's convention — a per-case `{ timeout }` option or a
-      // trailing `, 30_000)` argument — not the only possible way to budget a case. A future
+      // trailing `, 120_000)` argument — not the only possible way to budget a case. A future
       // `test.timeout` in `vitest.config.ts` would be a legitimate fix that this guard does
       // not recognise; that is a limitation to note, not a false green today (the config sets
       // no timeout).
@@ -1469,12 +1474,14 @@ describe("the verify-* skills' Postgres precondition", () => {
         const end = declarations[position + 1] ?? lines.length;
         const caseLines = lines.slice(start, end);
         // Vitest timeout in this file appears as either:
-        // - `{ timeout: 30_000 }` as the second argument (on the `it(` line or next line)
-        // - `, 30_000)` as the last argument (at the end of the test case)
+        // - `{ timeout: 120_000 }` as the second argument (on the `it(` line or next line)
+        // - `, 120_000)` as the last argument (at the end of the test case), or `120_000,` on a
+        //   line of its own as an `it.each` case's last argument
         const hasTimeout = caseLines.some(
           (candidate) =>
-            /\btimeout\s*:\s*30_000\b/.test(candidate) ||
-            /,\s*30_000\s*[)}]\s*;?\s*$/.test(candidate),
+            /\btimeout\s*:\s*120_000\b/.test(candidate) ||
+            /,\s*120_000\s*[)}]\s*;?\s*$/.test(candidate) ||
+            /^\s*120_000,\s*$/.test(candidate),
         );
         if (!hasTimeout) {
           missing.push(`line ${String(start + 1)}: ${lines[start]!.trim()}`);

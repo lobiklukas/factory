@@ -728,7 +728,9 @@ describe("the API's environment reads (LOB-257)", () => {
     ]) {
       expect(names).toContain(name);
     }
-  });
+    // It reads and scans every source of six packages: 3 s beside a full `bun run test`, and past
+    // vitest's 5 s default on a loaded machine (DEFLAKE).
+  }, 90_000);
 
   it("declares every variable the API reads on @repo/api#dev, in env or passThroughEnv", () => {
     const dryRun = resolveScript(

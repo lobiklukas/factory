@@ -295,11 +295,13 @@ const driveLoop = (
   // subshell (it is the condition of an `||`), so the driver's own `set -euo
   // pipefail` never applies and a more forgiving harness could report green for a
   // path where the real loop would stop. A plain statement inherits errexit.
+  // Sized for a gate's load, not the call's own work (DEFLAKE): beside a full `bun run test` the
+  // driver's `ensure_db` outlived the 30 s this was, and was killed before it printed its refusal.
   const run = spawnSync("bash", ["-c", `source "$LOOP"; ${statements}`], {
     cwd: scratch.root,
     encoding: "utf8",
     env: childEnv(scratch, extra),
-    timeout: 30_000,
+    timeout: 90_000,
   });
   const stdout = run.stdout ?? "";
   return {
@@ -432,7 +434,7 @@ const ensureDbBody = (): string => {
 describe("the ralph driver's ensure_db", () => {
   it(
     "fails loudly when a compose that exits 0 leaves nothing answering on the port",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // AC1, and the case the issue is about. `ensure_postgres` discards compose's exit code and asks
       // the port instead, so a start that reports success with the port refused is a failure here
@@ -467,7 +469,7 @@ describe("the ralph driver's ensure_db", () => {
 
   it(
     "calls no compose at all when a database already answers on the port",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // AC2. `ensure_postgres` returns on its first probe, so the only docker calls left are the ones
       // needed to ask a question of the database that is already there. Mutation: delete the
@@ -498,7 +500,7 @@ describe("the ralph driver's ensure_db", () => {
 
   it(
     "falls back to compose exec when nothing publishes the port as a container",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // The other half of AC2's mechanism: a database can answer on the port without a container
       // owning it (a native server, a tunnel), and `compose exec` can only reach the project of the
@@ -532,7 +534,7 @@ describe("the ralph driver's ensure_db", () => {
 
   it(
     "names the default database whichever ralph worker's shell runs the suite",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // LOB-209. A ralph worker runs this suite with the run context `loop.sh` exports to its agents:
       // `RALPH_WORKER=2` and `DATABASE_URL=…/factory_ralph_2`, sometimes `RALPH_DB` as well. The two
@@ -575,7 +577,7 @@ describe("the ralph driver's ensure_db", () => {
 
   it(
     "creates worker N's own database, the one the DATABASE_URL it hands its agents names",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // The other half of LOB-209: deleting the driver's knobs from every child must not leave the
       // per-worker database untested. A worker's agents are told `DATABASE_URL=…/factory_ralph_N`
@@ -617,7 +619,7 @@ describe("the ralph driver's ensure_db", () => {
 
   it(
     "creates the database in whichever postgres answers, and says so",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // The `createdb` half, which is the only write `ensure_db` does. An empty `psql` answer means
       // the database is not there yet. Mutation: drop the `if [ "$exists" != "1" ]` guard — the
@@ -645,7 +647,7 @@ describe("the ralph driver's ensure_db", () => {
 
   it(
     "does not treat a failed existence query as an absent database",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // A psql that fails must not be read as "the database is not there": `ensure_db` must stop
       // rather than go on to `createdb`. Mutation: append `|| true` to the existence assignment
@@ -671,7 +673,7 @@ describe("the ralph driver's ensure_db", () => {
 
   it(
     "leaves an explicit DOCKER_HOST alone, on every call ensure_db makes",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // The driver and the helper it now sources must agree on which daemon is authoritative (LOB-105
       // is the same promise one file over). `ensure_db` calls `docker_env` first, so a value rewritten
@@ -706,7 +708,7 @@ describe("the ralph driver's ensure_db", () => {
 
   it(
     "asks the container compose just started, when nothing answered before",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // The path a fresh machine takes: `loop.sh setup` on a host where 5442 answers nothing yet.
       // `ensure_postgres` starts the database with compose and the port answers afterwards, so the
@@ -746,7 +748,7 @@ describe("the ralph driver's ensure_db", () => {
 
   it(
     "proves the fake is what PATH resolves before any case relies on it",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     () => {
       // Every case's premise: `ensure_db` reaches the fake and not the machine's CLI. `childEnv`
       // asserts the fake file exists; this asserts the resolution, the way `postgres-up.test.ts` and

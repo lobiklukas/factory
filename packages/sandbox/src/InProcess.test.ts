@@ -24,7 +24,7 @@ import {
   registerEnvConformance,
 } from "@earendil-works/pi-durable/testing";
 import { Effect, Exit, Scope } from "effect";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { InProcess, SandboxCapabilities, SandboxRuntime } from "./index";
 import {
   createSandboxRuntimeConformance,
@@ -32,6 +32,11 @@ import {
 } from "./testing";
 
 const context = BACKGROUND_CONTEXT;
+
+// The cases spawn shells and write, list and remove files: milliseconds alone, but past vitest's 5 s
+// case and 10 s hook defaults beside a full `bun run test` on a loaded machine (DEFLAKE). Pi
+// Durable's suites register their cases without a budget, so the file sets one for all of them.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
 registerSandboxRuntimeConformance(
   { describe, expect, it },

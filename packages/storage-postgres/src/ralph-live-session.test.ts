@@ -56,7 +56,9 @@ afterAll(() => {
     }
   }
   for (const root of created) rmSync(root, { recursive: true, force: true });
-});
+  // Every case's scratch tree holds three git repositories: removing them all outran vitest's 10 s
+  // hook default beside a full `bun run test` (DEFLAKE).
+}, 60_000);
 
 interface Scratch {
   readonly root: string;
@@ -176,7 +178,10 @@ const sh = (
   const run = spawnSync("bash", ["-c", body], {
     cwd: scratch.root,
     encoding: "utf8",
-    timeout: 60_000,
+    // Sized for a gate's load (DEFLAKE), as every case's budget is: beside a full `bun run test` a
+    // case here took 76 s, those budgeted at 30 s timed out, and one run of the driver was killed at
+    // 120 s.
+    timeout: 180_000,
     env: env(scratch, extra),
   });
   return {
@@ -201,14 +206,14 @@ const alive = (pid: number): boolean => {
 };
 
 /**
- * Wait until `ok` holds, attempt-counted like `ralph-ensure-db.test.ts`'s `waitFor` (20 s at most
- * by default). `why` is read on a timeout, so a red run says what the waited-on process printed.
+ * Wait until `ok` holds, attempt-counted like `ralph-ensure-db.test.ts`'s `waitFor` (120 s at most
+ * by default: a gate beside sibling gates outran 20 s, and once 60 s, DEFLAKE). `why` is read on a timeout, so a red run says what the waited-on process printed.
  */
 const until = async (
   what: string,
   ok: () => boolean,
   {
-    attempts = 400,
+    attempts = 2_400,
     why = () => "",
   }: { attempts?: number; why?: () => string } = {},
 ): Promise<void> => {
@@ -270,7 +275,7 @@ describe("a ralph run and the worker session a previous run left behind", () => 
   // `with_timeout` — the record outlives run 3's session and the last assertion reddens.
   it(
     "refuses to start while the session is alive, naming its pid, and takes over once it is gone",
-    { timeout: 90_000 },
+    { timeout: 240_000 },
     async () => {
       const scratch = mkScratch();
       const ready = path.join(scratch.root, "pi-ready");
@@ -289,9 +294,8 @@ describe("a ralph run and the worker session a previous run left behind", () => 
       const driver = first.pid;
       if (driver === undefined) throw new Error("could not spawn run 1");
       spawned.push(driver);
-      // A loaded machine (sibling gates) has taken run 1 past 20 s to get here, so 60 s.
+      // A loaded machine (sibling gates) has taken run 1 past 20 s to get here, and once past 60 s.
       await until("run 1's session", () => existsSync(ready), {
-        attempts: 1_200,
         why: () => `run 1's output:\n${readIfAny(firstLog)}`,
       });
       const session = Number(piCalls(scratch)[0]?.split(" ")[0]);
@@ -344,7 +348,7 @@ describe("a ralph run and the worker session a previous run left behind", () => 
   // free once a liveness check has looked.
   it(
     "lets a second run started right after the first exits take the worktree normally",
-    { timeout: 60_000 },
+    { timeout: 240_000 },
     () => {
       const scratch = mkScratch();
       const first = sh(scratch, RUN);
@@ -363,7 +367,7 @@ describe("a ralph run and the worker session a previous run left behind", () => 
   // to another process after the session ended reads as the session, and the run is refused.
   it(
     "reads a record whose pid now belongs to another process as stale",
-    { timeout: 30_000 },
+    { timeout: 240_000 },
     () => {
       const scratch = mkScratch();
       const other = sleeper();
@@ -381,7 +385,7 @@ describe("a ralph run and the worker session a previous run left behind", () => 
   // the worktree to the base ref under it. Mutation: drop it from `cmd_audit` — the same, for audit.
   it(
     "refuses setup and audit while the session is alive, before touching the worktree",
-    { timeout: 30_000 },
+    { timeout: 240_000 },
     () => {
       const scratch = mkScratch();
       git(scratch.wt, "switch", "-q", "-c", "ralph/LOB-1");
@@ -410,7 +414,7 @@ describe("a ralph run and the worker session a previous run left behind", () => 
   // process group (a foreground `run` that was killed) survives `kill`, and the next run is refused.
   it(
     "stops the recorded session on kill, even outside the loop's process group",
-    { timeout: 30_000 },
+    { timeout: 240_000 },
     async () => {
       const scratch = mkScratch();
       const loop = sleeper();
@@ -432,7 +436,7 @@ describe("a ralph run and the worker session a previous run left behind", () => 
   // reads as a reused pid under another, the record is dropped and the run takes the worktree.
   it(
     "reads a live session as live from a run in another time zone than the one that recorded it",
-    { timeout: 30_000 },
+    { timeout: 240_000 },
     () => {
       const scratch = mkScratch();
       const session = sleeper();
@@ -457,7 +461,7 @@ describe("a ralph run and the worker session a previous run left behind", () => 
   // refusal lands only in the detached run's `loop.log`.
   it(
     "refuses start in the caller's terminal, before detaching anything",
-    { timeout: 30_000 },
+    { timeout: 240_000 },
     () => {
       const scratch = mkScratch();
       const session = sleeper();
@@ -479,7 +483,7 @@ describe("a ralph run and the worker session a previous run left behind", () => 
   // drop the group signal — the orphan, no longer anyone's descendant, survives.
   it(
     "stops the session's whole tree and its dead driver's group on kill",
-    { timeout: 30_000 },
+    { timeout: 240_000 },
     async () => {
       const scratch = mkScratch();
       const file = (name: string) => path.join(scratch.root, name);

@@ -38,7 +38,8 @@ const DOCTOR = ".pi/skills/verify-board/doctor.sh";
 const created: string[] = [];
 afterAll(() => {
   for (const root of created) rmSync(root, { recursive: true, force: true });
-});
+  // Past vitest's 10 s hook default on a loaded machine, as the cases' bounds are (DEFLAKE).
+}, 60_000);
 
 /** A listener that answers for the duration of one case, standing in for a healthy database. */
 const answeringPort = async (): Promise<{
@@ -143,21 +144,25 @@ const runDoctor = (bin: string, root: string, pgPort: number) => {
   delete inherited["PG_PORT"];
   delete inherited["WEB_PORT"];
   delete inherited["API_PORT"];
-  return spawnSync("bash", [path.join(root, DOCTOR)], {
+  // Beside a full `bun run test` the doctor's dozen commands outran the 20 s this bound was, and the
+  // kill read as a doctor that printed nothing (DEFLAKE); a kill is said as one instead.
+  const result = spawnSync("bash", [path.join(root, DOCTOR)], {
     encoding: "utf8",
-    timeout: 20_000,
+    timeout: 90_000,
     env: {
       ...inherited,
       PATH: `${bin}${path.delimiter}${inherited["PATH"] ?? ""}`,
       DATABASE_URL: `postgres://factory:factory@localhost:${String(pgPort)}/factory_doctor`,
     },
   });
+  expect(result.signal, `the doctor was killed: ${result.stderr}`).toBeNull();
+  return result;
 };
 
 describe("verify-board's doctor and the database", () => {
   it(
     "says OK when Postgres answers and the instance is healthy (the control)",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // Mutation checked: probing a hard-coded 5442 instead of the DATABASE_URL port makes this
       // case red wherever nothing listens on 5442, and a doctor that failed its database check
@@ -178,7 +183,7 @@ describe("verify-board's doctor and the database", () => {
 
   it(
     "fails, loudly, when Postgres is the only thing down",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // Mutation checked: dropping `fail=1` from the DOWN branch makes the doctor exit 0 here,
       // because the database is the one thing this case makes wrong; dropping the stderr line
@@ -199,7 +204,7 @@ describe("verify-board's doctor and the database", () => {
 
   it(
     "fails when a stranger owns the dashboard's port, even though it answers",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // Mutation checked: dropping the `is_ours` check on WEB_PORT — leaving only "the web pid is
       // alive and the port answers 200" — makes the doctor say OK here, because the recorded web
@@ -220,7 +225,7 @@ describe("verify-board's doctor and the database", () => {
 
   it(
     "fails when the GitHub fake ./up.sh recorded is no longer running",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // Mutation checked: dropping the doctor's GitHub block makes it say OK here — every other
       // part of the instance is healthy — and the drive's PR phase would then fail for a reason the
@@ -242,7 +247,7 @@ describe("verify-board's doctor and the database", () => {
 
   it(
     "still reports the database when no instance was ever started",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // Mutation checked: restoring the early `exit 1` on a missing `api.pid` — which ran before
       // the database check, so a down Postgres was never mentioned — makes the DOWN line vanish.

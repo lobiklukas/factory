@@ -824,7 +824,15 @@ describe("parseDiffSize", () => {
   });
 });
 
-describe("diffCapRefusal", () => {
+/**
+ * Each `diffCapRefusal` case builds a checkout with git and measures it with git, and `bun run test`
+ * runs every package's suites at once, so a case's wall clock is mostly the machine's load: the
+ * slowest here took 1.7 s alone and timed out at vitest's 5 s default beside a full `bun run test`.
+ * So the cases carry a budget sized to that load instead (DEFLAKE).
+ */
+const GIT_CASES = { timeout: 60_000 };
+
+describe("diffCapRefusal", GIT_CASES, () => {
   /** A throwaway checkout: the measurement is git's, so the case needs a real one. */
   const checkout = (files: Record<string, string>): string => {
     const directory = mkdtempSync(join(tmpdir(), "factory-cap-"));

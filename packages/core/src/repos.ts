@@ -39,8 +39,15 @@ const NO_CHECKOUT: CheckoutFacts = {
   hasFactoryConfig: false,
 };
 
-/** How long `rev-parse` may take before the path is answered as not a work tree. */
-const GIT_TIMEOUT_MS = 5_000;
+/**
+ * How long a local git question may take before it is answered as git not saying: the path is no
+ * work tree, the ref names no commit, the merge base is unknown. A healthy git answers a local probe
+ * in milliseconds, so this only bounds a hung one — and an answer read from a timeout is silently
+ * wrong (a real checkout refused as no work tree, a branch measured against the wrong base), so it is
+ * long enough that a loaded machine is waited for: the five seconds this was outran a local
+ * `rev-parse` and `merge-base` there (DEFLAKE).
+ */
+const GIT_TIMEOUT_MS = 60_000;
 
 /**
  * The root of the git work tree `directory` is inside, or `undefined` when it is not inside one.
@@ -52,6 +59,7 @@ const GIT_TIMEOUT_MS = 5_000;
  */
 export const workTreeRoot = (
   directory: string,
+  options: { readonly timeoutMs?: number } = {},
 ): Effect.Effect<string | undefined> =>
   Effect.callback<string | undefined>((resume, signal) => {
     execFile(
@@ -67,7 +75,11 @@ export const workTreeRoot = (
         "--is-inside-work-tree",
         "--show-toplevel",
       ],
-      { encoding: "utf8", signal, timeout: GIT_TIMEOUT_MS },
+      {
+        encoding: "utf8",
+        signal,
+        timeout: options.timeoutMs ?? GIT_TIMEOUT_MS,
+      },
       // stderr is dropped: a path that is not a repository is an answer, not a log line.
       (error, stdout) => {
         const [inside, root] = stdout.split("\n").map((line) => line.trim());

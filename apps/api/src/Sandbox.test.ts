@@ -15,7 +15,8 @@ import {
 } from "./Sandbox";
 
 const scratch = mkdtempSync(join(tmpdir(), "factory-api-sandbox-"));
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+// Removing the scratch tree outran vitest's 10 s hook default on a loaded machine (DEFLAKE).
+afterAll(() => rmSync(scratch, { recursive: true, force: true }), 60_000);
 
 const read = (env: Record<string, string>) =>
   Effect.runPromiseExit(

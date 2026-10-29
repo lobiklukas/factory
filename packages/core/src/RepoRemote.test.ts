@@ -3,7 +3,7 @@
  * (C17). Real git in a scratch repository; no network, no database.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RepoSlug } from "@repo/domain/Session";
@@ -16,10 +16,19 @@ process.env["GIT_CONFIG_NOSYSTEM"] = "1";
 // oxlint-disable-next-line effecttsgo/process-env -- as above.
 process.env["GIT_CONFIG_GLOBAL"] = "/dev/null";
 
+/**
+ * Each case spawns git a dozen times or more, and `bun run test` runs every package's suites at
+ * once, so a case's wall clock is mostly the machine's load: the slowest here took 3.5 s alone and
+ * 15 s beside a full `bun run test`, past vitest's 5 s default. So the cases carry a budget sized to
+ * that load instead (DEFLAKE).
+ */
+const GIT_CASES = { timeout: 60_000 };
+
 const roots: Array<string> = [];
 afterAll(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true });
-});
+  // Removing every case's checkouts outran vitest's 10 s hook default on a loaded machine (DEFLAKE).
+}, 60_000);
 
 const git = (cwd: string, ...args: ReadonlyArray<string>): string =>
   execFileSync("git", [...args], {
@@ -61,7 +70,7 @@ const measure = (directory: string, head: string) =>
 const diffNames = (cwd: string, range: string): string =>
   git(cwd, "diff", "--name-only", range);
 
-describe("measureBaseOf", () => {
+describe("measureBaseOf", GIT_CASES, () => {
   /**
    * Mutation: measure against the local base whatever was fetched — the forge's B is counted as
    * the run's change, and an empty run measures non-empty.
@@ -105,6 +114,42 @@ describe("measureBaseOf", () => {
     expect(await measure(root, "factory/s4")).toBe("refs/remotes/factory/main");
   });
 
+  /**
+   * A git slower than the five seconds the probes' deadline used to be is waited for: a loaded
+   * machine took that long over a local `merge-base`, and the question it timed out on answered the
+   * local base (DEFLAKE). The `git` first on `PATH` naps 6 s before `--is-ancestor`, and runs the
+   * real one.
+   *
+   * Mutation: put `GIT_TIMEOUT_MS` in `./repos` back to 5 s — the answer is `main`.
+   */
+  it("waits for a slow git rather than reading its silence as the local base", async () => {
+    const { root, b } = checkout();
+    git(root, "update-ref", "refs/remotes/factory/main", b);
+    git(root, "branch", "-q", "factory/s5", b);
+    const real = execFileSync("sh", ["-c", "command -v git"], {
+      encoding: "utf8",
+    }).trim();
+    const bin = mkdtempSync(join(tmpdir(), "factory-slow-git-"));
+    roots.push(bin);
+    writeFileSync(
+      join(bin, "git"),
+      `#!/bin/sh\ncase "$*" in *--is-ancestor*) sleep 6 ;; esac\nexec "${real}" "$@"\n`,
+    );
+    chmodSync(join(bin, "git"), 0o755);
+    // oxlint-disable-next-line effecttsgo/process-env -- a test harness sets up its own process.
+    const path = process.env["PATH"];
+    // oxlint-disable-next-line effecttsgo/process-env -- as above.
+    process.env["PATH"] = `${bin}:${path ?? ""}`;
+    try {
+      expect(await measure(root, "factory/s5")).toBe(
+        "refs/remotes/factory/main",
+      );
+    } finally {
+      // oxlint-disable-next-line effecttsgo/process-env -- as above.
+      process.env["PATH"] = path;
+    }
+  });
+
   it("answers the base for a head that does not resolve, so the measurement fails on its own terms", async () => {
     const { root, b } = checkout();
     git(root, "update-ref", "refs/remotes/factory/main", b);
@@ -145,7 +190,7 @@ describe("githubUrlOfRemote", () => {
   });
 });
 
-describe("forgeUrlFor", () => {
+describe("forgeUrlFor", GIT_CASES, () => {
   const repo = RepoSlug.make("acme/app");
   const withOrigin = (origin: string): string => {
     const root = mkdtempSync(join(tmpdir(), "factory-forge-url-"));

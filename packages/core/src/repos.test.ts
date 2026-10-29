@@ -4,8 +4,15 @@
  * `registerRepo`, `listRepos` and `getRepo` against Postgres; these cases need no database.
  */
 import { Effect } from "effect";
-import { execSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
+import { execFileSync, execSync } from "node:child_process";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -40,6 +47,46 @@ describe("workTreeRoot", () => {
     );
     expect(answers).toEqual([undefined, undefined, undefined]);
   });
+
+  /**
+   * A git slower than the five seconds the deadline used to be is waited for, as a loaded machine's
+   * was, rather than read as no work tree — which refused a real checkout's registration and dropped
+   * its readiness score (DEFLAKE). The deadline still bounds a hung git: a caller's shorter one gives
+   * up. The `git` first on `PATH` naps 6 s, then runs the real one. Mutation: put the deadline back
+   * to 5 s — the first answer is `undefined`.
+   */
+  it("waits for a slow git, and still gives up at its deadline", async () => {
+    const real = execFileSync("sh", ["-c", "command -v git"], {
+      encoding: "utf8",
+    }).trim();
+    const bin = mkdtempSync(join(tmpdir(), "factory-slow-git-"));
+    writeFileSync(
+      join(bin, "git"),
+      `#!/bin/sh\nsleep 6\nexec "${real}" "$@"\n`,
+    );
+    chmodSync(join(bin, "git"), 0o755);
+    // oxlint-disable-next-line effecttsgo/process-env -- a test harness sets up its own process.
+    const path = process.env["PATH"] ?? "";
+    // oxlint-disable-next-line effecttsgo/process-env -- as above.
+    process.env["PATH"] = `${bin}:${path}`;
+    try {
+      const [patient, impatient] = await Effect.runPromise(
+        Effect.all(
+          [
+            workTreeRoot(checkout),
+            workTreeRoot(checkout, { timeoutMs: 1_000 }),
+          ],
+          { concurrency: 2 },
+        ),
+      );
+      expect(patient).toBe(realpathSync(checkout));
+      expect(impatient).toBeUndefined();
+    } finally {
+      // oxlint-disable-next-line effecttsgo/process-env -- as above.
+      process.env["PATH"] = path;
+      rmSync(bin, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   it("yields while git runs, so a second fiber is not held behind it", async () => {
     // With a synchronous probe the first fiber would finish before the second started.

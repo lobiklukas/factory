@@ -187,11 +187,14 @@ const bashResult = (
   body: string,
   extra: Record<string, string> = {},
 ): BashRun => {
+  // The bounds here, and every case's `{ timeout: 120_000 }`, are sized for the load a gate puts on
+  // a machine rather than for a case's own work (DEFLAKE): beside a full `bun run test` a case here
+  // ran past the 30 s it used to have, and one `bash` call past the 30 s it was killed at.
   const run = spawnSync("bash", ["-c", body], {
     cwd: scratch.root,
     encoding: "utf8",
     env: childEnv(scratch, extra),
-    timeout: 30_000,
+    timeout: 90_000,
   });
   return {
     status: run.status ?? -1,
@@ -316,7 +319,7 @@ const colimaSocket = (scratch: Scratch): string =>
 describe("the ralph driver's shell contract", () => {
   it(
     "leaves an explicit DOCKER_HOST alone, and never probes either way",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // The acceptance criterion: with the caller's socket set and `docker info` failing, the value is
       // unchanged — this driver used to replace it with colima's here, and the skills an agent then
@@ -348,7 +351,7 @@ describe("the ralph driver's shell contract", () => {
 
   it(
     "falls back to colima's socket when nothing else answers",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // Mutation: `[ -z "${DOCKER_HOST:-}" ]` → `[ -n "${DOCKER_HOST:-}" ]`, and an unset host no
       // longer falls back at all. Deleting the `:-` instead leaves `${DOCKER_HOST}` unbound under the
@@ -368,7 +371,7 @@ describe("the ralph driver's shell contract", () => {
 
   it(
     "treats an empty DOCKER_HOST as unset, the way the skills' helper reads it",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // `pg_docker` and `docker_env` both spell the guard `${DOCKER_HOST:-}`, so an empty value falls
       // back (`postgres-up.test.ts` passes `DOCKER_HOST: ""` to reach its colima case for exactly this
@@ -390,7 +393,7 @@ describe("the ralph driver's shell contract", () => {
 
   it(
     "exports nothing when the active context answers",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // Mutation: delete `! docker info >/dev/null 2>&1 &&`, so a reachable docker still triggers the
       // fallback.
@@ -407,7 +410,7 @@ describe("the ralph driver's shell contract", () => {
 
   it(
     "exports nothing when there is no colima socket to fall back to",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // Mutation: delete `&& [ -S "$HOME/.colima/default/docker.sock" ]`, and the fallback points at a
       // socket that does not exist — which is worse than the unset value it replaced.
@@ -423,7 +426,7 @@ describe("the ralph driver's shell contract", () => {
 
   it(
     "does not mistake a plain file for colima's socket",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // A stale `docker.sock` left behind by a colima that was uninstalled is a regular file. `-S`
       // asks whether a socket accepts there; `-e` asks whether a name exists. Mutation: `-S` → `-e`,
@@ -444,7 +447,7 @@ describe("the ralph driver's shell contract", () => {
 
   it(
     "probes once across two calls, and writes nothing outside the environment",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // `ensure_db` calls `docker_env` on every `cmd_run`/`cmd_merge`/`cmd_plan`, and a stale export
       // from an earlier call must not cost a second probe — the same "resolved once, then kept"
@@ -486,7 +489,7 @@ describe("the ralph driver's shell contract", () => {
 
   it(
     "agrees with the skills' helper about an explicit socket",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // Mutation: delete `[ -z "${DOCKER_HOST:-}" ] &&` from the driver's guard: the loop half of this
       // case then reports colima while `pg_docker` keeps the explicit value — the disagreement the
@@ -520,7 +523,7 @@ describe("the ralph driver's shell contract", () => {
 
   it(
     "hands the explicit socket to every call ensure_db makes, from the checkout that owns them",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // Mutation: delete `[ -z "${DOCKER_HOST:-}" ] &&` from the guard: the fallback rewrites the value
       // before `ensure_db` makes a single docker call, and every call after it records colima.
@@ -572,7 +575,7 @@ describe("the ralph driver's shell contract", () => {
 
   it(
     "hands the explicit socket to the pi session, in the environment and in the run context",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // The claim the issue is about, one step past `docker_env`: `run_context` writes the socket into
       // the prompt of every iteration and `session` exports it into the `pi -p` it starts, so a value
@@ -642,7 +645,7 @@ describe("the ralph driver's shell contract", () => {
 
   it(
     "reads a provider error out of the session's logs, never out of their paths",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     () => {
       // The defect behind the CI red on 33954c0 (LOB-237): `provider_failed` piped
       // `tail -c 6000 "$out" "$err"`, and given two files `tail` prefixes each with a
@@ -758,7 +761,7 @@ describe("the ralph driver's shell contract", () => {
 
   it(
     "still dispatches when it is executed, in the shape each caller uses",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // The guard has to be exact: `return 0` when the file is sourced, and the dispatch when it is
       // run. Executed, `$0` and `BASH_SOURCE[0]` are the same string — as given, absolute or relative
@@ -787,7 +790,7 @@ describe("the ralph driver's shell contract", () => {
           cwd: REPO_ROOT,
           encoding: "utf8",
           env: childEnv(scratch, {}),
-          timeout: 30_000,
+          timeout: 90_000,
         });
         expect(run.status, `${label}: ${run.stderr}`).toBe(64);
         expect(run.stderr, label).toContain("usage:");
@@ -800,7 +803,7 @@ describe("the ralph driver's shell contract", () => {
 
   it(
     "refuses in one line whenever bash reads it from stdin, and dispatches in none",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // `bash < .pi/ralph/loop.sh` has no `BASH_SOURCE[0]` and no argv: under `set -u` the `HERE=`
       // line used to die with `BASH_SOURCE[0]: unbound variable` and `cd: null directory`, exit 1,
@@ -873,7 +876,7 @@ describe("the ralph driver's shell contract", () => {
           encoding: "utf8",
           input: script,
           env: childEnv(scratch, {}),
-          timeout: 30_000,
+          timeout: 90_000,
         });
         expect(run.status, `${label}: ${run.stderr}`).toBe(64);
         expect(run.stderr, `${label}: ${run.stdout}`).toContain("usage:");
@@ -894,7 +897,7 @@ describe("the ralph driver's shell contract", () => {
         cwd: REPO_ROOT,
         encoding: "utf8",
         env: childEnv(scratch, {}),
-        timeout: 30_000,
+        timeout: 90_000,
       });
       expect(viaC.status, viaC.stderr).toBe(64);
       expect(viaC.stderr, viaC.stdout).toContain("usage:");
@@ -913,7 +916,7 @@ describe("the ralph driver's shell contract", () => {
 
   it(
     "defines its functions and runs no subcommand when it is sourced",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     async () => {
       // Mutation: delete the `[ "${BASH_SOURCE[0]}" = "$0" ] || return 0` line (the sourced half then
       // dispatches `cmd_status`, which dies on the missing worktree and takes the sourcing shell with
@@ -943,7 +946,7 @@ describe("the ralph driver's shell contract", () => {
 
   it(
     "never names the CLI by a path, and resolves it to the fake in every case's environment",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     () => {
       // The false green `docs/testing-third-parties.md` names: a call by absolute path bypasses the
       // fake on `PATH` and reads as "docker was never called" — which is the claim half the cases
@@ -980,9 +983,9 @@ describe("the ralph driver's shell contract", () => {
 
   it(
     "gives every case a budget, so none relies on vitest's 5 s default",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     () => {
-      // Mutation: delete `{ timeout: 30_000 },` from any case above — the guard reads the file
+      // Mutation: delete `{ timeout: 120_000 },` from any case above — the guard reads the file
       // back and fails, naming the case that lost its budget. Without this case a future edit
       // could silently drop a budget and the gate would go red intermittently under parallel
       // load, which is the failure this issue exists to prevent.
@@ -1016,7 +1019,7 @@ describe("the ralph driver's shell contract", () => {
 
   it(
     "pins RALPH_AGENT=pi in every case that drives session, so it cannot launch the real agent CLI",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     () => {
       // Mutation: remove `RALPH_AGENT: "pi"` from the `session` case above — this guard reads the
       // file back and fails, naming the case that drives `session` without pinning the agent.
@@ -1064,7 +1067,7 @@ describe("the ralph driver's shell contract", () => {
 
   it(
     "README exit-code list names every status the driver exits with (LOB-131)",
-    { timeout: 30_000 },
+    { timeout: 120_000 },
     () => {
       const readme = readFileSync(
         path.join(REPO_ROOT, ".pi/ralph/README.md"),

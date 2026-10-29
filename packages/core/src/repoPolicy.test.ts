@@ -18,7 +18,8 @@ import { decodePolicy, readRepoPolicy } from "./repoPolicy";
 import { workTreePrefix } from "./workspace";
 
 const scratch = mkdtempSync(join(tmpdir(), "factory-core-repo-policy-"));
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+// Removing the scratch tree outran vitest's 10 s hook default on a loaded machine (DEFLAKE).
+afterAll(() => rmSync(scratch, { recursive: true, force: true }), 60_000);
 
 const git = (root: string, command: string) =>
   execSync(command, { cwd: root, stdio: "ignore" });
@@ -52,7 +53,9 @@ const read = (checkout: string, ref = "main", prefix = "") =>
 const config = (policy: unknown) =>
   JSON.stringify({ install: "bun install", policy });
 
-describe("readRepoPolicy at a base", { timeout: 30_000 }, () => {
+// Each case commits with git and reads the policy back with git at a ref: past the 30 s these had on
+// a loaded machine (DEFLAKE).
+describe("readRepoPolicy at a base", { timeout: 120_000 }, () => {
   /** Mutation: read the policy block's keys under other names — the gate is lost. */
   it("reads the policy block's gates, deny list and hosts, and says where it read them", async () => {
     const checkout = fixtureRepo({
@@ -200,7 +203,7 @@ describe("readRepoPolicy at a base", { timeout: 30_000 }, () => {
 
 describe(
   "a policy that cannot be loaded is a typed RepoPolicyRejected",
-  { timeout: 30_000 },
+  { timeout: 120_000 },
   () => {
     const rejection = async (files: Record<string, string>) => {
       const exit = await read(fixtureRepo(files));

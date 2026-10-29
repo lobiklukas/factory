@@ -40,7 +40,8 @@ import {
 
 const context = BACKGROUND_CONTEXT;
 const scratch = mkdtempSync(join(tmpdir(), "factory-environment-"));
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+// Removing the scratch tree outran vitest's 10 s hook default on a loaded machine (DEFLAKE).
+afterAll(() => rmSync(scratch, { recursive: true, force: true }), 60_000);
 
 /** A fresh directory standing in for the worktree the control plane cut, holding `files`. */
 const worktree = (files: Record<string, string> = {}): string => {

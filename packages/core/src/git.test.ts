@@ -128,8 +128,16 @@ process.env["GIT_CONFIG_NOSYSTEM"] = "1";
 // oxlint-disable-next-line effecttsgo/process-env -- as above.
 process.env["GIT_CONFIG_GLOBAL"] = "/dev/null";
 
-/** Each case spawns a few dozen git processes; `bun run test` runs every package at once. */
-const GIT_CASE = { timeout: 30_000 };
+/**
+ * Each case spawns a few dozen git processes, and serving one over HTTP spawns `git http-backend`
+ * per request; `bun run test` runs every package at once. Measured (DEFLAKE): the slowest case took
+ * 10 s alone, and two timed out at the 30 s this used to be beside a full `bun run test` — a
+ * budget for the load the case shares, not for its own work.
+ */
+const GIT_CASE = { timeout: 120_000 };
+
+/** The setup's eight git calls and the HTTP remote: past vitest's 10 s hook default under load. */
+const GIT_SETUP_MS = 60_000;
 
 const root = mkdtempSync(join(tmpdir(), "factory-git-"));
 // The bare repository sits at `/<repo>.git` under the served root, because the runner sends the
@@ -204,13 +212,14 @@ beforeAll(async () => {
   // A helper that *stores*: if the runner let configured helpers see the token, git would
   // `approve` it into this file after the first successful call.
   git(local, "config", "credential.helper", `store --file=${leakedStore}`);
-});
+}, GIT_SETUP_MS);
 
 afterAll(() => {
   remote?.server.close();
   // One directory holds the remote, the registered repo and every worktree, so one removal is all.
   rmSync(root, { recursive: true, force: true });
-});
+  // Removing every case's git checkouts outran vitest's 10 s hook default on a loaded machine (DEFLAKE).
+}, GIT_SETUP_MS);
 
 describe(
   "fetch, commit, push against a local bare repository",

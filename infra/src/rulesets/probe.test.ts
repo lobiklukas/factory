@@ -46,7 +46,8 @@ beforeAll(async () => {
 afterAll(async () => {
   await forge.close();
   rmSync(root, { recursive: true, force: true });
-});
+  // Removing the scratch checkout outran vitest's 10 s hook default on a loaded machine (DEFLAKE).
+}, 60_000);
 
 beforeEach(() => {
   count += 1;
