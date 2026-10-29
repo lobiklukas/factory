@@ -37,6 +37,7 @@ import {
   subscriptionProblem,
   type VapidConfig,
   webPushSink,
+  webPushSinkId,
 } from "./NotifierWebPush";
 import { HttpClient } from "effect/http";
 import {
@@ -69,6 +70,7 @@ type SinkRow = {
   readonly type: string;
   readonly config: string;
   readonly enabled: boolean;
+  readonly expiredAt: Date | string | null;
   readonly createdAt: Date | string;
 };
 
@@ -105,6 +107,9 @@ const summaryOf = (row: SinkRow): NotificationSinkSummary => ({
   type: row.type === "email" ? "email" : "web_push",
   label: labelOf(row),
   enabled: row.enabled,
+  ...(row.expiredAt === null || row.expiredAt === undefined
+    ? {}
+    : { expiredAt: iso(row.expiredAt) }),
   createdAt: iso(row.createdAt),
 });
 
@@ -177,7 +182,7 @@ export const makeNotifySettings = (
   Effect.gen(function* () {
     const sql = yield* SqlClient;
     const { channels } = options;
-    const columns = sql`id, actor, type, config::text AS config, enabled, created_at`;
+    const columns = sql`id, actor, type, config::text AS config, enabled, expired_at, created_at`;
 
     const kindSettings = withStorage(
       sql<{ readonly kind: string; readonly enabled: boolean }>`
@@ -300,7 +305,7 @@ export const makeNotifySettings = (
         // Adding what the person already has turns it back on: the answer they wanted.
         const [row] = yield* withStorage(
           sql<SinkRow>`
-            UPDATE notification_sinks SET enabled = TRUE WHERE id = ${same.id}
+            UPDATE notification_sinks SET enabled = TRUE, expired_at = NULL WHERE id = ${same.id}
             RETURNING ${columns}
           `,
         );
@@ -350,7 +355,9 @@ export const makeNotifySettings = (
       function* (actor: string, id: string, enabled: boolean) {
         const [row] = yield* withStorage(
           sql<SinkRow>`
-            UPDATE notification_sinks SET enabled = ${enabled}
+            UPDATE notification_sinks
+            SET enabled = ${enabled},
+                expired_at = ${enabled ? sql`NULL` : sql`expired_at`}
             WHERE id = ${id} AND actor = ${actor}
             RETURNING ${columns}
           `,
@@ -483,8 +490,10 @@ export const storedPeople = (
     readonly type: string;
     readonly config: string;
   }) => Effect.Effect<Option.Option<NotificationSink>>,
-): Effect.Effect<PeopleSinks, NotifyStorageError, SqlClient> =>
-  Effect.gen(function* () {
+): Effect.Effect<PeopleSinks, NotifyStorageError, SqlClient> => {
+  // The read runs every pass; a row that cannot be sent to is named once per process, not every poll.
+  const warned = new Set<string>();
+  return Effect.gen(function* () {
     const sql = yield* SqlClient;
     const rows = yield* sql<{
       readonly id: string;
@@ -506,12 +515,59 @@ export const storedPeople = (
     for (const row of rows) {
       const built = yield* build(row);
       if (Option.isNone(built)) {
-        yield* Effect.logWarning(
-          `notify: sink ${row.id} of ${row.actor} (${row.type}) cannot be sent to by this control plane and is skipped`,
-        );
+        if (!warned.has(row.id)) {
+          warned.add(row.id);
+          yield* Effect.logWarning(
+            `notify: sink ${row.id} of ${row.actor} (${row.type}) cannot be sent to by this control plane and is skipped`,
+          );
+        }
         continue;
       }
+      warned.delete(row.id);
       people.set(row.actor, [...(people.get(row.actor) ?? []), built.value]);
     }
     return people;
   });
+};
+
+/**
+ * A push service answered 404 or 410 for the ledger sink `sinkId` (`push:<fingerprint of the
+ * endpoint>`): switch off every stored Web Push subscription with that endpoint and stamp when, so the
+ * owner's routing falls back to their other sinks or the shared ones, and the settings page says the
+ * subscription expired. Returns how many rows it switched off.
+ */
+export const expireWebPushSink = (
+  sinkId: string,
+): Effect.Effect<number, NotifyStorageError, SqlClient> =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient;
+    const rows = yield* sql<{
+      readonly id: string;
+      readonly endpoint: string | null;
+    }>`
+      SELECT id, config->>'endpoint' AS endpoint FROM notification_sinks
+      WHERE type = 'web_push' AND enabled
+    `;
+    const ids = rows
+      .filter(
+        (row) =>
+          row.endpoint !== null && webPushSinkId(row.endpoint) === sinkId,
+      )
+      .map((row) => row.id);
+    if (ids.length === 0) return 0;
+    yield* sql`
+      UPDATE notification_sinks SET enabled = FALSE, expired_at = now()
+      WHERE id IN ${sql.in(ids)}
+    `;
+    yield* Effect.logWarning(
+      `notify: the push service says ${ids.length} Web Push subscription(s) are gone; switched off`,
+    );
+    return ids.length;
+  }).pipe(
+    Effect.mapError(
+      (cause) =>
+        new NotifyStorageError({
+          message: `switch off a gone subscription: ${String(cause)}`,
+        }),
+    ),
+  );

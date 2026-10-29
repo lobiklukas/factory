@@ -200,6 +200,48 @@ describe("what a subscription may be", () => {
   });
 });
 
+describe("where a subscription may point", () => {
+  const keys = makeSubscription("https://push.example.test/x");
+  const problem = (endpoint: string, allowInsecure = false) =>
+    subscriptionProblem(
+      { endpoint, p256dh: keys.p256dh, auth: keys.auth },
+      allowInsecure,
+    );
+
+  it("refuses loopback, private, link-local and local-name hosts, however they are written", () => {
+    for (const endpoint of [
+      "https://127.0.0.1/x",
+      "https://127.1.2.3:8443/x",
+      "https://localhost/x",
+      "https://app.localhost/x",
+      "https://10.1.2.3/x",
+      "https://172.16.0.1/x",
+      "https://172.31.255.255/x",
+      "https://192.168.0.10/x",
+      "https://169.254.169.254/latest/meta-data",
+      "https://100.64.0.1/x",
+      "https://0.0.0.0/x",
+      "https://[::1]/x",
+      "https://[fd00::1]/x",
+      "https://[fe80::1]/x",
+      "https://[::ffff:127.0.0.1]/x",
+      "https://db.internal/x",
+      "https://printer.local/x",
+      "https://2130706433/x",
+    ]) {
+      expect(problem(endpoint), endpoint).toContain("public host");
+    }
+  });
+
+  it("accepts a public host, and an internal one only when the deployment opts in", () => {
+    expect(problem("https://fcm.googleapis.com/fcm/send/abc")).toBeUndefined();
+    expect(problem("https://172.32.0.1/x")).toBeUndefined();
+    expect(problem("https://192.169.0.1/x")).toBeUndefined();
+    expect(problem("https://127.0.0.1/x", true)).toBeUndefined();
+    expect(problem("http://127.0.0.1:9/x", true)).toBeUndefined();
+  });
+});
+
 describe("the sink over a push service", () => {
   let push: FakePush | undefined;
   afterEach(async () => {
@@ -273,11 +315,32 @@ describe("the sink over a push service", () => {
     expect(gone.message).toContain("gone");
     expect(gone.message).toContain("410");
     expect(gone.message).not.toContain("abc123secret");
-    expect((await failure(404)).message).toContain("gone");
+    expect(gone.gone).toBe(true);
+    const missing = await failure(404);
+    expect(missing.message).toContain("gone");
+    expect(missing.gone).toBe(true);
     const broken = await failure(500);
     expect(broken.message).toContain("HTTP 500");
     expect(broken.rateLimited).toBeUndefined();
+    expect(broken.gone).toBeUndefined();
     expect((await failure(429)).rateLimited).toBe(true);
+  });
+
+  it("never follows a redirect: a 307 to another address is a failed send and the target is not reached", async () => {
+    push = await startFakePush();
+    const internal = await startFakePush();
+    try {
+      push.redirectTo = `${internal.origin}/admin`;
+      const { sink } = await sinkFor(push, vapidOf());
+      const failure = await Effect.runPromise(
+        Effect.flip(sink.send(notification)),
+      );
+      expect(failure.message).toContain("HTTP 307");
+      expect(push.received).toHaveLength(1);
+      expect(internal.received).toHaveLength(0);
+    } finally {
+      await internal.close();
+    }
   });
 
   it("an unreachable service is a NotifyError", async () => {

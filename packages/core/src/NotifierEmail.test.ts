@@ -5,6 +5,7 @@
  * encoding and the failure messages are the ones a real server would see. No real mail provider.
  */
 import { execFileSync } from "node:child_process";
+import net from "node:net";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -243,6 +244,65 @@ describe("a server that refuses", () => {
     expect(greeting).toContain("554 no service");
   });
 });
+
+/* oxlint-disable effecttsgo/new-promise effecttsgo/global-timers -- a node:net server's `listen` and `close` take callbacks, and the case races a socket close against a deadline. */
+describe("a server that never finishes connecting", () => {
+  it("is cut off with the send: interrupting it closes the half-open socket instead of leaving it to the OS timeout", async () => {
+    // A TLS handshake with a server that accepts the TCP connection and never answers is the
+    // connect phase hanging, as a host that drops packets would be.
+    const accepted: net.Socket[] = [];
+    const closed: Promise<void>[] = [];
+    const silent = net.createServer((socket) => {
+      accepted.push(socket);
+      closed.push(
+        new Promise((resolve) => socket.once("close", () => resolve())),
+      );
+      socket.on("error", () => undefined);
+      // Read, so the client's hang-up is seen as the end of the stream.
+      socket.resume();
+    });
+    await new Promise<void>((resolve) =>
+      silent.listen(0, "127.0.0.1", resolve),
+    );
+    try {
+      const address = silent.address();
+      const port =
+        typeof address === "object" && address !== null ? address.port : 0;
+      const transport = smtpTransport({
+        host: "127.0.0.1",
+        port,
+        secure: true,
+        clientName: "factory.test",
+      });
+      const exit = await Effect.runPromiseExit(
+        transport({
+          from: "factory@example.test",
+          to: "amy@example.test",
+          subject: "s",
+          text: "t",
+          key: "k",
+        }).pipe(Effect.timeout(300)),
+      );
+      expect(Exit.isFailure(exit)).toBe(true);
+      expect(accepted).toHaveLength(1);
+      // The server sees the client hang up well inside the 15 s step timeout.
+      await Promise.race([
+        Promise.all(closed),
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error("the socket was left open")),
+            3_000,
+          ),
+        ),
+      ]);
+    } finally {
+      for (const socket of accepted) socket.destroy();
+      await new Promise<void>((resolve) => silent.close(() => resolve()));
+    }
+  });
+});
+
+/* oxlint-enable effecttsgo/new-promise effecttsgo/global-timers */
 
 describe("authentication", () => {
   const credentials = { user: "factory", password: "p@ss/w0rd secret" };

@@ -21,7 +21,7 @@
  *   NOTIFY_VAPID_PUBLIC_KEY   the Web Push application-server key pair, base64url (a pair is made by
  *   NOTIFY_VAPID_PRIVATE_KEY  `generateVapidKeys` in @repo/core); the private key is never logged
  *   NOTIFY_VAPID_SUBJECT      a mailto: or https: contact for push services, default mailto:<SMTP_FROM>
- *   NOTIFY_PUSH_ALLOW_INSECURE  accept http: push endpoints, for a loopback fake push service only
+ *   NOTIFY_PUSH_ALLOW_INSECURE  accept http: and internal-host push endpoints (a loopback fake push service only)
  *   NOTIFY_RETENTION_DAYS     delivered notifications and run failures older than this are deleted
  *                             (F22), default 30
  *
@@ -31,6 +31,7 @@
  * retention sweep does and a sink added on the settings page is live on the next poll.
  */
 import {
+  expireWebPushSink,
   isEmailAddress,
   makeNotifier,
   makeNotifySettings,
@@ -250,6 +251,11 @@ export const NotifierDaemon = (defaultLinkBase: string) =>
           Effect.provideService(SqlClient, sql),
         ),
         people: storedPeople(build).pipe(Effect.provideService(SqlClient, sql)),
+        onGone: (sinkId) =>
+          expireWebPushSink(sinkId).pipe(
+            Effect.provideService(SqlClient, sql),
+            Effect.asVoid,
+          ),
         linkBase: plan.linkBase,
         retentionMs: plan.retentionMs,
       });

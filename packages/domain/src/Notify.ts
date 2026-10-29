@@ -53,6 +53,8 @@ export const NotificationSinkSummary = Schema.Struct({
   /** The email address, or the push service's host. */
   label: Schema.String,
   enabled: Schema.Boolean,
+  /** When the push service said the subscription is gone (HTTP 404/410); the sink is then off. */
+  expiredAt: Schema.optional(Timestamp),
   createdAt: Timestamp,
 });
 export type NotificationSinkSummary = typeof NotificationSinkSummary.Type;

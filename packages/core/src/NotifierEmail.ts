@@ -225,8 +225,17 @@ const replyReader = (socket: net.Socket) => {
   };
 };
 
-const connect = (config: SmtpConfig): Promise<net.Socket> =>
+/**
+ * Open the connection. The caller's `signal` and the step timeout both destroy the half-open socket,
+ * so a host that drops packets holds neither a socket nor the notifier's claim past the send timeout.
+ */
+const connect = (
+  config: SmtpConfig,
+  signal: AbortSignal,
+): Promise<net.Socket> =>
   new Promise((resolve, reject) => {
+    if (signal.aborted)
+      return reject(new SmtpFailure("the send was cancelled"));
     const socket = config.secure
       ? tls.connect({
           ...config.tls,
@@ -235,11 +244,35 @@ const connect = (config: SmtpConfig): Promise<net.Socket> =>
           servername: config.host,
         })
       : net.connect({ host: config.host, port: config.port });
+    const readyEvent = config.secure ? "secureConnect" : "connect";
+    const settle = () => {
+      signal.removeEventListener("abort", onAbort);
+      socket.removeListener("timeout", onTimeout);
+      socket.removeListener("error", onError);
+      socket.removeListener(readyEvent, onReady);
+    };
+    const giveUp = (cause: Error) => {
+      settle();
+      // Nothing listens for an error after this, and a destroyed socket may still raise one.
+      socket.on("error", () => undefined);
+      socket.destroy();
+      reject(cause);
+    };
+    const onAbort = () => giveUp(new SmtpFailure("the send was cancelled"));
+    const onTimeout = () =>
+      giveUp(
+        new SmtpFailure("the server did not accept the connection in time"),
+      );
+    const onError = (cause: Error) => giveUp(cause);
+    const onReady = () => {
+      settle();
+      resolve(socket);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
     socket.setTimeout(STEP_TIMEOUT_MS);
-    socket.once(config.secure ? "secureConnect" : "connect", () =>
-      resolve(socket),
-    );
-    socket.once("error", reject);
+    socket.once("timeout", onTimeout);
+    socket.once(readyEvent, onReady);
+    socket.once("error", onError);
   });
 
 /** One delivery over a fresh connection, closed when the conversation ends either way. */
@@ -249,7 +282,7 @@ const deliver = async (
   now: Date,
   signal: AbortSignal,
 ): Promise<void> => {
-  let socket = await connect(config);
+  let socket = await connect(config, signal);
   const abort = () => socket.destroy();
   signal.addEventListener("abort", abort, { once: true });
   try {

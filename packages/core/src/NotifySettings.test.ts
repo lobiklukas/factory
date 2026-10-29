@@ -15,8 +15,9 @@ import { afterAll, describe, expect, it } from "vitest";
 import { DatabaseLive } from "@repo/storage-postgres";
 import type { Notification } from "./Notifier";
 import type { Mail } from "./NotifierEmail";
-import { generateVapidKeys } from "./NotifierWebPush";
+import { generateVapidKeys, webPushSinkId } from "./NotifierWebPush";
 import {
+  expireWebPushSink,
   makeNotifySettings,
   MAX_SINKS_PER_ACTOR,
   type NotifyChannels,
@@ -156,6 +157,36 @@ describe("adding a sink", () => {
       expect(failure.message).toContain("nothing was stored");
     }
     expect(result.after.sinks).toEqual([]);
+  });
+
+  it("refuses a push endpoint on this machine or a private network unless the deployment opts in", async () => {
+    const amy = actor("amy");
+    const endpoints = [
+      "https://127.0.0.1/push",
+      "https://localhost/push",
+      "https://10.0.0.5:8443/admin",
+      "https://192.168.1.9/x",
+      "https://169.254.169.254/latest",
+      "https://[::1]/x",
+      "https://[::ffff:7f00:1]/x",
+      "https://kubernetes.default.svc.cluster.local/x",
+      "https://metadata.internal/x",
+    ];
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const service = yield* settings();
+        const failures = yield* Effect.forEach(endpoints, (endpoint) =>
+          Effect.flip(service.addSink(amy, push(endpoint))),
+        );
+        const open = yield* settings({ ...channels, allowInsecurePush: true });
+        const allowed = yield* open.addSink(amy, push("https://10.0.0.5/x"));
+        return { failures, allowed };
+      }),
+    );
+    expect(result.failures.map((failure) => failure._tag)).toEqual(
+      endpoints.map(() => "InvalidNotificationSink"),
+    );
+    expect(result.allowed.label).toBe("10.0.0.5");
   });
 
   it("accepts an http push endpoint only when the deployment opts in", async () => {
@@ -348,6 +379,44 @@ describe("what the notifier reads back", () => {
       }),
     );
     expect(result).toBeUndefined();
+  });
+
+  it("a gone subscription is switched off and stamped expired, and the owner's other sinks stay", async () => {
+    const amy = actor("amy");
+    const endpoint = `https://push.example.test/gone-${randomBytes(4).toString("hex")}`;
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const service = yield* settings();
+        const build = yield* personalSinkOf(channels);
+        yield* service.addSink(amy, email("amy@example.test"));
+        yield* service.addSink(amy, push(endpoint));
+        const switchedOff = yield* expireWebPushSink(webPushSinkId(endpoint));
+        const again = yield* expireWebPushSink(webPushSinkId(endpoint));
+        const listed = (yield* service.get(amy)).sinks;
+        const live = (yield* storedPeople(build)).get(amy);
+        // Turning it back on is the person's choice and clears the stamp.
+        const pushRow = listed.find((sink) => sink.type === "web_push");
+        const resumed = yield* service.setSinkEnabled(
+          amy,
+          pushRow?.id ?? "",
+          true,
+        );
+        return { switchedOff, again, listed, live, resumed };
+      }),
+    );
+    expect(result.switchedOff).toBe(1);
+    expect(result.again).toBe(0);
+    const pushRow = result.listed.find((sink) => sink.type === "web_push");
+    expect(pushRow).toMatchObject({ enabled: false });
+    expect(pushRow?.expiredAt).toBeDefined();
+    expect(result.listed.find((sink) => sink.type === "email")).toMatchObject({
+      enabled: true,
+    });
+    expect(result.live?.map((sink) => sink.id.split(":")[0])).toEqual([
+      "email",
+    ]);
+    expect(result.resumed).toMatchObject({ enabled: true });
+    expect(result.resumed.expiredAt).toBeUndefined();
   });
 
   it("refuses to build a stored push sink whose endpoint is no longer an allowed one", async () => {

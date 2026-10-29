@@ -11,7 +11,9 @@ import { SqlClient } from "effect/sql/SqlClient";
  * - `notification_sinks` is a person's own destinations: `actor` is the control-plane actor that
  *   added it (the credential's, LOB-20) and `config` is what the sink needs to send — `{address}` for
  *   `email`, `{endpoint, p256dh, auth}` for `web_push`. A Web Push subscription is useless without
- *   the deployment's VAPID private key, which is never stored here.
+ *   the deployment's VAPID private key, which is never stored here. `expired_at` is set, with
+ *   `enabled` cleared, when the push service answers 404 or 410: the subscription is gone and the
+ *   page says so.
  *
  * Neither table is part of `notification_deliveries`' exactly-once: a sink's ledger identity is a
  * fingerprint of its destination (`email:<digest of the address>`), not this row's id, so removing
@@ -36,6 +38,7 @@ export default Effect.gen(function* () {
       type TEXT NOT NULL CHECK (type IN ('email', 'web_push')),
       config JSONB NOT NULL,
       enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      expired_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `;

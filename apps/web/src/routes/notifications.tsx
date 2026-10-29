@@ -282,6 +282,15 @@ function Sinks({ settings }: { readonly settings: NotificationSettings }) {
                 <SmartphoneIcon className="size-3.5" strokeWidth={1.75} />
               )}
               <span className="font-mono">{sinkTitle(sink)}</span>
+              {sink.expiredAt === undefined ? null : (
+                <span
+                  data-notify-sink-expired={sink.id}
+                  className="text-[11px] text-destructive"
+                >
+                  expired: the push service no longer knows this browser; remove
+                  it and subscribe again
+                </span>
+              )}
               <label className="ml-auto flex items-center gap-1.5 text-[11px] text-muted-foreground">
                 <input
                   type="checkbox"

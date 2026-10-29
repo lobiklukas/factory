@@ -5,15 +5,15 @@
  * lookback — and a removed row's event is not announced again.
  *
  * "Old" is made by writing the timestamp: the sweep compares `delivered_at` and `failed_at` with
- * `now()`, and these cases set them to ten days ago. Every ledger row is under a fake sink with a
- * fresh id, so the cases read and delete only their own rows on a shared development database.
+ * `now()`, and these cases set them to ten days ago. The sweep deletes by age across the whole
+ * database, so the cases run on a scratch database of this file's own (`scratchDatabase`), never a
+ * developer's `factory` one.
  *
  * Postgres only, not mocked: `docker compose up -d --wait postgres`.
  */
-import { Effect, Layer, ManagedRuntime } from "effect";
+import { Effect } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
-import { DatabaseLive } from "@repo/storage-postgres";
 import {
   makeNotifier,
   NOTIFICATION_KINDS,
@@ -24,27 +24,21 @@ import {
   BASE,
   cleanup,
   fakeSink,
+  scratchDatabase,
   seed,
   type Seeded,
 } from "./notifier.test-fake";
-import { TaskServiceLive } from "./TaskService";
 
-/**
- * The window these cases sweep with, and how old their "old" rows are. Not the default thirty days:
- * every notifier's first pass sweeps the whole shared database, so a row this file aged past the
- * default could be deleted by another file's notifier before the case read it. Ten-day-old rows are
- * past this file's five-day window and inside every other notifier's.
- */
+/** The window these cases sweep with, and how old their "old" rows are: ten days against five. */
 const WINDOW_MS = 5 * 86_400_000;
 const OLD_DAYS = 10;
 
-const runtime = ManagedRuntime.make(
-  TaskServiceLive.pipe(Layer.provideMerge(DatabaseLive)),
-);
+const scratch = await scratchDatabase("retention");
+const runtime = scratch.runtime;
 
 afterAll(async () => {
   await runtime.runPromise(cleanup);
-  await runtime.dispose();
+  await scratch.drop();
 });
 
 const notifierOver = (
@@ -239,6 +233,45 @@ describe("the retention sweep", () => {
         .filter((id) => mineIds(result.seeded).includes(id))
         .sort(),
     ).toEqual([...mineIds(result.seeded)].sort());
+  }, 60_000);
+
+  it("deletes an undelivered row that can never be sent — out of attempts, or to a sink nothing sends to — and keeps a pending one", async () => {
+    const fake = fakeSink();
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const seeded = yield* seed(actor("owner"));
+        const notifier = yield* notifierOver(fake.sink, { sweepEveryMs: 0 });
+        yield* notifier.pass;
+        const old = (eventId: string, sink: string, attempts: number) =>
+          sql`
+            INSERT INTO notification_deliveries
+              (event_id, sink, kind, title, body, link, created_at, attempts)
+            VALUES (
+              ${eventId}, ${sink}, 'failed', 't', 'b', 'http://dash.test/',
+              now() - make_interval(secs => ${OLD_DAYS * 86_400}), ${attempts}
+            )
+          `;
+        const orphan = `push:orphan-${fake.sink.id.slice(5)}`;
+        yield* old("failed:old:spent", fake.sink.id, 5);
+        yield* old("failed:old:pending", fake.sink.id, 1);
+        yield* old("failed:old:orphaned", orphan, 1);
+        // An old row for an event that is still open is kept even when nothing sends to its sink:
+        // deleting it would let the event be recorded again.
+        yield* old(seeded.approval, orphan, 1);
+        yield* notifier.sweep;
+        const rows = yield* sql<{ readonly eventId: string }>`
+          SELECT event_id FROM notification_deliveries
+          WHERE (sink = ${fake.sink.id} AND event_id LIKE 'failed:old:%')
+             OR sink = ${orphan}
+        `;
+        return {
+          approval: seeded.approval,
+          rows: rows.map((row) => row.eventId).sort(),
+        };
+      }),
+    );
+    expect(result.rows).toEqual([result.approval, "failed:old:pending"].sort());
   }, 60_000);
 
   it("keeps a delivered row whose event is still open, so the event is not sent a second time", async () => {

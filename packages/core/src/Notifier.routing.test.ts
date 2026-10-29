@@ -4,22 +4,22 @@
  * the shared sinks only when the card has no owner with one — and a toggle or a new sink is live on
  * the next pass of the same notifier, with no restart.
  *
- * The sinks are recording fakes with fresh ids, so the ledger rows are this file's own on a shared
- * development database; every actor is random per case, so another file's cards are nobody's here.
- * The one stored thing the cases touch is `notification_kinds.approval` — no other file's assertions
- * read it, and it is put back after.
+ * The cases run on a scratch database of this file's own (`scratchDatabase`): they write the
+ * deployment-wide `notification_kinds`, which must not switch approvals off for a developer's
+ * running factory. The sinks are recording fakes with fresh ids and every actor is random per case.
  *
  * Postgres only, not mocked: `docker compose up -d --wait postgres`.
  */
-import { Effect, Layer, ManagedRuntime } from "effect";
+import { randomBytes } from "node:crypto";
+import { Effect } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
-import { DatabaseLive } from "@repo/storage-postgres";
 import {
   makeNotifier,
   NOTIFICATION_KINDS,
   type NotificationKind,
   type NotificationSink,
+  NotifyError,
   type NotifyStorageError,
   type PeopleSinks,
 } from "./Notifier";
@@ -28,15 +28,14 @@ import {
   BASE,
   cleanup,
   fakeSink,
+  scratchDatabase,
   kindsSent,
   seed,
 } from "./notifier.test-fake";
 import { storedKinds } from "./NotifySettings";
-import { TaskServiceLive } from "./TaskService";
 
-const runtime = ManagedRuntime.make(
-  TaskServiceLive.pipe(Layer.provideMerge(DatabaseLive)),
-);
+const scratch = await scratchDatabase("routing");
+const runtime = scratch.runtime;
 
 afterAll(async () => {
   await runtime.runPromise(
@@ -46,7 +45,7 @@ afterAll(async () => {
       yield* cleanup;
     }),
   );
-  await runtime.dispose();
+  await scratch.drop();
 });
 
 const ALL = ["approval", "failed", "gate", "question"];
@@ -193,6 +192,101 @@ describe("who an event goes to", () => {
     );
     expect(kindsSent(seeded, shared.sent)).toEqual(ALL);
     expect(kindsSent(seeded, frankMail.sent)).toEqual(ALL);
+  }, 60_000);
+
+  it("pausing or removing the owner's sink after delivery does not post their open events to the shared channel", async () => {
+    const kim = actor("kim");
+    const kimMail = fakeSink("email");
+    const shared = fakeSink();
+    const roster = {
+      current: new Map<string, ReadonlyArray<NotificationSink>>([
+        [kim, [kimMail.sink]],
+      ]),
+    };
+    const seeded = await runtime.runPromise(
+      Effect.gen(function* () {
+        const seeded = yield* seed(kim);
+        const notifier = yield* notifierOver({
+          shared: [shared.sink],
+          people: Effect.sync(() => roster.current),
+        });
+        yield* notifier.pass;
+        // The owner pauses their only sink; every event of theirs is still open.
+        roster.current = new Map();
+        yield* notifier.pass;
+        yield* notifier.pass;
+        return seeded;
+      }),
+    );
+    expect(kindsSent(seeded, kimMail.sent)).toEqual(ALL);
+    expect(kindsSent(seeded, shared.sent)).toEqual([]);
+  }, 60_000);
+
+  it("a push subscription the service says is gone is switched off, spent at once, and the owner falls back to the shared sinks", async () => {
+    const lee = actor("lee");
+    const goneCalls: string[] = [];
+    const deadSink: NotificationSink = {
+      id: `push:dead-${randomBytes(4).toString("hex")}`,
+      label: "a dead subscription",
+      send: (notification) =>
+        Effect.suspend(() => {
+          goneCalls.push(notification.eventId);
+          return Effect.fail(
+            new NotifyError({
+              sink: deadSink.id,
+              message:
+                "the push service says the subscription is gone (HTTP 410)",
+              gone: true,
+            }),
+          );
+        }),
+    };
+    const shared = fakeSink();
+    const roster = {
+      current: new Map<string, ReadonlyArray<NotificationSink>>([
+        [lee, [deadSink]],
+      ]),
+    };
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient;
+        const seeded = yield* seed(lee);
+        const gone: string[] = [];
+        const notifier = yield* makeNotifier({
+          sinks: [shared.sink],
+          kinds: new Set(NOTIFICATION_KINDS),
+          people: Effect.sync(() => roster.current),
+          onGone: (id) =>
+            Effect.sync(() => {
+              gone.push(id);
+              roster.current = new Map();
+            }),
+          linkBase: BASE,
+        });
+        yield* notifier.pass;
+        const afterFirst = { calls: goneCalls.length, gone: [...gone] };
+        yield* notifier.pass;
+        yield* notifier.pass;
+        const spent = yield* sql<{
+          readonly attempts: number;
+          readonly delivered: boolean;
+        }>`
+          SELECT attempts, delivered_at IS NOT NULL AS delivered
+          FROM notification_deliveries WHERE sink = ${deadSink.id}
+        `;
+        return { seeded, afterFirst, spent, gone };
+      }),
+    );
+    // One send reported it gone; the rest of its backlog was spent without another try.
+    expect(result.afterFirst.calls).toBe(1);
+    expect(result.afterFirst.gone).toEqual([deadSink.id]);
+    expect(goneCalls).toHaveLength(1);
+    expect(result.spent.length).toBeGreaterThan(0);
+    for (const row of result.spent) {
+      expect(row).toEqual({ attempts: 5, delivered: false });
+    }
+    // With the subscription off, the owner's events reach the shared channel.
+    expect(kindsSent(result.seeded, shared.sent)).toEqual(ALL);
   }, 60_000);
 
   it("one mailbox two people share is one sink, sent each event once", async () => {

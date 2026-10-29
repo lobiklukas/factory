@@ -7,13 +7,11 @@ import type {
   SetNotificationSinkEnabledInput,
 } from "@repo/domain/Notify";
 import { runtime } from "../atom";
+import { DASHBOARD_ACTOR as DASHBOARD } from "../approvals-view";
 import { RpcClient } from "../rpc-client";
 
 /** The reactivity key a write that changes the settings invalidates. */
 export const NOTIFICATIONS_KEY = "notification-settings";
-
-/** `actor` is only read by a control plane with auth off; under a credential the server's wins. */
-const DASHBOARD = "dashboard";
 
 /**
  * The notification settings (F21): the kinds' effective toggles, the caller's own sinks and what the

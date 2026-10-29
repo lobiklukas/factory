@@ -15,7 +15,12 @@
  *
  * **Where a subscription may point.** The endpoint is a URL a person supplied and this process will
  * `POST` to, so it must be `https:` — every browser vendor's push service is — unless the deployment
- * opts into plain `http:` for a loopback fake (`NOTIFY_PUSH_ALLOW_INSECURE`). A subscription whose
+ * opts into plain `http:` for a loopback fake (`NOTIFY_PUSH_ALLOW_INSECURE`). With that option off, a
+ * host that is an IP literal or a name on this machine or a private network (loopback, link-local,
+ * RFC 1918, unique-local, `localhost`, `*.local`, `*.internal`) is refused too, so a person cannot aim
+ * the control plane at an internal service; a redirect is never followed, since it would carry the
+ * request to wherever the answering server says. (A public name whose DNS points inside is not caught
+ * here: a deployment that must close that too belongs behind an egress proxy.) A subscription whose
  * endpoint, key or secret is malformed is refused before it is stored, and again before it is sent to.
  */
 import {
@@ -28,7 +33,7 @@ import {
   sign,
 } from "node:crypto";
 import { DateTime, Effect, Redacted } from "effect";
-import { HttpClient, HttpClientRequest } from "effect/http";
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 import {
   type Notification,
   type NotificationSink,
@@ -96,9 +101,59 @@ export const vapidProblem = (vapid: VapidConfig): string | undefined => {
   return undefined;
 };
 
+const ipv4Octets = (host: string): ReadonlyArray<number> | undefined => {
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (match === null) return undefined;
+  return match.slice(1).map(Number);
+};
+
+/** Whether a URL's host is on this machine or a private network: an address literal or a local name. */
+export const isInternalHost = (hostname: string): boolean => {
+  const host = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.$/, "");
+  if (host === "" || host === "localhost" || host.endsWith(".localhost")) {
+    return true;
+  }
+  if (host.endsWith(".local") || host.endsWith(".internal")) return true;
+  const octets = ipv4Octets(host);
+  if (octets !== undefined) {
+    const [a = 0, b = 0] = octets;
+    return (
+      a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168)
+    );
+  }
+  if (host.includes(":")) {
+    // An IPv6 literal: loopback, unspecified, unique-local, link-local, or an IPv4 inside one.
+    if (host === "::" || host === "::1") return true;
+    if (/^f[cd]/.test(host) || /^fe[89ab]/.test(host)) return true;
+    const mapped = /^::ffff:(.+)$/.exec(host);
+    if (mapped?.[1] !== undefined) {
+      const dotted = ipv4Octets(mapped[1]);
+      if (dotted !== undefined) return isInternalHost(mapped[1]);
+      const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(mapped[1]);
+      if (hex?.[1] !== undefined && hex[2] !== undefined) {
+        const hi = parseInt(hex[1], 16);
+        const lo = parseInt(hex[2], 16);
+        return isInternalHost(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+      }
+      return true;
+    }
+  }
+  return false;
+};
+
 /**
- * Why a subscription cannot be pushed to, or `undefined` when it can: an `https:` endpoint (`http:`
- * only when `allowInsecure`), a 65-byte P-256 `p256dh` and a 16-byte `auth`, both base64url.
+ * Why a subscription cannot be pushed to, or `undefined` when it can: an `https:` endpoint on a public
+ * host (`http:` and internal hosts only when `allowInsecure`), a 65-byte P-256 `p256dh` and a
+ * 16-byte `auth`, both base64url.
  */
 export const subscriptionProblem = (
   subscription: PushSubscriptionKeys,
@@ -118,6 +173,9 @@ export const subscriptionProblem = (
   }
   if (url.username !== "" || url.password !== "") {
     return "the push endpoint must not carry a login";
+  }
+  if (!allowInsecure && isInternalHost(url.hostname)) {
+    return "the push endpoint must be a public host, not an address on this machine or a private network";
   }
   const p256dh = BASE64URL.test(subscription.p256dh)
     ? Buffer.from(subscription.p256dh, "base64url")
@@ -256,6 +314,10 @@ export const pushPayload = (notification: Notification): Uint8Array =>
 const fingerprint = (value: string): string =>
   createHash("sha256").update(value).digest("hex").slice(0, 16);
 
+/** The ledger id of the sink a subscription's endpoint makes: how a `gone` report names its row. */
+export const webPushSinkId = (endpoint: string): string =>
+  `push:${fingerprint(endpoint)}`;
+
 /** How long a push service keeps a message for an offline browser. */
 const PUSH_TTL_S = 24 * 60 * 60;
 
@@ -271,13 +333,13 @@ export const webPushSink = (options: {
   Effect.gen(function* () {
     const http = yield* HttpClient.HttpClient;
     const { vapid, subscription } = options;
-    const id = `push:${fingerprint(subscription.endpoint)}`;
+    const id = webPushSinkId(subscription.endpoint);
     const host = new URL(subscription.endpoint).host;
-    const fail = (message: string, rateLimited = false) =>
+    const fail = (message: string, flag?: "rateLimited" | "gone") =>
       new NotifyError({
         sink: id,
         message,
-        ...(rateLimited ? { rateLimited: true } : {}),
+        ...(flag === undefined ? {} : { [flag]: true }),
       });
     return {
       id,
@@ -306,24 +368,28 @@ export const webPushSink = (options: {
           }).pipe(
             HttpClientRequest.bodyUint8Array(body, "application/octet-stream"),
           );
-          const response = yield* http
-            .execute(request)
-            .pipe(
-              Effect.mapError(() =>
-                fail(
-                  `${notification.eventId}: the push service could not be reached`,
-                ),
+          // A redirect is never followed: the endpoint is a person's input, and where an answering
+          // server sends the request is not.
+          const response = yield* http.execute(request).pipe(
+            Effect.provideService(FetchHttpClient.RequestInit, {
+              redirect: "manual",
+            }),
+            Effect.mapError(() =>
+              fail(
+                `${notification.eventId}: the push service could not be reached`,
               ),
-            );
+            ),
+          );
           if (response.status >= 200 && response.status <= 299) return;
           if (response.status === 404 || response.status === 410) {
             return yield* fail(
               `${notification.eventId}: the push service says the subscription is gone (HTTP ${response.status})`,
+              "gone",
             );
           }
           return yield* fail(
             `${notification.eventId}: the push service answered HTTP ${response.status}`,
-            response.status === 429,
+            response.status === 429 ? "rateLimited" : undefined,
           );
         }),
     };

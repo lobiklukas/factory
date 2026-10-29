@@ -29,11 +29,17 @@
  * told there **only**; an event with no such owner goes to the shared sinks (`options.sinks`, the
  * environment's Slack and ntfy). The kinds are read each pass too (`options.kinds` may be an effect,
  * the settings page's stored toggles over `NOTIFY_TYPES`), so a toggle or a new sink needs no restart.
+ * Routing is read every pass, but an event already delivered to a personal sink is not posted to the
+ * shared channel because its owner then paused or removed that sink; a sink added later is sent the
+ * owner's open events, as the shared channel's backlog is not theirs. A personal sink whose destination is gone (`gone`) is
+ * disabled by `onGone`, and the owner falls back to their other sinks or the shared ones.
  *
  * **Retention (F22).** A delivered `notification_deliveries` row and a `run_failures` row older than
- * `retentionMs` (30 days) are deleted, at most once an hour on the poll — never an undelivered row,
- * never a delivered row whose event is still open (a card parked on a question for six weeks would be
- * announced again the moment its row went), and never anything the failure lookback still reads.
+ * `retentionMs` (30 days) are deleted, at most once an hour on the poll — and so is an undelivered row
+ * that can never be sent (out of attempts, or to a sink this process no longer sends to), but never a
+ * row still pending, never one whose event is still open (a card parked on a question for six
+ * weeks would be announced again the moment its row went), and never anything the failure lookback
+ * still reads.
  *
  * **Exactly once per event and sink.** Every delivery is a `notification_deliveries` row keyed by
  * `(event id, sink id)`. A pass inserts the rows it has not seen (`ON CONFLICT DO NOTHING`), then
@@ -92,6 +98,11 @@ export class NotifyError extends Schema.TaggedError<NotifyError>()(
      * spending one of its attempts, and the sink is sent nothing more this pass.
      */
     rateLimited: Schema.optional(Schema.Boolean),
+    /**
+     * The destination is permanently gone (a Web Push subscription the push service answered 404 or
+     * 410 for): the delivery is not retried, and `onGone` is told so the sink stops being routed to.
+     */
+    gone: Schema.optional(Schema.Boolean),
   },
 ) {}
 
@@ -145,6 +156,11 @@ export type NotifierOptions = {
    */
   readonly people?: Effect.Effect<PeopleSinks, NotifyStorageError>;
   /**
+   * Told when a sink reports its destination permanently gone (`NotifyError.gone`): the place to
+   * disable the person's stored sink, so routing falls back to their other sinks or the shared ones.
+   */
+  readonly onGone?: (sinkId: string) => Effect.Effect<void, NotifyStorageError>;
+  /**
    * How old a delivered ledger row or a recorded failure must be before the retention sweep deletes
    * it. Default 30 days, and never less than `failureLookbackMs`.
    */
@@ -177,6 +193,13 @@ const MAX_SENDS_PER_PASS = 500;
 /** Why a retry was dropped instead of sent: what it announced is no longer open. */
 const SUPERSEDED =
   "superseded: the event was no longer open when it was retried";
+/**
+ * Whether a ledger sink id names a person's own destination (`email:`, `push:`) rather than a shared
+ * channel (`slack:`, `ntfy:`). An event already delivered to a person's own sink is never posted to
+ * the shared channel afterwards, whatever happens to that sink.
+ */
+const isPersonalSinkId = (id: string): boolean =>
+  id.startsWith("email:") || id.startsWith("push:");
 /** Ledger rows one insert writes at most. */
 const INSERT_BATCH = 200;
 /** A detail longer than this is cut: a notification is a pointer to the card, not the transcript. */
@@ -735,17 +758,32 @@ export const makeNotifier = (options: NotifierOptions) =>
         if (notifications.length === 0) return 0;
         const seen = yield* storage(
           "read the ledger",
-          sql<{ readonly eventId: string; readonly sink: string }>`
-            SELECT event_id, sink FROM notification_deliveries
+          sql<{
+            readonly eventId: string;
+            readonly sink: string;
+            readonly delivered: boolean;
+          }>`
+            SELECT event_id, sink, delivered_at IS NOT NULL AS delivered
+            FROM notification_deliveries
             WHERE event_id IN ${sql.in(notifications.map((n) => n.eventId))}
           `,
         );
         const have = new Set(
           seen.map((row) => `${row.sink}\u0000${row.eventId}`),
         );
+        // Events a person was already told of on their own sink.
+        const toldPersonally = new Set(
+          seen.flatMap((row) =>
+            row.delivered && isPersonalSinkId(row.sink) ? [row.eventId] : [],
+          ),
+        );
         const missing = routed.flatMap(({ notification, to }) =>
           [...new Set(to.map((sink) => sink.id))].flatMap((sink) =>
-            have.has(`${sink}\u0000${notification.eventId}`)
+            have.has(`${sink}\u0000${notification.eventId}`) ||
+            // Routing is read every pass, so a person who pauses or removes their sink must not
+            // have what they were already told posted to the shared channel as the fallback.
+            (!isPersonalSinkId(sink) &&
+              toldPersonally.has(notification.eventId))
               ? []
               : [
                   {
@@ -896,19 +934,41 @@ export const makeNotifier = (options: NotifierOptions) =>
           failed += 1;
           const message = sent.failure.message;
           const rateLimited = sent.failure.rateLimited === true;
+          const gone = sent.failure.gone === true;
           // A rate-limited send gives its attempt back: being told to wait is not the send failing.
+          // A destination that is gone is never retried: the delivery is spent at once.
           yield* storage(
             "record a failed delivery",
             sql`
               UPDATE notification_deliveries
               SET last_error = ${message},
-                  attempts = ${rateLimited ? sql`GREATEST(attempts - 1, 0)` : sql`attempts`}
+                  attempts = ${
+                    rateLimited
+                      ? sql`GREATEST(attempts - 1, 0)`
+                      : gone
+                        ? sql`GREATEST(attempts, ${maxAttempts})`
+                        : sql`attempts`
+                  }
               WHERE event_id = ${row.eventId} AND sink = ${row.sink}
             `,
           );
           yield* Effect.logWarning(
             `notify: ${row.kind} ${row.eventId} not sent to ${sink.label}: ${message}`,
           );
+          if (gone) {
+            // The rest of this sink's backlog is spent with it, and the owner's routing moves on.
+            yield* storage(
+              "spend a gone sink's deliveries",
+              sql`
+                UPDATE notification_deliveries
+                SET attempts = GREATEST(attempts, ${maxAttempts}),
+                    last_error = COALESCE(last_error, ${message})
+                WHERE sink = ${sink.id} AND delivered_at IS NULL
+              `,
+            );
+            if (options.onGone !== undefined) yield* options.onGone(sink.id);
+            break;
+          }
           if (rateLimited) break;
         }
         return { delivered, failed };
@@ -946,6 +1006,7 @@ export const makeNotifier = (options: NotifierOptions) =>
      */
     const sweepWith = (
       every: ReadonlyArray<{ readonly notification: Notification }>,
+      known: ReadonlyArray<string>,
     ): Effect.Effect<NotifySweep, NotifyStorageError> =>
       Effect.gen(function* () {
         lastSweepAt = yield* Clock.currentTimeMillis;
@@ -960,6 +1021,23 @@ export const makeNotifier = (options: NotifierOptions) =>
             RETURNING event_id
           `,
         );
+        // A delivery that will never be sent — out of attempts (a destination that is gone, a
+        // rejected address, one given up as superseded), or to a sink nothing sends to any more —
+        // is as dead as a delivered one, and an owner's failing sink would otherwise grow the table
+        // by one row per event forever. A row still pending (attempts left, its sink live) is never
+        // touched, and neither is one for an event that is still open: it would be recorded again.
+        const dead = yield* storage(
+          "prune undeliverable notifications",
+          sql<{ readonly eventId: string }>`
+            DELETE FROM notification_deliveries
+            WHERE delivered_at IS NULL
+              AND created_at < now() - make_interval(secs => ${retentionMs / 1000})
+              AND (attempts >= ${maxAttempts}
+                   ${known.length === 0 ? sql`OR TRUE` : sql`OR sink NOT IN ${sql.in(known)}`})
+              ${ids.length === 0 ? sql`` : sql`AND event_id NOT IN ${sql.in(ids)}`}
+            RETURNING event_id
+          `,
+        );
         const failedRuns = yield* storage(
           "prune run failures",
           sql<{ readonly sessionId: string }>`
@@ -969,7 +1047,7 @@ export const makeNotifier = (options: NotifierOptions) =>
           `,
         );
         const swept = {
-          deliveries: deliveries.length,
+          deliveries: deliveries.length + dead.length,
           failures: failedRuns.length,
         };
         if (swept.deliveries > 0 || swept.failures > 0) {
@@ -981,8 +1059,21 @@ export const makeNotifier = (options: NotifierOptions) =>
       });
 
     /** The retention sweep, now, whether or not it is due. */
-    const sweep: Effect.Effect<NotifySweep, NotifyStorageError> =
-      Effect.flatMap(readEvents, sweepWith);
+    const sweep: Effect.Effect<NotifySweep, NotifyStorageError> = Effect.gen(
+      function* () {
+        const every = yield* readEvents;
+        const personal = yield* people;
+        return yield* sweepWith(every, sinkIdsOf(personal));
+      },
+    );
+
+    /** Every sink this process sends to as of this pass, by id: shared, then each person's. */
+    const sinkIdsOf = (personal: PeopleSinks): ReadonlyArray<string> => [
+      ...new Set([
+        ...sinks.keys(),
+        ...[...personal.values()].flat().map((sink) => sink.id),
+      ]),
+    ];
 
     const pass: Effect.Effect<NotifyPass, NotifyStorageError> = Effect.gen(
       function* () {
@@ -1018,7 +1109,7 @@ export const makeNotifier = (options: NotifierOptions) =>
           [...kinds],
           new Set(wanted.map((event) => event.notification.eventId)),
         );
-        if (sweepDue) yield* sweepWith(every);
+        if (sweepDue) yield* sweepWith(every, sinkIdsOf(personal));
         return { recorded, delivered, failed };
       },
     );

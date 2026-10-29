@@ -78,6 +78,8 @@ export type FakePush = {
   readonly received: PushReceived[];
   /** The status the next requests are answered with (default 201, a push service's accept). */
   status: number;
+  /** When set, requests are answered `307` with this `Location` instead of `status`. */
+  redirectTo: string | undefined;
   readonly close: () => Promise<void>;
 };
 
@@ -85,7 +87,10 @@ export const startFakePush = (): Promise<FakePush> =>
   new Promise((resolve, reject) => {
     const received: PushReceived[] = [];
     const sockets = new Set<import("node:net").Socket>();
-    const state = { status: 201 };
+    const state: { status: number; redirectTo: string | undefined } = {
+      status: 201,
+      redirectTo: undefined,
+    };
     const server = http.createServer((request, response) => {
       const chunks: Buffer[] = [];
       request.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -95,6 +100,10 @@ export const startFakePush = (): Promise<FakePush> =>
           headers: request.headers,
           body: Buffer.concat(chunks),
         });
+        if (state.redirectTo !== undefined) {
+          response.writeHead(307, { location: state.redirectTo }).end();
+          return;
+        }
         response.writeHead(state.status).end();
       });
     });
@@ -117,6 +126,12 @@ export const startFakePush = (): Promise<FakePush> =>
         },
         set status(value: number) {
           state.status = value;
+        },
+        get redirectTo() {
+          return state.redirectTo;
+        },
+        set redirectTo(value: string | undefined) {
+          state.redirectTo = value;
         },
         close: () =>
           new Promise<void>((done) => {
