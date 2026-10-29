@@ -23,7 +23,7 @@ import { RepoSlug } from "@repo/domain/Session";
 import { DEFAULT_DEFINITION_ID, DefinitionId } from "@repo/domain/Task";
 import { createFauxModelAccess } from "@repo/harness";
 import { DatabaseLive } from "@repo/storage-postgres";
-import { Effect, Layer, ManagedRuntime } from "effect";
+import { Clock, DateTime, Effect, Layer, ManagedRuntime } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import {
@@ -36,6 +36,10 @@ import { SkillService, SkillServiceLive } from "./SkillService";
 import { TaskService, TaskServiceLive } from "./TaskService";
 
 const runId = randomBytes(4).toString("hex");
+
+/** An instant as the service answers it: ISO 8601 in UTC. */
+const isoAt = (millis: number): string =>
+  DateTime.formatIso(DateTime.makeUnsafe(millis));
 
 const git = (cwd: string, ...args: ReadonlyArray<string>): string =>
   execFileSync("git", [...args], {
@@ -195,7 +199,7 @@ describe("a scheduled automation (S-general-automations)", () => {
     expect(fired.tick?.replayed).toBe(false);
     expect(fired.tick?.tick.status).toBe("started");
     expect(fired.tick?.tick.trigger).toBe("schedule");
-    expect(fired.tick?.tick.tickAt).toBe(new Date(first).toISOString());
+    expect(fired.tick?.tick.tickAt).toBe(isoAt(first));
     expect(fired.tick?.tick.baseRef).toBe("main");
     expect(fired.tick?.tick.baseCommit).toBe(
       git(checkout, "rev-parse", "main"),
@@ -263,7 +267,7 @@ describe("a scheduled automation (S-general-automations)", () => {
       }),
     );
     expect(next.passed.map((entry) => entry.status)).toEqual(["started"]);
-    expect(next.passed[0]?.tickAt).toBe(new Date(first + 60_000).toISOString());
+    expect(next.passed[0]?.tickAt).toBe(isoAt(first + 60_000));
     expect(next.cards).toHaveLength(2);
     expect(next.runs).toHaveLength(2);
 
@@ -354,14 +358,14 @@ describe("a scheduled automation (S-general-automations)", () => {
     expect(outcome.started?.tick.status).toBe("started");
     expect(outcome.skipped?.tick.status).toBe("skipped");
     expect(outcome.skipped?.tick.reason).toBe(
-      `no new commits on main since the run at ${new Date(outcome.first).toISOString()} (${head.slice(0, 12)}), so nothing was filed`,
+      `no new commits on main since the run at ${isoAt(outcome.first)} (${head.slice(0, 12)}), so nothing was filed`,
     );
     expect(outcome.skipped?.tick.baseCommit).toBe(head);
     expect(outcome.skipped?.tick.taskId).toBeUndefined();
     expect(outcome.skipped?.tick.sessionId).toBeUndefined();
     // Still the run at the first minute: a skipped tick is not what the next one compares with.
     expect(outcome.alsoSkipped?.tick.reason).toContain(
-      `since the run at ${new Date(outcome.first).toISOString()}`,
+      `since the run at ${isoAt(outcome.first)}`,
     );
     expect(outcome.resumed?.tick.status).toBe("started");
     expect(outcome.resumed?.tick.baseCommit).toBe(outcome.moved);
@@ -483,8 +487,8 @@ describe("a scheduled automation (S-general-automations)", () => {
           description: "What an automation's run follows",
           body: "Read CHANGELOG.md and list what is unreleased.",
         });
-        const now = Date.now();
-        const runAt = new Date(now + 60_000).toISOString();
+        const now = yield* Clock.currentTimeMillis;
+        const runAt = isoAt(now + 60_000);
         const added = yield* automations.add({ repo, runAt, skill });
         const early = yield* automations.tick(added.id, now + 30_000);
         const due = yield* automations.tick(added.id, now + 90_000);
