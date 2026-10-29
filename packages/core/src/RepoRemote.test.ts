@@ -27,7 +27,8 @@ const GIT_CASES = { timeout: 60_000 };
 const roots: Array<string> = [];
 afterAll(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true });
-});
+  // Removing every case's checkouts outran vitest's 10 s hook default on a loaded machine (DEFLAKE).
+}, 60_000);
 
 const git = (cwd: string, ...args: ReadonlyArray<string>): string =>
   execFileSync("git", [...args], {

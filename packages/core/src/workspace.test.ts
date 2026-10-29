@@ -22,10 +22,10 @@ import { resolveWorkspace } from "./workspace";
 /**
  * Each case cuts worktrees with git a dozen times or more, and `bun run test` runs every package's
  * suites at once, so a case's wall clock is mostly the machine's load: the slowest here took 3.8 s
- * alone and timed out at vitest's 5 s default beside a full `bun run test`. The file's cases carry a
- * budget sized to that instead (DEFLAKE).
+ * alone and timed out at vitest's 5 s default beside a full `bun run test`, and removing the checkouts
+ * outran the 10 s hook default. The file's cases and hook carry a budget sized to that (DEFLAKE).
  */
-vi.setConfig({ testTimeout: 60_000 });
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
 const root = mkdtempSync(join(tmpdir(), "workspace-argv-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
