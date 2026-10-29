@@ -6,6 +6,7 @@ import {
   approveCommand,
   denyCommand,
 } from "./commands/approve";
+import { automationCommand } from "./commands/automation";
 import { boardCommand } from "./commands/board";
 import { budgetCommand } from "./commands/budget";
 import { costCommand } from "./commands/cost";
@@ -60,6 +61,7 @@ const root = Command.make("factory").pipe(
     repoCommand,
     skillCommand,
     secretCommand,
+    automationCommand,
     triggersCommand,
     replayCommand,
     costCommand,
