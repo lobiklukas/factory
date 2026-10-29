@@ -102,6 +102,7 @@ const factsWith = (
       sandbox: "in-process",
       triggerRules: 3,
       envFiles: ["/work/factory/.env"],
+      setupTimeoutSeconds: 1_800,
       ...extra,
     } satisfies ServerFactsShape;
   }).pipe(Effect.orDie);

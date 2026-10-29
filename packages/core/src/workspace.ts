@@ -17,7 +17,9 @@ import { Effect, Option, Schema } from "effect";
 // oxlint-disable-next-line node-builtin-import
 import { execFileSync, execSync } from "node:child_process";
 // oxlint-disable-next-line node-builtin-import
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+// oxlint-disable-next-line node-builtin-import
+import { randomUUID } from "node:crypto";
 // oxlint-disable-next-line node-builtin-import
 import { join } from "node:path";
 import type { FileSystem, Path } from "effect";
@@ -270,6 +272,61 @@ const takeBranchOver = (
   }
 };
 
+/** The file in a worktree's administrative directory that names the cut that made it. */
+const CUT_FILE = "factory-cut";
+
+/**
+ * Name the worktree just cut at `directory` (F23): a fresh id in its administrative directory
+ * (`<common>/worktrees/<name>`), which `git worktree remove` takes with the worktree, so a worktree
+ * cut again at the same path is a different cut. Out of the worktree itself, so it is no untracked
+ * file in the agent's status. Best effort: a worktree with no id is read as one nobody can tell
+ * apart from before (`readWorktreeCut`), and its setup is not run again on a guess.
+ */
+const stampCut = (directory: string): void => {
+  try {
+    const gitdir = execFileSync(
+      "git",
+      [
+        "-C",
+        directory,
+        ...QUIET_GIT,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-dir",
+      ],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    writeFileSync(join(gitdir, CUT_FILE), `${randomUUID()}\n`);
+  } catch {
+    // Unstamped: see above.
+  }
+};
+
+/**
+ * The id of the cut that made the worktree at `directory` (F23), or `undefined` when it has none: a
+ * plain directory, a worktree cut before cuts were named, or one whose administrative directory is
+ * unreadable. Read through the worktree's `.git` pointer rather than by running git in the agent's
+ * directory, as `takeBranchOver` writes through it.
+ */
+export const readWorktreeCut = (
+  directory: string,
+  deps: WorkspaceDeps,
+): Effect.Effect<string | undefined> =>
+  deps.fs.readFileString(join(directory, ".git")).pipe(
+    Effect.map((pointer) => /^gitdir: (.+)$/m.exec(pointer)?.[1]?.trim()),
+    Effect.flatMap((gitdir) =>
+      gitdir === undefined
+        ? Effect.undefined
+        : deps.fs.readFileString(
+            deps.path.resolve(directory, gitdir, CUT_FILE),
+          ),
+    ),
+    Effect.map((id) =>
+      id === undefined || id.trim() === "" ? undefined : id.trim(),
+    ),
+    Effect.orElseSucceed(() => undefined),
+  );
+
 /**
  * The session's directory, its repo binding, and the commands its repo declares. Never fails: a
  * session always has a workspace, even if the repo says nothing about itself.
@@ -400,6 +457,7 @@ export const resolveWorkspace = (
                 { cwd: checkout, stdio: "ignore" },
               );
             }
+            stampCut(directory);
           },
           // oxlint-disable-next-line global-error-in-effect-catch
           catch: (e) =>

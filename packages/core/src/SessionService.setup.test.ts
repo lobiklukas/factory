@@ -38,7 +38,15 @@ import {
   readVerifyRecords,
 } from "@repo/harness";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
-import { Clock, Effect, Exit, Fiber, Layer, ManagedRuntime } from "effect";
+import {
+  Clock,
+  Duration,
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  ManagedRuntime,
+} from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { afterAll, describe, expect, it } from "vitest";
 import { SessionService, SessionServiceLive } from "./SessionService";
@@ -655,6 +663,262 @@ describe("a worktree's declared setup", () => {
     expect(readFileSync(attempts, "utf8")).toBe("start\n");
     expect(outcome.logged.setup).toBeUndefined();
     expect(outcome.card.blocked).toBeUndefined();
+  }, 180_000);
+
+  it("sets a replay's worktree up before its first model call, and compares it as the run it is", async () => {
+    const attempts = join(scratch, "installs-replay.txt");
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const { repo } = yield* registerFixture("replayed", {
+          ...PACKAGE,
+          ".factory/config": JSON.stringify({
+            install: `echo install >> ${attempts}; sleep 1; bun install`,
+            verify: "true",
+          }),
+        });
+        const source = yield* sessions.create({ repo, title: "to replay" });
+        yield* sessions.send({ sessionId: source.id, content: "do it" });
+        yield* settled(source.id);
+        const calls = faux.faux.state.callCount;
+        const replay = yield* sessions.replay({ sessionId: source.id });
+        // The replay is answered while its install still runs: no model call has been made.
+        const answered = {
+          calls: faux.faux.state.callCount - calls,
+          users: (yield* sessions.get(replay.id)).entries.filter(
+            (entry) => entry.kind === "user",
+          ).length,
+        };
+        const run = yield* settled(replay.id);
+        yield* waitUntil(
+          Effect.map(
+            sessions.get(replay.id),
+            (snapshot) => (snapshot.replayComparisons ?? []).length > 0,
+          ),
+          "the replay's comparison",
+        );
+        return {
+          replay,
+          answered,
+          run,
+          compared: yield* sessions.get(replay.id),
+          logged: yield* readSetup(replay.id),
+        };
+      }),
+    );
+    expect(outcome.answered).toEqual({ calls: 0, users: 0 });
+    // Its own worktree, which had its dependencies when the replay's first command ran in it.
+    const probe = outcome.run.entries.find(
+      (entry) => entry.kind === "toolResult" && entry.toolName === "bash",
+    );
+    expect(probe?.text).toContain("deps-present");
+    expect(outcome.logged.setup?.outcome).toBe("succeeded");
+    expect(outcome.logged.setup?.directory).toBe(
+      realpathSync(outcome.run.workspace.path),
+    );
+    // The source's install and the replay's: one each, the replay's not skipped as the source's.
+    expect(readFileSync(attempts, "utf8")).toBe("install\ninstall\n");
+    // The comparison waited for the prompt the setup held, so it reads a run that answered.
+    expect(outcome.compared.replayComparisons?.[0]?.self.outcome).toBe(
+      "answered",
+    );
+  }, 180_000);
+
+  /** Mutation: let a message sent to the replay wake beside the held prompt, in either order. */
+  it("places the source's prompt before a message sent to a replay while its setup runs", async () => {
+    const entries = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const { repo } = yield* registerFixture("replay-order", {
+          ...PACKAGE,
+          ".factory/config": JSON.stringify({
+            install: "sleep 1; bun install",
+            verify: "true",
+          }),
+        });
+        const source = yield* sessions.create({ repo, title: "to replay" });
+        yield* sessions.send({ sessionId: source.id, content: "the task" });
+        yield* settled(source.id);
+        const replay = yield* sessions.replay({ sessionId: source.id });
+        // The web pane on the new session: a person types while the install still runs.
+        yield* sessions.sendDeferringSetup({
+          sessionId: replay.id,
+          content: "and a person's note",
+        });
+        const users = (id: SessionId) =>
+          Effect.map(sessions.get(id), (snapshot) =>
+            snapshot.entries.flatMap((entry) =>
+              entry.kind === "user" ? [entry.text] : [],
+            ),
+          );
+        yield* waitUntil(
+          Effect.map(users(replay.id), (texts) => texts.length >= 2),
+          "both messages to be submitted",
+        );
+        return yield* users(replay.id);
+      }),
+    );
+    expect(entries).toEqual(["the task", "and a person's note"]);
+  }, 180_000);
+
+  /** Mutation: `tapError` for the open's cleanup, which an interrupted request skips. */
+  it("leaves no index row behind when a replay request is interrupted in its open", async () => {
+    const counts = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const sql = yield* SqlClient;
+        const { repo } = yield* registerFixture("replay-interrupted", {
+          ...PACKAGE,
+          ".factory/config": JSON.stringify({
+            install: "bun install",
+            verify: "true",
+          }),
+        });
+        const source = yield* sessions.create({ repo, title: "to replay" });
+        yield* sessions.send({ sessionId: source.id, content: "do it" });
+        yield* settled(source.id);
+        const rows = () =>
+          Effect.map(
+            sql<{
+              n: number;
+            }>`SELECT count(*)::int AS n FROM sessions WHERE repo = ${repo}`,
+            (found) => found[0]?.n ?? 0,
+          );
+        const outcomes: Array<{ interrupted: boolean; rows: number }> = [];
+        // The request stops at a different step of the open each time: the cut is slow enough that
+        // some land after the index row is written.
+        for (const ms of [2, 10, 25, 60]) {
+          const before = yield* rows();
+          const finished = yield* sessions
+            .replay({ sessionId: source.id })
+            .pipe(Effect.timeoutOption(Duration.millis(ms)));
+          const after = yield* rows();
+          outcomes.push(
+            finished._tag === "Some"
+              ? { interrupted: false, rows: after - before - 1 }
+              : { interrupted: true, rows: after - before },
+          );
+        }
+        return outcomes;
+      }),
+    );
+    // An interrupted request left no row; a replay that did finish left exactly its own.
+    expect(counts.every((outcome) => outcome.rows === 0)).toBe(true);
+  }, 180_000);
+
+  it("submits no prompt for a replay whose setup fails, and says it was unanswered", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const { repo, localPath } = yield* registerFixture("replay-broken", {
+          ...PACKAGE,
+          ".factory/config": JSON.stringify({
+            install: "bun install",
+            verify: "true",
+          }),
+        });
+        const source = yield* sessions.create({ repo, title: "to replay" });
+        yield* sessions.send({ sessionId: source.id, content: "do it" });
+        yield* settled(source.id);
+        // The repo's install breaks after the source ran: the replay's worktree is cut from it.
+        writeFileSync(
+          join(localPath, ".factory", "config"),
+          JSON.stringify({
+            install: 'echo "error: registry unreachable" >&2; exit 7',
+            verify: "true",
+          }),
+        );
+        execSync("git commit -qam break", { cwd: localPath, stdio: "ignore" });
+        const calls = faux.faux.state.callCount;
+        const replay = yield* sessions.replay({ sessionId: source.id });
+        yield* waitUntil(
+          Effect.map(
+            readSetup(replay.id),
+            (logged) => logged.setup !== undefined,
+          ),
+          "the replay's setup to be recorded",
+        );
+        yield* waitUntil(
+          Effect.map(
+            sessions.get(replay.id),
+            (snapshot) => (snapshot.replayComparisons ?? []).length > 0,
+          ),
+          "the replay's comparison",
+        );
+        return {
+          calls,
+          snapshot: yield* sessions.get(replay.id),
+          logged: yield* readSetup(replay.id),
+        };
+      }),
+    );
+    expect(outcome.logged.setup?.outcome).toBe("failed");
+    expect(
+      outcome.snapshot.entries.filter((entry) => entry.kind === "user"),
+    ).toEqual([]);
+    expect(faux.faux.state.callCount).toBe(outcome.calls);
+    expect(outcome.snapshot.replayComparisons?.[0]?.self.outcome).toBe(
+      "unanswered",
+    );
+  }, 180_000);
+
+  it("sets a worktree up again when it is cut again, and not when it is merely reopened", async () => {
+    const attempts = join(scratch, "installs-recut.txt");
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sessions = yield* SessionService;
+        const { repo } = yield* registerFixture("recut", {
+          ...PACKAGE,
+          ".factory/config": JSON.stringify({
+            install: `echo install >> ${attempts}; bun install`,
+            verify: "true",
+          }),
+        });
+        const created = yield* sessions.create({ repo, title: "recut" });
+        const turns = (n: number) =>
+          waitUntil(
+            Effect.map(
+              sessions.get(created.id),
+              (snapshot) =>
+                !snapshot.live.busy &&
+                snapshot.entries.filter((entry) => entry.kind === "user")
+                  .length === n,
+            ),
+            `turn ${n} to settle`,
+          );
+        yield* sessions.send({ sessionId: created.id, content: "one" });
+        yield* turns(1);
+        const first = yield* readSetup(created.id);
+        const path = (yield* sessions.get(created.id)).workspace.path;
+        // Released and reopened on the same worktree: its dependencies are still there.
+        yield* sessions.close;
+        yield* sessions.send({ sessionId: created.id, content: "two" });
+        yield* turns(2);
+        const reopened = yield* readSetup(created.id);
+        const installsAfterReopen = readFileSync(attempts, "utf8");
+        // Released with its directory gone: the next send cuts a new worktree, with none.
+        yield* sessions.close;
+        rmSync(path, { recursive: true, force: true });
+        yield* sessions.send({ sessionId: created.id, content: "three" });
+        yield* turns(3);
+        return {
+          path,
+          first,
+          reopened,
+          installsAfterReopen,
+          recut: yield* readSetup(created.id),
+          installed: existsSync(join(path, "node_modules", "local-dep")),
+        };
+      }),
+    );
+    expect(outcome.first.setup?.cut).toBeTruthy();
+    expect(outcome.installsAfterReopen).toBe("install\n");
+    expect(outcome.reopened.setup).toEqual(outcome.first.setup);
+    expect(readFileSync(attempts, "utf8")).toBe("install\ninstall\n");
+    expect(outcome.recut.setup?.outcome).toBe("succeeded");
+    expect(outcome.recut.setup?.cut).toBeTruthy();
+    expect(outcome.recut.setup?.cut).not.toBe(outcome.first.setup?.cut);
+    expect(outcome.installed).toBe(true);
   }, 180_000);
 
   it("runs and records nothing for a repo that declares no install or build", async () => {

@@ -11,6 +11,10 @@
 //   pr       a PR recorded on a run's session shows as a link on the card, `href` verbatim, within
 //            one poll interval; the face never nests it in the card's own link
 //   idle     the busy card's face goes idle when its run settles
+//   readiness the board's repository's agent-readiness score (F25) sits beside every card's id, from
+//            one `getRepo` read for the board (the oracle: `getRepo`'s own `readiness`), with the
+//            failing checks in its title; a board on a repo with no checkout shows none, and nine
+//            cards cost the same `getRepo` reads per window as three
 //   fan-out  the page's RPC tags carry no per-card read (`getTask`, `listTaskRuns`, `getSession`,
 //            `listSessions`, `listTasks`), the board is read by `listBoardCards`, and six more cards
 //            cost no more calls per window than before
@@ -20,9 +24,10 @@
 // feature's. The PR and the cost are written onto the run's index rows by `seed-card-face.ts`.
 //
 // Env: WEB_URL, API_URL, EVIDENCE_DIR, FAUX_SLEEP_MS (the nap the instance was booted with).
-import { spawnSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "@playwright/test";
@@ -333,6 +338,101 @@ try {
     tags1 === tags2 && total(b2) <= total(b1) + 2,
     `3 cards ${JSON.stringify(w1)}; 9 cards ${JSON.stringify(w2)}`,
   );
+
+  // --- readiness: the board's repository's score on every card (F25) ---------------------------
+  // The board above is on a repo with no checkout, so nothing is scored: no card shows a score.
+  assert(
+    "a board on a repo with no checkout shows no readiness on any card",
+    (await page.locator("[data-card-readiness]").count()) === 0,
+    `${await page.locator("[data-card-readiness]").count()} readiness chip(s) on ${await page.locator("[data-card]").count()} cards`,
+  );
+  // A second board, on a checkout (a git repo with an AGENTS.md and nothing else a score looks for).
+  const checkout = await mkdtemp(path.join(tmpdir(), "card-face-checkout-"));
+  const git = (command) =>
+    execSync(command, { cwd: checkout, stdio: "ignore" });
+  git("git init -q -b main");
+  git("git config user.email card-face@localhost");
+  git("git config user.name card-face");
+  await writeFile(path.join(checkout, "AGENTS.md"), "# card face fixture\n");
+  git("git add -A");
+  git("git commit -q -m base");
+  const scoredRepo = `verify-card-face/${randomBytes(6).toString("hex")}`;
+  await rpc("registerRepo", {
+    repo: scoredRepo,
+    defaultBaseRef: "main",
+    localPath: checkout,
+  });
+  const scoredRow = await rpc("getRepo", { repo: scoredRepo });
+  const readiness = scoredRow.readiness;
+  const scoreText = `${readiness?.score}/${readiness?.max}`;
+  const failing = (readiness?.checks ?? []).filter((check) => !check.passed);
+  const scoredBoard = seed({ REPO: scoredRepo });
+  observed.scoredBoard = scoredBoard;
+  await page.goto(`${WEB_URL}/boards/${scoredBoard.boardId}`, {
+    waitUntil: "domcontentloaded",
+  });
+  const chips = page.locator("[data-card-readiness]");
+  await until(
+    "all three cards to show a readiness score",
+    async () => (await chips.count()) === 3,
+    20_000,
+  );
+  const texts = await chips.allInnerTexts();
+  const titles = await Promise.all(
+    (await chips.all()).map((chip) => chip.getAttribute("title")),
+  );
+  assert(
+    "every card of a board on a checkout shows the repo's score, as getRepo reports it, with the failing checks in its title",
+    readiness !== undefined &&
+      failing.length > 0 &&
+      texts.every((text) => text.trim() === `ready ${scoreText}`) &&
+      titles.every(
+        (title) =>
+          title?.includes(`Agent-readiness ${scoreText}`) === true &&
+          failing.every((check) => title.includes(check.reason)),
+      ),
+    `${JSON.stringify(texts)}; oracle ${scoreText}, failing ${JSON.stringify(failing.map((check) => check.name))}`,
+  );
+  assert(
+    "a bare card keeps its run row empty beside the score",
+    (await page.locator("[data-card-runs]").count()) === 0,
+    `${await page.locator("[data-card-runs]").count()} run row(s)`,
+  );
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "card-face-readiness.png"),
+    fullPage: true,
+  });
+  // Nine cards cost the same `getRepo` reads as three: one per poll of the board's repo.
+  const r1From = Date.now();
+  await sleep(11_000);
+  const r1 = histogram(r1From, Date.now());
+  seed({ MORE_BOARD: scoredBoard.boardId, MORE: "6" });
+  await until(
+    "the six extra cards to show a score",
+    async () => (await chips.count()) === 9,
+    WINDOW_MS,
+  );
+  const r2From = Date.now();
+  await sleep(11_000);
+  const r2 = histogram(r2From, Date.now());
+  observed.repoReads3Cards = r1;
+  observed.repoReads9Cards = r2;
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "card-face-readiness-nine.png"),
+    fullPage: true,
+  });
+  const [g1, g2] = [r1["getRepo"] ?? 0, r2["getRepo"] ?? 0];
+  assert(
+    "nine cards cost the same getRepo reads per window as three, and the page reads the repo at all",
+    g1 >= 1 && Math.abs(g2 - g1) <= 1 && g2 <= 4,
+    `3 cards: ${g1} getRepo; 9 cards: ${g2} getRepo`,
+  );
+  assert(
+    "the page sent no per-card read on the scored board either",
+    PER_CARD.every((tag) => r1[tag] === undefined && r2[tag] === undefined),
+    JSON.stringify({ r1, r2 }),
+  );
+  await rm(checkout, { recursive: true, force: true });
 
   assert(
     "the page logged no console error",

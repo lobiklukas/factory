@@ -1,6 +1,6 @@
 import { Duration, Effect } from "effect";
 import { Atom } from "effect/reactivity";
-import type { RegisterRepoInput } from "@repo/domain/Session";
+import type { RegisterRepoInput, RepoSlug } from "@repo/domain/Session";
 import { runtime } from "../atom";
 import { RpcClient } from "../rpc-client";
 import { SESSIONS_KEY } from "./session-list";
@@ -32,6 +32,23 @@ export const reposAtom = runtime
     Atom.withReactivity([REPOS_KEY, SESSIONS_KEY]),
     Atom.withRefresh(REPOS_POLL),
   );
+
+/**
+ * One repository's row, for the board page (F25): `getRepo`, so its readiness score can be worded on
+ * every card of the board from the one read — a board is on one repo, however many cards it holds.
+ * Polled as the registry is, because the score follows the checkout's files as they are now. A repo
+ * the registry has no row for fails the read, and the board shows no score.
+ */
+export const repoAtom = Atom.family((repo: RepoSlug) =>
+  runtime
+    .atom(
+      Effect.gen(function* () {
+        const rpc = yield* RpcClient;
+        return yield* rpc.client.getRepo({ repo });
+      }),
+    )
+    .pipe(Atom.withReactivity([REPOS_KEY]), Atom.withRefresh(REPOS_POLL)),
+);
 
 /**
  * Registers a repository, or updates the one with that slug: `registerRepo`, exactly as `factory

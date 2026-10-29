@@ -171,6 +171,8 @@ check "every webhook route is listed, armed or not, with the variable that arms 
   "$(hasre faux '^warn webhook github: not armed.*GITHUB_WEBHOOK_SECRET' && hasre faux '^warn webhook linear: not armed.*LINEAR_WEBHOOK_SECRET' && echo 0 || echo 1)" "webhook lines"
 check "the trigger rules and env files are reported" \
   "$(hasre faux '^(ok|warn) trigger-rules: ' && hasre faux '^ok env-files: ' && echo 0 || echo 1)" "trigger-rules, env-files"
+check "the setup timeout is reported, 1800s unless SETUP_TIMEOUT_SECONDS says otherwise" \
+  "$(hasre faux '^ok setup-timeout: 1800s per setup step' && echo 0 || echo 1)" "setup-timeout"
 check "no repo is registered yet: it says so, and the forge is checked once" \
   "$(hasre faux '^ok repos: none registered' && hasre faux '^ok forge: static-token' && echo 0 || echo 1)" "forge static-token"
 

@@ -26,6 +26,7 @@ import {
   Clock,
   Context,
   DateTime,
+  Deferred,
   Duration,
   Effect,
   Exit,
@@ -212,6 +213,8 @@ import {
   readPinnedModelKey,
   readRecordedReview,
   readSetupRecord,
+  setupCovers,
+  submitReplayPrompt,
   readPolicyRecord,
   readRepoPrompt,
   readSettlePr,
@@ -231,8 +234,9 @@ import {
   readReplayDocument,
   readReplayRun,
   readReplaySource,
+  type ReplaySource,
   readSpec,
-  replaySession,
+  openReplay,
   waitForPrompt,
   writeReplayComparison,
   requestCuration,
@@ -393,6 +397,7 @@ import {
   workTreeRoot,
 } from "./repos";
 import {
+  readWorktreeCut,
   removeWorkspace,
   resolveWorkspace,
   sessionDirectory,
@@ -1786,6 +1791,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        */
       const deferredSends = yield* FiberMap.make<string, void, never>();
       let deferredSendCount = 0;
+      /**
+       * The replays whose first prompt waits for their worktree's setup (F23), each open until the
+       * prompt is submitted or will not be. `reconcileReplay` waits on it, because a replay with no
+       * prompt in its log yet would be compared as one that never ran.
+       */
+      const heldPrompts = new Map<SessionId, Deferred.Deferred<void>>();
       /** One activity projection per owned session; releasing an owner interrupts its fiber. */
       const projectors = yield* FiberMap.make<SessionId, void, never>();
       /**
@@ -4945,6 +4956,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* refuseOversized(input);
           const row = yield* requireSession(input.sessionId);
           yield* refuseUnservedModel(input.sessionId, row);
+          yield* awaitHeldPrompt(input.sessionId);
           yield* refuseSendOverSpendCap(input, row);
           // A released session is refused by the acquisition, from the release it reads under the
           // owners' gate (LOB-268): a check here, on `row`, would miss one that commits in between.
@@ -4981,6 +4993,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           yield* refuseOversized(input);
           const row = yield* requireSession(input.sessionId);
           yield* refuseUnservedModel(input.sessionId, row);
+          yield* awaitHeldPrompt(input.sessionId);
           yield* refuseSendOverSpendCap(input, row);
           const owner = yield* acquireOwner(input.sessionId, row, {
             starts: true,
@@ -5160,14 +5173,24 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 owner.harness,
                 owner.root,
               );
-              if (recorded?.outcome === "succeeded") return undefined;
+              // A success is for the worktree it ran in: one cut again since (its directory went
+              // missing and the acquisition cut a new one) has no install, so it is set up again.
+              // A failure is not a worktree's: it ended the card's run, whatever was cut after.
+              if (
+                recorded?.outcome === "succeeded" &&
+                setupCovers(
+                  recorded,
+                  yield* readWorktreeCut(workspace.path, { fs, path }),
+                )
+              )
+                return undefined;
               if (
                 recorded === undefined &&
                 (yield* rootEverSubmitted(owner.storage))
               )
                 return undefined;
               if (
-                recorded !== undefined &&
+                recorded?.outcome === "failed" &&
                 (yield* runTaskFor(sessionId)) !== undefined
               ) {
                 yield* countRefusal("setup_failed");
@@ -5206,9 +5229,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 message: `session ${sessionId}: its worktree ${workspace.path} cannot run its setup: ${cause instanceof Error ? cause.message : String(cause)}`,
               }),
           });
+          const cut = yield* readWorktreeCut(workspace.path, { fs, path });
           const record = yield* runSetup({
             env,
             commands: workspace.commands,
+            ...(cut === undefined ? {} : { cut }),
             secrets: owner.secrets.setup.values,
             missingSecrets: owner.secrets.setup.missing,
             ...(options.setupTimeoutSeconds === undefined
@@ -6206,10 +6231,12 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           };
           // The replay's transcript is its own run, so nothing is copied in: the log opens empty,
           // the title and the binding are written with the lineage, and the source's prompt is what
-          // starts it. A failure after the row is written removes the row again — an index row with
-          // no log is invisible to the list and would wait for a rebuild to be swept (as a refused
-          // fork's does).
-          yield* acquireOwnerWith(
+          // starts it — once the worktree is set up (F23), so the open leaves the prompt for after.
+          // A failure after the row is written removes the row again — an index row with no log is
+          // invisible to the list and would wait for a rebuild to be swept (as a refused fork's does).
+          const held = yield* Deferred.make<void>();
+          heldPrompts.set(id, held);
+          const owner = yield* acquireOwnerWith(
             id,
             row,
             ({
@@ -6223,7 +6250,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               mcp,
               mcpListing,
             }) =>
-              replaySession({
+              openReplay({
                 source: origin,
                 sourceId: input.sessionId,
                 replayId: id,
@@ -6252,20 +6279,116 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               }),
             { slot },
           ).pipe(
-            Effect.tapError(() =>
+            // `onError`, not `tapError`: the open is a slow step (a mirror fetch, a worktree cut), and
+            // a request that is interrupted in it — its client gone — must not leave the row, or
+            // the held prompt that every later comparison of this replay would wait on forever.
+            Effect.onError(() =>
               paper(
                 "remove the refused replay's index row",
                 sql`DELETE FROM sessions WHERE id = ${id}`,
-              ).pipe(Effect.ignore),
+              ).pipe(
+                Effect.ignore,
+                Effect.andThen(releaseHeldPrompt(id, held)),
+              ),
             ),
           );
-          // The prompt is admitted, so the run is under way: opening the owner armed the comparison
-          // (`reconcileReplay`), which waits for it in the background, and the caller gets the replay
-          // now, as it always has.
+          yield* promptAfterSetup(id, owner, origin, held).pipe(
+            // Opened but not started: the refusal ends the replay as the open's own would.
+            Effect.tapError(() =>
+              releaseIdleOwner(id, owner).pipe(
+                Effect.andThen(
+                  paper(
+                    "remove the refused replay's index row",
+                    sql`DELETE FROM sessions WHERE id = ${id}`,
+                  ).pipe(Effect.ignore),
+                ),
+              ),
+            ),
+          );
+          // The prompt is admitted, or waits only for the setup that is running, so the run is under
+          // way: opening the owner armed the comparison (`reconcileReplay`), which waits for it in the
+          // background, and the caller gets the replay now, as it always has.
           yield* touchActivity(id);
           yield* countSessionCreate("replay");
           return yield* describe(id, row);
         }).pipe(Effect.scoped);
+
+      /**
+       * Wait for a replay's own first prompt to be submitted (F23), when this process holds one: a
+       * message sent to the replay while its setup runs would otherwise wake on the same setup as
+       * the held prompt and could be placed first, as the run, with the source's task queued
+       * behind it. Nothing held, nothing waited for.
+       */
+      const awaitHeldPrompt = (sessionId: SessionId): Effect.Effect<void> => {
+        const held = heldPrompts.get(sessionId);
+        return held === undefined ? Effect.void : Deferred.await(held);
+      };
+
+      const releaseHeldPrompt = (
+        replay: SessionId,
+        held: Deferred.Deferred<void>,
+      ): Effect.Effect<void> =>
+        Effect.sync(() => heldPrompts.delete(replay)).pipe(
+          Effect.andThen(Deferred.succeed(held, undefined)),
+          Effect.asVoid,
+        );
+
+      /**
+       * Submit a replay's prompt once its worktree is set up (F23). A replay's run used to start
+       * inside its open, before any `send` could set the worktree up, so a repo that declares an
+       * install step ran its replay on a worktree with no dependencies, while the session it
+       * replays had them. Nothing owed (no step declared, or none needed): the prompt is submitted
+       * here, as it always was. A setup running or started here: the prompt is submitted by a fiber
+       * in `deferredSends`, in the layer's scope, once that setup succeeds — as a trigger's message
+       * is (`sendDeferringSetup`) — so the replay is answered now rather than after an install.
+       * A setup that fails or is stopped submits nothing and says so in the log: the replay has no
+       * run, its comparison reads it `unanswered`, and the setup's failure is in its `factory.setup`
+       * record.
+       */
+      const promptAfterSetup = (
+        replay: SessionId,
+        owner: LiveOwner,
+        origin: ReplaySource,
+        held: Deferred.Deferred<void>,
+      ): Effect.Effect<void, SessionError> => {
+        const submit = submitReplayPrompt({
+          root: owner.root,
+          source: origin,
+        }).pipe(Effect.asVoid);
+        return Effect.gen(function* () {
+          // A failure to decide is no reason to run on an unprepared worktree silently: the replay
+          // is refused, and its row removed with the open's other failures.
+          const pending = yield* startSetup(replay, owner);
+          if (pending === undefined) {
+            yield* submit;
+            return yield* releaseHeldPrompt(replay, held);
+          }
+          yield* FiberMap.run(
+            deferredSends,
+            `${replay}#replay`,
+            Effect.gen(function* () {
+              const exit = yield* Fiber.await(pending);
+              const refusal = yield* setupRefusalOf(replay, exit);
+              if (refusal !== undefined) {
+                return yield* Effect.logWarning(
+                  `session ${replay}: the replay's prompt was not sent, its worktree's setup did not finish: ${refusal.message.split("\n")[0]}`,
+                );
+              }
+              yield* submit.pipe(
+                Effect.catch((error) =>
+                  Effect.logWarning(
+                    `session ${replay}: the replay's prompt was not sent after its worktree's setup: ${error.message}`,
+                  ),
+                ),
+              );
+            }).pipe(
+              Effect.ensuring(releaseHeldPrompt(replay, held)),
+              Effect.withSpan("SessionService.replayPrompt"),
+            ),
+            { onlyIfMissing: true },
+          );
+        }).pipe(Effect.onError(() => releaseHeldPrompt(replay, held)));
+      };
 
       /**
        * Bring one replay's comparison up to date with its logs (LOB-199): what is owed is read off
@@ -6290,6 +6413,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
        */
       const reconcileReplay = (replay: SessionId): Effect.Effect<void> =>
         Effect.gen(function* () {
+          const held = heldPrompts.get(replay);
+          if (held !== undefined) yield* Deferred.await(held);
           const document = yield* withReader(replay, readReplayDocument);
           const link = document.link;
           if (link === undefined || !Schema.is(SessionIdSchema)(link.source))

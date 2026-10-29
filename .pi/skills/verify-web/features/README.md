@@ -61,7 +61,9 @@ worktree, API `:9541` / web `:3541`, `FAUX_SLEEP_MS=4000`.
 
 `card-face.sh` (the card face's run status, PR link and cost, C10) last passed **10/10** on 2026-10-28
 from the `agent/C10` worktree, API `:9581` / web `:3581`, `FAUX_SLEEP_MS=5000`. `drive.mjs` re-passed there
-(120 checks, 0 failed) once `listBoardCards` joined its read allowlist.
+(120 checks, 0 failed) once `listBoardCards` joined its read allowlist. It then also proved the board's
+repository's readiness score on every card (F25) and passed **14/14** on 2026-10-29 from the `agent/F23-F24-F25`
+worktree, API `:9571` / web `:3571`.
 
 `exit-checklist.sh` (a column's exit checklist in the card pane, D9; planning's `plan_doc` and the Plan
 section, D10) last passed **16/16** on 2026-10-28 from the `agent/D10` worktree, API `:9550` / web `:3550`;

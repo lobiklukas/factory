@@ -123,6 +123,7 @@ export const DoctorRpcHandlers = DoctorRpc.toLayer(
           const base = {
             triggerRules: facts.triggerRules,
             envFiles: [...facts.envFiles],
+            setupTimeoutSeconds: facts.setupTimeoutSeconds,
           };
           if (listed._tag === "Failure") {
             return {

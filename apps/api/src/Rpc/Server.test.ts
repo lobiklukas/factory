@@ -98,6 +98,7 @@ const factsFor = (input: {
       sandbox: "in-process",
       triggerRules: 0,
       envFiles: [],
+      setupTimeoutSeconds: 1_800,
     } satisfies ServerFactsShape;
   }).pipe(Effect.runPromise);
 

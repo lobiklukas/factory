@@ -13,7 +13,10 @@
  * code and a bounded tail of its output (`VERIFY_OUTPUT_TAIL`, the bound a verification keeps), and
  * whether the whole setup succeeded. The control plane reads it back before every first turn: a log
  * whose setup succeeded runs nothing again, and one whose setup failed runs it again, because a
- * failed setup submitted nothing and the next attempt is the operator's retry.
+ * failed setup submitted nothing and the next attempt is the operator's retry. A success is for the
+ * worktree it ran in, named by the cut that made it (`cut`, F23): a worktree cut again — its
+ * directory went missing — has none of what the install put there, so the control plane runs the
+ * setup again for it.
  *
  * Steps stop at the first failure: a build after a failed install would only fail again, more
  * noisily, and bury the cause. A step that could not run to an exit code (spawn failure, timeout) is
@@ -47,6 +50,20 @@ import {
 
 /** The document a session's setup is recorded in. */
 export const SETUP_DOC_KIND = "factory.setup";
+
+/**
+ * Whether `record` is a setup of the worktree whose cut is `cut` (F23). A worktree with no cut is
+ * one nobody can tell from before (a plain directory, one cut before cuts were named), so its
+ * record is trusted. A worktree with a cut is covered only by a record naming that same cut: two
+ * different cuts say it was made again, and a record with no cut next to a worktree that has one
+ * says the same, because a worktree cut since cuts were named is stamped when it is made and its
+ * setup is recorded with the stamp. The worktree of a session that set up before cuts were named
+ * and was then cut again is set up once more, which is what it needs.
+ */
+export const setupCovers = (
+  record: SetupRecord,
+  cut: string | undefined,
+): boolean => cut === undefined || record.cut === cut;
 
 /** The steps a setup runs, in order: the `.factory/config` fields of the same names. */
 export const SETUP_STEPS = ["install", "build"] as const;
@@ -106,6 +123,13 @@ export const SetupRecord = Schema.Struct({
   steps: Schema.mutable(Schema.Array(SetupStepResult)),
   startedAt: Schema.String,
   finishedAt: Schema.String,
+  /**
+   * The cut of the worktree the steps ran in (F23, `readWorktreeCut`), when it had one: a record
+   * for another cut is no setup of this worktree. Absent on a record written before cuts were named,
+   * and for a directory that is no cut worktree. Beside a worktree that has a cut, an absent one is
+   * stale (`setupCovers`).
+   */
+  cut: Schema.optionalKey(Schema.String),
 });
 export type SetupRecord = typeof SetupRecord.Type;
 
@@ -145,6 +169,8 @@ export const runSetup = (input: {
   readonly commands: RepoCommands;
   /** Overrides `SETUP_TIMEOUT_SECONDS`, per step. */
   readonly timeoutSeconds?: number | undefined;
+  /** The cut of the worktree `env` runs in, recorded with the setup (F23). */
+  readonly cut?: string | undefined;
   /**
    * The secrets the repo declares for its setup (S-agent-secrets): each step gets them as variables,
    * and its output is masked before it is streamed or recorded.
@@ -214,6 +240,7 @@ export const runSetup = (input: {
       steps: results,
       startedAt,
       finishedAt: yield* isoNow,
+      ...(input.cut === undefined ? {} : { cut: input.cut }),
     } satisfies SetupRecord;
   }).pipe(Effect.withSpan("Setup.run"));
 

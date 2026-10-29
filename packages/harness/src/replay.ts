@@ -189,13 +189,22 @@ export type ReplaySessionOptions = {
   readonly defaultBudget?: number;
 };
 
-export type ReplayedSession = OpenSession & {
+/** A replay's own session, opened with its link and no prompt yet (`openReplay`). */
+export type OpenedReplay = OpenSession & {
   readonly source: ReplaySource;
+};
+
+export type ReplayedSession = OpenedReplay & {
   readonly submission: SubmittedMessage;
 };
 
 /**
  * Open a replay: the replay's own session, its link to the source, then the source's prompt.
+ *
+ * The factory's own `SessionService` does not call this: it composes `openReplay` and
+ * `submitReplayPrompt` itself so the worktree's setup runs between them (F23). This is that
+ * composition for a caller with nothing to run in between, and for the tests of the two halves
+ * together.
  *
  * The link, the title, the repo binding, the cap and the actor are one commit, in the shape a fork copies its entries
  * in: a replay that exists at all exists with everything `rebuildIndexes` folds, so no window
@@ -207,6 +216,22 @@ export type ReplayedSession = OpenSession & {
 export const replaySession = (
   options: ReplaySessionOptions,
 ): Effect.Effect<ReplayedSession, SessionError> =>
+  Effect.gen(function* () {
+    const replay = yield* openReplay(options);
+    const submission = yield* submitReplayPrompt(replay).pipe(
+      Effect.tapError(() => closeSession(replay).pipe(Effect.ignore)),
+    );
+    return { ...replay, submission };
+  });
+
+/**
+ * The first half of `replaySession`: the replay's session and its link, with no prompt submitted
+ * (F23). A caller that has something to do before the first model call — the worktree's setup —
+ * runs it between this and `submitReplayPrompt`. A failure closes the session it opened.
+ */
+export const openReplay = (
+  options: ReplaySessionOptions,
+): Effect.Effect<OpenedReplay, SessionError> =>
   Effect.gen(function* () {
     const opened = yield* openSession({
       storage: options.target,
@@ -271,11 +296,14 @@ export const replaySession = (
         return Promise.all([doc, binding, ...title, ...cap, ...actor]);
       }, BACKGROUND_CONTEXT),
     ).pipe(Effect.tapError(() => closeSession(opened).pipe(Effect.ignore)));
-    const submission = yield* submitMessage(opened.root, {
-      content: options.source.prompt,
-    }).pipe(Effect.tapError(() => closeSession(opened).pipe(Effect.ignore)));
-    return { ...opened, source: options.source, submission };
+    return { ...opened, source: options.source };
   });
+
+/** The second half of `replaySession`: submit the source's prompt, which starts the replay's run. */
+export const submitReplayPrompt = (
+  replay: Pick<OpenedReplay, "root" | "source">,
+): Effect.Effect<SubmittedMessage, SessionError> =>
+  submitMessage(replay.root, { content: replay.source.prompt });
 
 /**
  * One side of a replay, measured from its log (LOB-199): how its task settled, how many assistant
