@@ -56,6 +56,7 @@ import {
 } from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
 import { HealthGroupLive } from "./Api/Health";
+import { effectiveSetupTimeout, SetupTimeoutConfig } from "./SetupTimeout";
 import { webhookLiveFor } from "./Api/Webhook";
 import {
   bootEnvFromProcess,
@@ -600,6 +601,7 @@ const HttpLive = Effect.gen(function* () {
   const autonomy = yield* ApprovalGateConfig;
   const defaultBudget = yield* SessionBudgetConfig;
   const maxConcurrent = yield* SessionMaxConcurrentConfig;
+  const setupTimeoutSeconds = effectiveSetupTimeout(yield* SetupTimeoutConfig);
   const declaredRoles = yield* parseRoleModels(yield* RoleModelsConfig);
   const declaredDefault = (yield* DefaultModelConfig).trim();
   const docsSchedule = yield* DocsScheduleConfig;
@@ -808,6 +810,7 @@ const HttpLive = Effect.gen(function* () {
     sandbox: Option.getOrElse(sandboxChoice, () => DEFAULT_SANDBOX_RUNTIME),
     triggerRules: triggerRules.length,
     envFiles,
+    setupTimeoutSeconds,
   });
 
   // Sessions own one log, one working directory, and (locally) the harness that drives them. The PR
@@ -832,6 +835,7 @@ const HttpLive = Effect.gen(function* () {
           rolePolicies,
           sessionRoot: model.sessionRoot,
           sandbox,
+          setupTimeoutSeconds,
           idleTimeoutMs: model.idleTimeoutMs,
           ...Option.match(maxConcurrent, {
             onNone: () => ({}),

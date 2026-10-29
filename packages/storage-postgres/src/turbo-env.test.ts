@@ -286,6 +286,7 @@ describe("the dev tasks' environment", () => {
     "SESSION_ROOT",
     "SESSION_IDLE_TIMEOUT_MS",
     "SESSION_MAX_CONCURRENT",
+    "SETUP_TIMEOUT_SECONDS",
     "SANDBOX_RUNTIME",
     "PR_CAP_MAX_FILES",
     "PR_CAP_MAX_LINES",

@@ -172,6 +172,11 @@ export const DeploymentChecks = Schema.Struct({
   triggerRules: Schema.Int,
   /** The absolute paths of the env files the process loaded, never their contents. */
   envFiles: Schema.Array(Schema.String),
+  /**
+   * How long each step of a worktree's setup may run, in seconds (F24): `SETUP_TIMEOUT_SECONDS`,
+   * or the default when the deployment sets none.
+   */
+  setupTimeoutSeconds: Schema.Finite,
   /** One row per registered repo, by slug. Empty when the registry could not be read. */
   repos: Schema.Array(RepoCheck),
   /** Why the registry could not be read (Postgres down), when it could not. */

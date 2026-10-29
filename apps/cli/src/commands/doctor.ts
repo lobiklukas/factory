@@ -316,6 +316,12 @@ export const bootChecks = (
             "set TRIGGER_RULES, or store a route over the trigger-routes RPC",
           )
         : ok("trigger-rules", "0 mapped (no webhook is armed)"),
+    // What a slow install is given before the setup fails (F24): an `ok` either way, because the
+    // default is a choice, and the line is there so an operator reads which one is in force.
+    ok(
+      "setup-timeout",
+      `${deployment.setupTimeoutSeconds}s per setup step (SETUP_TIMEOUT_SECONDS)`,
+    ),
     ok(
       "env-files",
       deployment.envFiles.length === 0

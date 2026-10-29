@@ -49,6 +49,8 @@ export type ServerFactsShape = {
   readonly triggerRules: number;
   /** The absolute paths of the env files the process loaded; paths only (`factory doctor`, E8). */
   readonly envFiles: ReadonlyArray<string>;
+  /** Seconds each step of a worktree's setup may run: `SETUP_TIMEOUT_SECONDS` or its default (F24). */
+  readonly setupTimeoutSeconds: number;
 };
 
 /** The boot's resolved configuration, provided beside the RPC handlers that read it. */
