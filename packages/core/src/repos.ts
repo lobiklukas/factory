@@ -39,15 +39,15 @@ const NO_CHECKOUT: CheckoutFacts = {
   hasFactoryConfig: false,
 };
 
-/** How long `rev-parse` may take before the path is answered as not a work tree. */
-const GIT_TIMEOUT_MS = 5_000;
-
 /**
- * How long a registration waits for the same answer (`workTreeRoot`'s `timeoutMs`): a refusal is the
- * operator's to act on, and a loaded machine outlived the five seconds on a real checkout, which was
- * then refused as no work tree (DEFLAKE). A read keeps the probe's deadline.
+ * How long a local git question may take before it is answered as git not saying: the path is no
+ * work tree, the ref names no commit, the merge base is unknown. A healthy git answers a local probe
+ * in milliseconds, so this only bounds a hung one — and an answer read from a timeout is silently
+ * wrong (a real checkout refused as no work tree, a branch measured against the wrong base), so it is
+ * long enough that a loaded machine is waited for: the five seconds this was outran a local
+ * `rev-parse` and `merge-base` there (DEFLAKE).
  */
-export const REGISTRATION_GIT_TIMEOUT_MS = 60_000;
+const GIT_TIMEOUT_MS = 60_000;
 
 /**
  * The root of the git work tree `directory` is inside, or `undefined` when it is not inside one.
@@ -248,13 +248,14 @@ export const lookupCommit = (
 export const resolveCommit = (
   directory: string,
   ref: string,
-  options: { readonly timeoutMs?: number } = {},
 ): Effect.Effect<string | undefined> =>
-  gitAnswer(
-    directory,
-    ["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`],
-    options,
-  ).pipe(
+  gitAnswer(directory, [
+    "rev-parse",
+    "--verify",
+    "--quiet",
+    "--end-of-options",
+    `${ref}^{commit}`,
+  ]).pipe(
     Effect.map((sha) => (sha === undefined || sha === "" ? undefined : sha)),
   );
 

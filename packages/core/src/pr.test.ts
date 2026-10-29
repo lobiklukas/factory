@@ -825,10 +825,10 @@ describe("parseDiffSize", () => {
 });
 
 /**
- * Each `diffCapRefusal` case builds a checkout with git and measures it with git, and `bun run test` runs every package's suites at once,
- * so a case's wall clock is mostly the machine's load: the slowest here took 1.7 s alone and timed out at 5 s beside a full
- * `bun run test`. vitest's 5 s default is under that,
- * so these cases carry a budget sized to the work instead (DEFLAKE).
+ * Each `diffCapRefusal` case builds a checkout with git and measures it with git, and `bun run test`
+ * runs every package's suites at once, so a case's wall clock is mostly the machine's load: the
+ * slowest here took 1.7 s alone and timed out at vitest's 5 s default beside a full `bun run test`.
+ * So the cases carry a budget sized to that load instead (DEFLAKE).
  */
 const GIT_CASES = { timeout: 60_000 };
 

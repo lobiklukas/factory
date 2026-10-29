@@ -15,11 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import {
-  checkBaseRef,
-  REGISTRATION_GIT_TIMEOUT_MS,
-  workTreeRoot,
-} from "./repos";
+import { checkBaseRef, workTreeRoot } from "./repos";
 
 const checkout = mkdtempSync(join(tmpdir(), "factory-repos-"));
 execSync("git init -q -b main", { cwd: checkout, stdio: "ignore" });
@@ -52,12 +48,13 @@ describe("workTreeRoot", () => {
   });
 
   /**
-   * A registration waits for a git slower than the probe's five seconds, as a loaded machine's was,
-   * instead of refusing a real checkout as no work tree (DEFLAKE). The `git` first on `PATH` naps
-   * 6 s, then runs the real one. Mutation: drop `timeoutMs` from the probe's `execFile` — the
-   * registration's answer is `undefined`, as the read's is.
+   * A git slower than the five seconds the deadline used to be is waited for, as a loaded machine's
+   * was, rather than read as no work tree — which refused a real checkout's registration and dropped
+   * its readiness score (DEFLAKE). The deadline still bounds a hung git: a caller's shorter one gives
+   * up. The `git` first on `PATH` naps 6 s, then runs the real one. Mutation: put the deadline back
+   * to 5 s — the first answer is `undefined`.
    */
-  it("waits as long as it is told for a slow git, and a read still gives up at five seconds", async () => {
+  it("waits for a slow git, and still gives up at its deadline", async () => {
     const real = execFileSync("sh", ["-c", "command -v git"], {
       encoding: "utf8",
     }).trim();
@@ -72,17 +69,17 @@ describe("workTreeRoot", () => {
     // oxlint-disable-next-line effecttsgo/process-env -- as above.
     process.env["PATH"] = `${bin}:${path}`;
     try {
-      const [registration, read] = await Effect.runPromise(
+      const [patient, impatient] = await Effect.runPromise(
         Effect.all(
           [
-            workTreeRoot(checkout, { timeoutMs: REGISTRATION_GIT_TIMEOUT_MS }),
             workTreeRoot(checkout),
+            workTreeRoot(checkout, { timeoutMs: 1_000 }),
           ],
           { concurrency: 2 },
         ),
       );
-      expect(registration).toBe(realpathSync(checkout));
-      expect(read).toBeUndefined();
+      expect(patient).toBe(realpathSync(checkout));
+      expect(impatient).toBeUndefined();
     } finally {
       // oxlint-disable-next-line effecttsgo/process-env -- as above.
       process.env["PATH"] = path;

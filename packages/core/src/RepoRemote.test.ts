@@ -17,10 +17,10 @@ process.env["GIT_CONFIG_NOSYSTEM"] = "1";
 process.env["GIT_CONFIG_GLOBAL"] = "/dev/null";
 
 /**
- * Each case spawns git a dozen times or more, and `bun run test` runs every package's suites at once,
- * so a case's wall clock is mostly the machine's load: the slowest here took 3.5 s alone and 15 s beside a full
- * `bun run test`. vitest's 5 s default is under that,
- * so these cases carry a budget sized to the work instead (DEFLAKE).
+ * Each case spawns git a dozen times or more, and `bun run test` runs every package's suites at
+ * once, so a case's wall clock is mostly the machine's load: the slowest here took 3.5 s alone and
+ * 15 s beside a full `bun run test`, past vitest's 5 s default. So the cases carry a budget sized to
+ * that load instead (DEFLAKE).
  */
 const GIT_CASES = { timeout: 60_000 };
 
@@ -115,11 +115,12 @@ describe("measureBaseOf", GIT_CASES, () => {
   });
 
   /**
-   * A git slower than a probe's five seconds is still waited for: a loaded machine took that long
-   * over a local `merge-base`, and the question it timed out on answered the local base (DEFLAKE).
-   * The `git` first on `PATH` naps 6 s before `--is-ancestor`, and runs the real one.
+   * A git slower than the five seconds the probes' deadline used to be is waited for: a loaded
+   * machine took that long over a local `merge-base`, and the question it timed out on answered the
+   * local base (DEFLAKE). The `git` first on `PATH` naps 6 s before `--is-ancestor`, and runs the
+   * real one.
    *
-   * Mutation: drop `patient` from the `--is-ancestor` question — the answer is `main`.
+   * Mutation: put `GIT_TIMEOUT_MS` in `./repos` back to 5 s — the answer is `main`.
    */
   it("waits for a slow git rather than reading its silence as the local base", async () => {
     const { root, b } = checkout();

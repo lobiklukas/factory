@@ -126,14 +126,6 @@ export const forgeUrlFor = (
  * `base` whenever there is no tracking ref, or a ref does not resolve (the measurement then fails on
  * its own terms); the tracking ref when the checkout has no local `<base>` at all.
  */
-/**
- * How long each of `measureBaseOf`'s git questions may take: longer than a probe's five seconds,
- * because a question it times out on answers `base` — silently the wrong base for a branch cut from
- * the fetched tip — and the PR step, the board and `verify` all measure through it. A loaded machine
- * outlived the probe's deadline on a local `rev-parse` (DEFLAKE); a hung git still ends here.
- */
-const MEASURE_GIT_TIMEOUT_MS = 60_000;
-
 export const measureBaseOf = (input: {
   /** Any directory inside the repository: the session's worktree or the registered checkout. */
   readonly directory: string;
@@ -141,30 +133,26 @@ export const measureBaseOf = (input: {
   readonly head: string;
 }): Effect.Effect<string> =>
   Effect.gen(function* () {
-    const patient = { timeoutMs: MEASURE_GIT_TIMEOUT_MS };
     const tracking = baseTrackingRef(input.base);
-    const trackingTip = yield* resolveCommit(
-      input.directory,
-      tracking,
-      patient,
-    );
+    const trackingTip = yield* resolveCommit(input.directory, tracking);
     if (trackingTip === undefined) return input.base;
-    const baseTip = yield* resolveCommit(input.directory, input.base, patient);
+    const baseTip = yield* resolveCommit(input.directory, input.base);
     if (baseTip === undefined) return tracking;
-    const headTip = yield* resolveCommit(input.directory, input.head, patient);
+    const headTip = yield* resolveCommit(input.directory, input.head);
     if (headTip === undefined) return input.base;
     const [fromTracking, fromBase] = yield* Effect.all([
-      gitAnswer(input.directory, ["merge-base", trackingTip, headTip], patient),
-      gitAnswer(input.directory, ["merge-base", baseTip, headTip], patient),
+      gitAnswer(input.directory, ["merge-base", trackingTip, headTip]),
+      gitAnswer(input.directory, ["merge-base", baseTip, headTip]),
     ]);
     if (fromTracking === undefined || fromTracking === "") return input.base;
     if (fromBase === undefined || fromBase === "") return tracking;
     if (fromTracking === fromBase) return input.base;
-    const later = yield* gitAnswer(
-      input.directory,
-      ["merge-base", "--is-ancestor", fromBase, fromTracking],
-      patient,
-    );
+    const later = yield* gitAnswer(input.directory, [
+      "merge-base",
+      "--is-ancestor",
+      fromBase,
+      fromTracking,
+    ]);
     return later === undefined ? input.base : tracking;
   });
 
