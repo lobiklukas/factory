@@ -49,6 +49,8 @@ export type FakeClusterOptions = {
   /** A directory the fake owns: its volumes and its relay bundle live under it. Canonical. */
   readonly root: string;
   readonly behaviour?: FakeControllerBehaviour;
+  /** A relay bundle already built (`buildRelay`); built under `root` when absent. */
+  readonly relay?: string;
 };
 
 type Resource = {
@@ -84,7 +86,7 @@ const closedConnection = (reason: string): Connection => ({
 export const fakeCluster = (options: FakeClusterOptions): FakeCluster => {
   const volumes = join(options.root, "volumes");
   mkdirSync(volumes, { recursive: true });
-  const relay = buildRelay(join(options.root, "relay.mjs"));
+  const relay = options.relay ?? buildRelay(join(options.root, "relay.mjs"));
   const resources = new Map<string, Resource>();
   const behaviours = new Map<string, FakeControllerBehaviour>();
   const connections = new Map<string, Set<Connection>>();

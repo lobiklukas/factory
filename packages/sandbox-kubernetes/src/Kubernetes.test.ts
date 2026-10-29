@@ -22,6 +22,7 @@ import { registerSandboxRuntimeConformance } from "@repo/sandbox/testing";
 import { Cause, Effect, Exit, Fiber, Layer, Schema, type Scope } from "effect";
 import { afterAll, describe, expect, it } from "vitest";
 import { Kubernetes } from "./index";
+import { buildRelay } from "./relay/build";
 import { fakeCluster, type FakeCluster } from "./testing";
 
 const scratch = realpathSync(
@@ -29,17 +30,36 @@ const scratch = realpathSync(
 );
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
+/** Whether process `pid` still exists on this host. */
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+// The relay as the image runs it, bundled once for every fake cluster here.
+const RELAY = buildRelay(join(scratch, "relay.mjs"));
+
 const freshCluster = (
   behaviour?: Parameters<typeof fakeCluster>[0]["behaviour"],
 ) =>
   fakeCluster({
     root: mkdtempSync(join(scratch, "cluster-")),
+    relay: RELAY,
     ...(behaviour === undefined ? {} : { behaviour }),
   });
 
 // One fake cluster per case, as one layer per case: the suite builds its layer afresh each time.
+// The suite sizes its timeouts for a local process; every case here also spawns relay processes,
+// and the gate runs every package at once.
+const patient = (name: string, run: () => Promise<void>, timeoutMs?: number) =>
+  it(name, run, Math.max(timeoutMs ?? 0, 30_000));
+
 registerSandboxRuntimeConformance(
-  { describe, expect, it },
+  { describe, expect, it: patient },
   "kubernetes runtime (fake cluster)",
   Layer.unwrap(
     Effect.sync(() =>
@@ -181,7 +201,7 @@ describe("kubernetes runtime lifecycle", () => {
         const running = yield* Effect.forkChild(
           runtime.exec(
             sandbox,
-            "printf s > started; sleep 1; printf s > survived",
+            "printf $$ > started; sleep 30; printf s > survived",
           ),
         );
         while (!existsSync(join(sandbox.workdir, "started")))
@@ -190,8 +210,13 @@ describe("kubernetes runtime lifecycle", () => {
         const exit = yield* Fiber.await(running);
         expect(Exit.isFailure(exit)).toBe(true);
         expect(cluster.relays()).toBe(0);
-        yield* Effect.sleep("1500 millis");
-        expect(existsSync(join(sandbox.workdir, "survived"))).toBe(false);
+        // The command's shell is gone well before its thirty seconds: killed with the pod.
+        const pid = Number(
+          readFileSync(join(sandbox.workdir, "started"), "utf8"),
+        );
+        for (let tries = 0; tries < 500 && alive(pid); tries++)
+          yield* Effect.sleep("20 millis");
+        expect(alive(pid)).toBe(false);
       }),
     );
   }, 15_000);

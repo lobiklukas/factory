@@ -46,6 +46,29 @@ const relay = (refusal?: () => string | undefined) => {
 // oxlint-disable-next-line effecttsgo/global-timers, effecttsgo/new-promise -- a Promise-world suite waits in real time.
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Whether process `pid` still exists on this host. */
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Wait until the command that wrote its shell's pid to `path` is gone: killed, not finished, since
+ * the commands here sleep far longer than any wait. Polled rather than slept, so a loaded machine
+ * slows the case down instead of failing it.
+ */
+const killed = async (env: RemoteExecutionEnv, path: string) => {
+  const read = await env.readTextFile(path, context);
+  if (!read.ok) throw read.error;
+  const pid = Number(read.value);
+  for (let tries = 0; tries < 500 && alive(pid); tries++) await sleep(20);
+  return !alive(pid);
+};
+
 /** Wait until `path` exists in the environment: the command that writes it has started. */
 const until = async (env: RemoteExecutionEnv, path: string) => {
   for (let tries = 0; tries < 250; tries++) {
@@ -56,8 +79,13 @@ const until = async (env: RemoteExecutionEnv, path: string) => {
   throw new Error(`${path} never appeared`);
 };
 
+// The suite sizes its timeouts for a local environment; here each case also starts a relay process,
+// and the gate runs every package at once.
+const patient = (name: string, run: () => Promise<void>, timeoutMs?: number) =>
+  it(name, run, Math.max(timeoutMs ?? 0, 30_000));
+
 registerEnvConformance(
-  { describe, expect, it },
+  { describe, expect, it: patient },
   "relay: ExecutionEnv",
   async (use) => {
     const { cwd, env } = relay();
@@ -108,7 +136,7 @@ describe("relay connection", () => {
     const { env, connections } = relay();
     try {
       const running = env.exec(
-        "printf s > started; sleep 2; printf s > survived",
+        "printf $$ > started; sleep 30; printf s > survived",
         undefined,
         context,
       );
@@ -116,12 +144,8 @@ describe("relay connection", () => {
       connections[0]?.close();
       const lost = await running;
       expect(lost.ok ? "ran" : lost.error.code).toBe("unknown");
-      // The server ended with its stdin and took the command with it.
-      await sleep(2500);
-      expect(await env.exists("survived", context)).toEqual({
-        ok: true,
-        value: false,
-      });
+      // The server ended with its stdin and took the command with it, long before it would end.
+      expect(await killed(env, "started")).toBe(true);
       expect(connections).toHaveLength(2);
     } finally {
       env.disconnect();
@@ -172,7 +196,7 @@ describe("relay connection", () => {
     const { env } = relay();
     try {
       const result = await env.exec(
-        "printf one; sleep 2; printf two > survived",
+        "printf $$ > pid; printf one; sleep 30; printf two > survived",
         {
           onOutput: () => {
             throw new Error("the caller's callback failed");
@@ -183,11 +207,9 @@ describe("relay connection", () => {
       expect(
         result.ok ? "ran" : [result.error.code, result.error.message],
       ).toEqual(["callback_error", "the caller's callback failed"]);
-      await sleep(2500);
-      expect(await env.exists("survived", context)).toEqual({
-        ok: true,
-        value: false,
-      });
+      // The shell is gone long before its thirty seconds were up. Whether every grandchild went with
+      // it is Pi Durable's process-group kill, which this relay does not change.
+      expect(await killed(env, "pid")).toBe(true);
     } finally {
       env.disconnect();
     }
