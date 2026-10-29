@@ -24,7 +24,7 @@ export default Effect.gen(function* () {
 
   yield* sql`
     CREATE TABLE IF NOT EXISTS notification_kinds (
-      kind TEXT PRIMARY KEY CHECK (kind IN ('question', 'approval', 'gate', 'failed')),
+      kind TEXT PRIMARY KEY CHECK (kind IN ('question', 'approval', 'gate', 'failed', 'spend')),
       enabled BOOLEAN NOT NULL,
       updated_by TEXT NOT NULL DEFAULT '',
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()

@@ -7,7 +7,7 @@
  *   NOTIFY_NTFY_URL           the ntfy server, default https://ntfy.sh
  *   NOTIFY_NTFY_TOKEN         an ntfy access token, for a protected topic
  *   NOTIFY_TYPES              which kinds: a comma-separated subset of question, approval, gate,
- *                             failed; blank (the default) is all four
+ *                             failed, spend; blank (the default) is all five
  *   NOTIFY_LINK_BASE          where links point: the dashboard's origin, default the first
  *                             ALLOWED_ORIGINS entry
  *   NOTIFY_POLL_MS            how often the notifier looks, default 5000

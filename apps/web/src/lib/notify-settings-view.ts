@@ -10,7 +10,7 @@ import type {
   NotificationSinkSummary,
 } from "@repo/domain/Notify";
 
-/** What the page calls a kind, and when it fires: the four events the notifier reads. */
+/** What the page calls a kind, and when it fires: the events the notifier reads. */
 export const KIND_COPY: Readonly<
   Record<NotificationKind, { readonly label: string; readonly detail: string }>
 > = {
@@ -29,6 +29,10 @@ export const KIND_COPY: Readonly<
   failed: {
     label: "Failures",
     detail: "A run stopped on its budget or a model request that kept failing",
+  },
+  spend: {
+    label: "Spend caps",
+    detail: "A repo or actor spend cap crossed 80% or was reached",
   },
 };
 

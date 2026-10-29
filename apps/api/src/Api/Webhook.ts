@@ -603,7 +603,12 @@ const handle = (adapter: () => Adapter) =>
     if (!outcome.ok) {
       if (outcome.cause.code !== "at-capacity")
         return storageFailure(outcome.cause);
-      yield* logRefusal("at-capacity");
+      // A retry hint means the refusal knows when it ends: a spend cap's window, not a freed slot.
+      yield* logRefusal(
+        outcome.cause.retryAfterSeconds === undefined
+          ? "at-capacity"
+          : "budget-exceeded",
+      );
       const answer = triggerFailureAnswer(outcome.cause);
       return HttpServerResponse.jsonUnsafe(answer.body, {
         status: answer.status,

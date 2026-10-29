@@ -1169,6 +1169,14 @@ export type CompactSessionResult = typeof CompactSessionResult.Type;
  *   one of its board definition's run caps (B9, LOB-71): the message names the cap, the board, task,
  *   repository or column it counts, and the definition version it is configured in, and `cap` says
  *   which it was.
+ * - `budget_exceeded` — an aggregate spend cap (S-aggregate-spend-caps): the spend already recorded
+ *   for the request's repository, or for the actor making it, reaches the cap configured for the
+ *   current UTC day or month (`SPEND_CAPS`), so a new run on it is refused before anything is
+ *   written or any model is called. `spendCap` names the cap, the scope it counted, the window, the
+ *   limit, the spend and where the limit is configured. Not transient in the way `at_capacity` is:
+ *   the same request succeeds once the window rolls over or the cap is raised, and runs on any other
+ *   repository or by any other actor are unaffected. Distinct from a session's own budget (C23), which
+ *   stops a run already under way.
  * - `setup_failed` — the session's worktree setup failed before the agent's first turn
  *   (S-env-setup): the repo's declared `install` or `build` exited non-zero or could not run, so the
  *   message was not submitted and no model was called. The message names the step, the command, its
@@ -1202,6 +1210,7 @@ export const SessionErrorCode = Schema.Literals([
   "repo_clone_failed",
   "owned_elsewhere",
   "at_capacity",
+  "budget_exceeded",
   "setup_failed",
   "setup_running",
   "policy_rejected",
@@ -1237,6 +1246,33 @@ export const CapacityCap = Schema.Struct({
 });
 export type CapacityCap = typeof CapacityCap.Type;
 
+/** What an aggregate spend cap counts: one repository's spend, or one actor's. */
+export const SpendCapScope = Schema.Literals(["repo", "actor"]);
+export type SpendCapScope = typeof SpendCapScope.Type;
+
+/** The window a spend cap counts over: the current UTC day or the current UTC month. */
+export const SpendCapWindow = Schema.Literals(["day", "month"]);
+export type SpendCapWindow = typeof SpendCapWindow.Type;
+
+/**
+ * The cap a `budget_exceeded` refusal names, typed (S-aggregate-spend-caps): what it counted (`scope`
+ * of `subject`, the repository slug or the actor), over which `window`, the `limit` in US dollars,
+ * the `spent` that reaches it, where an operator changes it (`source`, the configuration key and the
+ * entry), and when the window ends and the request would be let through (`resetsAt`, and the
+ * `retryAfterSeconds` to it from the refusal, which a webhook's `Retry-After` is).
+ */
+export const SpendCap = Schema.Struct({
+  scope: SpendCapScope,
+  subject: Schema.String,
+  window: SpendCapWindow,
+  limit: Schema.Finite,
+  spent: Schema.Finite,
+  source: Schema.String,
+  resetsAt: Timestamp,
+  retryAfterSeconds: Schema.Int,
+});
+export type SpendCap = typeof SpendCap.Type;
+
 export class SessionError extends Schema.TaggedError<SessionError>()(
   "SessionError",
   {
@@ -1244,5 +1280,7 @@ export class SessionError extends Schema.TaggedError<SessionError>()(
     message: Schema.String,
     /** Set on an `at_capacity` refusal only: the cap that was hit (LOB-70, LOB-71). */
     cap: Schema.optional(CapacityCap),
+    /** Set on a `budget_exceeded` refusal only: the aggregate spend cap that was reached. */
+    spendCap: Schema.optional(SpendCap),
   },
 ) {}

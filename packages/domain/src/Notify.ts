@@ -29,6 +29,7 @@ export const NotificationKind = Schema.Literals([
   "approval",
   "gate",
   "failed",
+  "spend",
 ]);
 export type NotificationKind = typeof NotificationKind.Type;
 export const NOTIFICATION_KINDS: ReadonlyArray<NotificationKind> =

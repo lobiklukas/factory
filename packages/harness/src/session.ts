@@ -2609,6 +2609,22 @@ export const readPromptSubmission = (
   });
 
 /**
+ * Whether the root already took a submission under `requestId`: a retried `send` is answered from
+ * it by Pi Durable's own dedupe, so it starts nothing new (S-aggregate-spend-caps).
+ */
+export const rootHasRequest = (
+  storage: Storage,
+  requestId: string,
+): Effect.Effect<boolean, SessionError> =>
+  attempt("find submission by request", () =>
+    storage.submissionByRequest(
+      ROOT_CONVERSATION_ID,
+      requestId,
+      BACKGROUND_CONTEXT,
+    ),
+  ).pipe(Effect.map((record) => record !== undefined));
+
+/**
  * Withdraw a queued message (LOB-166): Pi Durable settles the submission `unanswered` with reason
  * `aborted` and removes its inbox item in one commit, so the message never reaches the transcript
  * and every watcher sees the queue shrink.
