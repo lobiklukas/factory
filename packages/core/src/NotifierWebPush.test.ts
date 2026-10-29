@@ -140,6 +140,12 @@ describe("the VAPID authorization", () => {
     expect(header).not.toContain(Redacted.value(vapid.privateKey));
   });
 
+  it("accepts every generated key pair, including a private key with a leading zero byte", () => {
+    // One P-256 private key in 256 starts with a zero byte; 2000 pairs miss one with odds of about 0.04%.
+    for (let i = 0; i < 2000; i++)
+      expect(vapidProblem(vapidOf())).toBeUndefined();
+  });
+
   it("is refused for a key pair that is not a pair, and for a subject that is not a contact", () => {
     const a = vapidOf();
     const b = vapidOf();
