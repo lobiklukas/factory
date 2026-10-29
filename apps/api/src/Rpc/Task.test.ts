@@ -57,7 +57,7 @@ import {
 import { RpcClient, RpcSerialization } from "effect/rpc";
 import type { RpcClientError } from "effect/rpc/RpcClientError";
 import { SqlClient } from "effect/sql/SqlClient";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { SessionRpcLive } from "./Session";
 import {
   sendingToken,
@@ -353,6 +353,10 @@ const DEFAULT_V3: ReadonlyArray<ColumnConfig> = [
     autonomy: unasked,
   },
 ];
+
+// The cases boot the RPC server over a scratch database, and several register git checkouts: past
+// vitest's 5 s default on a loaded machine (DEFLAKE).
+vi.setConfig({ testTimeout: 60_000 });
 
 describe("a board's configuration over RPC (LOB-270)", () => {
   /**

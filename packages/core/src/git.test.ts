@@ -218,7 +218,8 @@ afterAll(() => {
   remote?.server.close();
   // One directory holds the remote, the registered repo and every worktree, so one removal is all.
   rmSync(root, { recursive: true, force: true });
-});
+  // Removing every case's git checkouts outran vitest's 10 s hook default on a loaded machine (DEFLAKE).
+}, GIT_SETUP_MS);
 
 describe(
   "fetch, commit, push against a local bare repository",

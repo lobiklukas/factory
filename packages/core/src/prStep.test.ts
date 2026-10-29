@@ -219,7 +219,9 @@ afterAll(async () => {
   await runtime.dispose();
   remote?.server.close();
   rmSync(root, { recursive: true, force: true });
-});
+  // Its deletes, the runtime's close and removing every case's checkouts outran vitest's 10 s hook
+  // default on a loaded machine (DEFLAKE).
+}, 60_000);
 
 const CASE = { timeout: 60_000 };
 

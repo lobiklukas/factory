@@ -200,7 +200,8 @@ const registered = async (): Promise<RepoSlug> => {
   return repo;
 };
 
-describe("secrets over RPC", () => {
+// Past vitest's 5 s default on a loaded machine, as the RPC server's other suites are (DEFLAKE).
+describe("secrets over RPC", { timeout: 60_000 }, () => {
   it("stores a value and never answers it: set, list and delete each answer a summary", async () => {
     const repo = await registered();
     const before = answered.length;

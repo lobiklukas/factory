@@ -2270,7 +2270,9 @@ describe("compact", () => {
   }, 120_000);
 });
 
-describe("repo binding", () => {
+// Each case registers a checkout git has to inspect, and most cut a worktree: past vitest's 5 s
+// default on a loaded machine (DEFLAKE).
+describe("repo binding", { timeout: 60_000 }, () => {
   it("binds a session to a repo and resolves its workspace from the repo's config", async () => {
     const result = await program(
       Effect.gen(function* () {

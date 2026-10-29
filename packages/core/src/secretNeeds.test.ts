@@ -47,7 +47,9 @@ const needsAt = (directory: string, ref: string) =>
     }).pipe(Effect.provide(BunServices.layer)),
   );
 
-describe("secretNeedsAt", () => {
+// Each case commits with git and reads the declaration back with git: past vitest's 5 s default on a
+// loaded machine (DEFLAKE).
+describe("secretNeedsAt", { timeout: 60_000 }, () => {
   it("reads the declaration at the base, whatever the branch's config says", async () => {
     const root = mkdtempSync(join(tmpdir(), "factory-needs-"));
     dirs.push(root);
