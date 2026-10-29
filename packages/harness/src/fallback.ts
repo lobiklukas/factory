@@ -23,22 +23,33 @@
  * only while the conversation is still on the model that failed — a retried hook, or a recovered
  * request that failed again on the model the log already moved off, commits nothing. The session
  * stays on the fallback afterwards; it never moves back up the chain on its own.
+ *
+ * Two limits follow from riding the retry. A switch is made only for a request Pi Durable will send
+ * again (`isRetried`): its attempts are counted per request across every model the request went to,
+ * so a request whose retries are spent — on transient errors of the same model, or on earlier links
+ * of a chain longer than the policy's retries — fails on the model it is on, and no switch is
+ * recorded for a retry that never comes. And a session created on a model of its own (LOB-274,
+ * `SessionModelDoc`) is never moved: the chain is its role's, and that session is not on it.
  */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai/utils/retry";
 import type {
   ConversationId,
+  ConversationRetryPolicy,
   Extension,
   Harness,
 } from "@earendil-works/pi-durable";
 import {
   AgentDoc,
   configure,
+  defineDoc,
   defineEntry,
   defineExtension,
+  DEFAULT_RETRY_POLICY,
   GenerationTask,
   hook,
+  LiveDoc,
 } from "@earendil-works/pi-durable";
 import { DateTime, Effect, Schema } from "effect";
 import { modelAccessFor, modelKey, type ModelAccess } from "./models";
@@ -166,6 +177,45 @@ export const isProviderUnavailable = (message: AssistantMessage): boolean =>
   isRetryableAssistantError(message) &&
   UNAVAILABLE.test(message.errorMessage ?? "");
 
+/**
+ * The retry policy every session's harness runs with (`openSession`'s settings): the one the hook
+ * reads to know whether the failed request will be sent again. Pi Durable's own default, named here
+ * so the harness and the hook cannot disagree about it.
+ */
+export const SESSION_RETRY_POLICY: ConversationRetryPolicy = {
+  ...DEFAULT_RETRY_POLICY,
+};
+
+/**
+ * Whether Pi Durable sends a request again after its `attempt`th answer failed retryably — the rule
+ * its generation task applies after the `afterResponse` hooks ran: retries enabled and `attempt` not
+ * past `maxRetries`. Attempts count from 1 and are not reset by a switch. An attempt the hook could
+ * not read is treated as not retried, so a switch is never recorded for a retry that may not come.
+ */
+export const isRetried = (
+  attempt: number | undefined,
+  policy: ConversationRetryPolicy,
+): boolean =>
+  attempt !== undefined && policy.enabled && attempt <= policy.maxRetries;
+
+export const SESSION_MODEL_DOC_KIND = "factory.session-model";
+
+/**
+ * The model a session was created on when it was created on one of its own (LOB-274), written in
+ * the commit that creates its root and never again. Its presence is what keeps a role's fallback
+ * chain off the session on every later open, whichever model that was — the role's own included —
+ * because a person chose it. Absent (or blank): the session's model came from its role or the
+ * deployment, and its role's chain applies.
+ */
+export const SessionModelDoc = defineDoc({
+  kind: SESSION_MODEL_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({ model: "" }),
+});
+
 /** One switch, as the log records it. */
 export type ModelSwitch = {
   /** The model that answered overloaded or unavailable, `provider/modelId`. */
@@ -252,11 +302,13 @@ const commitSwitch = (
   });
 
 /**
- * The chain as an extension, installed by `openSession` for a run whose role has one. `chain` is the
- * head and its fallbacks, in order; an answer from a model in it that is a trigger moves the
- * conversation that asked onto the model after it, and an answer from the last, or from a model the
- * chain does not hold (a session created on a model of its own), moves nothing. `session` is read
- * when an answer arrives, which is always after the harness that owns the hook has opened.
+ * The chain as an extension, installed by `openSession` for a run whose role has one and that was not
+ * created on a model of its own. `chain` is the head and its fallbacks, in order; an answer from a
+ * model in it that is a trigger moves the conversation that asked onto the model after it, and an
+ * answer from the last, or from a model the chain does not hold, moves nothing. Nor does an answer
+ * whose request Pi Durable will not retry (`isRetried` under `retry`, the harness's policy): the run
+ * then ends on the model that failed, as a run without a chain does. `session` is read when an answer
+ * arrives, which is always after the harness that owns the hook has opened.
  *
  * A switch that cannot be committed is logged and the run carries on as if there were no chain: Pi
  * Durable retries the same model, which is what a run without one does.
@@ -264,12 +316,13 @@ const commitSwitch = (
 export const fallbackExtension = (
   chain: readonly ModelAccess[],
   session: () => Pick<Harness, "conversation"> | undefined,
+  retry: ConversationRetryPolicy = SESSION_RETRY_POLICY,
 ): Extension =>
   defineExtension({
     name: FALLBACK_EXTENSION,
     hooks: [
       hook(GenerationTask, {
-        afterResponse: (message, api) => {
+        afterResponse: (message, api, context) => {
           if (!isProviderUnavailable(message)) return;
           const index = chain.findIndex(
             (access) =>
@@ -286,13 +339,26 @@ export const fallbackExtension = (
           )
             return;
           return Effect.runPromise(
-            commitSwitch(
-              harness,
-              api.conversationId,
-              failed,
-              next,
-              message.errorMessage ?? "",
-            ).pipe(
+            Effect.gen(function* () {
+              // The attempt this answer was for, as the generation committed it when it prepared.
+              const live = yield* Effect.tryPromise({
+                try: () => api.snapshot(LiveDoc, api.conversationId, context),
+                catch: switchFailed,
+              });
+              const attempt = live?.generation?.attempt;
+              if (!isRetried(attempt, retry)) {
+                return yield* Effect.logWarning(
+                  `model switch: ${modelKey(failed)} is unavailable on attempt ${attempt ?? "?"} of a request whose retries are spent, so it is not retried and the run ends on ${modelKey(failed)} rather than moving to ${modelKey(next)}`,
+                );
+              }
+              yield* commitSwitch(
+                harness,
+                api.conversationId,
+                failed,
+                next,
+                message.errorMessage ?? "",
+              );
+            }).pipe(
               Effect.catch((error) =>
                 Effect.logError(
                   `model switch: ${modelKey(failed)} → ${modelKey(next)} could not be committed (${error.message}); the request is retried on ${modelKey(failed)}`,

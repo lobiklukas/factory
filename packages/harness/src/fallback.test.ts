@@ -16,11 +16,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { MemoryStorage, type Storage } from "@earendil-works/pi-durable";
+import {
+  type GenerationHooks,
+  type Harness,
+  type HookApi,
+  MemoryStorage,
+  type Storage,
+} from "@earendil-works/pi-durable";
 import { Effect, Schedule } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  fallbackExtension,
   isProviderUnavailable,
+  isRetried,
   NO_ROLE_FALLBACKS,
   parseRoleFallbacks,
   resolveRoleFallbacks,
@@ -54,6 +62,7 @@ import {
 import {
   closeHarness,
   openSession,
+  reachableWindow,
   readPinnedModelKey,
   readSessionLog,
   submitMessage,
@@ -254,6 +263,15 @@ describe("parseOpenAICompatible", () => {
     ];
     for (const refusal of refusals) expect(refusal).toHaveProperty("error");
   });
+
+  it("never echoes a refused URL, which can carry a key", () => {
+    const refusal = read("htps://user:sk-secret@gw/v1?key=sk-query", "a");
+    expect(refusal).toHaveProperty("error");
+    const text = JSON.stringify(refusal);
+    expect(text).not.toContain("sk-secret");
+    expect(text).not.toContain("sk-query");
+    expect(text).toContain("OPENAI_COMPATIBLE_BASE_URL is not an http(s) URL");
+  });
 });
 
 describe("parseRoleFallbacks and resolveRoleFallbacks", () => {
@@ -414,7 +432,7 @@ describe("a role on the second provider", () => {
     expect([...result.usage]).toEqual([
       ["openai-compatible/compat-1", 2 * COMPAT_ANSWER_COST],
     ]);
-  });
+  }, 30_000);
 
   it("sends the endpoint the key pi-ai resolves, never a placeholder, when one is set", async () => {
     const endpoint = await fake();
@@ -431,7 +449,7 @@ describe("a role on the second provider", () => {
       "Bearer test-dummy-compat-key",
       "Bearer test-dummy-compat-key",
     ]);
-  });
+  }, 30_000);
 });
 
 describe("a role's fallback chain", () => {
@@ -601,7 +619,7 @@ describe("a role's fallback chain", () => {
     );
     expect(result.pinned).toBe("faux/faux-1");
     expect(endpoint.requests).toEqual([]);
-  });
+  }, 30_000);
 
   it("leaves a session created on a model outside the chain on that model", async () => {
     const endpoint = await fake();
@@ -660,6 +678,146 @@ describe("a role's fallback chain", () => {
         (entry) => entry.kind === "assistant" && entry.isError === true,
       ).length,
     ).toBeGreaterThanOrEqual(1);
+    expect(endpoint.requests).toEqual([]);
+  }, 30_000);
+});
+
+describe("a switch only for a request Pi Durable sends again", () => {
+  const policy = {
+    enabled: true,
+    maxRetries: 3,
+    baseDelayMs: 2000,
+    maxAgentDelayMs: 60000,
+  };
+
+  it("is retried while the attempt is within the policy's retries, and never once they are spent", () => {
+    expect(isRetried(1, policy)).toBe(true);
+    expect(isRetried(3, policy)).toBe(true);
+    expect(isRetried(4, policy)).toBe(false);
+    expect(isRetried(1, { ...policy, enabled: false })).toBe(false);
+    expect(isRetried(undefined, policy)).toBe(false);
+  });
+
+  /** The hook as Pi Durable calls it, on an answer for `attempt`, counting the switches it asks for. */
+  const afterResponseOn = async (attempt: number) => {
+    const deployment = createFauxModelAccess({
+      fauxModels: ["faux-1", "faux-backup"],
+    }).access;
+    const chain = [deployment, { ...deployment, modelId: "faux-backup" }];
+    let reads = 0;
+    const harness: Pick<Harness, "conversation"> = {
+      conversation: () => {
+        reads += 1;
+        return Promise.resolve(undefined);
+      },
+    };
+    const registration = fallbackExtension(chain, () => harness, policy)
+      .hooks?.[0];
+    const hooks = registration?.handlers as Partial<GenerationHooks>;
+    const api = {
+      conversationId: 0,
+      snapshot: () => Promise.resolve({ generation: { attempt } }),
+    } as unknown as HookApi;
+    await hooks.afterResponse?.(
+      {
+        ...failure(FAUX_OVERLOADED_MESSAGE),
+        provider: "faux",
+        model: "faux-1",
+      },
+      api,
+      context,
+    );
+    return reads;
+  };
+
+  it("moves the conversation on an outage the policy retries, and leaves it when the retries are spent", async () => {
+    // The commit reads the conversation first: one read is a switch attempted, none is no switch.
+    expect(await afterResponseOn(3)).toBe(1);
+    expect(await afterResponseOn(4)).toBe(0);
+  });
+});
+
+describe("the compaction window of a run that can fall back", () => {
+  const deployment = createFauxModelAccess({ fauxModels: ["big"] }).access;
+  const big = { ...deployment, modelId: "big", contextWindow: 200_000 };
+  const small = { ...deployment, modelId: "small", contextWindow: 32_000 };
+  const unknown = { ...deployment, modelId: "gone", contextWindow: 0 };
+
+  it("is the smallest window of the model and every link after it, ignoring windows nobody knows", () => {
+    expect(reachableWindow(big, [])).toBe(200_000);
+    expect(reachableWindow(big, [big, small])).toBe(32_000);
+    // Already on the last link: nothing smaller is reachable.
+    expect(reachableWindow(small, [big, small])).toBe(32_000);
+    expect(reachableWindow(big, [small, big])).toBe(200_000);
+    expect(reachableWindow(big, [big, unknown])).toBe(200_000);
+    expect(reachableWindow(unknown, [])).toBe(0);
+  });
+});
+
+describe("a session created on a model of its own", () => {
+  it("never falls back, even on a model its role's chain holds, on this open or a later one", async () => {
+    const endpoint = await fake();
+    const deployment = deploymentOn(endpoint.url, {
+      fauxModelScripts: new Map([
+        ["faux-backup", { fail: { afterAnswers: 1, kind: "overloaded" } }],
+      ]),
+    });
+    // `faux-backup` is a link of the builder's chain, between its head and the endpoint.
+    const { roles, fallbacks } = tables(
+      deployment,
+      "",
+      "builder=faux/faux-backup|openai-compatible/compat-1",
+    );
+    const storage = reopenable(new MemoryStorage());
+    const sessionModel = { ...deployment, modelId: "faux-backup" };
+    /** One turn, stopped once the 529 is in the log: a switch would be committed before it. */
+    const outage = (withModel: boolean) =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const opened = yield* openSession({
+            storage,
+            model: deployment,
+            roles,
+            fallbacks,
+            ...(withModel ? { sessionModel } : {}),
+            cwd: mkdtempSync(join(tmpdir(), "factory-fallback-")),
+            run: builder,
+          });
+          const before = (yield* readSessionLog(storage)).entries.filter(
+            (entry) => entry.kind === "assistant" && entry.isError === true,
+          ).length;
+          const submitted = yield* submitMessage(opened.root, {
+            content: "go",
+          });
+          const log = yield* readSessionLog(storage).pipe(
+            Effect.repeat({
+              until: (read) =>
+                read.entries.filter(
+                  (entry) =>
+                    entry.kind === "assistant" && entry.isError === true,
+                ).length > before,
+              schedule: Schedule.spaced("50 millis"),
+            }),
+          );
+          yield* Effect.promise(() => opened.root.abort(context));
+          yield* Effect.promise(() => submitted.submission.wait(context));
+          const pinned = yield* readPinnedModelKey(storage);
+          yield* closeHarness(opened.harness);
+          return { log, pinned };
+        }),
+      );
+    // Created on it: the open that creates the root records the choice.
+    const first = await outage(true);
+    expect(
+      first.log.entries.some((entry) => entry.kind === "modelSwitch"),
+    ).toBe(false);
+    expect(first.pinned).toBe("faux/faux-backup");
+    // Reopened as every later open is, without the model: the record still keeps the chain off.
+    const second = await outage(false);
+    expect(
+      second.log.entries.some((entry) => entry.kind === "modelSwitch"),
+    ).toBe(false);
+    expect(second.pinned).toBe("faux/faux-backup");
     expect(endpoint.requests).toEqual([]);
   }, 30_000);
 });

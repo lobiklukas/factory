@@ -21,8 +21,13 @@ commits — in one commit — the conversation's agent moved onto the next model
 that gave it (Pi Durable keys usage by the answering model). A session's pinned model changes only
 this way: the pin is the switch's, a reopened session stays on the fallback, and a run never moves
 back up its chain. A chain that names a model the process cannot serve, or the role's own model,
-fails the boot. A session created on a model of its own (`createSession`'s `model`) is outside its
-role's chain and never falls back.
+fails the boot. A session created on a model of its own (`createSession`'s `model`) never falls
+back, whichever model it is — one its role's chain holds included: the open that creates its root
+records the choice (`factory.session-model`), and every later open reads it. A switch is made only
+for a request Pi Durable will send again: its attempts (`maxRetries` 3) are counted per request
+across every model the request went to, so a request whose retries are spent — by transient errors
+first, or by a chain longer than the retries — fails on the model it is on, and no switch is
+recorded.
 
 **How a user reaches it.** The boot log names both:
 `second provider: openai-compatible at http://127.0.0.1:8000/v1 serving compat-1 (OPENAI_COMPATIBLE_BASE_URL; auth: OPENAI_COMPATIBLE_API_KEY)`
@@ -57,5 +62,6 @@ refusals, `getServerInfo`).
 **What it does not prove.** That a given vendor's server streams exactly as the fake does, or that a
 real provider's outage is worded the way pi-ai's retry pattern expects: Anthropic's `529
 overloaded_error` and an HTTP 503 are, by pi-ai's own classification. The fallback waits Pi Durable's
-first retry delay (2 s) before the fallback's request. A switched session keeps the compaction
-thresholds of the model it opened on until it is reopened.
+first retry delay (2 s) before the fallback's request. A run with a chain compacts for the smallest
+context window it can reach inside one open — its model's and every link after it — so a switch in
+a live harness never leaves it compacting for a larger window than the fallback has.

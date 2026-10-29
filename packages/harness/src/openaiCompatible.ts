@@ -109,7 +109,10 @@ export const parseOpenAICompatible = (input: {
     }
     if (!/^https?:\/\/[^/\s]+/.test(baseUrl)) {
       return yield* new InvalidOpenAICompatible({
-        message: `OPENAI_COMPATIBLE_BASE_URL is "${baseUrl}", which is not an http(s) URL`,
+        // The value is not echoed: a mistyped URL can still carry a key in its userinfo or query,
+        // and this message is printed by the failed boot (`describeEndpoint` redacts a good one).
+        message:
+          "OPENAI_COMPATIBLE_BASE_URL is not an http(s) URL: it must start with http:// or https:// and name a host",
       });
     }
     const models: readonly OpenAICompatibleModel[] = text.startsWith("[")

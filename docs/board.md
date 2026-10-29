@@ -196,7 +196,8 @@ A role may also have a fallback chain (S-model-provider-breadth): `ROLE_FALLBACK
 When the run's model answers overloaded or unavailable, the run moves onto the next model of its
 chain — the agent reconfigured and a `factory.model.switched` entry committed together, so the
 transcript says which answers came from which model and why — and the session stays there. That
-recorded switch is the one exception to the pin above. A second provider for a row or a chain to name
+recorded switch is the one exception to the pin above. A run created on a model of its own (below)
+never falls back. A second provider for a row or a chain to name
 is an OpenAI-compatible endpoint (`OPENAI_COMPATIBLE_BASE_URL`, `OPENAI_COMPATIBLE_MODELS`).
 
 A run can also be started on a model of its own (LOB-274): `createSession`'s `model`
