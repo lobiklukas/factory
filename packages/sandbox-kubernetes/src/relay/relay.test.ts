@@ -7,7 +7,14 @@
  * Offline and cluster-free: the relay is a local `bun` child in a fresh temporary directory, so
  * this proves the wire and the server, not `kubectl exec` (the verify-sandbox drive does that).
  */
-import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -303,6 +310,30 @@ describe("relay connection", () => {
     expect(read.ok ? "read" : read.error.message).toContain(
       `the relay speaks protocol 0-stale, this client ${RELAY_PROTOCOL}`,
     );
+  });
+
+  it("sends a relay of another protocol nothing, so it serves no call under its own meaning", async () => {
+    // A stale relay that would serve anything: it records every line it is sent, and only says
+    // which protocol it speaks after a pause — a call written before then would reach it.
+    const received = join(mkdtempSync(join(scratch, "stale-")), "received");
+    writeFileSync(received, "");
+    const script = [
+      `const { appendFileSync } = require("node:fs");`,
+      `process.stdin.on("data", (chunk) => appendFileSync(${JSON.stringify(received)}, chunk));`,
+      `setTimeout(() => process.stdout.write(JSON.stringify({ t: "ready", pid: 1, protocol: "0-stale" }) + "\\n"), 300);`,
+    ].join("\n");
+    const env = new RemoteExecutionEnv({
+      id: "relay-test:stale-recording",
+      cwd: scratch,
+      connect: () => spawnConnection("node", ["-e", script]),
+    });
+    const write = await env.writeFile("written", "x", context);
+    expect(write.ok ? "written" : write.error.message).toContain(
+      "the relay speaks protocol 0-stale",
+    );
+    // Give a line that had been written time to land before reading what the relay was sent.
+    await sleep(200);
+    expect(readFileSync(received, "utf8")).toBe("");
   });
 
   it("names what the server said when it never started", async () => {

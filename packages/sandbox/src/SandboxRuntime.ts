@@ -73,8 +73,10 @@ export type SandboxRuntimeShape = {
   ) => Effect.Effect<void, SandboxNotFound | SandboxFileError>;
   /**
    * Stop the sandbox's compute and keep its files; only when `capabilities.pauseResume`. A backend
-   * that could not do it (a cluster that failed or timed out) fails with `SandboxFileError`, as
-   * `create` does, and the sandbox stays running.
+   * that could not do it fails with `SandboxFileError`, as `create` does. One that refused the
+   * change outright leaves the sandbox running; one that took it but did not finish in time (a
+   * cluster that timed out) leaves the sandbox refusing operations as if paused, and a later
+   * `resume` or `pause` is attempted again rather than taken as already done.
    */
   readonly pause: (
     sandbox: Sandbox,
@@ -84,7 +86,8 @@ export type SandboxRuntimeShape = {
   >;
   /**
    * Bring a paused sandbox back with its files; only when `capabilities.pauseResume`. A backend
-   * that could not do it fails with `SandboxFileError`, and the sandbox stays paused.
+   * that could not do it fails with `SandboxFileError`, and the sandbox stays paused; a later
+   * `resume` is attempted again.
    */
   readonly resume: (
     sandbox: Sandbox,

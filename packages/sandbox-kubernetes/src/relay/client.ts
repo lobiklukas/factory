@@ -16,7 +16,9 @@
  *   flight with `unknown`, naming what the connection said last, and every handle opened on it is
  *   dead: its methods fail with `invalid`, as a closed one's do. The next call opens a new one.
  * - **A relay of another version** — a stale sandbox image — says so in its first line (`ready`),
- *   and every call on that connection fails with both versions named instead of waiting.
+ *   and every call on that connection fails with both versions named instead of waiting. Nothing
+ *   is sent on a connection before that line matches, so a relay of another version is never
+ *   sent a call it might serve under its own meaning (a write, a remove).
  * - **A refusal** (`refusal`) — the sandbox is paused — fails a call before any connection is
  *   tried, so a paused sandbox is never woken or waited on by a stray read.
  */
@@ -84,6 +86,10 @@ type Link = {
   readonly watchers: Map<number, (change: unknown) => void>;
   /** Changes for a watcher whose call has not answered yet: the server reports before it answers. */
   readonly orphans: Map<number, unknown[]>;
+  /** Lines written before the server's `ready` matched: sent when it does, dropped if it does not. */
+  readonly held: string[];
+  /** Whether the server said `ready` in this client's protocol. */
+  ready: boolean;
   dead: string | undefined;
 };
 
@@ -123,6 +129,7 @@ export class RemoteExecutionEnv implements ExecutionEnv {
     link.pending.clear();
     link.watchers.clear();
     link.orphans.clear();
+    link.held.length = 0;
     for (const each of pending) {
       each.resolve({
         ok: false,
@@ -146,6 +153,8 @@ export class RemoteExecutionEnv implements ExecutionEnv {
       pending: new Map(),
       watchers: new Map(),
       orphans: new Map(),
+      held: [],
+      ready: false,
       dead: undefined,
     };
     this.link = link;
@@ -162,7 +171,11 @@ export class RemoteExecutionEnv implements ExecutionEnv {
       case "ready": {
         // The first line: a server speaking another wire fails everything sent on this connection.
         const protocol = reply["protocol"];
-        if (protocol === RELAY_PROTOCOL) return;
+        if (protocol === RELAY_PROTOCOL) {
+          link.ready = true;
+          for (const held of link.held.splice(0)) link.connection.send(held);
+          return;
+        }
         this.lose(
           link,
           `the relay speaks protocol ${typeof protocol === "string" ? protocol : "(none)"}, this client ${RELAY_PROTOCOL}: the sandbox image is older or newer than the control plane; rebuild and load it (infra/sandbox/build.sh)`,
@@ -212,6 +225,13 @@ export class RemoteExecutionEnv implements ExecutionEnv {
    * handle's call to the connection that opened the handle; a call on the environment uses the
    * current one, opening it if needed.
    */
+  /** Write one line on `link`, held until its server has said `ready` in this protocol. */
+  private write(link: Link, line: string): void {
+    if (link.dead !== undefined) return;
+    if (link.ready) link.connection.send(line);
+    else link.held.push(line);
+  }
+
   private request(
     build: (id: number) => Request,
     context: Context,
@@ -277,8 +297,7 @@ export class RemoteExecutionEnv implements ExecutionEnv {
       resolve = settle;
     });
     const cancel = () => {
-      if (link.pending.has(id))
-        link.connection.send(encode({ t: "cancel", id }));
+      if (link.pending.has(id)) this.write(link, encode({ t: "cancel", id }));
     };
     signal?.addEventListener("abort", cancel, { once: true });
     link.pending.set(id, {
@@ -289,7 +308,7 @@ export class RemoteExecutionEnv implements ExecutionEnv {
       signal,
       ...(onOutput === undefined ? {} : { onOutput }),
     });
-    link.connection.send(encode(message));
+    this.write(link, encode(message));
     return promise;
   }
 
@@ -451,8 +470,9 @@ export class RemoteExecutionEnv implements ExecutionEnv {
                 cause instanceof Error ? cause : undefined,
               );
               // The command is stopped, as `NodeExecutionEnv` stops one whose callback threw.
-              if (sent !== undefined)
-                this.link?.connection.send(encode({ t: "cancel", id: sent }));
+              const link = this.link;
+              if (sent !== undefined && link !== undefined)
+                this.write(link, encode({ t: "cancel", id: sent }));
             }
           };
     return this.request(

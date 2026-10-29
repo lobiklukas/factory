@@ -19,7 +19,16 @@ import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { SandboxCapabilities } from "@repo/sandbox";
 import { registerSandboxRuntimeConformance } from "@repo/sandbox/testing";
-import { Cause, Effect, Exit, Fiber, Layer, Schema, type Scope } from "effect";
+import {
+  Cause,
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  Option,
+  Schema,
+  type Scope,
+} from "effect";
 import { afterAll, describe, expect, it } from "vitest";
 import { ClusterError, Kubernetes } from "./index";
 import { buildRelay } from "./relay/build";
@@ -321,6 +330,127 @@ describe("kubernetes runtime lifecycle", () => {
           expect(cluster.hasPod(sandbox.id)).toBe(false);
         }),
     );
+  });
+
+  /** `cluster`, but while `lagging()` the controller writes nothing: no conditions are read back. */
+  const lagged = (
+    cluster: FakeCluster,
+    lagging: () => boolean,
+  ): FakeCluster => ({
+    ...cluster,
+    read: (name) =>
+      cluster.read(name).pipe(
+        Effect.map((found) =>
+          lagging()
+            ? Option.map(found, (object) => ({
+                ...object,
+                status: { conditions: [] },
+              }))
+            : found,
+        ),
+      ),
+  });
+
+  it("fails a pause the cluster took but never reported done, refuses calls, and lets a resume reach the cluster", async () => {
+    const cluster = freshCluster();
+    let lagging = false;
+    await withRuntime(
+      lagged(cluster, () => lagging),
+      (runtime) =>
+        Effect.gen(function* () {
+          const sandbox = yield* runtime.create;
+          lagging = true;
+          const failed = yield* Effect.flip(runtime.pause(sandbox));
+          expect(failed).toMatchObject({ _tag: "SandboxFileError" });
+          expect(String((failed as { message?: string }).message)).toMatch(
+            /was not suspended after/,
+          );
+          // The cluster took the suspension: the pod is gone, and calls are refused, not sent to it.
+          expect(cluster.hasPod(sandbox.id)).toBe(false);
+          const refused = yield* Effect.flip(runtime.exec(sandbox, "true"));
+          expect(String((refused as { message?: string }).message)).toContain(
+            "is paused",
+          );
+          // A resume is not taken as already done: it sets Running and waits for the new pod.
+          lagging = false;
+          yield* runtime.resume(sandbox);
+          expect(cluster.calls).toContain(`setMode ${sandbox.id} Running`);
+          expect((yield* runtime.exec(sandbox, "true")).exitCode).toBe(0);
+        }),
+      { settleTimeout: "100 millis" },
+    );
+  });
+
+  it("retries a pause that never settled, rather than taking it as done", async () => {
+    const cluster = freshCluster();
+    let lagging = false;
+    await withRuntime(
+      lagged(cluster, () => lagging),
+      (runtime) =>
+        Effect.gen(function* () {
+          const sandbox = yield* runtime.create;
+          lagging = true;
+          yield* Effect.flip(runtime.pause(sandbox));
+          lagging = false;
+          const before = cluster.calls.length;
+          yield* runtime.pause(sandbox);
+          expect(cluster.calls.slice(before)).toContain(
+            `setMode ${sandbox.id} Suspended`,
+          );
+          // Settled now: a resume brings it back as usual.
+          yield* runtime.resume(sandbox);
+          expect((yield* runtime.exec(sandbox, "true")).exitCode).toBe(0);
+        }),
+      { settleTimeout: "100 millis" },
+    );
+  });
+
+  it("waits past a read the API server failed instead of giving the sandbox up", async () => {
+    const cluster = freshCluster();
+    let failures = 2;
+    await withRuntime(
+      {
+        ...cluster,
+        read: (name) =>
+          failures-- > 0
+            ? Effect.fail(
+                new ClusterError({
+                  operation: "read",
+                  message: "net/http: TLS handshake timeout",
+                }),
+              )
+            : cluster.read(name),
+      },
+      (runtime) =>
+        Effect.gen(function* () {
+          const sandbox = yield* runtime.create;
+          expect((yield* runtime.exec(sandbox, "true")).exitCode).toBe(0);
+          expect(cluster.calls).not.toContain(`remove ${sandbox.id}`);
+        }),
+    );
+  });
+
+  it("gives up on reads that keep failing at the deadline, says why, and deletes the resource", async () => {
+    const cluster = freshCluster();
+    const exit = await withRuntime(
+      {
+        ...cluster,
+        read: () =>
+          Effect.fail(
+            new ClusterError({
+              operation: "read",
+              message: "net/http: TLS handshake timeout",
+            }),
+          ),
+      },
+      (runtime) => Effect.exit(runtime.create),
+      { settleTimeout: "100 millis" },
+    );
+    const error = Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined;
+    expect(String((error as { message?: string }).message)).toMatch(
+      /was not running after .*TLS handshake timeout/,
+    );
+    expect(cluster.resources()).toEqual([]);
   });
 
   it("destroys a paused sandbox without resuming it", async () => {

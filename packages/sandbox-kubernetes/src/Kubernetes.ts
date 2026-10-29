@@ -10,6 +10,8 @@
  * - `pause` sets `operatingMode: Suspended` and returns once the controller reports the pod
  *   terminated. Whatever ran in the pod is gone; the volume, and every file on it, is kept. While
  *   paused, every operation is refused rather than waking the sandbox.
+ * - A pause or a resume the cluster took but never reported done leaves the sandbox refusing
+ *   operations, as if paused, and the next pause or resume goes to the cluster again.
  * - `resume` sets `Running` and returns once a new pod is `Ready` over the same volume.
  * - `destroy` deletes the resource and returns once the pod and the volume are gone with it. It
  *   deletes by name, so it also reclaims a sandbox this process does not hold (one a crashed
@@ -93,8 +95,12 @@ type Live = {
   readonly env: SandboxExecutionEnv;
   /** One lifecycle change at a time per sandbox. */
   readonly lock: Semaphore.Semaphore;
-  /** Read by the environment's refusal, outside any fiber, so a plain field. */
-  state: { paused: boolean };
+  /**
+   * Read by the environment's refusal, outside any fiber, so a plain field. `unsettled`: the
+   * cluster took the last pause or resume but never reported it done, so `paused` (calls refused)
+   * is a precaution, not the cluster's state.
+   */
+  state: { paused: boolean; unsettled: boolean };
 };
 
 export const make = (
@@ -121,7 +127,12 @@ export const make = (
         }),
       );
 
-    /** Read the resource back until the controller reports `want`, a failure, or time runs out. */
+    /**
+     * Read the resource back until the controller reports `want`, a failure, or time runs out. A
+     * read that failed (an API server that did not answer once) is waited past like a pending
+     * phase: the deadline is what absorbs a slow cluster, and only a resource that is gone or a
+     * controller that reports a failure ends the wait early.
+     */
     const settle = Effect.fn("SandboxRuntime.Kubernetes.settle")(function* (
       name: string,
       want: "running" | "suspended",
@@ -129,7 +140,19 @@ export const make = (
       const deadline = (yield* Clock.currentTimeMillis) + settleTimeout;
       let last = "the controller has not reported yet";
       for (;;) {
-        const found = yield* cluster.read(name);
+        const read = yield* Effect.result(cluster.read(name));
+        if (read._tag === "Failure") {
+          last = `${read.failure.operation}: ${read.failure.message}`;
+          if ((yield* Clock.currentTimeMillis) > deadline) {
+            return yield* new ClusterError({
+              operation: want,
+              message: `${name} was not ${want} after ${Duration.format(Duration.millis(settleTimeout))}: ${last}`,
+            });
+          }
+          yield* Effect.sleep(pollInterval);
+          continue;
+        }
+        const found = read.success;
         if (Option.isNone(found)) {
           return yield* new ClusterError({
             operation: want,
@@ -192,7 +215,7 @@ export const make = (
           ),
           Effect.mapError(fileError(sandbox)),
         );
-        const state = { paused: false };
+        const state = { paused: false, unsettled: false };
         const remote = new RemoteExecutionEnv({
           id: `kubernetes:${cluster.name}/${id}`,
           cwd: sandbox.workdir,
@@ -234,28 +257,43 @@ export const make = (
         const pausing = mode === "Suspended";
         yield* entry.lock.withPermit(
           Effect.gen(function* () {
-            if (entry.state.paused === pausing) return;
+            // A sandbox whose last change never settled is not known to be in either mode, so
+            // a pause or a resume after it goes to the cluster whatever the flag says.
+            if (entry.state.paused === pausing && !entry.state.unsettled)
+              return;
+            const before = entry.state.paused;
             if (pausing) {
               // Refuse new calls first, then cut the connection: the relay ends, and with it every
               // command still running, before the controller deletes the pod.
               entry.state.paused = true;
               entry.remote.disconnect(`sandbox ${sandbox.id} was paused`);
             }
+            // The cluster refused the change: nothing moved, so the sandbox is as it was — a pause
+            // refused leaves it running, a resume refused leaves it paused.
             yield* cluster.setMode(sandbox.id, mode).pipe(
-              Effect.andThen(
-                settle(sandbox.id, pausing ? "suspended" : "running"),
-              ),
-              // A pause that failed leaves the pod running, so calls may run again; a failed resume
-              // leaves the sandbox paused. Either is the caller's typed failure, not a defect: a
-              // cluster that timed out once may answer the next attempt.
               Effect.tapError(() =>
                 Effect.sync(() => {
-                  if (pausing) entry.state.paused = false;
+                  entry.state.paused = before;
+                }),
+              ),
+              Effect.mapError(fileError(sandbox)),
+            );
+            // The cluster took the change but did not report it done in time: its pod may be gone
+            // or half up. Calls are refused as if paused, and the next pause or resume goes to
+            // the cluster again, since either may be what the caller wants next. Either failure is
+            // the caller's typed failure, not a defect: a cluster that timed out once may answer
+            // the next attempt.
+            yield* settle(sandbox.id, pausing ? "suspended" : "running").pipe(
+              Effect.tapError(() =>
+                Effect.sync(() => {
+                  entry.state.paused = true;
+                  entry.state.unsettled = true;
                 }),
               ),
               Effect.mapError(fileError(sandbox)),
             );
             entry.state.paused = pausing;
+            entry.state.unsettled = false;
           }),
         );
       });
