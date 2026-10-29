@@ -32,8 +32,22 @@ import {
   writeFileIn,
 } from "@repo/sandbox";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { Clock, Duration, Effect, Layer, Option, Random, Ref, type Scope, Semaphore } from "effect";
-import { ClusterError, type OperatingMode, type SandboxClusterShape } from "./Cluster";
+import {
+  Clock,
+  Duration,
+  Effect,
+  Layer,
+  Option,
+  Random,
+  Ref,
+  type Scope,
+  Semaphore,
+} from "effect";
+import {
+  ClusterError,
+  type OperatingMode,
+  type SandboxClusterShape,
+} from "./Cluster";
 import { phaseOf, sandboxManifest } from "./manifest";
 import { RemoteExecutionEnv } from "./relay/client";
 
@@ -86,7 +100,9 @@ export const make = (
 ): Effect.Effect<SandboxRuntimeShape, never, Scope.Scope> =>
   Effect.gen(function* () {
     const { cluster } = options;
-    const settleTimeout = Duration.toMillis(Duration.fromInputUnsafe(options.settleTimeout ?? "3 minutes"));
+    const settleTimeout = Duration.toMillis(
+      Duration.fromInputUnsafe(options.settleTimeout ?? "3 minutes"),
+    );
     const pollInterval = options.pollInterval ?? "250 millis";
     const live = yield* Ref.make<ReadonlyMap<SandboxId, Live>>(new Map());
     // Sandboxes whose destroy began but did not finish: no operation finds them, and a retried
@@ -113,12 +129,18 @@ export const make = (
       for (;;) {
         const found = yield* cluster.read(name);
         if (Option.isNone(found)) {
-          return yield* new ClusterError({ operation: want, message: `${name} no longer exists` });
+          return yield* new ClusterError({
+            operation: want,
+            message: `${name} no longer exists`,
+          });
         }
         const phase = phaseOf(found.value);
         if (phase._tag === want) return;
         if (phase._tag === "failed") {
-          return yield* new ClusterError({ operation: want, message: `${name}: ${phase.message}` });
+          return yield* new ClusterError({
+            operation: want,
+            message: `${name}: ${phase.message}`,
+          });
         }
         if (phase._tag === "pending") last = phase.message;
         if ((yield* Clock.currentTimeMillis) > deadline) {
@@ -139,7 +161,8 @@ export const make = (
         message: `${error.operation}: ${error.message}`,
       });
 
-    const pausedMessage = (id: SandboxId) => `sandbox ${id} is paused: resume it first`;
+    const pausedMessage = (id: SandboxId) =>
+      `sandbox ${id} is paused: resume it first`;
 
     const create = Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* () {
@@ -150,12 +173,20 @@ export const make = (
           namespace: cluster.namespace,
           workdir: sandbox.workdir,
           ...(options.image === undefined ? {} : { image: options.image }),
-          ...(options.storage === undefined ? {} : { storage: options.storage }),
+          ...(options.storage === undefined
+            ? {}
+            : { storage: options.storage }),
         });
-        yield* restore(cluster.create(manifest)).pipe(Effect.mapError(fileError(sandbox)));
+        yield* restore(cluster.create(manifest)).pipe(
+          Effect.mapError(fileError(sandbox)),
+        );
         // A resource that never became ready, or a create given up on, is not left behind.
         yield* restore(settle(id, "running")).pipe(
-          Effect.onExit((exit) => (exit._tag === "Success" ? Effect.void : Effect.ignore(cluster.remove(id)))),
+          Effect.onExit((exit) =>
+            exit._tag === "Success"
+              ? Effect.void
+              : Effect.ignore(cluster.remove(id)),
+          ),
           Effect.mapError(fileError(sandbox)),
         );
         const state = { paused: false };
@@ -172,23 +203,30 @@ export const make = (
           lock: yield* Semaphore.make(1),
           state,
         };
-        yield* Ref.update(live, (sandboxes) => new Map(sandboxes).set(id, entry));
+        yield* Ref.update(live, (sandboxes) =>
+          new Map(sandboxes).set(id, entry),
+        );
         return sandbox;
       }),
     ).pipe(Effect.withSpan("SandboxRuntime.Kubernetes.create"));
 
     /** The entry, unless it is paused, in which case `refuse` says why the operation cannot run. */
-    const running = <E>(sandbox: Sandbox, refuse: (message: string) => E): Effect.Effect<Live, SandboxNotFound | E> =>
+    const running = <E>(
+      sandbox: Sandbox,
+      refuse: (message: string) => E,
+    ): Effect.Effect<Live, SandboxNotFound | E> =>
       find(sandbox).pipe(
         Effect.flatMap((entry) =>
-          entry.state.paused ? Effect.fail(refuse(pausedMessage(sandbox.id))) : Effect.succeed(entry),
+          entry.state.paused
+            ? Effect.fail(refuse(pausedMessage(sandbox.id)))
+            : Effect.succeed(entry),
         ),
       );
 
     const lifecycle = (mode: OperatingMode) =>
-      Effect.fn(`SandboxRuntime.Kubernetes.${mode === "Suspended" ? "pause" : "resume"}`)(function* (
-        sandbox: Sandbox,
-      ) {
+      Effect.fn(
+        `SandboxRuntime.Kubernetes.${mode === "Suspended" ? "pause" : "resume"}`,
+      )(function* (sandbox: Sandbox) {
         const entry = yield* find(sandbox);
         const pausing = mode === "Suspended";
         yield* entry.lock.withPermit(
@@ -201,7 +239,9 @@ export const make = (
               entry.remote.disconnect(`sandbox ${sandbox.id} was paused`);
             }
             yield* cluster.setMode(sandbox.id, mode).pipe(
-              Effect.andThen(settle(sandbox.id, pausing ? "suspended" : "running")),
+              Effect.andThen(
+                settle(sandbox.id, pausing ? "suspended" : "running"),
+              ),
               // A pause that failed leaves the pod running, so calls may run again; a failed resume
               // leaves the sandbox paused.
               Effect.tapError(() =>
@@ -223,9 +263,15 @@ export const make = (
       Effect.gen(function* () {
         // The environment ends first: running commands are aborted (a paused sandbox has none) and
         // handles closed. Its temporary files are in the pod, which the deletion takes with it.
-        yield* Effect.ignore(Effect.promise(() => entry.env.destroy(BACKGROUND_CONTEXT).catch(() => undefined)));
+        yield* Effect.ignore(
+          Effect.promise(() =>
+            entry.env.destroy(BACKGROUND_CONTEXT).catch(() => undefined),
+          ),
+        );
         entry.remote.disconnect(`sandbox ${entry.sandbox.id} was destroyed`);
-        yield* cluster.remove(entry.sandbox.id).pipe(Effect.mapError(fileError(entry.sandbox)));
+        yield* cluster
+          .remove(entry.sandbox.id)
+          .pipe(Effect.mapError(fileError(entry.sandbox)));
         yield* Ref.update(dying, (sandboxes) => {
           const next = new Map(sandboxes);
           next.delete(entry.sandbox.id);
@@ -233,7 +279,9 @@ export const make = (
         });
       });
 
-    const destroy = Effect.fn("SandboxRuntime.Kubernetes.destroy")(function* (sandbox: Sandbox) {
+    const destroy = Effect.fn("SandboxRuntime.Kubernetes.destroy")(function* (
+      sandbox: Sandbox,
+    ) {
       // Out of `live` first, so no operation can find it while it is being deleted.
       const entry = yield* Ref.modify(live, (sandboxes) => {
         const next = new Map(sandboxes);
@@ -241,7 +289,9 @@ export const make = (
         return [sandboxes.get(sandbox.id), next] as const;
       });
       if (entry !== undefined) {
-        yield* Ref.update(dying, (sandboxes) => new Map(sandboxes).set(sandbox.id, entry));
+        yield* Ref.update(dying, (sandboxes) =>
+          new Map(sandboxes).set(sandbox.id, entry),
+        );
       }
       const pending = entry ?? (yield* Ref.get(dying)).get(sandbox.id);
       if (pending === undefined) return;
@@ -255,10 +305,14 @@ export const make = (
         const alive = yield* Ref.getAndSet(live, new Map());
         const all = new Map([...(yield* Ref.get(dying)), ...alive]);
         yield* Ref.set(dying, all);
-        yield* Effect.forEach([...all.values()], (entry) => Effect.exit(finish(entry)), {
-          concurrency: "unbounded",
-          discard: true,
-        });
+        yield* Effect.forEach(
+          [...all.values()],
+          (entry) => Effect.exit(finish(entry)),
+          {
+            concurrency: "unbounded",
+            discard: true,
+          },
+        );
       }),
     );
 
@@ -268,25 +322,52 @@ export const make = (
       exec: (sandbox, command, execOptions) =>
         running(
           sandbox,
-          (message) => new SandboxExecError({ sandboxId: sandbox.id, code: "unknown", message }),
-        ).pipe(Effect.flatMap(({ env }) => execIn(env, sandbox.id, command, execOptions))),
+          (message) =>
+            new SandboxExecError({
+              sandboxId: sandbox.id,
+              code: "unknown",
+              message,
+            }),
+        ).pipe(
+          Effect.flatMap(({ env }) =>
+            execIn(env, sandbox.id, command, execOptions),
+          ),
+        ),
       readFile: (sandbox, path) =>
         running(
           sandbox,
-          (message) => new SandboxFileError({ sandboxId: sandbox.id, path, code: "unknown", message }),
+          (message) =>
+            new SandboxFileError({
+              sandboxId: sandbox.id,
+              path,
+              code: "unknown",
+              message,
+            }),
         ).pipe(Effect.flatMap(({ env }) => readFileIn(env, sandbox.id, path))),
       writeFile: (sandbox, path, content) =>
         running(
           sandbox,
-          (message) => new SandboxFileError({ sandboxId: sandbox.id, path, code: "unknown", message }),
-        ).pipe(Effect.flatMap(({ env }) => writeFileIn(env, sandbox.id, path, content))),
+          (message) =>
+            new SandboxFileError({
+              sandboxId: sandbox.id,
+              path,
+              code: "unknown",
+              message,
+            }),
+        ).pipe(
+          Effect.flatMap(({ env }) =>
+            writeFileIn(env, sandbox.id, path, content),
+          ),
+        ),
       pause: lifecycle("Suspended"),
       resume: lifecycle("Running"),
-      executionEnv: (sandbox) => find(sandbox).pipe(Effect.map(({ env }) => env)),
+      executionEnv: (sandbox) =>
+        find(sandbox).pipe(Effect.map(({ env }) => env)),
       destroy,
     } satisfies SandboxRuntimeShape;
   });
 
 /** The Kubernetes runtime as the `SandboxRuntime` service. */
-export const layer = (options: KubernetesOptions): Layer.Layer<SandboxRuntime> =>
-  Layer.effect(SandboxRuntime, make(options));
+export const layer = (
+  options: KubernetesOptions,
+): Layer.Layer<SandboxRuntime> => Layer.effect(SandboxRuntime, make(options));

@@ -5,6 +5,8 @@
     "": {
       "name": "factory",
       "devDependencies": {
+        "@earendil-works/chord": "1.0.3",
+        "@earendil-works/pi-durable": "1.0.3",
         "@effect/platform-bun": "4.0.0",
         "@effect/tsgo": "0.38.0",
         "@playwright/test": "^1.63.0",
@@ -12,6 +14,8 @@
         "@repo/domain": "workspace:*",
         "@repo/harness": "workspace:*",
         "@repo/infra": "workspace:*",
+        "@repo/sandbox": "workspace:*",
+        "@repo/sandbox-kubernetes": "workspace:*",
         "@repo/storage-postgres": "workspace:*",
         "@types/bun": "^1.2.17",
         "effect": "4.0.0",

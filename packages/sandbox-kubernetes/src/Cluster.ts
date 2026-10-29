@@ -31,11 +31,18 @@ export type SandboxClusterShape = {
   /** Where sandbox `name`'s volume is mounted in its pod: the sandbox's workdir. */
   readonly workdir: (name: string) => string;
   /** Create the resource; one that already exists is a failure, not an update. */
-  readonly create: (manifest: SandboxManifest) => Effect.Effect<void, ClusterError>;
+  readonly create: (
+    manifest: SandboxManifest,
+  ) => Effect.Effect<void, ClusterError>;
   /** The resource as the API server has it now, or `None` when there is none. */
-  readonly read: (name: string) => Effect.Effect<Option.Option<SandboxObject>, ClusterError>;
+  readonly read: (
+    name: string,
+  ) => Effect.Effect<Option.Option<SandboxObject>, ClusterError>;
   /** Set `spec.operatingMode`: `Suspended` pauses, `Running` resumes. */
-  readonly setMode: (name: string, mode: OperatingMode) => Effect.Effect<void, ClusterError>;
+  readonly setMode: (
+    name: string,
+    mode: OperatingMode,
+  ) => Effect.Effect<void, ClusterError>;
   /**
    * Delete the resource and wait until it, its pod and its volume are gone. A resource that does not
    * exist is already deleted.

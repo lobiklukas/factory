@@ -7,7 +7,13 @@
  * Cluster-free: the controller is modelled, the pod is a local relay process, the PVC a directory.
  * The same runtime against real kind is the verify-sandbox drive and `bun run test:kind`.
  */
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -18,10 +24,14 @@ import { afterAll, describe, expect, it } from "vitest";
 import { Kubernetes } from "./index";
 import { fakeCluster, type FakeCluster } from "./testing";
 
-const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-kubernetes-")));
+const scratch = realpathSync(
+  mkdtempSync(join(tmpdir(), "factory-kubernetes-")),
+);
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
-const freshCluster = (behaviour?: Parameters<typeof fakeCluster>[0]["behaviour"]) =>
+const freshCluster = (
+  behaviour?: Parameters<typeof fakeCluster>[0]["behaviour"],
+) =>
   fakeCluster({
     root: mkdtempSync(join(scratch, "cluster-")),
     ...(behaviour === undefined ? {} : { behaviour }),
@@ -32,19 +42,29 @@ registerSandboxRuntimeConformance(
   { describe, expect, it },
   "kubernetes runtime (fake cluster)",
   Layer.unwrap(
-    Effect.sync(() => Kubernetes.layer({ cluster: freshCluster(), pollInterval: "5 millis" })),
+    Effect.sync(() =>
+      Kubernetes.layer({ cluster: freshCluster(), pollInterval: "5 millis" }),
+    ),
   ),
 );
 
 /** Run `body` against a runtime over `cluster`, released when it ends. */
 const withRuntime = <A, E>(
   cluster: FakeCluster,
-  body: (runtime: Effect.Success<ReturnType<typeof Kubernetes.make>>) => Effect.Effect<A, E, Scope.Scope>,
+  body: (
+    runtime: Effect.Success<ReturnType<typeof Kubernetes.make>>,
+  ) => Effect.Effect<A, E, Scope.Scope>,
   options: Partial<Kubernetes.KubernetesOptions> = {},
 ): Promise<A> =>
   Effect.runPromise(
     Effect.gen(function* () {
-      return yield* body(yield* Kubernetes.make({ cluster, pollInterval: "5 millis", ...options }));
+      return yield* body(
+        yield* Kubernetes.make({
+          cluster,
+          pollInterval: "5 millis",
+          ...options,
+        }),
+      );
     }).pipe(Effect.scoped),
   );
 
@@ -52,7 +72,9 @@ const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 
 describe("kubernetes runtime lifecycle", () => {
   it("says what it provides: a volume that survives a pause, and no isolation", () => {
-    expect(Schema.decodeUnknownSync(SandboxCapabilities)(Kubernetes.capabilities)).toEqual({
+    expect(
+      Schema.decodeSync(SandboxCapabilities)(Kubernetes.capabilities),
+    ).toEqual({
       runtime: "kubernetes",
       isolation: "none",
       persistence: "volume",
@@ -76,9 +98,14 @@ describe("kubernetes runtime lifecycle", () => {
           `read ${sandbox.id}`,
           `read ${sandbox.id}`,
         ]);
-        const marked = yield* runtime.exec(sandbox, "printf in-the-pod > marker.txt; pwd -P");
+        const marked = yield* runtime.exec(
+          sandbox,
+          "printf in-the-pod > marker.txt; pwd -P",
+        );
         expect(marked.stdout.trim()).toBe(sandbox.workdir);
-        expect(readFileSync(join(cluster.volume(sandbox.id), "marker.txt"), "utf8")).toBe("in-the-pod");
+        expect(
+          readFileSync(join(cluster.volume(sandbox.id), "marker.txt"), "utf8"),
+        ).toBe("in-the-pod");
       }),
     );
   });
@@ -89,11 +116,17 @@ describe("kubernetes runtime lifecycle", () => {
       Effect.gen(function* () {
         const sandbox = yield* runtime.create;
         const env = yield* runtime.executionEnv(sandbox);
-        yield* runtime.writeFile(sandbox, "kept/before-pause.txt", "written before the pause");
+        yield* runtime.writeFile(
+          sandbox,
+          "kept/before-pause.txt",
+          "written before the pause",
+        );
         yield* runtime.pause(sandbox);
         expect(cluster.calls).toContain(`setMode ${sandbox.id} Suspended`);
         expect(cluster.hasPod(sandbox.id)).toBe(false);
-        expect(existsSync(join(cluster.volume(sandbox.id), "kept/before-pause.txt"))).toBe(true);
+        expect(
+          existsSync(join(cluster.volume(sandbox.id), "kept/before-pause.txt")),
+        ).toBe(true);
 
         const refused = yield* Effect.all([
           Effect.flip(runtime.exec(sandbox, "true")),
@@ -101,21 +134,40 @@ describe("kubernetes runtime lifecycle", () => {
           Effect.flip(runtime.writeFile(sandbox, "x", "x")),
         ]);
         for (const error of refused) {
-          expect(error).toMatchObject({ code: "unknown", message: `sandbox ${sandbox.id} is paused: resume it first` });
+          expect(error).toMatchObject({
+            code: "unknown",
+            message: `sandbox ${sandbox.id} is paused: resume it first`,
+          });
         }
         // The environment it handed out refuses too, without trying to reach a pod that is gone.
-        const connects = cluster.calls.filter((call) => call.startsWith("connect")).length;
-        const viaEnv = yield* Effect.promise(() => env.readTextFile("kept/before-pause.txt", BACKGROUND_CONTEXT));
-        expect(viaEnv.ok ? "read" : viaEnv.error.message).toBe(`sandbox ${sandbox.id} is paused: resume it first`);
-        expect(cluster.calls.filter((call) => call.startsWith("connect")).length).toBe(connects);
+        const connects = cluster.calls.filter((call) =>
+          call.startsWith("connect"),
+        ).length;
+        const viaEnv = yield* Effect.promise(() =>
+          env.readTextFile("kept/before-pause.txt", BACKGROUND_CONTEXT),
+        );
+        expect(viaEnv.ok ? "read" : viaEnv.error.message).toBe(
+          `sandbox ${sandbox.id} is paused: resume it first`,
+        );
+        expect(
+          cluster.calls.filter((call) => call.startsWith("connect")).length,
+        ).toBe(connects);
         // Pausing a paused sandbox is a no-op.
         yield* runtime.pause(sandbox);
-        expect(cluster.calls.filter((call) => call === `setMode ${sandbox.id} Suspended`)).toHaveLength(1);
+        expect(
+          cluster.calls.filter(
+            (call) => call === `setMode ${sandbox.id} Suspended`,
+          ),
+        ).toHaveLength(1);
 
         yield* runtime.resume(sandbox);
         expect(cluster.hasPod(sandbox.id)).toBe(true);
-        expect(text(yield* runtime.readFile(sandbox, "kept/before-pause.txt"))).toBe("written before the pause");
-        const again = yield* Effect.promise(() => env.readTextFile("kept/before-pause.txt", BACKGROUND_CONTEXT));
+        expect(
+          text(yield* runtime.readFile(sandbox, "kept/before-pause.txt")),
+        ).toBe("written before the pause");
+        const again = yield* Effect.promise(() =>
+          env.readTextFile("kept/before-pause.txt", BACKGROUND_CONTEXT),
+        );
         expect(again).toEqual({ ok: true, value: "written before the pause" });
       }),
     );
@@ -127,9 +179,13 @@ describe("kubernetes runtime lifecycle", () => {
       Effect.gen(function* () {
         const sandbox = yield* runtime.create;
         const running = yield* Effect.forkChild(
-          runtime.exec(sandbox, "printf s > started; sleep 1; printf s > survived"),
+          runtime.exec(
+            sandbox,
+            "printf s > started; sleep 1; printf s > survived",
+          ),
         );
-        while (!existsSync(join(sandbox.workdir, "started"))) yield* Effect.sleep("20 millis");
+        while (!existsSync(join(sandbox.workdir, "started")))
+          yield* Effect.sleep("20 millis");
         yield* runtime.pause(sandbox);
         const exit = yield* Fiber.await(running);
         expect(Exit.isFailure(exit)).toBe(true);
@@ -151,10 +207,16 @@ describe("kubernetes runtime lifecycle", () => {
         expect(cluster.resources()).toEqual([]);
         expect(cluster.relays()).toBe(0);
         expect(existsSync(cluster.volume(sandbox.id))).toBe(false);
-        const removes = cluster.calls.filter((call) => call === `remove ${sandbox.id}`).length;
+        const removes = cluster.calls.filter(
+          (call) => call === `remove ${sandbox.id}`,
+        ).length;
         yield* runtime.destroy(sandbox);
-        expect(cluster.calls.filter((call) => call === `remove ${sandbox.id}`)).toHaveLength(removes);
-        expect((yield* Effect.flip(runtime.exec(sandbox, "true")))._tag).toBe("SandboxNotFound");
+        expect(
+          cluster.calls.filter((call) => call === `remove ${sandbox.id}`),
+        ).toHaveLength(removes);
+        expect((yield* Effect.flip(runtime.exec(sandbox, "true")))._tag).toBe(
+          "SandboxNotFound",
+        );
       }),
     );
   });
@@ -188,21 +250,31 @@ describe("kubernetes runtime lifecycle", () => {
 
   it("deletes a resource that never became ready, and says why it gave up", async () => {
     const cluster = freshCluster("stuck");
-    const exit = await withRuntime(cluster, (runtime) => Effect.exit(runtime.create), {
-      settleTimeout: "100 millis",
-    });
+    const exit = await withRuntime(
+      cluster,
+      (runtime) => Effect.exit(runtime.create),
+      {
+        settleTimeout: "100 millis",
+      },
+    );
     expect(Exit.isFailure(exit)).toBe(true);
     const error = Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined;
     expect(error).toMatchObject({ _tag: "SandboxFileError", code: "unknown" });
-    expect(String((error as { message?: string }).message)).toMatch(/was not running after .*: Pod is pending/);
+    expect(String((error as { message?: string }).message)).toMatch(
+      /was not running after .*: Pod is pending/,
+    );
     expect(cluster.resources()).toEqual([]);
   });
 
   it("fails a create whose pod failed at once, and deletes it", async () => {
     const cluster = freshCluster("failing");
-    const exit = await withRuntime(cluster, (runtime) => Effect.exit(runtime.create));
+    const exit = await withRuntime(cluster, (runtime) =>
+      Effect.exit(runtime.create),
+    );
     const error = Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined;
-    expect(String((error as { message?: string }).message)).toMatch(/Pod failed/);
+    expect(String((error as { message?: string }).message)).toMatch(
+      /Pod failed/,
+    );
     expect(cluster.resources()).toEqual([]);
   });
 });

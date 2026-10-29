@@ -67,7 +67,11 @@ type Pending = {
   readonly resolve: (result: WireResult) => void;
   /** The caller's signal: a call it aborted is `aborted`, whatever became of the connection. */
   readonly signal: AbortSignal | undefined;
-  readonly onOutput?: (text: string, stream: "stdout" | "stderr", skipped: unknown) => void;
+  readonly onOutput?: (
+    text: string,
+    stream: "stdout" | "stderr",
+    skipped: unknown,
+  ) => void;
 };
 
 /** One live connection and what is in flight on it. */
@@ -80,8 +84,11 @@ type Link = {
   dead: string | undefined;
 };
 
-const fileFailure = <T>(code: FileError["code"], message: string, path?: string): Result<T, FileError> =>
-  err(new FileError(code, message, path));
+const fileFailure = <T>(
+  code: FileError["code"],
+  message: string,
+  path?: string,
+): Result<T, FileError> => err(new FileError(code, message, path));
 
 export class RemoteExecutionEnv implements ExecutionEnv {
   readonly id: string;
@@ -119,7 +126,11 @@ export class RemoteExecutionEnv implements ExecutionEnv {
         error:
           each.signal?.aborted === true
             ? { kind: "file", code: "aborted", message: "aborted" }
-            : { kind: "file", code: "unknown", message: `the sandbox's environment is unreachable: ${reason}` },
+            : {
+                kind: "file",
+                code: "unknown",
+                message: `the sandbox's environment is unreachable: ${reason}`,
+              },
       });
     }
   }
@@ -160,7 +171,11 @@ export class RemoteExecutionEnv implements ExecutionEnv {
         if (typeof id !== "number" || typeof text !== "string") return;
         link.pending
           .get(id)
-          ?.onOutput?.(text, stream === "stderr" ? "stderr" : "stdout", reply["skipped"]);
+          ?.onOutput?.(
+            text,
+            stream === "stderr" ? "stderr" : "stdout",
+            reply["skipped"],
+          );
         return;
       }
       case "change": {
@@ -168,7 +183,11 @@ export class RemoteExecutionEnv implements ExecutionEnv {
         if (typeof handle !== "number") return;
         const watcher = link.watchers.get(handle);
         if (watcher !== undefined) watcher(reply["change"]);
-        else link.orphans.set(handle, [...(link.orphans.get(handle) ?? []), reply["change"]]);
+        else
+          link.orphans.set(handle, [
+            ...(link.orphans.get(handle) ?? []),
+            reply["change"],
+          ]);
         return;
       }
     }
@@ -182,26 +201,50 @@ export class RemoteExecutionEnv implements ExecutionEnv {
   private request(
     build: (id: number) => Request,
     context: Context,
-    options: { readonly link?: Link; readonly onOutput?: Pending["onOutput"] } = {},
+    options: {
+      readonly link?: Link;
+      readonly onOutput?: Pending["onOutput"];
+    } = {},
   ): Promise<{ readonly result: WireResult; readonly link?: Link }> {
-    const refusal = options.link === undefined ? this.options.refusal?.() : undefined;
+    const refusal =
+      options.link === undefined ? this.options.refusal?.() : undefined;
     if (refusal !== undefined) {
-      return Promise.resolve({ result: { ok: false, error: { kind: "file", code: "unknown", message: refusal } } });
+      return Promise.resolve({
+        result: {
+          ok: false,
+          error: { kind: "file", code: "unknown", message: refusal },
+        },
+      });
     }
     if (context.abortSignal?.aborted === true) {
-      return Promise.resolve({ result: { ok: false, error: { kind: "file", code: "aborted", message: "aborted" } } });
+      return Promise.resolve({
+        result: {
+          ok: false,
+          error: { kind: "file", code: "aborted", message: "aborted" },
+        },
+      });
     }
     const link = options.link ?? this.open();
     if (link.dead !== undefined) {
       return Promise.resolve({
         result: {
           ok: false,
-          error: { kind: "file", code: "invalid", message: `the handle's connection is gone: ${link.dead}` },
+          error: {
+            kind: "file",
+            code: "invalid",
+            message: `the handle's connection is gone: ${link.dead}`,
+          },
         },
       });
     }
     const id = this.nextId++;
-    return this.send(link, id, build(id), context.abortSignal, options.onOutput).then((result) => ({
+    return this.send(
+      link,
+      id,
+      build(id),
+      context.abortSignal,
+      options.onOutput,
+    ).then((result) => ({
       result,
       link,
     }));
@@ -220,7 +263,8 @@ export class RemoteExecutionEnv implements ExecutionEnv {
       resolve = settle;
     });
     const cancel = () => {
-      if (link.pending.has(id)) link.connection.send(encode({ t: "cancel", id }));
+      if (link.pending.has(id))
+        link.connection.send(encode({ t: "cancel", id }));
     };
     signal?.addEventListener("abort", cancel, { once: true });
     link.pending.set(id, {
@@ -240,17 +284,30 @@ export class RemoteExecutionEnv implements ExecutionEnv {
     args: ReadonlyArray<unknown>,
     context: Context,
   ): Promise<{ readonly result: WireResult; readonly link?: Link }> {
-    return this.request((id) => ({ t: "call", id, cwd: this.cwd, method, args }), context);
+    return this.request(
+      (id) => ({ t: "call", id, cwd: this.cwd, method, args }),
+      context,
+    );
   }
 
-  private file<T>(method: EnvMethod, args: ReadonlyArray<unknown>, context: Context): Promise<Result<T, FileError>> {
-    return this.call(method, args, context).then(({ result }) => this.asFile<T>(result));
+  private file<T>(
+    method: EnvMethod,
+    args: ReadonlyArray<unknown>,
+    context: Context,
+  ): Promise<Result<T, FileError>> {
+    return this.call(method, args, context).then(({ result }) =>
+      this.asFile<T>(result),
+    );
   }
 
   private asFile<T>(result: WireResult): Result<T, FileError> {
     if (result.ok) return ok(result.value as T);
     const error = errorFromWire(result.error);
-    return err(error instanceof FileError ? error : new FileError("unknown", error.message));
+    return err(
+      error instanceof FileError
+        ? error
+        : new FileError("unknown", error.message),
+    );
   }
 
   // --- handles ----------------------------------------------------------------------------------
@@ -262,13 +319,18 @@ export class RemoteExecutionEnv implements ExecutionEnv {
     args: ReadonlyArray<unknown>,
     context: Context,
   ): Promise<Result<T, FileError>> {
-    return this.request((id) => ({ t: "handle", id, handle, method, args }), context, { link }).then(
-      ({ result }) => this.asFile<T>(result),
-    );
+    return this.request(
+      (id) => ({ t: "handle", id, handle, method, args }),
+      context,
+      { link },
+    ).then(({ result }) => this.asFile<T>(result));
   }
 
   /** A handle's `close`: idempotent, and done once its connection is gone. */
-  private closer(link: Link, handle: number): (context: Context) => Promise<void> {
+  private closer(
+    link: Link,
+    handle: number,
+  ): (context: Context) => Promise<void> {
     let closing: Promise<void> | undefined;
     return (context) => {
       // A watcher reports nothing once its close has begun; what the server sends until its close
@@ -295,38 +357,57 @@ export class RemoteExecutionEnv implements ExecutionEnv {
     args: ReadonlyArray<unknown>,
     context: Context,
     wrap: (
-      invoke: <V>(method: HandleMethod, args: ReadonlyArray<unknown>, context: Context) => Promise<Result<V, FileError>>,
+      invoke: <V>(
+        method: HandleMethod,
+        args: ReadonlyArray<unknown>,
+        context: Context,
+      ) => Promise<Result<V, FileError>>,
       close: (context: Context) => Promise<void>,
       link: Link,
       handle: number,
       mode: FileWatcher["mode"] | undefined,
     ) => T,
   ): Promise<Result<T, FileError>> {
-    return this.call(method, args, context).then(({ result, link: current }) => {
-      if (!result.ok) return this.asFile<T>(result);
-      if (current === undefined || !isWireHandle(result.value)) {
-        return fileFailure<T>("unknown", "the sandbox's environment answered without a handle");
-      }
-      const { $handle: handle, mode } = result.value;
-      let closed = false;
-      const close = this.closer(current, handle);
-      const invoke = <V>(handleMethod: HandleMethod, handleArgs: ReadonlyArray<unknown>, handleContext: Context) =>
-        closed
-          ? Promise.resolve(fileFailure<V>("invalid", "the handle is closed"))
-          : this.handleCall<V>(current, handle, handleMethod, handleArgs, handleContext);
-      return ok(
-        wrap(
-          invoke,
-          (closeContext) => {
-            closed = true;
-            return close(closeContext);
-          },
-          current,
-          handle,
-          mode,
-        ),
-      );
-    });
+    return this.call(method, args, context).then(
+      ({ result, link: current }) => {
+        if (!result.ok) return this.asFile<T>(result);
+        if (current === undefined || !isWireHandle(result.value)) {
+          return fileFailure<T>(
+            "unknown",
+            "the sandbox's environment answered without a handle",
+          );
+        }
+        const { $handle: handle, mode } = result.value;
+        let closed = false;
+        const close = this.closer(current, handle);
+        const invoke = <V>(
+          handleMethod: HandleMethod,
+          handleArgs: ReadonlyArray<unknown>,
+          handleContext: Context,
+        ) =>
+          closed
+            ? Promise.resolve(fileFailure<V>("invalid", "the handle is closed"))
+            : this.handleCall<V>(
+                current,
+                handle,
+                handleMethod,
+                handleArgs,
+                handleContext,
+              );
+        return ok(
+          wrap(
+            invoke,
+            (closeContext) => {
+              closed = true;
+              return close(closeContext);
+            },
+            current,
+            handle,
+            mode,
+          ),
+        );
+      },
+    );
   }
 
   // --- Shell ------------------------------------------------------------------------------------
@@ -356,7 +437,8 @@ export class RemoteExecutionEnv implements ExecutionEnv {
                 cause instanceof Error ? cause : undefined,
               );
               // The command is stopped, as `NodeExecutionEnv` stops one whose callback threw.
-              if (sent !== undefined) this.link?.connection.send(encode({ t: "cancel", id: sent }));
+              if (sent !== undefined)
+                this.link?.connection.send(encode({ t: "cancel", id: sent }));
             }
           };
     return this.request(
@@ -387,15 +469,24 @@ export class RemoteExecutionEnv implements ExecutionEnv {
 
   // --- FileSystem -------------------------------------------------------------------------------
 
-  absolutePath(path: string, context: Context): Promise<Result<string, FileError>> {
+  absolutePath(
+    path: string,
+    context: Context,
+  ): Promise<Result<string, FileError>> {
     return this.file("absolutePath", [path], context);
   }
 
-  joinPath(parts: string[], context: Context): Promise<Result<string, FileError>> {
+  joinPath(
+    parts: string[],
+    context: Context,
+  ): Promise<Result<string, FileError>> {
     return this.file("joinPath", [parts], context);
   }
 
-  readTextFile(path: string, context: Context): Promise<Result<string, FileError>> {
+  readTextFile(
+    path: string,
+    context: Context,
+  ): Promise<Result<string, FileError>> {
     return this.file("readTextFile", [path], context);
   }
 
@@ -407,15 +498,29 @@ export class RemoteExecutionEnv implements ExecutionEnv {
     return this.file("readTextLines", [path, options ?? null], context);
   }
 
-  readBinaryFile(path: string, context: Context): Promise<Result<Uint8Array, FileError>> {
+  readBinaryFile(
+    path: string,
+    context: Context,
+  ): Promise<Result<Uint8Array, FileError>> {
     return this.file("readBinaryFile", [path], context);
   }
 
-  openTextLineReader(path: string, context: Context): Promise<Result<TextLineReader, FileError>> {
-    return this.opened("openTextLineReader", [path], context, (invoke, close) => ({
-      readLine: (lineContext) => invoke<TextLine | undefined>("readLine", [], lineContext).then(nullToUndefined),
-      close,
-    }));
+  openTextLineReader(
+    path: string,
+    context: Context,
+  ): Promise<Result<TextLineReader, FileError>> {
+    return this.opened(
+      "openTextLineReader",
+      [path],
+      context,
+      (invoke, close) => ({
+        readLine: (lineContext) =>
+          invoke<TextLine | undefined>("readLine", [], lineContext).then(
+            nullToUndefined,
+          ),
+        close,
+      }),
+    );
   }
 
   openBinaryReader(
@@ -423,18 +528,32 @@ export class RemoteExecutionEnv implements ExecutionEnv {
     options: { noFollow?: boolean } | undefined,
     context: Context,
   ): Promise<Result<BinaryReader, FileError>> {
-    return this.opened("openBinaryReader", [path, options ?? null], context, (invoke, close) => ({
-      info: (infoContext) => invoke<FileInfo>("info", [], infoContext),
-      read: (offset, length, readContext) => invoke<Uint8Array>("read", [offset, length], readContext),
-      scanLines: (range, scanContext) => invoke<LineScan>("scanLines", [range], scanContext),
-      close,
-    }));
+    return this.opened(
+      "openBinaryReader",
+      [path, options ?? null],
+      context,
+      (invoke, close) => ({
+        info: (infoContext) => invoke<FileInfo>("info", [], infoContext),
+        read: (offset, length, readContext) =>
+          invoke<Uint8Array>("read", [offset, length], readContext),
+        scanLines: (range, scanContext) =>
+          invoke<LineScan>("scanLines", [range], scanContext),
+        close,
+      }),
+    );
   }
 
-  openDirReader(path: string, context: Context): Promise<Result<DirReader, FileError>> {
+  openDirReader(
+    path: string,
+    context: Context,
+  ): Promise<Result<DirReader, FileError>> {
     return this.opened("openDirReader", [path], context, (invoke, close) => ({
       next: (maxEntries, nextContext) =>
-        invoke<{ entries: FileInfo[]; done: boolean }>("next", [maxEntries], nextContext),
+        invoke<{ entries: FileInfo[]; done: boolean }>(
+          "next",
+          [maxEntries],
+          nextContext,
+        ),
       close,
     }));
   }
@@ -444,25 +563,42 @@ export class RemoteExecutionEnv implements ExecutionEnv {
     onChange: (change: WatchChange) => void,
     context: Context,
   ): Promise<Result<FileWatcher, FileError>> {
-    return this.opened("watch", [targets], context, (_invoke, close, link, handle, mode) => {
-      const deliver = (change: unknown) => onChange(fromWireChange(change));
-      link.watchers.set(handle, deliver);
-      // What the server reported before its answer arrived, in the order it was reported.
-      for (const change of link.orphans.get(handle) ?? []) deliver(change);
-      link.orphans.delete(handle);
-      return { mode: mode ?? "polling", close };
-    });
+    return this.opened(
+      "watch",
+      [targets],
+      context,
+      (_invoke, close, link, handle, mode) => {
+        const deliver = (change: unknown) => onChange(fromWireChange(change));
+        link.watchers.set(handle, deliver);
+        // What the server reported before its answer arrived, in the order it was reported.
+        for (const change of link.orphans.get(handle) ?? []) deliver(change);
+        link.orphans.delete(handle);
+        return { mode: mode ?? "polling", close };
+      },
+    );
   }
 
-  writeFile(path: string, content: string | Uint8Array, context: Context): Promise<Result<void, FileError>> {
+  writeFile(
+    path: string,
+    content: string | Uint8Array,
+    context: Context,
+  ): Promise<Result<void, FileError>> {
     return this.file("writeFile", [path, content], context);
   }
 
-  appendFile(path: string, content: string | Uint8Array, context: Context): Promise<Result<void, FileError>> {
+  appendFile(
+    path: string,
+    content: string | Uint8Array,
+    context: Context,
+  ): Promise<Result<void, FileError>> {
     return this.file("appendFile", [path, content], context);
   }
 
-  truncateFile(path: string, size: number, context: Context): Promise<Result<void, FileError>> {
+  truncateFile(
+    path: string,
+    size: number,
+    context: Context,
+  ): Promise<Result<void, FileError>> {
     return this.file("truncateFile", [path, size], context);
   }
 
@@ -470,19 +606,32 @@ export class RemoteExecutionEnv implements ExecutionEnv {
     return this.file("flushFile", [path], context);
   }
 
-  renameFile(sourcePath: string, destinationPath: string, context: Context): Promise<Result<void, FileError>> {
+  renameFile(
+    sourcePath: string,
+    destinationPath: string,
+    context: Context,
+  ): Promise<Result<void, FileError>> {
     return this.file("renameFile", [sourcePath, destinationPath], context);
   }
 
-  fileInfo(path: string, context: Context): Promise<Result<FileInfo, FileError>> {
+  fileInfo(
+    path: string,
+    context: Context,
+  ): Promise<Result<FileInfo, FileError>> {
     return this.file("fileInfo", [path], context);
   }
 
-  listDir(path: string, context: Context): Promise<Result<FileInfo[], FileError>> {
+  listDir(
+    path: string,
+    context: Context,
+  ): Promise<Result<FileInfo[], FileError>> {
     return this.file("listDir", [path], context);
   }
 
-  canonicalPath(path: string, context: Context): Promise<Result<string, FileError>> {
+  canonicalPath(
+    path: string,
+    context: Context,
+  ): Promise<Result<string, FileError>> {
     return this.file("canonicalPath", [path], context);
   }
 
@@ -506,7 +655,10 @@ export class RemoteExecutionEnv implements ExecutionEnv {
     return this.file("remove", [path, options ?? null], context);
   }
 
-  createTempDir(prefix: string | undefined, context: Context): Promise<Result<string, FileError>> {
+  createTempDir(
+    prefix: string | undefined,
+    context: Context,
+  ): Promise<Result<string, FileError>> {
     return this.file("createTempDir", [prefix ?? null], context);
   }
 
@@ -522,7 +674,10 @@ const asExecError = (error: WireError): ExecutionError => {
   const rebuilt = errorFromWire(error);
   if (rebuilt instanceof ExecutionError) return rebuilt;
   // A transport failure arrives as a file error; for a command it is the same fact.
-  return new ExecutionError(rebuilt.code === "aborted" ? "aborted" : "unknown", rebuilt.message);
+  return new ExecutionError(
+    rebuilt.code === "aborted" ? "aborted" : "unknown",
+    rebuilt.message,
+  );
 };
 
 /** JSON has no `undefined`: the end of a line reader crosses as `null`. */
@@ -534,7 +689,12 @@ const nullToUndefined = (
 const fromWireChange = (change: unknown): WatchChange => {
   if (typeof change === "object" && change !== null && "error" in change) {
     const error = errorFromWire((change as { error: WireError }).error);
-    return { error: error instanceof FileError ? error : new FileError("unknown", error.message) };
+    return {
+      error:
+        error instanceof FileError
+          ? error
+          : new FileError("unknown", error.message),
+    };
   }
   return change as WatchChange;
 };

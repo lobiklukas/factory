@@ -53,10 +53,15 @@ export const spawnConnection = (
   child.stderr.on("data", (chunk: string) => {
     stderr = (stderr + chunk).slice(-STDERR_TAIL);
   });
-  createInterface({ input: child.stdout, crlfDelay: Infinity }).on("line", (line) => {
-    for (const listener of lineListeners) listener(line);
-  });
-  child.on("error", (error) => finish(`${command} could not run (${error.message})`));
+  createInterface({ input: child.stdout, crlfDelay: Infinity }).on(
+    "line",
+    (line) => {
+      for (const listener of lineListeners) listener(line);
+    },
+  );
+  child.on("error", (error) =>
+    finish(`${command} could not run (${error.message})`),
+  );
   child.on("close", (code, signal) =>
     finish(`${command} exited (${signal ?? `code ${code ?? "unknown"}`})`),
   );
@@ -65,7 +70,8 @@ export const spawnConnection = (
 
   return {
     send: (line) => {
-      if (closed === undefined && child.stdin.writable) child.stdin.write(`${line}\n`);
+      if (closed === undefined && child.stdin.writable)
+        child.stdin.write(`${line}\n`);
     },
     onLine: (listener) => {
       lineListeners.push(listener);

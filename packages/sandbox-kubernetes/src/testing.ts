@@ -1,3 +1,4 @@
+/* oxlint-disable effecttsgo/node-builtin-import -- a test fake: its volumes are host directories the tests read directly. */
 /**
  * A fake cluster for the Kubernetes runtime (LOB-89): the agent-sandbox controller's contract,
  * modelled in memory, so the runtime's lifecycle and its `ExecutionEnv` run in the gate without
@@ -22,8 +23,17 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Effect, Option } from "effect";
-import { ClusterError, type OperatingMode, type SandboxClusterShape } from "./Cluster";
-import { type Condition, SANDBOX_API_VERSION, type SandboxManifest, type SandboxObject } from "./manifest";
+import {
+  ClusterError,
+  type OperatingMode,
+  type SandboxClusterShape,
+} from "./Cluster";
+import {
+  type Condition,
+  SANDBOX_API_VERSION,
+  type SandboxManifest,
+  type SandboxObject,
+} from "./manifest";
 import { buildRelay } from "./relay/build";
 import { type Connection, spawnConnection } from "./relay/connection";
 
@@ -99,11 +109,20 @@ export const fakeCluster = (options: FakeClusterOptions): FakeCluster => {
     connections.delete(name);
   };
 
-  const refuse = (operation: string, message: string) => Effect.fail(new ClusterError({ operation, message }));
+  const refuse = (operation: string, message: string) =>
+    Effect.fail(new ClusterError({ operation, message }));
 
-  const conditionsOf = (name: string, resource: Resource): ReadonlyArray<Condition> => {
+  const conditionsOf = (
+    name: string,
+    resource: Resource,
+  ): ReadonlyArray<Condition> => {
     const observedGeneration = resource.generation;
-    const stamp = (type: string, status: string, reason: string, message = "") => ({
+    const stamp = (
+      type: string,
+      status: string,
+      reason: string,
+      message = "",
+    ) => ({
       type,
       status,
       reason,
@@ -112,10 +131,12 @@ export const fakeCluster = (options: FakeClusterOptions): FakeCluster => {
     });
     if (!settled(resource)) {
       // The controller has not caught up: what it last wrote is for the previous generation.
-      return [stamp("Ready", "True", "DependenciesReady", "stale")].map((condition) => ({
-        ...condition,
-        observedGeneration: observedGeneration - 1,
-      }));
+      return [stamp("Ready", "True", "DependenciesReady", "stale")].map(
+        (condition) => ({
+          ...condition,
+          observedGeneration: observedGeneration - 1,
+        }),
+      );
     }
     if (resource.mode === "Suspended") {
       return [
@@ -125,7 +146,9 @@ export const fakeCluster = (options: FakeClusterOptions): FakeCluster => {
     }
     switch (behaviours.get(name)) {
       case "stuck":
-        return [stamp("Ready", "False", "DependenciesNotReady", "Pod is pending")];
+        return [
+          stamp("Ready", "False", "DependenciesNotReady", "Pod is pending"),
+        ];
       case "failing":
         return [stamp("Ready", "False", "PodFailed", "Pod failed")];
       default:
@@ -137,17 +160,28 @@ export const fakeCluster = (options: FakeClusterOptions): FakeCluster => {
   };
 
   const validate = (manifest: SandboxManifest): string | undefined => {
-    if (manifest.apiVersion !== SANDBOX_API_VERSION || manifest.kind !== "Sandbox") {
+    if (
+      manifest.apiVersion !== SANDBOX_API_VERSION ||
+      manifest.kind !== "Sandbox"
+    ) {
       return `not an ${SANDBOX_API_VERSION} Sandbox`;
     }
-    const claim = manifest.spec.volumeClaimTemplates.find((template) => template.metadata.name === "workspace");
+    const claim = manifest.spec.volumeClaimTemplates.find(
+      (template) => template.metadata.name === "workspace",
+    );
     if (claim === undefined) return "no workspace volume claim";
     const container = manifest.spec.podTemplate.spec.containers[0];
-    const mount = container?.volumeMounts.find((each) => each.name === "workspace");
+    const mount = container?.volumeMounts.find(
+      (each) => each.name === "workspace",
+    );
     if (mount?.mountPath !== volume(manifest.metadata.name)) {
       return `the workspace is mounted at ${mount?.mountPath ?? "nothing"}, not the workdir`;
     }
-    if (container?.image === undefined || container.image.endsWith(":latest") || !container.image.includes(":")) {
+    if (
+      container?.image === undefined ||
+      container.image.endsWith(":latest") ||
+      !container.image.includes(":")
+    ) {
       return `the image ${container?.image ?? "(none)"} is not pinned`;
     }
     return undefined;
@@ -161,7 +195,8 @@ export const fakeCluster = (options: FakeClusterOptions): FakeCluster => {
     resources: () => [...resources.keys()],
     hasPod,
     volume,
-    relays: () => [...connections.values()].reduce((count, each) => count + each.size, 0),
+    relays: () =>
+      [...connections.values()].reduce((count, each) => count + each.size, 0),
     setBehaviour: (next) => {
       behaviour = next;
     },
@@ -169,12 +204,19 @@ export const fakeCluster = (options: FakeClusterOptions): FakeCluster => {
       Effect.suspend(() => {
         const name = manifest.metadata.name;
         calls.push(`create ${name}`);
-        if (resources.has(name)) return refuse("create", `sandboxes "${name}" already exists`);
+        if (resources.has(name))
+          return refuse("create", `sandboxes "${name}" already exists`);
         const invalid = validate(manifest);
-        if (invalid !== undefined) return refuse("create", `${name}: ${invalid}`);
+        if (invalid !== undefined)
+          return refuse("create", `${name}: ${invalid}`);
         // The claim's volume: kept across suspends, removed with the resource.
         mkdirSync(volume(name), { recursive: true });
-        resources.set(name, { manifest, generation: 1, mode: "Running", settlesIn: 1 });
+        resources.set(name, {
+          manifest,
+          generation: 1,
+          mode: "Running",
+          settlesIn: 1,
+        });
         behaviours.set(name, behaviour);
         return Effect.void;
       }),
@@ -195,7 +237,8 @@ export const fakeCluster = (options: FakeClusterOptions): FakeCluster => {
       Effect.suspend(() => {
         calls.push(`setMode ${name} ${mode}`);
         const resource = resources.get(name);
-        if (resource === undefined) return refuse("setMode", `sandboxes "${name}" not found`);
+        if (resource === undefined)
+          return refuse("setMode", `sandboxes "${name}" not found`);
         if (resource.mode !== mode) {
           resource.mode = mode;
           resource.generation += 1;
@@ -214,8 +257,11 @@ export const fakeCluster = (options: FakeClusterOptions): FakeCluster => {
       }),
     connect: (name) => {
       calls.push(`connect ${name}`);
-      if (!hasPod(name)) return closedConnection(`error: pod "${name}" not found`);
-      const connection = spawnConnection("node", [relay], { cwd: volume(name) });
+      if (!hasPod(name))
+        return closedConnection(`error: pod "${name}" not found`);
+      const connection = spawnConnection("node", [relay], {
+        cwd: volume(name),
+      });
       const held = connections.get(name) ?? new Set();
       held.add(connection);
       connections.set(name, held);

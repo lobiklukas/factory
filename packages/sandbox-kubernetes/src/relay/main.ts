@@ -19,5 +19,5 @@ const server = serveExecutionEnv({
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 lines.on("line", server.receive);
 lines.on("close", () => {
-  server.end().finally(() => process.exit(0));
+  void server.end().finally(() => process.exit(0));
 });

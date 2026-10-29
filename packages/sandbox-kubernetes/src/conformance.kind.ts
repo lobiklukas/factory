@@ -29,4 +29,8 @@ const layer = Layer.unwrap(
 const slow = (name: string, run: () => Promise<void>, timeoutMs?: number) =>
   it(name, run, Math.max(timeoutMs ?? 0, 180_000));
 
-registerSandboxRuntimeConformance({ describe, expect, it: slow }, `kubernetes runtime (kind-${cluster})`, layer);
+registerSandboxRuntimeConformance(
+  { describe, expect, it: slow },
+  `kubernetes runtime (kind-${cluster})`,
+  layer,
+);

@@ -10,7 +10,10 @@
 import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
+import {
+  BACKGROUND_CONTEXT,
+  withAbortSignal,
+} from "@earendil-works/chord/context";
 import { registerEnvConformance } from "@earendil-works/pi-durable/testing";
 import { afterAll, describe, expect, it } from "vitest";
 import { RemoteExecutionEnv } from "./client";
@@ -40,6 +43,7 @@ const relay = (refusal?: () => string | undefined) => {
   return { cwd, env, connections };
 };
 
+// oxlint-disable-next-line effecttsgo/global-timers, effecttsgo/new-promise -- a Promise-world suite waits in real time.
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Wait until `path` exists in the environment: the command that writes it has started. */
@@ -52,24 +56,35 @@ const until = async (env: RemoteExecutionEnv, path: string) => {
   throw new Error(`${path} never appeared`);
 };
 
-registerEnvConformance({ describe, expect, it }, "relay: ExecutionEnv", async (use) => {
-  const { cwd, env } = relay();
-  try {
-    await use(env);
-  } finally {
-    env.disconnect();
-    rmSync(cwd, { recursive: true, force: true });
-  }
-});
+registerEnvConformance(
+  { describe, expect, it },
+  "relay: ExecutionEnv",
+  async (use) => {
+    const { cwd, env } = relay();
+    try {
+      await use(env);
+    } finally {
+      env.disconnect();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  },
+);
 
 describe("relay connection", () => {
   it("runs in the server's directory, which the client names, not in its own", async () => {
     const { cwd, env } = relay();
     try {
-      const result = await env.exec("pwd -P; printf marker > marker.txt", undefined, context);
+      const result = await env.exec(
+        "pwd -P; printf marker > marker.txt",
+        undefined,
+        context,
+      );
       expect(result.ok).toBe(true);
       expect(existsSync(join(cwd, "marker.txt"))).toBe(true);
-      expect(await env.readTextFile("marker.txt", context)).toEqual({ ok: true, value: "marker" });
+      expect(await env.readTextFile("marker.txt", context)).toEqual({
+        ok: true,
+        value: "marker",
+      });
     } finally {
       env.disconnect();
     }
@@ -81,7 +96,9 @@ describe("relay connection", () => {
       const bytes = Uint8Array.from([0, 255, 10, 13, 0xc3, 0x28, 0x7b, 0x7d]);
       expect((await env.writeFile("data.bin", bytes, context)).ok).toBe(true);
       const read = await env.readBinaryFile("data.bin", context);
-      expect(read.ok ? Array.from(read.value) : read.error.code).toEqual(Array.from(bytes));
+      expect(read.ok ? Array.from(read.value) : read.error.code).toEqual(
+        Array.from(bytes),
+      );
     } finally {
       env.disconnect();
     }
@@ -90,14 +107,21 @@ describe("relay connection", () => {
   it("fails what is in flight when the connection is lost, kills the command, and reconnects on the next call", async () => {
     const { env, connections } = relay();
     try {
-      const running = env.exec("printf s > started; sleep 2; printf s > survived", undefined, context);
+      const running = env.exec(
+        "printf s > started; sleep 2; printf s > survived",
+        undefined,
+        context,
+      );
       await until(env, "started");
       connections[0]?.close();
       const lost = await running;
       expect(lost.ok ? "ran" : lost.error.code).toBe("unknown");
       // The server ended with its stdin and took the command with it.
       await sleep(2500);
-      expect(await env.exists("survived", context)).toEqual({ ok: true, value: false });
+      expect(await env.exists("survived", context)).toEqual({
+        ok: true,
+        value: false,
+      });
       expect(connections).toHaveLength(2);
     } finally {
       env.disconnect();
@@ -114,7 +138,10 @@ describe("relay connection", () => {
       const read = await opened.value.read(0, 3, context);
       expect(read.ok ? "read" : read.error.code).toBe("invalid");
       await opened.value.close(context);
-      expect(await env.readTextFile("a.txt", context)).toEqual({ ok: true, value: "abc" });
+      expect(await env.readTextFile("a.txt", context)).toEqual({
+        ok: true,
+        value: "abc",
+      });
     } finally {
       env.disconnect();
     }
@@ -153,12 +180,14 @@ describe("relay connection", () => {
         },
         context,
       );
-      expect(result.ok ? "ran" : [result.error.code, result.error.message]).toEqual([
-        "callback_error",
-        "the caller's callback failed",
-      ]);
+      expect(
+        result.ok ? "ran" : [result.error.code, result.error.message],
+      ).toEqual(["callback_error", "the caller's callback failed"]);
       await sleep(2500);
-      expect(await env.exists("survived", context)).toEqual({ ok: true, value: false });
+      expect(await env.exists("survived", context)).toEqual({
+        ok: true,
+        value: false,
+      });
     } finally {
       env.disconnect();
     }
@@ -168,7 +197,10 @@ describe("relay connection", () => {
     const { env, connections } = relay();
     const controller = new AbortController();
     controller.abort();
-    const read = await env.readTextFile("x", withAbortSignal(controller.signal, context));
+    const read = await env.readTextFile(
+      "x",
+      withAbortSignal(controller.signal, context),
+    );
     expect(read.ok ? "read" : read.error.code).toBe("aborted");
     expect(connections).toHaveLength(0);
   });
@@ -177,9 +209,12 @@ describe("relay connection", () => {
     const env = new RemoteExecutionEnv({
       id: "relay-test:broken",
       cwd: scratch,
-      connect: () => spawnConnection("sh", ["-c", "echo 'no such pod' >&2; exit 1"]),
+      connect: () =>
+        spawnConnection("sh", ["-c", "echo 'no such pod' >&2; exit 1"]),
     });
     const read = await env.readTextFile("x", context);
-    expect(read.ok ? "read" : read.error.message).toMatch(/unreachable: sh exited \(code 1\): no such pod/);
+    expect(read.ok ? "read" : read.error.message).toMatch(
+      /unreachable: sh exited \(code 1\): no such pod/,
+    );
   });
 });

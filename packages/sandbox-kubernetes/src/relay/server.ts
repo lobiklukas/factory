@@ -124,9 +124,9 @@ export const serveExecutionEnv = (options: RelayServerOptions): RelayServer => {
           .then(fileResult);
       }
       case "cleanup":
-        return Promise.all([...envs.values()].map((each) => each.cleanup(context))).then(
-          () => ({ ok: true, value: null }),
-        );
+        return Promise.all(
+          [...envs.values()].map((each) => each.cleanup(context)),
+        ).then(() => ({ ok: true, value: null }));
       case "watch": {
         const targets = args[0] as ReadonlyArray<WatchTarget>;
         // Numbered before the watch exists: a change may be reported before the call resolves.
@@ -147,7 +147,11 @@ export const serveExecutionEnv = (options: RelayServerOptions): RelayServer => {
           )
           .then((result) => {
             if (!result.ok) return fileResult(result);
-            return hold(result.value as unknown as Held, result.value.mode, number);
+            return hold(
+              result.value as unknown as Held,
+              result.value.mode,
+              number,
+            );
           });
       }
       case "openTextLineReader":
@@ -158,18 +162,26 @@ export const serveExecutionEnv = (options: RelayServerOptions): RelayServer => {
         ) => Promise<Result<Held, unknown>>;
         return operation
           .call(env, ...args, context)
-          .then((result) => (result.ok ? hold(result.value) : fileResult(result)));
+          .then((result) =>
+            result.ok ? hold(result.value) : fileResult(result),
+          );
       }
       default: {
         const operation = (env as unknown as Record<string, unknown>)[method];
         if (typeof operation !== "function") {
           return Promise.resolve({
             ok: false,
-            error: { kind: "file", code: "invalid", message: `no method ${method}` },
+            error: {
+              kind: "file",
+              code: "invalid",
+              message: `no method ${method}`,
+            },
           });
         }
         return (
-          operation as (...given: unknown[]) => Promise<Result<unknown, unknown>>
+          operation as (
+            ...given: unknown[]
+          ) => Promise<Result<unknown, unknown>>
         )
           .call(env, ...args, context)
           .then(fileResult);
@@ -193,20 +205,32 @@ export const serveExecutionEnv = (options: RelayServerOptions): RelayServer => {
     if (held === undefined || typeof operation !== "function") {
       return Promise.resolve({
         ok: false,
-        error: { kind: "file", code: "invalid", message: "the handle is closed" },
+        error: {
+          kind: "file",
+          code: "invalid",
+          message: "the handle is closed",
+        },
       });
     }
-    return (operation as (...given: unknown[]) => Promise<Result<unknown, unknown>>)
+    return (
+      operation as (...given: unknown[]) => Promise<Result<unknown, unknown>>
+    )
       .call(held, ...args, context)
       .then(fileResult);
   };
 
-  const answer = (id: number, work: (context: Context) => Promise<WireResult>) => {
+  const answer = (
+    id: number,
+    work: (context: Context) => Promise<WireResult>,
+  ) => {
     const controller = new AbortController();
     running.set(id, controller);
     const context = withAbortSignal(controller.signal, BACKGROUND_CONTEXT);
-    work(context)
-      .catch((error: unknown): WireResult => ({ ok: false, error: errorToWire(error) }))
+    void work(context)
+      .catch((error: unknown): WireResult => ({
+        ok: false,
+        error: errorToWire(error),
+      }))
       .then((result) => {
         running.delete(id);
         send({ t: "done", id, result });
@@ -231,7 +255,9 @@ export const serveExecutionEnv = (options: RelayServerOptions): RelayServer => {
         ) {
           return;
         }
-        answer(id, (context) => call(id, envAt(cwd), String(method), args, context));
+        answer(id, (context) =>
+          call(id, envAt(cwd), String(method), args, context),
+        );
         return;
       }
       case "handle": {
@@ -243,7 +269,9 @@ export const serveExecutionEnv = (options: RelayServerOptions): RelayServer => {
         ) {
           return;
         }
-        answer(id, (context) => handleCall(handle, String(method), args, context));
+        answer(id, (context) =>
+          handleCall(handle, String(method), args, context),
+        );
         return;
       }
     }

@@ -51,7 +51,9 @@ export const sandboxManifest = (options: SandboxManifestOptions) => ({
   spec: {
     operatingMode: "Running",
     podTemplate: {
-      metadata: { labels: { ...MANAGED_BY, "factory.dev/sandbox": options.name } },
+      metadata: {
+        labels: { ...MANAGED_BY, "factory.dev/sandbox": options.name },
+      },
       spec: {
         // A sandbox talks to nothing in the cluster: no service-account token in its filesystem.
         automountServiceAccountToken: false,
@@ -91,7 +93,7 @@ const Condition = Schema.Struct({
   status: Schema.String,
   reason: Schema.optional(Schema.String),
   message: Schema.optional(Schema.String),
-  observedGeneration: Schema.optional(Schema.Number),
+  observedGeneration: Schema.optional(Schema.Int),
 });
 export type Condition = typeof Condition.Type;
 
@@ -99,7 +101,7 @@ export type Condition = typeof Condition.Type;
 export const SandboxObject = Schema.Struct({
   metadata: Schema.Struct({
     name: Schema.String,
-    generation: Schema.optional(Schema.Number),
+    generation: Schema.optional(Schema.Int),
   }),
   spec: Schema.Struct({
     operatingMode: Schema.optional(Schema.String),
@@ -137,13 +139,17 @@ export const phaseOf = (sandbox: SandboxObject): SandboxPhase => {
       condition.observedGeneration === undefined ||
       condition.observedGeneration === generation,
   );
-  const named = (type: string) => current.find((condition) => condition.type === type);
+  const named = (type: string) =>
+    current.find((condition) => condition.type === type);
   const ready = named("Ready");
   const suspended = named("Suspended");
   if (sandbox.spec.operatingMode === "Suspended") {
     return suspended?.status === "True" && suspended.reason === "PodTerminated"
       ? { _tag: "suspended" }
-      : { _tag: "pending", message: suspended?.message ?? "the pod is still being deleted" };
+      : {
+          _tag: "pending",
+          message: suspended?.message ?? "the pod is still being deleted",
+        };
   }
   if (ready?.status === "True") return { _tag: "running" };
   if (ready?.reason !== undefined && FAILED_REASONS.has(ready.reason)) {
@@ -151,6 +157,7 @@ export const phaseOf = (sandbox: SandboxObject): SandboxPhase => {
   }
   return {
     _tag: "pending",
-    message: ready?.message || ready?.reason || "the controller has not reported yet",
+    message:
+      ready?.message || ready?.reason || "the controller has not reported yet",
   };
 };
