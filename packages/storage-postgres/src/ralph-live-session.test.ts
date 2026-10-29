@@ -179,8 +179,9 @@ const sh = (
     cwd: scratch.root,
     encoding: "utf8",
     // Sized for a gate's load (DEFLAKE), as every case's budget is: beside a full `bun run test` a
-    // case here took 76 s, and those budgeted at 30 s timed out.
-    timeout: 120_000,
+    // case here took 76 s, those budgeted at 30 s timed out, and one run of the driver was killed at
+    // 120 s.
+    timeout: 180_000,
     env: env(scratch, extra),
   });
   return {

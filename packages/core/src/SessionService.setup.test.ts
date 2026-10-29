@@ -83,7 +83,10 @@ afterAll(async () => {
   await impatient.dispose();
   await runtime.dispose();
   rmSync(scratch, { recursive: true, force: true });
-});
+  // Closing every owner the cases opened — a harness, a sandbox, a log handle and three writes each —
+  // and removing the fixtures' checkouts and installs: 40 ms alone, and past vitest's 10 s hook
+  // default in a gate whose cases here ran at three times their solo time (DEFLAKE).
+}, 60_000);
 
 const waitUntil = <E, R>(
   check: Effect.Effect<boolean, E, R>,

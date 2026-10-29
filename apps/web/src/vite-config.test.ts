@@ -27,7 +27,9 @@ describe("vite.config.ts", () => {
     expect(config.envDir).toBe(REPO_ROOT);
     // The root is the repository's, not merely two levels up: it holds the file the README names.
     expect(existsSync(join(REPO_ROOT, ".env.example"))).toBe(true);
-  }, 30_000);
+    // Resolving the config loads Vite and every plugin: past the 30 s this was beside a full `bun
+    // run test` on a loaded machine (DEFLAKE).
+  }, 120_000);
 
   it("reads VITE_PORT from a .env in envDir, with the shell winning, else 3000", async () => {
     // Loaded by path: the helper belongs to the Node-side tsconfig project, which the app project
