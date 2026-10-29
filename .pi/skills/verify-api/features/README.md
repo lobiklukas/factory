@@ -371,11 +371,18 @@ The admission-control checks (LOB-70) were run from the `agent/LOB-70` worktree 
 | Outcome metrics          | passing | [outcomes.md](outcomes.md)                   |
 | Cost prediction          | passing | [cost.md](cost.md)                           |
 | Notifications            | passing | [notify.md](notify.md)                       |
+| Second provider, fallback | passing | [model-fallback.md](model-fallback.md) |
 
 The notification checks (S-notifications) were run from the `agent/S-notifications` worktree on
 2026-10-28 (`NOTIFY_PORT=9550`, the fake on `NOTIFY_FAKE_PORT=9551`, a scratch database minted on the
 worktree's 5442 server): `./notify.sh` **26/26**, evidence `.verify/evidence/latest/api/notify-*`.
 See [notify.md](notify.md).
+
+The second-provider and fallback checks (S-model-provider-breadth) were run from the
+`agent/S-model-provider-breadth` worktree on 2026-10-29 (`FALLBACK_PORT=9540`, the fake on
+`FALLBACK_FAKE_PORT=9541`, a scratch database minted on the worktree's 5442 server):
+`./model-fallback.sh` **18/18**, evidence `.verify/evidence/latest/api/model-fallback-*`. See
+[model-fallback.md](model-fallback.md).
 
 The model-backend checks (LOB-258) were run from the `agent/LOB-258` worktree on 2026-10-28
 (`BACKEND_BOOT_PORT=9542`, the worktree's own database on 5442, no repo-root `.env`):
