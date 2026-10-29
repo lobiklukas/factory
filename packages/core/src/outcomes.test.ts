@@ -87,11 +87,12 @@ const SESSIONS: ReadonlyArray<SessionFixture> = [
   // after that merge (30h) — a follow-up fix.
   { name: "a1", createdAt: 4, actor: "amy", cost: 0.1 },
   { name: "a2", createdAt: 5, prUrl: pr(1), mergedAt: 20, cost: 0.2 },
-  { name: "a3", createdAt: 30, cost: 0.1 },
+  // a3 and b2 were started by a scheduled automation: a board run, and no person.
+  { name: "a3", createdAt: 30, actor: "automation:aut_nightly", cost: 0.1 },
   // Card B's runs (board): b1 from 20h with no finished_at, its last activity at 30h; b2 60–70h, after
   // B reached done at 50h.
   { name: "b1", createdAt: 20, actor: "carol", cost: 0.05, lastActivityAt: 30 },
-  { name: "b2", createdAt: 60, cost: 0.05 },
+  { name: "b2", createdAt: 60, actor: "automation:aut_nightly", cost: 0.05 },
   // Linear delegations. ISS-0 was delegated before the window (-50h) and merged in it (5h): 55h.
   {
     name: "l0",
@@ -623,7 +624,8 @@ describe("readOutcomes over the seeded fixture (LOB-44)", () => {
         18,
       );
     }
-    // People: amy (a1, l2r, c1, c2), bob (s1f, c3), carol (b1) — two of the three came back.
+    // People: amy (a1, l2r, c1, c2), bob (s1f, c3), carol (b1) — two of the three came back. The
+    // automation that started a3 and b2 is no person.
     expectValue("adoption", "actors.repeat", 2 / 3, 3);
   });
 
