@@ -340,8 +340,11 @@ policy unchanged.
 
 Built (S-factory-config-as-code): **a repository's policy**, between the deployment's and the
 column's. A repo's `.factory/config` may carry a `policy` block — `approvalRequired[]` (gates added
-to `APPROVAL_REQUIRED`), `deny[]` (command prefixes refused outright, read the way a gate is) and
-`allowedHosts[]` (the session's egress allowlist narrowed to these, each one the deployment allows).
+to `APPROVAL_REQUIRED`), `deny[]` (command prefixes refused outright, read the way a gate is),
+`allowedHosts[]` (the session's egress allowlist narrowed to these, each one the deployment allows)
+and `mcp` (S-agent-mcp-tools: the deployment-registered MCP servers its runs may call, and the tools of
+each; a server the deployment does not register is a widening and refuses the policy, and a write tool
+asks a person on every call).
 It is read at the session's base ref in the registered checkout or the factory's mirror
 (`packages/core/src/repoPolicy.ts`, `git cat-file`), never from the worktree, and pinned in the log
 by the first open (`factory.policy`, which also records the effective rules the run met), so an
