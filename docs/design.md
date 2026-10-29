@@ -362,6 +362,17 @@ agent could write into the checkout's shared `.git/config` pinned on its command
 credential patterns apply to every repo, with or without a store; a line opts out of them with
 `factory-secret-scan:allow` only in a file that carries the marker at that base, so a marker the
 branch writes, or one in a commit message, exempts nothing.
+
+_Refined (S-agent-mcp-tools):_ a remote MCP server's bearer token is a repository secret used a
+third way, and still never in the session's shell. The control plane is the MCP client: the token is
+a header on its own requests, sent only to the URL the deployment registered the server under
+(`MCP_SERVERS`, which names the secret), and only for a session whose repository's `.factory/config`
+`policy.mcp` allows that server; it is masked in every tool result, in case a server echoes it. It is
+read through the same `SecretService` store as the setup and verify secrets, not `CredentialProvider`:
+that seam mints the forge's credential for the factory's own identity, while this is a value the
+repository's owner set for a third-party service, scoped per repo, write-only and rotated with
+`factory secrets set`. A server whose secret the repo does not hold, or holds in a form this key
+cannot read, is not offered, with a warning, rather than called with no credential.
 _Limits:_ masking is literal, so a command that prints a value encoded leaks it, and the scan is
 literal too, so a value committed encoded passes it; a line added to a file the base already marks
 is exempt from the patterns (never from a stored value); a repo the factory

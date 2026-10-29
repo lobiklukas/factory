@@ -20,6 +20,9 @@ block in its `.factory/config`, beside the commands `install`, `build`, `test` a
   `sudo` and `sh -c` read through), with no approval that lifts them.
 - `allowedHosts` — the session's egress allowlist narrowed to these. Each must be one the deployment
   allows.
+- `mcp` — the MCP servers the deployment registers (`MCP_SERVERS`) that its runs may call, and which
+  of their tools; each server must be one the deployment registers. See
+  [mcp-tools.md](mcp-tools.md) (S-agent-mcp-tools).
 
 The block is read once per session, by its first open and before its worktree is cut, **at the
 session's base ref** — in the registered checkout, or the factory's clone of a URL-only repo (at its
