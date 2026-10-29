@@ -34,6 +34,16 @@ export const RoleModelRow = Schema.Struct({
 export type RoleModelRow = typeof RoleModelRow.Type;
 
 /**
+ * One `ROLE_FALLBACKS` row (S-model-provider-breadth): the models a role's runs move onto, in order,
+ * when their own answers overloaded or unavailable, each `provider/modelId`.
+ */
+export const RoleFallbackRow = Schema.Struct({
+  role: Schema.String,
+  models: Schema.Array(Schema.String),
+});
+export type RoleFallbackRow = typeof RoleFallbackRow.Type;
+
+/**
  * How the model backend authenticates: pi-ai's label for the source (`ANTHROPIC_API_KEY`,
  * `workload identity federation`) and the credential's type. A name, never a value.
  */
@@ -106,6 +116,11 @@ export const ServerInfo = Schema.Struct({
   defaultModel: Schema.String,
   /** The `ROLE_MODELS` rows, resolved against the catalog at boot, by role. */
   roleModels: Schema.Array(RoleModelRow),
+  /**
+   * The `ROLE_FALLBACKS` rows, resolved against the catalog at boot, by role
+   * (S-model-provider-breadth). Optional on the wire so a client reads a server older than it.
+   */
+  roleFallbacks: Schema.optional(Schema.Array(RoleFallbackRow)),
   /**
    * Every model the catalog serves, `provider/modelId`, sorted: what a replay or `createSession`'s
    * `model` (and so the dashboard's and the CLI's model choosers) may name (LOB-274).

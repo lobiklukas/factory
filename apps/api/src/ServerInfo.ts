@@ -4,6 +4,7 @@ import {
   catalogModels,
   modelKey,
   type ModelAccess,
+  type RoleFallbacks,
   type RoleModels,
 } from "@repo/harness";
 import { Context, Option } from "effect";
@@ -31,6 +32,8 @@ export type ServerFactsShape = {
   readonly model: ModelAccess;
   /** `ROLE_MODELS`, resolved against the catalog. */
   readonly roleModels: RoleModels;
+  /** `ROLE_FALLBACKS`, resolved against the catalog (S-model-provider-breadth). Absent: none. */
+  readonly roleFallbacks?: RoleFallbacks;
   readonly approvalRequired: readonly string[];
   readonly defaultBudget: Option.Option<number>;
   /** Every webhook route and whether its secret is set, resolved at boot (`webhookRouteStates`). */
@@ -88,6 +91,12 @@ export const describeServer = (
   defaultModel: modelKey(facts.model),
   roleModels: [...facts.roleModels]
     .map(([role, access]) => ({ role, model: modelKey(access) }))
+    .sort((a, b) => a.role.localeCompare(b.role)),
+  roleFallbacks: [...(facts.roleFallbacks ?? [])]
+    .map(([role, chain]) => ({
+      role,
+      models: chain.map((access) => modelKey(access)),
+    }))
     .sort((a, b) => a.role.localeCompare(b.role)),
   models: [...catalogModels(facts.model)],
   approvalRequired: [...facts.approvalRequired],
