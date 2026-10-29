@@ -298,7 +298,7 @@ export const RepoPromptDoc = defineDoc({
  * on its branch is never read, and a base that moved under a running session reaches its next run,
  * not this one. `source: null` is a session with no repository, or one whose base did not resolve.
  * `effective.allowedHosts` is what the run may reach; `effective.pushRefPrefixes` empty is a column
- * that pushes nothing (C22). It is the one document a generator of LOB-30's rulesets would read.
+ * that pushes nothing (C22); `effective.mcpTools` is the MCP tools the open offered (S-agent-mcp-tools). It is the one document a generator of LOB-30's rulesets would read.
  */
 export const PolicyDoc = defineDoc({
   kind: POLICY_DOC_KIND,
@@ -317,12 +317,25 @@ export const PolicyDoc = defineDoc({
       approvalRequired: [] as string[],
       denied: [] as string[],
       allowedHosts: null as string[] | null,
+      // The MCP servers and tools the repository allows (S-agent-mcp-tools); absent in a record
+      // written before there were any.
+      mcp: null as Record<
+        string,
+        { tools: string[]; approvalRequired: string[] }
+      > | null,
     },
     effective: {
       approvalRequired: [] as string[],
       denied: [] as string[],
       allowedHosts: [] as string[],
       pushRefPrefixes: [] as string[],
+      // The MCP tools the open offered, and whether each asks a person (S-agent-mcp-tools).
+      mcpTools: [] as Array<{
+        name: string;
+        server: string;
+        tool: string;
+        gated: boolean;
+      }>,
     },
   }),
 });

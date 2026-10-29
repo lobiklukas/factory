@@ -379,6 +379,16 @@ one place it can be flaky: its windows are the UTC day. See [limits.md](limits.m
 | Outcome metrics          | passing | [outcomes.md](outcomes.md)                   |
 | Cost prediction          | passing | [cost.md](cost.md)                           |
 | Notifications            | passing | [notify.md](notify.md)                       |
+| MCP tools                | passing | [mcp-tools.md](mcp-tools.md)                 |
+
+The MCP tools checks (S-agent-mcp-tools) were run from the `agent/S-agent-mcp-tools` worktree on
+2026-10-29 (`API_PORT=9510`, the fake MCP server on `MCP_FAKE_PORT=9511`, the worktree's own database
+on 5442): `./mcp-tools.sh` **7/7** (an allowed read runs unattended with the repo secret as its bearer
+token and out of the agent's shell, a write raises an approval and a denial never reaches the server,
+an unallowed server is never contacted, and the log records the allowlist and the offered tools),
+evidence `.verify/evidence/latest/api/mcp-tools.json`. That an MCP server which never answers holds no
+other session's open is `packages/core/src/SessionService.mcp.test.ts`'s. See
+[mcp-tools.md](mcp-tools.md).
 
 The notification checks (S-notifications) were run from the `agent/S-notifications` worktree on
 2026-10-28 (`NOTIFY_PORT=9550`, the fake on `NOTIFY_FAKE_PORT=9551`, a scratch database minted on the

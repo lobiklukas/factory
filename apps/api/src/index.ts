@@ -32,6 +32,8 @@ import {
   modelKey,
   parseFauxFail,
   parseFauxModelScripts,
+  parseFauxMcpCalls,
+  parseMcpServers,
   parseRoleModels,
   parseRolePolicies,
   extendRolePolicies,
@@ -177,6 +179,17 @@ const ApprovalGateConfig = Config.String("APPROVAL_REQUIRED").pipe(
 );
 
 /**
+ * The remote MCP servers the deployment registers for its agents (S-agent-mcp-tools): a JSON array
+ * of `{ "name", "url", "secret"? }` — `[{"name":"tracker","url":"https://mcp.example/mcp","secret":"TRACKER_MCP_TOKEN"}]`.
+ * Registering offers nothing: a repository's `.factory/config` `policy.mcp` names the servers and
+ * tools its runs are offered. `secret` names the repository secret (`factory secrets set`) sent as
+ * the bearer token. Parsed at boot (`parseMcpServers`), so a malformed list fails it. Blank: none.
+ */
+const McpServersConfig = Config.String("MCP_SERVERS").pipe(
+  Config.withDefault(""),
+);
+
+/**
  * Which model a session runs against.
  *
  * `MODEL_BACKEND` wins when set. Otherwise a credential decides (`./ModelBackend`, LOB-258): the real
@@ -266,6 +279,13 @@ const ModelConfig = Config.all({
    * (`FAUX_MODEL_SCRIPTS`'s `fail`). Unset: the faux never fails. Anything else fails the boot.
    */
   fauxFail: Config.String("FAUX_FAIL").pipe(Config.withDefault("")),
+  /**
+   * Tool calls the faux makes after its `bash` step (S-agent-mcp-tools): a JSON array of
+   * `{ "tool", "arguments"? }` — `[{"tool":"mcp__tracker__get_issue","arguments":{"id":"ISS-1"}}]` —
+   * each once a turn under `FAUX_EVERY_TURN`. What `verify-api/mcp-tools.sh` calls an MCP tool with.
+   * Blank: none; anything else fails the boot (`parseFauxMcpCalls`).
+   */
+  fauxMcpCalls: Config.String("FAUX_MCP_CALLS").pipe(Config.withDefault("")),
   /**
    * A faux script per model id (LOB-86): `{"builder": {"command": "…", "verify": true}}`. With
    * `ROLE_MODELS=builder=faux/builder`, a run in a `builder` column writes, commits and verifies a
@@ -611,7 +631,8 @@ const HttpLive = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const model = yield* ModelConfig;
   const prCap = yield* PrCapConfig;
-  const autonomy = yield* ApprovalGateConfig;
+  const mcpServers = yield* parseMcpServers(yield* McpServersConfig);
+  const autonomy = { ...(yield* ApprovalGateConfig), mcpServers };
   const defaultBudget = yield* SessionBudgetConfig;
   const maxConcurrent = yield* SessionMaxConcurrentConfig;
   const spendCaps = yield* parseSpendCaps(yield* SpendCapsConfig);
@@ -705,6 +726,7 @@ const HttpLive = Effect.gen(function* () {
     );
   }
   const fauxFail = yield* parseFauxFail(model.fauxFail);
+  const fauxMcpCalls = yield* parseFauxMcpCalls(model.fauxMcpCalls);
   if (backend === "faux" && fauxFail !== undefined) {
     yield* Effect.logWarning(
       `faux requests fail with model_error once a session holds ${fauxFail.afterAnswers} answers (FAUX_FAIL)`,
@@ -722,6 +744,7 @@ const HttpLive = Effect.gen(function* () {
     fauxVerify: model.fauxVerify,
     fauxSleepMs: model.fauxSleepMs,
     fauxFail,
+    fauxMcpCalls,
     fauxModels,
     fauxModelScripts,
   });
@@ -962,6 +985,9 @@ const HttpLive = Effect.gen(function* () {
   );
   yield* Effect.logInfo(
     `  - commands that wait for an approval: ${autonomy.approvalRequired.length === 0 ? "none" : autonomy.approvalRequired.join(", ")}`,
+  );
+  yield* Effect.logInfo(
+    `  - MCP servers a repository may allow its runs: ${mcpServers.length === 0 ? "none (MCP_SERVERS unset)" : mcpServers.map((server) => `${server.name} (${server.url}${server.secret === undefined ? "" : `, token from secret ${server.secret}`})`).join(", ")}`,
   );
   yield* Effect.logInfo(
     `  - a session's PR step refuses a diff over ${prCap.maxFiles} files / ${prCap.maxLines} lines`,
