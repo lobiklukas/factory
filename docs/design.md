@@ -224,6 +224,10 @@ control plane's.
 _Refined (C18):_ nobody has to ask for it. A run that settles in a session that declares its PR — a
 card's run in a column that requires one, a session a trigger opened — runs the PR step with no
 operator call; a person's session keeps `factory pr` and the dashboard's control.
+_Refined (F17):_ a person's session can ask at create (`openPrOnSettle`: `factory run --open-pr`, the
+New session form's checkbox), recorded in its log as `factory.settlePr`, and then declares the step
+as a trigger's session does; one that did not ask keeps `factory pr`. The boot sweep (F16) covers
+it, reading the same log record, so a settle no process saw still gets its PR.
 _Refined (F14, F16):_ the PR follows its session's branch. A recorded PR whose branch moved past the
 commit it was published at is pushed onto — measured, capped and pushed as an open is, never forced,
 answered `updated` — by `factory pr` and by every later settle, so a session's later commits reach

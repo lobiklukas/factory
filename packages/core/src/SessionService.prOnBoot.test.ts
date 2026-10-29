@@ -698,4 +698,62 @@ describe("a settle no process saw gets its PR step at boot (F16)", () => {
     },
     CASE,
   );
+
+  /**
+   * F17. Mutations: leave person's sessions out of the sweep's query — the opted-in session has no
+   * PR after the boot. Read only the index in the sweep (no `factory.settlePr` overlay) — the same.
+   * Open every person's session — the one that did not ask gets a PR too.
+   */
+  it(
+    "a person's session that asked for its PR at create gets it at boot when no process stepped its settle, and one that did not ask does not",
+    async () => {
+      const root = tempDir("factory-f17-asked-");
+      const made = await onBoot(
+        root,
+        false,
+        Effect.gen(function* () {
+          const service = yield* SessionService;
+          const repo = yield* register(1, "asked");
+          const asked = yield* service.create({
+            title: "asked for a PR",
+            repo,
+            baseRef: "main",
+            actor: "person:f17",
+            openPrOnSettle: true,
+          });
+          yield* service.send({ sessionId: asked.id, content: "change it" });
+          const quiet = yield* service.create({
+            title: "did not ask",
+            repo,
+            baseRef: "main",
+            actor: "person:f17",
+          });
+          yield* service.send({ sessionId: quiet.id, content: "change it" });
+          yield* settled(asked.id);
+          yield* settled(quiet.id);
+          return { asked: asked.id, quiet: quiet.id };
+        }),
+      );
+      const swept = await onBoot(
+        root,
+        true,
+        Effect.gen(function* () {
+          const stepped = yield* sweptAmong([made.asked, made.quiet]);
+          return {
+            stepped,
+            asked: yield* prUrlOf(made.asked),
+            quiet: yield* prUrlOf(made.quiet),
+          };
+        }),
+      );
+
+      expect(swept.stepped).toEqual([made.asked]);
+      expect(swept.asked).toMatch(/\/pull\/\d+$/);
+      expect(decisionsOf(made.asked)).toEqual(["opened"]);
+      expect(swept.quiet).toBeNull();
+      expect(decisionsOf(made.quiet)).toEqual([]);
+      expect(createsFor(made.quiet)).toBe(0);
+    },
+    CASE,
+  );
 });

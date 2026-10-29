@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { REPO_NESTED_MAX } from "@repo/harness";
 import { Effect } from "effect";
 import { afterAll, describe, expect, it } from "vitest";
 import {
@@ -161,6 +162,117 @@ describe(
         path: "AGENTS.md",
         bytes: big.length,
       });
+    });
+
+    // F20. Mutations: read AGENTS.md only (a CLAUDE.md-only repo gets nothing); try the candidates in
+    // another order (CLAUDE.md beats AGENTS.md).
+    it("falls back to CLAUDE.md, then the Copilot file, and the first that exists wins", async () => {
+      const claudeOnly = fixture("claude-only", {
+        "CLAUDE.md": "claude rules\n",
+      });
+      const copilotOnly = fixture("copilot-only", {
+        ".github/copilot-instructions.md": "copilot rules\n",
+      });
+      const both = fixture("agents-and-claude", {
+        "AGENTS.md": "agents rules\n",
+        "CLAUDE.md": "claude rules\n",
+        ".github/copilot-instructions.md": "copilot rules\n",
+      });
+      const claudeAndCopilot = fixture("claude-and-copilot", {
+        "CLAUDE.md": "claude rules\n",
+        ".github/copilot-instructions.md": "copilot rules\n",
+      });
+
+      expect((await read(claudeOnly))?.instructions).toEqual({
+        path: "CLAUDE.md",
+        bytes: "claude rules\n".length,
+        text: "claude rules\n",
+      });
+      expect((await read(copilotOnly))?.instructions).toEqual({
+        path: ".github/copilot-instructions.md",
+        bytes: "copilot rules\n".length,
+        text: "copilot rules\n",
+      });
+      expect((await read(both))?.instructions?.path).toBe("AGENTS.md");
+      expect((await read(both))?.instructions?.text).toBe("agents rules\n");
+      expect((await read(claudeAndCopilot))?.instructions?.path).toBe(
+        "CLAUDE.md",
+      );
+    });
+
+    it("passes over a candidate that cannot be used for the next, and says why; an empty one silently", async () => {
+      const outside = fixture("agents-out-claude-in", {
+        "CLAUDE.md": "claude rules\n",
+      });
+      symlinkSync("../elsewhere/agents.md", join(outside, "AGENTS.md"));
+      git(outside, "git add -A");
+      git(outside, "git commit -q -m link");
+      const empty = fixture("agents-empty", {
+        "AGENTS.md": " \n\n",
+        "CLAUDE.md": "claude rules\n",
+      });
+      const emptyAll = fixture("all-empty", { "AGENTS.md": "\n" });
+
+      const blocked = await readWithProblems(outside);
+      expect(blocked.context?.instructions?.path).toBe("CLAUDE.md");
+      expect(blocked.problems).toEqual([
+        "AGENTS.md points outside the repository",
+      ]);
+      const skipped = await readWithProblems(empty);
+      expect(skipped.context?.instructions?.path).toBe("CLAUDE.md");
+      expect(skipped.problems).toEqual([]);
+      expect((await read(emptyAll))?.instructions).toBeUndefined();
+    });
+
+    it("follows the same symlink rule for CLAUDE.md as for AGENTS.md", async () => {
+      const root = fixture("claude-link", {
+        "docs/rules.md": "linked rules\n",
+      });
+      symlinkSync("docs/rules.md", join(root, "CLAUDE.md"));
+      git(root, "git add -A");
+      git(root, "git commit -q -m link");
+
+      expect((await read(root))?.instructions?.path).toBe("docs/rules.md");
+    });
+
+    it("lists the AGENTS.md files nested in directories by path, sorted, not the root's or a link's", async () => {
+      const root = fixture("nested-agents", {
+        "AGENTS.md": "root\n",
+        "packages/web/AGENTS.md": "web rules\n",
+        "apps/api/deep/AGENTS.md": "api rules\n",
+        "packages/web/README.md": "not instructions\n",
+        "docs/NOT-AGENTS.md": "no\n",
+      });
+      symlinkSync("../../AGENTS.md", join(root, "packages", "AGENTS.md"));
+      git(root, "git add -A");
+      git(root, "git commit -q -m link");
+
+      const context = await read(root);
+
+      expect(context?.nested).toEqual([
+        "apps/api/deep/AGENTS.md",
+        "packages/web/AGENTS.md",
+      ]);
+      // They are listed, never read in: the instructions are the root's alone.
+      expect(context?.instructions?.text).toBe("root\n");
+    });
+
+    it("lists no nested files for a repository with none, and at most REPO_NESTED_MAX", async () => {
+      const bare = fixture("no-nested", { "AGENTS.md": "root\n" });
+      const many = fixture(
+        "many-nested",
+        Object.fromEntries(
+          Array.from({ length: REPO_NESTED_MAX + 5 }, (_, index) => [
+            `pkg-${String(index).padStart(2, "0")}/AGENTS.md`,
+            "rules\n",
+          ]),
+        ),
+      );
+
+      expect((await read(bare))?.nested).toBeUndefined();
+      const listed = (await read(many))?.nested ?? [];
+      expect(listed).toHaveLength(REPO_NESTED_MAX);
+      expect(listed[0]).toBe("pkg-00/AGENTS.md");
     });
 
     it("answers a repository with neither file as no instructions and no skills", async () => {

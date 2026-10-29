@@ -56,6 +56,71 @@ describe("opensPullRequestOnSettle", () => {
     expect(opensPullRequestOnSettle({ ...trigger, actor: null })).toBe(false);
   });
 
+  // F17: `createSession`'s `openPrOnSettle`, read from the log, is how a person says it at the start.
+  it("opens for a person's session that asked, and for no other person's (F17)", () => {
+    const person = { ...trigger, actor: "person:lukas", requestId: null };
+    expect(opensPullRequestOnSettle({ ...person, openPrOnSettle: true })).toBe(
+      true,
+    );
+    expect(opensPullRequestOnSettle({ ...person, openPrOnSettle: false })).toBe(
+      false,
+    );
+    expect(opensPullRequestOnSettle(person)).toBe(false);
+    // Whoever the session is attributed to: the ask alone declares it.
+    expect(
+      opensPullRequestOnSettle({
+        ...person,
+        actor: null,
+        openPrOnSettle: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps every other guard on a session that asked (F17)", () => {
+    const asked = {
+      ...trigger,
+      actor: "person:lukas",
+      requestId: null,
+      openPrOnSettle: true,
+    };
+    // Nothing to publish: no repo, a released workspace, a PR that merged.
+    expect(settleDeclarationOf({ ...asked, repo: null })).toBe("undeclared");
+    expect(settleDeclarationOf({ ...asked, released: true })).toBe(
+      "undeclared",
+    );
+    expect(
+      settleDeclarationOf({
+        ...asked,
+        prUrl: "https://github.com/acme/widget/pull/1",
+        prMerged: true,
+      }),
+    ).toBe("undeclared");
+    // A fork or a replay of it chose its own PR.
+    expect(settleDeclarationOf({ ...asked, forkedFrom: "ses-1" })).toBe(
+      "undeclared",
+    );
+    // Parked on a person: held until a run settles done. A recorded unmerged PR is still pushed to.
+    expect(settleDeclarationOf({ ...asked, waiting: true })).toBe("parked");
+    expect(
+      settleDeclarationOf({
+        ...asked,
+        prUrl: "https://github.com/acme/widget/pull/1",
+      }),
+    ).toBe("declared");
+  });
+
+  it("never reads the ask for a card's run: its column decides (F17)", () => {
+    expect(
+      opensPullRequestOnSettle({
+        ...trigger,
+        actor: "person:lukas",
+        requestId: null,
+        columnRequires: ["verified"],
+        openPrOnSettle: true,
+      }),
+    ).toBe(false);
+  });
+
   it("decides a card's run by its column alone: a column that requires a PR opens one", () => {
     expect(
       opensPullRequestOnSettle({

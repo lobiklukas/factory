@@ -23,3 +23,12 @@ ran, the transcript committed, and the stream delivered it to this terminal.
 **What it does not prove.** Nothing about the model (faux), nothing about a repo checkout (the
 session gets a scratch directory under `SESSION_ROOT` until M6), and nothing about a live/historical
 label — `run` does not print the mode; `watch` does.
+
+**`--open-pr` (F17).** `factory run "<task>" --repo r --open-pr` asks the control plane to open the
+session's PR when its run settles with a change, as a trigger's session does (`createSession`'s
+`openPrOnSettle`, recorded in the log as `factory.settlePr`, read by the settle rule in
+`packages/core/src/prOnSettle.ts`). Without the flag a person's session keeps `factory pr`. After the
+answer the command waits for the settle-time step and prints `pr <link>`, or `pr none: <why>` (a branch
+with no change, a diff over the cap). `--open-pr` without `--repo` is `error: invalid_input`.
+`./open-pr.sh` drives it against a GitHub fake: the ledger is the oracle for one create on
+`factory/<session>`, none without the flag, none for a run that changes nothing.

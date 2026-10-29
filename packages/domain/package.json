@@ -27,6 +27,7 @@
     "./Page": "./src/Page.ts",
     "./PlanFreshness": "./src/PlanFreshness.ts",
     "./PullRequest": "./src/PullRequest.ts",
+    "./RepoContext": "./src/RepoContext.ts",
     "./Rpc": "./src/Rpc.ts",
     "./Secret": "./src/Secret.ts",
     "./Server": "./src/Server.ts",
