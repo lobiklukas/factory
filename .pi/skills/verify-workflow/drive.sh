@@ -27,7 +27,10 @@ if [ ! -s "$ROOT/.verify/run/workflow/instance.json" ]; then
   echo "no workflow instance — run ./up.sh${1:+ $1} first" >&2
   exit 1
 fi
-if ! curl -sf -m 2 "$(sed -n 's/^  "apiUrl": "\(.*\)",$/\1/p' "$ROOT/.verify/run/workflow/instance.json")/readyz" >/dev/null 2>&1; then
+WF_DIR="$ROOT/.verify/run/workflow"
+# shellcheck source=instance-env.sh
+source "$SKILL/instance-env.sh"
+if ! curl -sf -m 2 "$(workflow_field apiUrl)/readyz" >/dev/null 2>&1; then
   echo "the instance's API is not ready — ./doctor.sh says why" >&2
   exit 1
 fi

@@ -194,7 +194,7 @@ run pushes `factory/<session-id>` with the CredentialProvider's token to a loopb
 `git push`) and opens exactly one PR with its evidence block (a retry is `already-open`); Linear gets
 the PR attached, one comment and In Review, then Done after the merge with still one comment; the
 reviewer passes; and `listSessions`/`listSpend` show every run's status, repo, duration and cost.
-41/41 checks, twice in a row from nothing (`cycle.sh`), with `down.sh` leaving no process, port or
+42/42 checks, twice in a row from nothing (`cycle.sh`), with `down.sh` leaving no process, port or
 scratch database. The faux loop surfaced no product gap; it needed seams in the verify tooling only
 (verify-board's `up.sh` can now restart its API in place, point at a live forge and model, and seed a
 named repo with a forge URL). Not proven: the real services. The `--live` mode of the same drive is

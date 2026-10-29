@@ -18,7 +18,7 @@ truth. What is not specific to this stretch is in `AGENTS.md` and `docs/handoff.
 Everything the MVP roadmap asked of the code is merged: the board (B), triggers (T), the PR lifecycle
 (C17–C21), notifications, spend caps, automations, MCP tools, model fallback, the kind sandbox (LOB-13
 and its children) and DEFLAKE. The whole loop is proven end to end **in faux** by
-`.pi/skills/verify-workflow/` (`cycle.sh`: 41 checks, twice in a row from nothing): a Linear delegation
+`.pi/skills/verify-workflow/` (`cycle.sh`: 42 checks, twice in a row from nothing): a Linear delegation
 through the real webhook and label rule, specify, plan approval by a person, a gated `git commit`
 whose approval survives an API restart, a real `git push` with the CredentialProvider token, one PR
 with its evidence (retry-safe), Linear write-back with no duplicate comment, review, merge, and the

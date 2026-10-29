@@ -86,6 +86,9 @@ const GUARDED = [
   "verify-board-equivalence.test.ts",
   // Every case spawns `bash` on verify-workflow's `--live` scripts in a scratch repo (LOB-40).
   "verify-workflow-live.test.ts",
+  // Every case spawns `bash` on verify-workflow's `up.sh`, `down.sh` or `instance-env.sh` in a
+  // scratch repo (LOB-40).
+  "verify-workflow-instance.test.ts",
 ] as const;
 
 /**

@@ -36,7 +36,9 @@
 # Ports: API_PORT (9610), WEB_PORT (3610), GITHUB_PORT (API_PORT+1), LINEAR_PORT (API_PORT+2), GIT_PORT
 # (API_PORT+3). The instance is recorded in .verify/run/workflow/instance.json for doctor.sh and
 # drive.sh. verify-board's own files stay where its scripts put them (.verify/run), so run one board
-# instance at a time, as verify-board says.
+# instance at a time, as verify-board says: this script refuses, before it makes anything, when one
+# is already running, and records `board-owned` once it launches its own, which is the only case in
+# which `down.sh` stops verify-board's instance.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -65,6 +67,24 @@ STAMP="$(date +%s)"
 
 if [ -s "$WF_DIR/instance.json" ] || [ -s "$WF_DIR/database" ]; then
   echo "a workflow instance is already recorded in $WF_DIR — run ./down.sh first" >&2
+  exit 1
+fi
+# verify-board's instance lives in .verify/run, one per worktree. One that is already running (its own
+# drive, or another skill's) is not ours: refuse before anything is made, so `down.sh` — which stops
+# verify-board's instance only when this script launched it — has nothing of someone else's to stop.
+board_alive() {
+  local name pid
+  for name in api web github; do
+    pid="$(cat "$RUN_DIR/$name.pid" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      echo "$name pid $pid"
+      return 0
+    fi
+  done
+  return 1
+}
+if held="$(board_alive)"; then
+  echo "a verify-board instance is already running in $RUN_DIR ($held) — stop it with its own ./down.sh first" >&2
   exit 1
 fi
 mkdir -p "$WF_DIR"
@@ -133,28 +153,47 @@ fi
 
 # Recorded before anything is launched with it: `instance-env.sh` rebuilds the API's environment from
 # this file, for this launch and for `restart-api.sh`'s.
-cat > "$WF_DIR/instance.json" <<JSON
-{
-  "mode": "$MODE",
-  "apiUrl": "http://localhost:$API_PORT",
-  "webUrl": "http://localhost:$WEB_PORT",
-  "apiPort": $API_PORT,
-  "webPort": $WEB_PORT,
-  "githubPort": $GITHUB_PORT,
-  "linearPort": $LINEAR_PORT,
-  "gitPort": $GIT_PORT,
-  "database": "$DB_NAME",
-  "repo": "$SLUG",
-  "label": "$LABEL",
-  "approvalRequired": "$([ "$MODE" = live ] && echo "${WORKFLOW_APPROVAL_REQUIRED:-git commit}" || echo "git commit")",
-  "stamp": "$STAMP"
-}
-JSON
+# Written by a JSON encoder, not a heredoc: the label and the gate are the owner's text in live mode,
+# and the gate is a comma-separated list (APPROVAL_REQUIRED), so a value may hold a comma or a quote.
+APPROVAL="git commit"
+[ "$MODE" = live ] && APPROVAL="${WORKFLOW_APPROVAL_REQUIRED:-git commit}"
+if ! printf '%s' "$APPROVAL" | tr ',' '\n' | grep -q '[^[:space:]]'; then
+  echo "WORKFLOW_APPROVAL_REQUIRED names no command prefix — the run would have no gate" >&2
+  exit 1
+fi
+WF_MODE="$MODE" WF_API_PORT="$API_PORT" WF_WEB_PORT="$WEB_PORT" WF_GITHUB_PORT="$GITHUB_PORT" \
+  WF_LINEAR_PORT="$LINEAR_PORT" WF_GIT_PORT="$GIT_PORT" WF_DATABASE="$DB_NAME" WF_REPO="$SLUG" \
+  WF_LABEL="$LABEL" WF_APPROVAL="$APPROVAL" WF_STAMP="$STAMP" bun -e '
+    const e = process.env;
+    console.log(JSON.stringify({
+      mode: e.WF_MODE,
+      apiUrl: `http://localhost:${e.WF_API_PORT}`,
+      webUrl: `http://localhost:${e.WF_WEB_PORT}`,
+      apiPort: Number(e.WF_API_PORT),
+      webPort: Number(e.WF_WEB_PORT),
+      githubPort: Number(e.WF_GITHUB_PORT),
+      linearPort: Number(e.WF_LINEAR_PORT),
+      gitPort: Number(e.WF_GIT_PORT),
+      database: e.WF_DATABASE,
+      repo: e.WF_REPO,
+      label: e.WF_LABEL,
+      approvalRequired: e.WF_APPROVAL,
+      stamp: e.WF_STAMP,
+    }, null, 2));
+  ' > "$WF_DIR/instance.json"
 WORKFLOW_BASE_URL="$BASE_URL"
 # shellcheck source=instance-env.sh
 source "$SKILL/instance-env.sh"
 workflow_export_env
 
+# From here on verify-board's instance is this one's, even if its `up.sh` fails part-way: none was
+# running above, so whatever it leaves in .verify/run, `down.sh` stops. Without this marker `down.sh`
+# leaves verify-board's run directory alone.
+if held="$(board_alive)"; then
+  echo "a verify-board instance started in $RUN_DIR meanwhile ($held) — not ours; run ./down.sh" >&2
+  exit 1
+fi
+: > "$WF_DIR/board-owned"
 if ! "$BOARD/up.sh"; then
   echo "verify-board's up.sh failed — see $RUN_DIR/api.log" >&2
   exit 1

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Stop only what ./up.sh started (LOB-40): the two loopback fakes by the pids it recorded, then
-# verify-board's own instance through its `down.sh` (API, dashboard, GitHub fake, tmux, fixtures),
+# Stop only what ./up.sh started (LOB-40): the two loopback fakes by the pids it recorded, then —
+# when `up.sh` launched it (the `board-owned` marker) — verify-board's own instance through its
+# `down.sh` (API, dashboard, GitHub fake, tmux, fixtures),
 # then the scratch database it made — by the name it recorded, never by a pattern. Evidence in
 # .verify/evidence/ is left alone.
 #
@@ -27,7 +28,12 @@ for name in linear git; do
   rm -f "$pidfile"
 done
 
-"$ROOT/.pi/skills/verify-board/down.sh" || status=1
+# verify-board's instance only when `up.sh` launched it (`board-owned`): one it found running was
+# refused, and is someone else's to stop.
+if [ -f "$WF_DIR/board-owned" ]; then
+  "$ROOT/.pi/skills/verify-board/down.sh" || status=1
+  [ "$status" -eq 0 ] && rm -f "$WF_DIR/board-owned"
+fi
 
 if [ -s "$WF_DIR/database" ]; then
   name="$(cat "$WF_DIR/database")"

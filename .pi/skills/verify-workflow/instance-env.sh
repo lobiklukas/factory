@@ -7,9 +7,14 @@
 # URL (the scratch database is on its server). Faux values are the fakes' own and are recorded on
 # disk; live credentials are never recorded — they are read from the owner's shell, as exported.
 
-# One scalar field of instance.json, as `up.sh` writes it (one `"key": value` per line).
+# One scalar field of instance.json, read as JSON: `up.sh` writes the file with JSON.stringify, so a
+# value may hold a comma or a quote — APPROVAL_REQUIRED is a comma-separated list — and still reads
+# back whole. Prints nothing for a field the file does not have.
 workflow_field() {
-  sed -n "s/^  \"$1\": \"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}$/\1/p" "$WF_DIR/instance.json" | head -1
+  WF_INSTANCE="$WF_DIR/instance.json" WF_FIELD="$1" bun -e '
+    const value = JSON.parse(require("node:fs").readFileSync(process.env.WF_INSTANCE, "utf8"))[process.env.WF_FIELD];
+    if (value !== undefined && value !== null) console.log(String(value));
+  '
 }
 
 # Export everything verify-board's `up.sh` hands the API for this instance.

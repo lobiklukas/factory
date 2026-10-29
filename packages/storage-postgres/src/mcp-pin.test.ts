@@ -51,7 +51,7 @@ const THIRD_PARTIES = "docs/testing-third-parties.md";
 /** The MCP server entry whose specifier is pinned. */
 const SERVER = "linear";
 
-/** The endpoint that entry reaches, as the row's System cell and `docs/next-agent.md` name it. */
+/** The endpoint that entry reaches, as the row's System cell and the MCP paragraph below it name it. */
 const LINEAR_URL = "https://mcp.linear.app/mcp";
 
 /** The package `npx` runs for that server. */
@@ -231,9 +231,9 @@ describe("the mcp-remote pin", () => {
   // Mutation checked: `args` reordered to `["-y", "https://mcp.linear.app/mcp", "mcp-remote@0.14.3"]`,
   // where `npx` runs the URL as the command, and `"command": "bunx"`. Both were green against the
   // cases above — `specifier` scans every argument and never reads `command`, so it still answered
-  // `pinned 0.14.3` — and both redden here. `docs/next-agent.md` writes this line as
-  // `npx -y mcp-remote@<exact version>`, the shipped config is that line with the version filled in,
-  // and `pi mcp list` prints it back resolved.
+  // `pinned 0.14.3` — and both redden here. The "Where the MCP servers are configured" paragraph of
+  // `docs/testing-third-parties.md` writes this line as `npx -y mcp-remote@<exact version>`, the
+  // shipped config is that line with the version filled in, and `pi mcp list` prints it back resolved.
   it("runs the pin through `npx -y`, the command line the docs print", () => {
     const entry = config(read(MCP_CONFIG)).mcpServers?.[SERVER];
     expect(entry?.command, `${MCP_CONFIG}'s ${SERVER} server runs npx`).toBe(
@@ -269,7 +269,7 @@ describe("the mcp-remote pin", () => {
 
   // Mutation checked: replacing the link with a real file — a copy of `.mcp.json`, which then drifts
   // silently — or pointing it at a different config. The row's "single source of truth" sentence and
-  // `docs/next-agent.md`'s answer to "which file is authoritative" both rest on this being a link.
+  // that file's MCP paragraph's answer to "which file is authoritative" both rest on this being a link.
   it("keeps .pi/mcp.json a link to the root config", () => {
     const link = path.join(REPO_ROOT, PI_MCP_CONFIG);
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
@@ -384,8 +384,9 @@ describe("the mcp-remote pin", () => {
     ).toBeGreaterThan(0);
     expect([...new Set(cellVersions(row))]).toEqual([PIN]);
     // Exactly two cells name it — the strategy cell and the sources cell — which is what
-    // `docs/next-agent.md`'s "the two places ... that the guard reads" promises. A third one would
-    // make a bump that missed it go stale silently, so the promise is asserted rather than assumed.
+    // `docs/testing-third-parties.md`'s MCP paragraph's "the two places ... that the guard reads"
+    // promises. A third one would make a bump that missed it go stale silently, so the promise is
+    // asserted rather than assumed.
     expect(
       row.split("|").filter((cell) => cellVersions(`|${cell}|`).length > 0)
         .length,

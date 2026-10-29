@@ -136,6 +136,29 @@ const ISSUE_DESCRIPTION =
   "Delegated from Linear by verify-workflow: the whole loop on one card.";
 const ANSWER = "Postgres 16. Keep port 5442 — it is shared.";
 const MINUTE = 60_000;
+/**
+ * The gate's command prefixes: APPROVAL_REQUIRED is a comma-separated list (apps/api/src/index.ts),
+ * so the gated call's action matches any one of them.
+ */
+const GATES = instance.approvalRequired
+  .split(",")
+  .map((prefix) => prefix.trim())
+  .filter((prefix) => prefix !== "");
+/**
+ * The Linear states the write-back moves the issue to: the API reads the same variables
+ * (`LINEAR_STATE_IN_REVIEW`, `LINEAR_STATE_DONE`, apps/api/src/Api/LinearSync.ts), and a blank one is
+ * Linear's default name there too.
+ */
+const stateName = (variable: string, fallback: string): string =>
+  process.env[variable]?.trim() || fallback;
+const STATE_IN_REVIEW = stateName("LINEAR_STATE_IN_REVIEW", "In Review");
+const STATE_DONE = stateName("LINEAR_STATE_DONE", "Done");
+/** The sentences a settled run's PR step leaves when it opened nothing (verify-board's `build.ts`). */
+const NOT_OPENED = [
+  "the run settled and the PR step opened no PR",
+  "no change: ",
+  "no documentation change: ",
+];
 /** When the run began: `cycle.sh` sets it just before `up.sh`, so the report's time includes the launch. */
 const STARTED_AT =
   Number(process.env["WORKFLOW_STARTED_AT"] ?? "") || Date.now();
@@ -477,6 +500,27 @@ const commitsHolding = async (
   }
 };
 
+/**
+ * How many deliveries about the Linear issue `key` the API recorded other than the one that filed its
+ * card (`linear:<key>:mapped`). Removing the mapped label is an update that starts nothing, recorded
+ * under its own delivery id (`linear:<key>:update:<delivery>`, `linearRequestId`), so a new row here
+ * is Linear's later delivery for the issue having reached the API — which the re-add's replay, keyed
+ * by the issue and writing no row of its own, cannot show.
+ */
+const laterDeliveries = async (key: string): Promise<number> => {
+  const sql = new SQL(SCRATCH_URL);
+  const prefix = `linear:${key}:`;
+  try {
+    const rows = (await sql`
+      SELECT count(*)::int AS count FROM webhook_deliveries
+      WHERE strpos(request_id, ${prefix}) = 1 AND request_id <> ${`${prefix}mapped`}
+    `) as Array<{ count: number }>;
+    return rows[0]?.count ?? -1;
+  } finally {
+    await sql.close();
+  }
+};
+
 /** The approval's row in the index: the request and, once made, the decision. */
 const approvalRow = async (sessionId: string, requestId: string) => {
   const sql = new SQL(SCRATCH_URL);
@@ -592,6 +636,37 @@ const program = Effect.gen(function* () {
         afterReplay[0]?.id === card?.id,
       `answer=${JSON.stringify(redelivered.body)} cards=${afterReplay.length}`,
     );
+    // What the live run asks the owner to do, delivered as Linear sends it: the removal is an update
+    // that starts nothing, recorded under its own delivery id — the row the live check waits for —
+    // and the re-add is a new event keyed by the issue, so a replay.
+    const deliveredBefore = yield* Effect.promise(() => laterDeliveries(ISSUE));
+    const removed = yield* Effect.promise(() =>
+      deliverLinear(
+        "label-removed",
+        issueEvent("update", [], {
+          labelIds: [`label-${instance.label}`],
+        }),
+      ),
+    );
+    const deliveredAfter = yield* Effect.promise(() => laterDeliveries(ISSUE));
+    const readded = yield* Effect.promise(() =>
+      deliverLinear(
+        "label-readded",
+        issueEvent("update", [instance.label], { labelIds: [] }),
+      ),
+    );
+    const afterRelabel = yield* cards();
+    check(
+      "removing the label and adding it again files no second card: the removal is recorded under its own id, the re-add is a replay",
+      removed.status === 200 &&
+        removed.body?.["status"] === "skipped" &&
+        deliveredAfter === deliveredBefore + 1 &&
+        readded.status === 200 &&
+        readded.body?.["replayed"] === true &&
+        afterRelabel.length === 1 &&
+        afterRelabel[0]?.id === card?.id,
+      `removal=${JSON.stringify(removed.body)} later deliveries=${deliveredBefore}→${deliveredAfter} re-add=${JSON.stringify(readded.body)} cards=${afterRelabel.length}`,
+    );
   } else {
     console.log(
       `\n>>> In Linear, add the label "${instance.label}" to an issue now (waiting up to 15 minutes).\n`,
@@ -605,16 +680,25 @@ const program = Effect.gen(function* () {
         filed.value[0]?.column === "intake",
       `cards=${filed.value.length}`,
     );
+    const key = (filed.value[0]?.externalRef ?? "").replace(/^linear:/, "");
+    const deliveredBefore = yield* Effect.promise(() => laterDeliveries(key));
     console.log(
-      `\n>>> Now remove the label "${instance.label}" from that issue and add it again; the drive watches for 3 minutes.\n`,
+      `\n>>> Now remove the label "${instance.label}" from that issue, then add it again (waiting up to 10 minutes for the removal to arrive).\n`,
     );
-    // A replay writes no row of its own (the claim is keyed by the issue), so what is observable is
-    // the absence of a second card, for long enough that Linear's delivery has arrived.
+    // The re-add is a new update event, keyed by the issue like the first (`linear:<key>:mapped`), so
+    // the seam answers it as a replay and writes no row. What can be observed is that Linear's later
+    // deliveries for the issue reach the API — the removal is recorded under its own id — and, after
+    // that, the absence of a second card for long enough that the re-add has arrived too.
+    const removal = yield* poll(
+      Effect.promise(() => laterDeliveries(key)),
+      (count) => count > deliveredBefore,
+      10 * MINUTE,
+    );
     const second = yield* poll(cards(), (list) => list.length > 1, 3 * MINUTE);
     check(
-      "a second delivery of the delegation files no second card",
-      !second.met && second.value.length === 1,
-      `cards=${second.value.length}`,
+      "removing the label and adding it again files no second card: the removal's delivery reached the API, and the re-add opened nothing",
+      key !== "" && removal.met && !second.met && second.value.length === 1,
+      `issue=${key || "none"} later deliveries=${deliveredBefore}→${removal.value} cards=${second.value.length}`,
     );
   }
   if (taskId === undefined) {
@@ -810,7 +894,7 @@ const program = Effect.gen(function* () {
     "the builder's gated call is refused by policy and one approval is requested",
     pending.met &&
       pendingApprovals.approvals.length === 1 &&
-      (request?.action ?? "").includes(instance.approvalRequired) &&
+      GATES.some((prefix) => (request?.action ?? "").includes(prefix)) &&
       blockedCall !== undefined,
     `approvals=${JSON.stringify(pendingApprovals.approvals)} refused=${blockedCall?.text.slice(0, 160) ?? "none"}`,
   );
@@ -899,6 +983,21 @@ const program = Effect.gen(function* () {
   console.log(
     "\n# 5 PR: the push, one PR with evidence, a retry, the Linear write-back",
   );
+  // The resumed run has to take the gated call again, verify, settle, push and open the PR before
+  // build.ts's own wait (a minute, sized for faux) starts: a real model takes minutes for that, so
+  // the drive waits here, as long as it waits for any run, until the PR step has answered one way or
+  // the other.
+  const answered = (snapshot: SessionSnapshot) =>
+    snapshot.session.prUrl !== undefined ||
+    snapshot.entries.some((entry) =>
+      NOT_OPENED.some((sentence) => entry.text.startsWith(sentence)),
+    );
+  const resumed = yield* poll(
+    getSession(BUILD),
+    answered,
+    LIVE ? 20 * MINUTE : 2 * MINUTE,
+  );
+  summary["prStepAnswered"] = resumed.met;
   const prSettled = probe("build.ts", {
     MODE: "settled",
     SESSION_ID: BUILD,
@@ -984,7 +1083,7 @@ const program = Effect.gen(function* () {
   const marker = `factory:${BUILD}:pr`;
   const inReview = yield* poll(
     Effect.promise(() => linearIssue(issueId)),
-    (issue) => issue?.state === "In Review",
+    (issue) => issue?.state === STATE_IN_REVIEW,
     LIVE ? 2 * MINUTE : 30_000,
   );
   const prComments = (inReview.value?.comments ?? []).filter((comment) =>
@@ -1090,7 +1189,7 @@ const program = Effect.gen(function* () {
   );
   const doneIssue = yield* poll(
     Effect.promise(() => linearIssue(issueId)),
-    (issue) => issue?.state === "Done",
+    (issue) => issue?.state === STATE_DONE,
     LIVE ? 2 * MINUTE : 30_000,
   );
   check(

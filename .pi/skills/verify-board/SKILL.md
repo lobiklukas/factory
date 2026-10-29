@@ -248,7 +248,23 @@ restart between ask and answer must lose neither. Its two non-CLI facts (is the 
 was the next run's recorded prompt) are probed by `ask.ts`. See `features/ask.md`.
 
 Environment: `API_URL` (default `http://localhost:9400`), `WEB_URL` (default the recorded web port),
-`EVIDENCE_DIR`. `up.sh` also takes `GITHUB_PORT` and `BOARD_GITHUB` (`fake` | `off`).
+`EVIDENCE_DIR`. `up.sh` also takes `GITHUB_PORT` and `BOARD_GITHUB` (`fake` | `off` | `live`).
+
+Seams for a caller (verify-workflow, LOB-40, runs the whole loop on this instance through them), each
+off by default; `up.sh`'s header has the detail:
+
+- `./up.sh --restart-api [KILL|TERM]` stops the recorded API with that signal and starts it again with
+  the recorded configuration (`api-port`, `github-mode`, `github-port`, `github-token`,
+  `model-backend`, `webhook-secret` in `.verify/run`), then waits for `/readyz`; nothing else is
+  touched. The caller's environment must be the one `up.sh` ran under.
+- `BOARD_GITHUB=live` starts no fake and hands the API the caller's own `GITHUB_TOKEN` and
+  `GITHUB_WEBHOOK_SECRET` (both required; the secret is not written to `.verify/run`).
+- `BOARD_GITHUB_TOKEN` is the fake's token (default `verify-board-fake-token`), for a caller whose git
+  forge accepts only its own; `BOARD_GITHUB_GIT_ROOT` is the fake's `GITHUB_FAKE_GIT_ROOT`, so it
+  refuses a PR whose head that forge does not hold.
+- `BOARD_MODEL_BACKEND` is `faux` (the default, which every phase here needs) or another backend,
+  which drops the faux scripts and `ROLE_MODELS`.
+- `SEED_REPO_SLUG` and `SEED_REPO_URL` name the board's repository and its forge URL (`seed.ts`).
 
 The phases, in order: **add** (`factory board add` in the pane, `add.ts` over RPC) → `ls` → `show` → a declared move to
 `specifying` → the **stale** refusal (the revision the card had before that move) → the **undeclared**

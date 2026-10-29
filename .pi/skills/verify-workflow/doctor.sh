@@ -33,7 +33,9 @@ if [ ! -s "$WF_DIR/instance.json" ]; then
   exit 1
 fi
 
-field() { sed -n "s/.*\"$1\": *\"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}$/\1/p" "$WF_DIR/instance.json" | head -1; }
+# shellcheck source=instance-env.sh
+source "$SKILL/instance-env.sh"
+field() { workflow_field "$1"; }
 RECORDED="$(field mode)"
 if [ "$RECORDED" != "$MODE" ]; then
   note "workflow instance:" "is $RECORDED, not $MODE — ./down.sh, then ./up.sh$([ "$MODE" = live ] && echo ' --live')"
