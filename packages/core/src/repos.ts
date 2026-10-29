@@ -236,14 +236,13 @@ export const lookupCommit = (
 export const resolveCommit = (
   directory: string,
   ref: string,
+  options: { readonly timeoutMs?: number } = {},
 ): Effect.Effect<string | undefined> =>
-  gitAnswer(directory, [
-    "rev-parse",
-    "--verify",
-    "--quiet",
-    "--end-of-options",
-    `${ref}^{commit}`,
-  ]).pipe(
+  gitAnswer(
+    directory,
+    ["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`],
+    options,
+  ).pipe(
     Effect.map((sha) => (sha === undefined || sha === "" ? undefined : sha)),
   );
 
