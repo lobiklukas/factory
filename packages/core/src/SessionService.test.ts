@@ -11957,7 +11957,8 @@ describe("the verify tool reads the session's workspace", () => {
     );
     git("git add -A");
     git("git commit -m base");
-  });
+    // Git spawned in a hook: past vitest's 10 s hook default on a loaded machine (DEFLAKE).
+  }, 60_000);
 
   it("runs the declared command, not the skill, over the change committed on the branch", async () => {
     const faux = createFauxModelAccess({
@@ -12203,11 +12204,13 @@ describe("a repo registered with only a URL (LOB-265)", () => {
     git(upstream, "add", "README.md");
     git(upstream, "commit", "-q", "-m", "seed");
     git(cloneRoot, "clone", "-q", "--bare", upstream, bareUpstream);
-  });
+    // Git spawned in a hook: past vitest's 10 s hook default on a loaded machine (DEFLAKE).
+  }, 60_000);
 
   afterAll(() => {
     rmSync(cloneRoot, { recursive: true, force: true });
-  });
+    // Removing the clones: past vitest's 10 s hook default on a loaded machine (DEFLAKE).
+  }, 60_000);
 
   const runtimeWith = (mirror: RepoMirror | undefined) =>
     ManagedRuntime.make(
@@ -14370,7 +14373,8 @@ describe("a session's workspace outlives its owner (LOB-268)", () => {
     git(keptRepoRoot, "git config user.email t@t.com");
     git(keptRepoRoot, "git config user.name t");
     git(keptRepoRoot, "git commit --allow-empty -m base");
-  });
+    // Git spawned in a hook: past vitest's 10 s hook default on a loaded machine (DEFLAKE).
+  }, 60_000);
 
   const keptRuntime = (
     extra: {

@@ -209,7 +209,8 @@ beforeAll(async () => {
       Layer.provideMerge(Layer.mergeAll(DatabaseLive, BunServices.layer)),
     ),
   );
-});
+  // The forge's bare repository is made with git: budgeted as the cases are (DEFLAKE).
+}, 60_000);
 
 afterAll(async () => {
   await runtime.runPromise(

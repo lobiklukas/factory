@@ -201,7 +201,8 @@ const link = (answer: PullRequestStep) => {
 
 beforeAll(async () => {
   remote = await startGitRemote(join(root, "forge"), TOKEN);
-});
+  // The forge's bare repository is made with git: budgeted as the cases are (DEFLAKE).
+}, 60_000);
 
 afterAll(async () => {
   // The rows point at a session root this suite deletes, so they leave with it rather than waiting
