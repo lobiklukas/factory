@@ -336,7 +336,6 @@ import { openPullRequest, type OpenPullRequestInput } from "./prStep";
 import {
   notOpenedText,
   settleDeclarationOf,
-  TRIGGER_PREFIX,
   type NotOpened,
   type SettleDecision,
   type SettledRun,
@@ -839,10 +838,11 @@ export type SessionServiceShape = {
    * session with no PR until someone ran `factory pr`.
    *
    * The sessions are the ones the settle rule declares (`./prOnSettle`'s `settleDeclarationOf`: a
-   * trigger's session, a card's run in a column that requires a PR or continuing the card's PR) that
-   * record no PR, have no run or mission in flight, and whose worktree is under this process's
-   * session root and its own checkout — so a person's session, a fork, a replay, a released
-   * workspace and a parked run are never opened, and another instance's sessions are its own. Nor is
+   * trigger's session, a card's run in a column that requires a PR or continuing the card's PR, a
+   * person's session whose log records its opt-in, F17) that record no PR, have no run or mission in
+   * flight, and whose worktree is under this process's session root and its own checkout — so a
+   * person's session that did not ask, a fork, a released workspace and a parked run are never
+   * opened, and another instance's sessions are its own. Nor is
    * a card run a later run of the card took the branch over from (C19): it is superseded, and its
    * step would publish the later run's branch into its stale log. Nor a session this process saw a
    * run go busy in before the sweep finished (one `resumeRuns` continued, one a client started):
@@ -5413,6 +5413,27 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       const unchangedAt = new Map<SessionId, string>();
 
       /**
+       * `settledRunOf` with the log's half of the rule applied (F17): a person's session may have
+       * asked, at create, for its PR to open when a run settles, which is the log's, not the index's.
+       * It is read for the sessions the index leaves undeclared and that no card runs — one reader,
+       * for a repo session only — so the live settle and the boot sweep decide from the same answer.
+       */
+      const settledRunWithAsk = (sessionId: SessionId) =>
+        Effect.gen(function* () {
+          const indexed = yield* settledRunOf(sessionId);
+          const asked =
+            indexed !== undefined &&
+            indexed.taskId === undefined &&
+            indexed.run.repo !== null &&
+            settleDeclarationOf(indexed.run) === "undeclared"
+              ? yield* withReader(sessionId, readSettlePr)
+              : false;
+          return indexed === undefined || !asked
+            ? indexed
+            : { ...indexed, run: { ...indexed.run, openPrOnSettle: true } };
+        });
+
+      /**
        * The PR step a settled run takes with no operator (C18, `./prOnSettle`): run when this process
        * sees a session's run go idle, for a session that declares it, through the same `openPr` an
        * operator's call takes — the gate, the cap, the push, the record and the write-back are the
@@ -5432,21 +5453,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         forge: Context.Context<CredentialProvider | HttpClient.HttpClient>,
       ): Effect.Effect<void> => {
         const decide = Effect.gen(function* () {
-          const indexed = yield* settledRunOf(sessionId);
-          // A person's session may have asked, at create, for its PR to open (F17): that is the
-          // log's, not the index's, so it is read for the sessions the index leaves undeclared and
-          // that no card runs — one reader, for a repo session only.
-          const asked =
-            indexed !== undefined &&
-            indexed.taskId === undefined &&
-            indexed.run.repo !== null &&
-            settleDeclarationOf(indexed.run) === "undeclared"
-              ? yield* withReader(sessionId, readSettlePr)
-              : false;
-          const settled =
-            indexed === undefined || !asked
-              ? indexed
-              : { ...indexed, run: { ...indexed.run, openPrOnSettle: true } };
+          const settled = yield* settledRunWithAsk(sessionId);
           const declaration =
             settled === undefined
               ? "undeclared"
@@ -8410,9 +8417,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
       > = Effect.gen(function* () {
         const forge = options.pullRequestOnSettle;
         if (forge === undefined) return [];
-        // The settle rule's provenance, narrowed in SQL to what could be declared and owes a PR:
-        // `settleDeclarationOf` below is still the rule, this only keeps a boot from reading every
-        // row. A run or mission still in flight is `resumeRuns`' and `resumeMissions`', and its
+        // The settle rule's provenance, narrowed in SQL to what could owe a PR (a repo session with
+        // none recorded, no fork, no run in flight): `settleDeclarationOf` below is the rule — a
+        // card's run, a trigger's session, and a person's session whose log records the opt-in
+        // (F17) — so this only keeps a boot from stepping every row. A run or mission still in flight is `resumeRuns`' and `resumeMissions`', and its
         // settle takes the step as any live one does.
         const rows = yield* paper(
           "read settled sessions that may owe a PR",
@@ -8425,11 +8433,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
             WHERE s.repo IS NOT NULL AND s.pr_url IS NULL
               AND s.workspace_released_at IS NULL AND s.forked_from IS NULL
               AND s.run_session_root IS NULL AND NOT s.mission_in_flight
-              AND (
-                EXISTS (SELECT 1 FROM task_runs tr WHERE tr.session_id = s.id)
-                OR (s.actor LIKE ${`${TRIGGER_PREFIX}%`}
-                    AND s.request_id LIKE ${`${TRIGGER_PREFIX}%`})
-              )
             ORDER BY s.id
           `,
         );
@@ -8454,6 +8457,14 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                 .exists(path.join(directory, ".git"))
                 .pipe(Effect.orElseSucceed(() => false));
               if (!checkout) return undefined;
+              // Decided from the index (and, for a person's session, its log) before anything is
+              // opened: an undeclared or parked session is left exactly as it was.
+              const settled = yield* settledRunWithAsk(sessionId);
+              if (
+                settled === undefined ||
+                settleDeclarationOf(settled.run) !== "declared"
+              )
+                return undefined;
               // A card's run whose branch a later run of the card took over (C19) is superseded: its
               // worktree is on a detached HEAD, nothing can steer it again, and stepping it would
               // push the later run's branch and adopt the card's PR into this stale log.
@@ -8464,14 +8475,6 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   branch ?? `factory/${id}`,
                   directory,
                 )) !== undefined
-              )
-                return undefined;
-              // Decided from the index before anything is opened: an undeclared or parked session
-              // is left exactly as it was.
-              const settled = yield* settledRunOf(sessionId);
-              if (
-                settled === undefined ||
-                settleDeclarationOf(settled.run) !== "declared"
               )
                 return undefined;
               const tip = yield* resolveCommit(directory, "HEAD");

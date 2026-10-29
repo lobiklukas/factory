@@ -4,7 +4,7 @@ import {
   SessionBudgetCap,
   type SessionSnapshot,
 } from "@repo/domain/Session";
-import { Console, Effect, Option } from "effect";
+import { Console, Effect, Option, Schedule } from "effect";
 import { Argument, Command, Flag } from "effect/cli";
 import { resolveApiUrl } from "../api";
 import { reportFailure, reportFailures } from "../errors";
@@ -13,16 +13,19 @@ import { followSession, formatDollars } from "../transcript";
 import { predictedCap, predictionLine } from "./cost";
 import { runModelLines } from "./status";
 
-/** How long `--open-pr` waits for the settle-time PR step's answer after the run settled. */
-const OPEN_PR_POLL_MS = 250;
-const OPEN_PR_POLL_TRIES = 240;
+/** How `--open-pr` waits for the settle-time PR step's answer after the run settled. */
+const OPEN_PR_POLL = "250 millis";
+const OPEN_PR_WAIT = "60 seconds";
 
 /**
  * What the settle-time PR step came to, as the session's snapshot shows it (F17): the `pr <url>`
- * line once the PR is recorded, `pr none: <the step's sentence>` once the step wrote one (a branch
- * with no change, a diff over the cap, a push it refused), and `undefined` while neither is there.
- * `seen` is how many step lines the transcript held before the run settled, so an earlier one is
- * never read as this run's.
+ * line once the PR is recorded, `pr none: <the step's sentence>` once the step wrote one it flags
+ * as its own (a branch with no change, a diff over the cap, a push it refused), `pr held: ...` while
+ * the run is parked on an approval (the step runs when it settles), and `undefined` while none of
+ * those is there. Only entries the step flags count: an approval or a page the run wrote is not its
+ * answer, and the PR's own entry is committed a moment before the session's link, so the link is
+ * what says it opened. `seen` is how many step lines the transcript held before the run settled, so
+ * an earlier one is never read as this run's.
  */
 export const settledPrLine = (
   snapshot: SessionSnapshot,
@@ -30,10 +33,12 @@ export const settledPrLine = (
 ): string | undefined => {
   if (snapshot.session.prUrl !== undefined)
     return `pr ${snapshot.session.prUrl}`;
-  const steps = snapshot.entries.filter((entry) => entry.kind === "other");
+  const steps = snapshot.entries.filter((entry) => entry.prStep === true);
   const latest = steps.at(-1);
-  return steps.length > seen && latest !== undefined
-    ? `pr none: ${latest.text}`
+  if (steps.length > seen && latest !== undefined)
+    return `pr none: ${latest.text}`;
+  return snapshot.approvals.length > 0
+    ? `pr held: the run is waiting on ${snapshot.approvals.length === 1 ? "an approval" : `${snapshot.approvals.length} approvals`}; its pull request opens when it settles`
     : undefined;
 };
 
@@ -226,19 +231,21 @@ export const runCommand = Command.make(
         // The step runs when the run goes idle, a moment after the answer printed: wait for what it
         // wrote (the PR, or the sentence saying why there is none).
         const seen = opened.entries.filter(
-          (entry) => entry.kind === "other",
+          (entry) => entry.prStep === true,
         ).length;
-        let line: string | undefined;
-        for (let tries = 0; line === undefined && tries < OPEN_PR_POLL_TRIES;) {
-          const snapshot = yield* client.getSession({ sessionId: session.id });
-          line = settledPrLine(snapshot, seen);
-          if (line === undefined) {
-            tries += 1;
-            yield* Effect.sleep(OPEN_PR_POLL_MS);
-          }
-        }
+        const answered = yield* client
+          .getSession({ sessionId: session.id })
+          .pipe(
+            Effect.map((snapshot) => settledPrLine(snapshot, seen)),
+            Effect.repeat({
+              schedule: Schedule.spaced(OPEN_PR_POLL),
+              until: (line) => line !== undefined,
+            }),
+            Effect.timeoutOption(OPEN_PR_WAIT),
+          );
         yield* Console.log(
-          line ?? "pr none: the settle-time PR step did not answer in time",
+          Option.getOrUndefined(answered) ??
+            "pr none: the settle-time PR step did not answer in time",
         );
       }
     });

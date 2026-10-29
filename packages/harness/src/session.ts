@@ -7,6 +7,7 @@
  * Pi Durable is Promise-based, so every call into it is wrapped at this boundary; everything that
  * leaves this module is an Effect, like the rest of the repo.
  */
+import { RepoPromptRecord as RepoPromptRecordFields } from "@repo/domain/RepoContext";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord";
 import type {
@@ -1235,28 +1236,15 @@ export const readRepoPrompt = (
     };
   });
 
-/** The record's shape, as a reader of the log checks it (`readRepoPrompt`). */
+/**
+ * The record's shape, as a reader of the log checks it (`readRepoPrompt`): the domain's, with
+ * `nested` optional because a record written before nested files were listed (F20) has none.
+ */
 const RepoPromptRecordSchema = Schema.Struct({
-  ref: Schema.String,
-  commit: Schema.String,
-  instructions: Schema.NullOr(
-    Schema.Struct({
-      path: Schema.String,
-      bytes: Schema.Finite,
-      tokens: Schema.Finite,
-      cap: Schema.Finite,
-      truncated: Schema.Boolean,
-    }),
-  ),
+  ...RepoPromptRecordFields.fields,
   skills: Schema.Struct({
-    tokens: Schema.Finite,
-    cap: Schema.Finite,
-    listed: Schema.Array(
-      Schema.Struct({ name: Schema.String, path: Schema.String }),
-    ),
+    ...RepoPromptRecordFields.fields.skills.fields,
     nested: Schema.optional(Schema.Array(Schema.String)),
-    dropped: Schema.Array(Schema.String),
-    shadowed: Schema.Array(Schema.String),
   }),
 });
 

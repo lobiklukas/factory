@@ -9,7 +9,11 @@ import { settledPrLine } from "./run";
 
 const snapshot = (
   prUrl: string | undefined,
-  others: readonly string[],
+  steps: readonly string[],
+  extra: {
+    readonly entries?: SessionSnapshot["entries"];
+    readonly approvals?: SessionSnapshot["approvals"];
+  } = {},
 ): SessionSnapshot => ({
   session: {
     id: SessionId.make("ses_01m5yvfya2tsyn56ycr5jj3pvs"),
@@ -23,18 +27,20 @@ const snapshot = (
   entries: [
     { id: "1", kind: "user", text: "task", toolCalls: [] },
     { id: "2", kind: "assistant", text: "done", toolCalls: [] },
-    ...others.map((text, index) => ({
+    ...(extra.entries ?? []),
+    ...steps.map((text, index) => ({
       id: String(10 + index),
       kind: "other" as const,
       text,
       toolCalls: [],
+      prStep: true,
     })),
   ],
   live: { busy: false, tools: [] },
   usage: { models: [], tools: [] },
   queued: [],
   tasks: [],
-  approvals: [],
+  approvals: extra.approvals ?? [],
 });
 
 describe("settledPrLine", () => {
@@ -58,5 +64,51 @@ describe("settledPrLine", () => {
     expect(
       settledPrLine(snapshot(undefined, ["an earlier step"]), 1),
     ).toBeUndefined();
+  });
+
+  it("does not read an approval or a page the run wrote as the step's answer", () => {
+    const unrelated = [
+      { id: "5", kind: "other" as const, text: "", toolCalls: [] },
+      { id: "6", kind: "other" as const, text: "a page", toolCalls: [] },
+    ];
+    expect(
+      settledPrLine(snapshot(undefined, [], { entries: unrelated }), 0),
+    ).toBeUndefined();
+    // The PR's own entry lands a moment before the session's link: not an answer on its own.
+    expect(
+      settledPrLine(
+        snapshot(undefined, [], {
+          entries: [{ id: "7", kind: "other", text: "", toolCalls: [] }],
+        }),
+        0,
+      ),
+    ).toBeUndefined();
+    expect(
+      settledPrLine(
+        snapshot(undefined, ["no change"], { entries: unrelated }),
+        0,
+      ),
+    ).toBe("pr none: no change");
+  });
+
+  it("reports a run parked on an approval as holding its pull request", () => {
+    const approvals: SessionSnapshot["approvals"] = [
+      {
+        sessionId: SessionId.make("ses_01m5yvfya2tsyn56ycr5jj3pvs"),
+        requestId: "apr_1",
+        action: "push refs/heads/main",
+        detail: "",
+        requestedAt: "2026-10-28T00:00:00.000Z",
+      },
+    ];
+    expect(settledPrLine(snapshot(undefined, [], { approvals }), 0)).toMatch(
+      /^pr held: the run is waiting on an approval/,
+    );
+    expect(
+      settledPrLine(
+        snapshot("https://github.com/a/b/pull/7", [], { approvals }),
+        0,
+      ),
+    ).toBe("pr https://github.com/a/b/pull/7");
   });
 });

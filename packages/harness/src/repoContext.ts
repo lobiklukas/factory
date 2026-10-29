@@ -30,6 +30,7 @@
  * The harness only knows the text: the control plane reads the files at the session's base ref
  * (`@repo/core`'s `repoContext`) and hands them in, which keeps this module free of git.
  */
+import type { RepoPromptRecord as DomainRepoPromptRecord } from "@repo/domain/RepoContext";
 import type { Extension, PromptSection } from "@earendil-works/pi-durable";
 import { defineExtension, section } from "@earendil-works/pi-durable";
 import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
@@ -372,31 +373,7 @@ export const repoSkillsExtension = (prompt: RepoPrompt): Extension => {
  * text is the `pi.system` entry the sections were committed as, and a second copy here is one a
  * reader could find disagreeing with the first.
  */
-export type RepoPromptRecord = {
-  /** The ref and commit the files were read at. */
-  readonly ref: string;
-  readonly commit: string;
-  /** The instructions section; `null` when none was rendered (no instruction file, or an empty one). */
-  readonly instructions: {
-    readonly path: string;
-    readonly bytes: number;
-    readonly tokens: number;
-    readonly cap: number;
-    readonly truncated: boolean;
-  } | null;
-  readonly skills: {
-    readonly tokens: number;
-    readonly cap: number;
-    readonly listed: readonly {
-      readonly name: string;
-      readonly path: string;
-    }[];
-    /** The nested `AGENTS.md` paths the index named (F20). */
-    readonly nested: readonly string[];
-    readonly dropped: readonly string[];
-    readonly shadowed: readonly string[];
-  };
-};
+export type RepoPromptRecord = DomainRepoPromptRecord;
 
 /** The record of an open, from the prompt it rendered. */
 export const repoPromptRecord = (prompt: RepoPrompt): RepoPromptRecord => ({

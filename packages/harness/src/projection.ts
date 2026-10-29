@@ -561,6 +561,11 @@ export const projectEntry = (entry: EntryRecord): TranscriptEntry => {
     ...(toolName === undefined ? {} : { toolName }),
     ...(isError === undefined ? {} : { isError }),
     ...(error === undefined ? {} : { error }),
+    ...(entry.kind === NO_CHANGE_ENTRY_KIND ||
+    entry.kind === PR_NOT_OPENED_ENTRY_KIND ||
+    entry.kind === PR_UPDATED_ENTRY_KIND
+      ? { prStep: true }
+      : {}),
   };
 };
 

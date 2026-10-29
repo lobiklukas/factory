@@ -242,10 +242,11 @@ const readInstructions = (
 
 /**
  * The paths of the `AGENTS.md` files in directories under the root at `commit` (F20), sorted, at
- * most `REPO_NESTED_MAX` of them. Read from one recursive listing, which a very large tree can
- * outgrow (`LISTING_MAX_BYTES`, or the time bound): the answer is then no listing, with a problem,
- * and the run is told only its root file. A symlink named `AGENTS.md` is not a file to list. Names
- * only, no sizes: `-l` would read every blob's header.
+ * most `REPO_NESTED_MAX` of them. `git ls-tree` takes no glob pathspec, so the names come from one
+ * recursive, names-only listing (about a third of the bytes of a full one) that a very large tree
+ * can still outgrow (`LISTING_MAX_BYTES`, or the time bound): the answer is then no listing, with a
+ * problem, and the run is told only its root file. Only the candidates are then listed again, for
+ * their modes: a symlink named `AGENTS.md` is not a file to list.
  */
 const readNestedInstructions = (
   directory: string,
@@ -254,7 +255,7 @@ const readNestedInstructions = (
   Effect.gen(function* () {
     const output = yield* gitAnswer(
       directory,
-      ["ls-tree", "-r", "-z", "--end-of-options", commit],
+      ["ls-tree", "-r", "-z", "--name-only", "--end-of-options", commit],
       {
         trim: false,
         maxBuffer: LISTING_MAX_BYTES,
@@ -266,11 +267,21 @@ const readNestedInstructions = (
         value: [],
         problems: ["git could not list the tree for nested AGENTS.md files"],
       };
-    const nested = parseTreeEntries(output)
-      .filter(
-        (entry) =>
-          isFile(entry) && entry.path.endsWith(`/${REPO_INSTRUCTIONS_FILE}`),
-      )
+    // Twice the cap, so a few links among the candidates do not leave the list short.
+    const candidates = output
+      .split("\0")
+      .filter((path) => path.endsWith(`/${REPO_INSTRUCTIONS_FILE}`))
+      .sort()
+      .slice(0, REPO_NESTED_MAX * 2);
+    if (candidates.length === 0) return { value: [], problems: [] };
+    const listed = yield* listTree(directory, commit, candidates);
+    if (listed === undefined)
+      return {
+        value: [],
+        problems: ["git could not list the tree for nested AGENTS.md files"],
+      };
+    const nested = listed
+      .filter((entry) => isFile(entry))
       .map((entry) => entry.path)
       .sort()
       .slice(0, REPO_NESTED_MAX);
