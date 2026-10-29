@@ -6273,9 +6273,27 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // A slot before the row is written, after the refusals that need none (LOB-70).
           const slot = yield* admitted;
           const id = yield* mintSessionId;
-          const inserted = yield* paper(
-            "create session",
-            insertSession(id, source.title, undefined, binding, null, actor),
+          const held = yield* Deferred.make<void>();
+          // Whether the replay is the caller's now: its prompt is admitted, or waits only for the
+          // setup that is running, so the run is under way and nothing below takes it back.
+          let handedOver = false;
+          // The row and its removal are one uninterruptible step: a request interrupted while the
+          // insert is in flight (its client gone, its deadline passed) would otherwise leave the
+          // row Postgres committed with nothing to remove it. Any end of the request before the
+          // replay is handed over — a refusal, a failed open, an interruption at any step —
+          // removes it again: an index row with no log is invisible to the list and would wait for
+          // a rebuild to be swept (as a refused fork's does).
+          const inserted = yield* Effect.acquireRelease(
+            paper(
+              "create session",
+              insertSession(id, source.title, undefined, binding, null, actor),
+            ).pipe(
+              Effect.tap(() => Effect.sync(() => heldPrompts.set(id, held))),
+            ),
+            (_, exit) =>
+              Exit.isSuccess(exit) || handedOver
+                ? Effect.void
+                : abandonReplay(id, held),
           );
           const row = inserted[0] ?? {
             id,
@@ -6294,12 +6312,8 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // The replay's transcript is its own run, so nothing is copied in: the log opens empty,
           // the title and the binding are written with the lineage, and the source's prompt is what
           // starts it — once the worktree is set up (F23), so the open leaves the prompt for after.
-          // A failure after the row is written removes the row again — an index row with no log is
-          // invisible to the list and would wait for a rebuild to be swept (as a refused fork's does).
           // Held to the answer, as a create's owner is (`holding`).
           yield* holdForScope(id);
-          const held = yield* Deferred.make<void>();
-          heldPrompts.set(id, held);
           const owner = yield* acquireOwnerWith(
             id,
             row,
@@ -6342,40 +6356,44 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
                   : { defaultBudget: options.defaultBudget }),
               }),
             { slot },
-          ).pipe(
-            // `onError`, not `tapError`: the open is a slow step (a mirror fetch, a worktree cut), and
-            // a request that is interrupted in it — its client gone — must not leave the row, or
-            // the held prompt that every later comparison of this replay would wait on forever.
-            Effect.onError(() =>
-              paper(
-                "remove the refused replay's index row",
-                sql`DELETE FROM sessions WHERE id = ${id}`,
-              ).pipe(
-                Effect.ignore,
-                Effect.andThen(releaseHeldPrompt(id, held)),
+          );
+          // Handed over in the step that admits the prompt, so no interruption falls between the two:
+          // one that comes while the prompt is decided still ends the replay (`abandonReplay`).
+          yield* Effect.uninterruptibleMask((restore) =>
+            restore(promptAfterSetup(id, owner, origin, held)).pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  handedOver = true;
+                }),
               ),
             ),
           );
-          yield* promptAfterSetup(id, owner, origin, held).pipe(
-            // Opened but not started: the refusal ends the replay as the open's own would.
-            Effect.tapError(() =>
-              releaseIdleOwner(id, owner).pipe(
-                Effect.andThen(
-                  paper(
-                    "remove the refused replay's index row",
-                    sql`DELETE FROM sessions WHERE id = ${id}`,
-                  ).pipe(Effect.ignore),
-                ),
-              ),
-            ),
-          );
-          // The prompt is admitted, or waits only for the setup that is running, so the run is under
-          // way: opening the owner armed the comparison (`reconcileReplay`), which waits for it in the
-          // background, and the caller gets the replay now, as it always has.
+          // The run is under way: opening the owner armed the comparison (`reconcileReplay`), which
+          // waits for it in the background, and the caller gets the replay now, as it always has.
           yield* touchActivity(id);
           yield* countSessionCreate("replay");
           return yield* describe(id, row);
         }).pipe(Effect.scoped);
+
+      /**
+       * End a replay its request did not hand over (`replay`): a refusal, a failed open, or an
+       * interruption at any step after its row was written. The owner its open published (the only
+       * one there can be: nobody else knows the id yet) is released, the row is removed, and the held
+       * prompt every later comparison of this replay would wait on is released.
+       */
+      const abandonReplay = (
+        id: SessionId,
+        held: Deferred.Deferred<void>,
+      ): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          const opened = HashMap.get(yield* Ref.get(live), id);
+          if (Option.isSome(opened)) yield* releaseIdleOwner(id, opened.value);
+          yield* paper(
+            "remove the refused replay's index row",
+            sql`DELETE FROM sessions WHERE id = ${id}`,
+          ).pipe(Effect.ignore);
+          yield* releaseHeldPrompt(id, held);
+        });
 
       /**
        * Wait for a replay's own first prompt to be submitted (F23), when this process holds one: a
@@ -8852,14 +8870,20 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // The log first, then its index, as the PR step writes `pr_url`: a failure between the two
           // leaves the log ahead of the row until a rebuild, never a row the log does not back. Written
           // on a repeat too, so a row a crash left behind the log is caught up by the redelivery.
+          // Each column only ever goes from empty to the log's fact, never back: `merge` is the log
+          // as this event's commit saw it, and a merge and its revert delivered at once commit in
+          // one order and reach this write in either. The later write can carry the older snapshot,
+          // which lacks the other's fact, and assigning it would empty a column the log holds. A
+          // fact in the log is never changed (the first stands), so a value the row already has is
+          // the log's, and keeping it is right.
           const { merge } = recorded;
           yield* paper(
             "write session merge",
             sql`
               UPDATE sessions SET
-                pr_merged_at = ${merge.mergedAt === "" ? null : merge.mergedAt}::timestamptz,
-                pr_reverted_at = ${merge.revert?.at ?? null}::timestamptz,
-                pr_closed_at = ${merge.closedAt ?? null}::timestamptz
+                pr_merged_at = COALESCE(pr_merged_at, ${merge.mergedAt === "" ? null : merge.mergedAt}::timestamptz),
+                pr_reverted_at = COALESCE(pr_reverted_at, ${merge.revert?.at ?? null}::timestamptz),
+                pr_closed_at = COALESCE(pr_closed_at, ${merge.closedAt ?? null}::timestamptz)
               WHERE id = ${input.sessionId}
             `,
           );
