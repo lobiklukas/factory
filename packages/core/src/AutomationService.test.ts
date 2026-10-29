@@ -293,7 +293,9 @@ describe("a scheduled automation (S-general-automations)", () => {
       Effect.gen(function* () {
         yield* finishCards(added.id);
         const automations = yield* AutomationService;
-        const passed = yield* automations.pass(first + 60_000 + 3_000, { repo });
+        const passed = yield* automations.pass(first + 60_000 + 3_000, {
+          repo,
+        });
         return {
           passed: passed.filter((entry) => entry.automationId === added.id),
           cards: yield* cardsOf(added.id),
@@ -454,9 +456,12 @@ describe("a scheduled automation (S-general-automations)", () => {
           added.id,
           first + 60_000 + 1_000,
         );
-        const passWhilePaused = yield* automations.pass(first + 120_000 + 1_000, {
-          repo,
-        });
+        const passWhilePaused = yield* automations.pass(
+          first + 120_000 + 1_000,
+          {
+            repo,
+          },
+        );
         // A paused automation still runs when a person asks.
         const manualWhilePaused = yield* automations.run(added.id);
         yield* finishCards(added.id);
@@ -604,7 +609,9 @@ describe("a scheduled automation (S-general-automations)", () => {
         yield* claimed(first + 60_000, "30 seconds");
         yield* claimed(first + 120_000, "11 minutes");
         // The pass at the third minute: its due instant is the third claim's, stale — taken over.
-        const passed = yield* automations.pass(first + 120_000 + 1_000, { repo });
+        const passed = yield* automations.pass(first + 120_000 + 1_000, {
+          repo,
+        });
         const ticks = yield* automations.ticks(added.id);
         return { added, first, passed, ticks };
       }),

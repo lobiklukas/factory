@@ -842,7 +842,9 @@ export const AutomationServiceLive = Layer.effect(
      * and `run` starts it again by hand.
      */
     const retireOneOff = (row: AutomationRow, tick: AutomationTick) =>
-      row.cron === null && tick.trigger === "schedule" && tick.status !== "claimed"
+      row.cron === null &&
+      tick.trigger === "schedule" &&
+      tick.status !== "claimed"
         ? storage(
             "retire the one-off",
             sql`
