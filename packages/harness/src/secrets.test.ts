@@ -157,7 +157,13 @@ describe("maskToolResult", () => {
   });
 });
 
-describe("execToExit with secrets", () => {
+/**
+ * The cases below spawn a shell per command: milliseconds alone, past vitest's 5 s default beside a
+ * full `bun run test` on a loaded machine (DEFLAKE).
+ */
+const SPAWNING_CASES = { timeout: 60_000 };
+
+describe("execToExit with secrets", SPAWNING_CASES, () => {
   it("gives the command its secret and masks what it prints, one byte at a time too", async () => {
     const root = checkout({});
     const env = new NodeExecutionEnv({ cwd: root });
@@ -202,7 +208,7 @@ describe("execToExit with secrets", () => {
   });
 });
 
-describe("runSetup with secrets", () => {
+describe("runSetup with secrets", SPAWNING_CASES, () => {
   it("gives each step the setup's secrets and records only the placeholder", async () => {
     const root = checkout({});
     const env = new NodeExecutionEnv({ cwd: root });
