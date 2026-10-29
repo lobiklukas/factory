@@ -1,4 +1,5 @@
 import { Clock, Effect, Random } from "effect";
+import { AutomationId } from "@repo/domain/Automation";
 import { SessionId } from "@repo/domain/Session";
 import { BoardInstanceId, TaskId } from "@repo/domain/Task";
 import { TriggerRouteId } from "@repo/domain/Trigger";
@@ -55,3 +56,8 @@ export const mintBoardId: Effect.Effect<BoardInstanceId> = mint("brd_").pipe(
 export const mintTriggerRouteId: Effect.Effect<TriggerRouteId> = mint(
   "trr_",
 ).pipe(Effect.map((id) => TriggerRouteId.make(id)));
+
+/** Automation ids (`aut_`, the same shape again; `AutomationId` in `packages/domain/src/Automation.ts`). */
+export const mintAutomationId: Effect.Effect<AutomationId> = mint("aut_").pipe(
+  Effect.map((id) => AutomationId.make(id)),
+);

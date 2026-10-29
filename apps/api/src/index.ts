@@ -87,6 +87,7 @@ import {
 } from "./Api/TriggerAdapters";
 import { ProbesLive } from "./Api/Probes";
 import { NotifierDaemon } from "./Notifications";
+import { AutomationsDaemon } from "./Automations";
 import { SessionRpcLive } from "./Rpc/Session";
 import {
   ApiAuthConfig,
@@ -1019,6 +1020,9 @@ const HttpLive = Effect.gen(function* () {
           : MissionResume,
     }),
     PlanFreshnessPassesLive,
+    // The automations' clock (S-general-automations): its ticks open sessions, so it is shut down
+    // before the owners are, like the docs schedule.
+    AutomationsDaemon,
   ).pipe(Layer.provideMerge(SessionShutdown));
   if (docsEveryMs <= 0) {
     yield* Effect.logInfo("docs schedule: off (DOCS_SCHEDULE_MS unset)");

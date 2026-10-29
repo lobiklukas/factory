@@ -22,6 +22,19 @@ agent harness of our own; we adopt one.
 event triggers), AutoWiki, Agent Readiness scoring, Slack/Linear/Jira delegation, security
 review, incident response.
 
+_Refined (S-general-automations):_ the first slice of Automations is built ahead of v2, because the
+2026 survey found scheduled work in every comparable product, and it is small on what exists: a
+schedule (`automations`: a cron in a time zone, or one instant; a prompt or a factory skill; a
+budget) whose each tick files one card through `TaskService.file` and starts one run on it, as a
+card-mode trigger and `factory board start` do. A tick is claimed in `automation_ticks` by the
+automation and its instant before anything happens, so a restart or a second process never fires it
+twice; a scheduled tick whose base tip (`SessionService.baseHead`) is the commit the last started
+tick ran on is recorded `skipped` with the reason. The docs schedule (`DOCS_SCHEDULE_MS`) keeps its
+own daemon and branch rule for now; folding it into automations is a follow-up. Webhook and event automations remain the trigger routes they are.
+_Rejected:_ ticking through the trigger seam (a tick is no outside delivery: it has no source to
+answer and must read the base before it decides), and one session per tick with no card (an
+automation's work is reviewed and gated on the board like any other).
+
 The reasoning behind deferring Missions: Pi Durable already supplies the primitives
 orchestration needs — `defineTask` with phases and `waiting`/`on`/`failFast`, an ownership
 tree with bottom-up `abort`, `defineDoc` for externalized state, and fresh-context subagents
@@ -115,6 +128,15 @@ sandbox is the in-process special case. A capability flag is not needed for that
 has `bind` or the control plane creates. A session's bound sandbox keeps its exec spill files when
 it ends (`BindOptions.keepSpillFiles`), because the session's transcript names them (Pi Durable's
 bash tool reports `Full output: <path>`) and outlives the sandbox through an idle release.
+_As built (LOB-91):_ `OpenSessionOptions.sandbox` now takes `SandboxRuntimeShape` too: with a
+runtime that has no `bind` (the Kubernetes one), the conversation's sandbox is `create`d on first use
+and its commands start at that sandbox's workdir, with the credential filter passed per command.
+`SessionServiceOptions.sandbox` and apps/api still require `bind`, until the control plane cuts the
+worktree inside the sandbox it creates. Two gaps are latent until then, and are that work's to close:
+the session's release (an idle sweep included) destroys a created sandbox and its PVC rather than
+pausing it, so a reopened session starts on an empty volume, and each distinct conversation `cwd`
+(a subagent's) gets its own sandbox rather than the session's one. `pause` and `resume` fail with a
+typed `SandboxFileError` when the backend cannot do them, as `create` does, never a defect.
 
 ### D7 — Storage: append-only log is truth, projections are derived
 

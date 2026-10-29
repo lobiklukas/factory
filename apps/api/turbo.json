@@ -65,6 +65,7 @@
         "GITHUB_API_URL",
         "DOCS_SCHEDULE_MS",
         "DOCS_SCHEDULE_REPO",
+        "AUTOMATIONS_POLL_MS",
         "MISSION_RESUME",
         "TRIGGER_RULES",
         "TRIGGER_SECRET_HEADER",
