@@ -6666,19 +6666,31 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           : touchActivity(sessionId);
 
       /**
-       * The index row's model after a recorded model switch (S-model-provider-breadth): the log's
-       * `pi.agent` moved onto the fallback, so the row is written from it, as an open writes it.
-       * Best-effort: a stale row is a display field the next open (or a rebuild) repairs.
+       * The session's model after a recorded model switch (S-model-provider-breadth): the log's
+       * `pi.agent` moved onto the fallback, so the live owner's model and the index row are both
+       * taken from it, as an open takes them. Best-effort: a stale value is a display field the next
+       * open (or a rebuild) repairs.
        */
       const refreshSessionModel = (sessionId: SessionId): Effect.Effect<void> =>
         withReader(sessionId, readPinnedModelKey).pipe(
           Effect.flatMap((model) =>
             model === undefined
               ? Effect.void
-              : paper(
-                  "write session model",
-                  sql`UPDATE sessions SET model = ${model} WHERE id = ${sessionId}`,
-                ).pipe(Effect.asVoid),
+              : Ref.update(live, (owners) =>
+                  Option.match(HashMap.get(owners, sessionId), {
+                    onNone: () => owners,
+                    onSome: (owner) =>
+                      HashMap.set(owners, sessionId, { ...owner, model }),
+                  }),
+                ).pipe(
+                  Effect.andThen(
+                    paper(
+                      "write session model",
+                      sql`UPDATE sessions SET model = ${model} WHERE id = ${sessionId}`,
+                    ),
+                  ),
+                  Effect.asVoid,
+                ),
           ),
           Effect.catch((error) =>
             Effect.logWarning(

@@ -12,7 +12,8 @@
  * is what a role's fallback chain moves a run off (`./fallback`).
  *
  * Every request is recorded — the model it named, whether it carried a key, the status it got — so
- * a test asserts what the provider was asked rather than what the caller says it asked. Nothing here
+ * a test asserts what the provider was asked rather than what the caller says it asked; a drive in
+ * another process reads the same record from `GET /__ledger`. Nothing here
  * reaches past 127.0.0.1, and the key it is sent is a test's dummy, never a real one.
  */
 import { createServer, type IncomingMessage } from "node:http";
@@ -101,6 +102,12 @@ export const startOpenAICompatibleFake = (
   let calls = 0;
   const server = createServer((request, response) => {
     void readBody(request).then((text) => {
+      // What it was asked, for a drive in another process (`.pi/skills/verify-api/model-fallback.ts`).
+      if (request.method === "GET" && request.url === "/__ledger") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ requests }));
+        return;
+      }
       if (
         request.method !== "POST" ||
         !(request.url ?? "").endsWith("/chat/completions")
