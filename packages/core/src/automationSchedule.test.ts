@@ -8,6 +8,7 @@ import {
   dueTickAt,
   nextTickAt,
   parseCronSchedule,
+  shortestInterval,
 } from "./automationSchedule";
 
 const at = (iso: string): number => Date.parse(iso);
@@ -111,5 +112,22 @@ describe("an automation's clock", () => {
     expect(dueTickAt(everyTenSeconds, at("2026-10-29T12:00:27.000Z"), 0)).toBe(
       at("2026-10-29T12:00:20.000Z"),
     );
+  });
+
+  /**
+   * Mutations this catches: a gap read between `from` and the first instant rather than between two
+   * instants — an every-minute cron read at 12:00:59 looks one second apart; a sample of one gap —
+   * `0,50 * * * * *` read at 12:00:59 goes 12:01:00, 12:01:50 (50s), 12:02:00 (10s), and the first
+   * gap alone misses the 10s one.
+   */
+  it("reads the shortest gap between a cron's instants", () => {
+    const from = at("2026-10-29T12:00:59.000Z");
+    expect(shortestInterval(cron("* * * * *"), from)).toBe(60_000);
+    expect(shortestInterval(cron("0 9 * * *"), from)).toBe(86_400_000);
+    expect(shortestInterval(cron("*/10 * * * * *"), from)).toBe(10_000);
+    expect(shortestInterval(cron("0,50 * * * * *"), from)).toBe(10_000);
+    expect(
+      shortestInterval({ _tag: "once", at: at("2026-11-01T00:00:00Z") }, from),
+    ).toBe(undefined);
   });
 });

@@ -103,6 +103,20 @@ export const tickLines = (tick: AutomationTick): ReadonlyArray<string> => [
   `reason       ${tick.reason}`,
 ];
 
+/**
+ * Why `factory automation run` exits non-zero: a tick that started no run — `failed`, or `skipped`
+ * (the repo has no board) — so a script can tell. `undefined` for a started tick.
+ */
+export const runRefusal = (
+  tick: AutomationTick,
+): { readonly code: string; readonly message: string } | undefined =>
+  tick.status === "started"
+    ? undefined
+    : {
+        code: `tick_${tick.status}`,
+        message: `the tick at ${tick.tickAt} started no run: ${tick.reason}`,
+      };
+
 export const AUTOMATION_HISTORY_HEADER = [
   "tick",
   "trigger",
@@ -358,11 +372,16 @@ const byId = <E>(
 
 const runCommand = byId(
   "run",
-  "Start one tick now: a card and a run, paused or not, even when the base has not moved",
+  "Start one tick now: a card and a run, paused or not, even when the base has not moved; exits non-zero when it started no run",
   (id) =>
     Effect.gen(function* () {
       const { client } = yield* BoardClient;
-      return tickLines(yield* client.runAutomation({ id }));
+      const tick = yield* client.runAutomation({ id });
+      for (const line of tickLines(tick)) yield* Console.log(line);
+      const refused = runRefusal(tick);
+      if (refused !== undefined)
+        yield* reportFailure(refused.code, refused.message);
+      return [];
     }),
 );
 

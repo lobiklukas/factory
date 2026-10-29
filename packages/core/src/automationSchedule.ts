@@ -84,3 +84,33 @@ export const nextTickAt = (
       ? schedule.at
       : undefined
     : guarded(() => Cron.next(schedule.cron, now));
+
+/**
+ * The shortest a schedule allows between two ticks: once a minute. A tick is a card and a run, and
+ * the clock looks for due ticks every `AUTOMATIONS_POLL_MS` — a six-field cron that fires every few
+ * seconds would file a card on every look.
+ */
+export const MIN_AUTOMATION_INTERVAL_MS = 60_000;
+
+/**
+ * The shortest gap between consecutive instants among the cron's next `count` after `from`, or
+ * `undefined` for a one-off or an expression with fewer than two instants ahead. A sample, not a
+ * proof: it reads the gaps the schedule has near `from`, which is where a seconds field shows.
+ */
+export const shortestInterval = (
+  schedule: AutomationSchedule,
+  from: number,
+  count = 8,
+): number | undefined => {
+  if (schedule._tag === "once") return undefined;
+  let previous = nextTickAt(schedule, from);
+  let shortest: number | undefined;
+  for (let index = 1; previous !== undefined && index < count; index++) {
+    const next = nextTickAt(schedule, previous);
+    if (next === undefined) break;
+    const gap = next - previous;
+    shortest = shortest === undefined ? gap : Math.min(shortest, gap);
+    previous = next;
+  }
+  return shortest;
+};

@@ -36,8 +36,10 @@ export const describeAutomationsPoll = (pollMs: number): string =>
 /**
  * The daemon: read the interval, log it, and — unless it is `0` — run `runAutomations` for as long as
  * the process lives. It reads the session layer, so the boot builds it beside the docs schedule, on
- * `SessionShutdown`: shutdown interrupts a tick before the session owners are released. The first
- * pass waits one interval, which is the boot's migrations' head start.
+ * `SessionShutdown`: shutdown interrupts the clock before the session owners are released — a tick
+ * still reading its base is dropped (the next pass records its claim `failed`), and one that has
+ * filed its card is waited for until it records its outcome. The first pass waits one interval,
+ * which is the boot's migrations' head start.
  */
 export const AutomationsDaemon = Layer.effectDiscard(
   Effect.gen(function* () {

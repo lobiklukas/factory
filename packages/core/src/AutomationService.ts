@@ -16,7 +16,17 @@
  * `RECLAIM_AFTER` and still `claimed` — the process that held it died before it recorded an outcome
  * — and taking it over is safe, because the card is filed under its external ref, the run created
  * under its request id and the message sent under it too: a retried tick finds the card, the run and
- * the message the first attempt made, and makes none of them twice.
+ * the message the first attempt made, and makes none of them twice. A takeover needs the same
+ * instant to be due again, which a one-off's is and a frequent cron's is not: by the time the claim
+ * is stale the cron has reached later instants. So each pass also closes every stale claim on an
+ * instant its schedule has moved past, as `failed` with the reason — a tick is never left `claimed`
+ * in the history. A shutdown does not leave one behind: from filing the card to recording the
+ * outcome a tick is uninterruptible, so a card is never filed without the tick saying so.
+ *
+ * **No card without a run.** When the run cannot be opened (admission control at capacity, the
+ * board's run cap), the card this tick filed is moved to `canceled` before the tick is recorded
+ * `failed`: a frequent schedule that keeps being refused does not pile run-less cards on the board.
+ * A schedule fires at most once a minute (`MIN_AUTOMATION_INTERVAL_MS`); `add` refuses a faster one.
  *
  * **Skip if unchanged.** A scheduled tick reads the base's tip first (`SessionService.baseHead`, the
  * read a session's cut makes: the clone synced, the forge fetched). When it is the commit the last
@@ -57,12 +67,19 @@ import {
 } from "@repo/domain/Automation";
 import { SessionId } from "@repo/domain/Ids";
 import { RepoSlug } from "@repo/domain/Session";
-import { MAX_TASK_TITLE_CHARS, runPrompt, TaskId } from "@repo/domain/Task";
+import {
+  ABANDON_COLUMN,
+  MAX_TASK_TITLE_CHARS,
+  runPrompt,
+  TaskId,
+} from "@repo/domain/Task";
 import {
   type AutomationSchedule,
   dueTickAt,
+  MIN_AUTOMATION_INTERVAL_MS,
   nextTickAt,
   parseCronSchedule,
+  shortestInterval,
 } from "./automationSchedule";
 import { isSafeBranchName } from "./git";
 import { mintAutomationId } from "./ids";
@@ -396,6 +413,13 @@ export const AutomationServiceLive = Layer.effect(
               `"${cron}" matches no date, so it would never fire`,
             );
           }
+          const interval = shortestInterval(parsed.schedule, now);
+          if (interval !== undefined && interval < MIN_AUTOMATION_INTERVAL_MS) {
+            return yield* invalid(
+              "cron",
+              `"${cron}" fires ${interval / 1000}s apart; an automation fires at most once every ${MIN_AUTOMATION_INTERVAL_MS / 1000}s, because each tick files a card and starts a run`,
+            );
+          }
         } else {
           const parsed = DateTime.make(runAt ?? "");
           at = Option.isSome(parsed)
@@ -706,81 +730,105 @@ export const AutomationServiceLive = Layer.effect(
             .filter((part) => part !== undefined)
             .join("\n\n"),
         ).body;
-        const filed = yield* tasks
-          .file({
-            boardId,
-            repo: row.repo,
-            title: cardTitle(row.name, tickAt, trigger),
-            body,
-            ...(row.baseRef === null ? {} : { baseRef: row.baseRef }),
-            externalRef: automationCardRef(id, tickAt),
-            actor: automationActorOf(id),
-          })
-          .pipe(Effect.result);
-        if (filed._tag === "Failure") {
-          return yield* failed(
-            `the board refused the card: ${filed.failure._tag}: ${filed.failure.message}`,
+        // From the card to the outcome, a tick is not interrupted: a shutdown waits for it, so it never
+        // leaves a card filed (or a run opened) with the tick still `claimed`.
+        return yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+          const filed = yield* tasks
+            .file({
+              boardId,
+              repo: row.repo,
+              title: cardTitle(row.name, tickAt, trigger),
+              body,
+              ...(row.baseRef === null ? {} : { baseRef: row.baseRef }),
+              externalRef: automationCardRef(id, tickAt),
+              actor: automationActorOf(id),
+            })
+            .pipe(Effect.result);
+          if (filed._tag === "Failure") {
+            return yield* failed(
+              `the board refused the card: ${filed.failure._tag}: ${filed.failure.message}`,
+            );
+          }
+          const card = filed.success.task;
+          const column = row.taskColumn ?? card.column;
+          const definition = yield* tasks.getBoard(card.boardId).pipe(
+            Effect.flatMap((view) =>
+              view.definition.version === card.definitionVersion
+                ? Effect.succeed(view.definition)
+                : tasks.getDefinition(
+                    view.instance.definitionId,
+                    card.definitionVersion,
+                  ),
+            ),
+            Effect.result,
           );
-        }
-        const card = filed.success.task;
-        const column = row.taskColumn ?? card.column;
-        const definition = yield* tasks.getBoard(card.boardId).pipe(
-          Effect.flatMap((view) =>
-            view.definition.version === card.definitionVersion
-              ? Effect.succeed(view.definition)
-              : tasks.getDefinition(
-                  view.instance.definitionId,
-                  card.definitionVersion,
-                ),
-          ),
-          Effect.result,
-        );
-        const columnOf =
-          definition._tag === "Success"
-            ? definition.success.columns.find((entry) => entry.name === column)
-            : undefined;
-        const requestId = automationRequestId(id, tickAt);
-        const created = yield* sessions
-          .create({
-            title: card.title,
-            requestId,
+          const columnOf =
+            definition._tag === "Success"
+              ? definition.success.columns.find((entry) => entry.name === column)
+              : undefined;
+          const requestId = automationRequestId(id, tickAt);
+          const created = yield* sessions
+            .create({
+              title: card.title,
+              requestId,
+              taskId: card.id,
+              taskColumn: column,
+              actor: automationActorOf(id),
+              ...(row.budget === null ? {} : { budget: row.budget }),
+            })
+            .pipe(Effect.result);
+          if (created._tag === "Failure") {
+            const refused = `its run could not be opened: ${created.failure.code}: ${created.failure.message}`;
+            // A card this tick filed and no run took is canceled, not left for the next tick to pile
+            // another beside. A card an earlier attempt filed (a taken-over claim) is left as it is.
+            if (!filed.success.created) {
+              return yield* failed(`found card ${card.id}, but ${refused}`, {
+                taskId: card.id,
+              });
+            }
+            const canceled = yield* tasks
+              .move({
+                taskId: card.id,
+                expectedRevision: card.revision,
+                to: ABANDON_COLUMN,
+                actor: automationActorOf(id),
+              })
+              .pipe(Effect.result);
+            return yield* failed(
+              canceled._tag === "Success"
+                ? `filed card ${card.id}, but ${refused}; the card was moved to ${ABANDON_COLUMN}`
+                : `filed card ${card.id}, but ${refused}; the card could not be moved to ${ABANDON_COLUMN} either (${canceled.failure._tag}: ${canceled.failure.message})`,
+              { taskId: card.id },
+            );
+          }
+          const sessionId = created.success.id;
+          const sent = yield* sessions
+            .sendDeferringSetup({
+              sessionId,
+              content: runPrompt(card, columnOf),
+              requestId,
+            })
+            .pipe(Effect.result);
+          if (sent._tag === "Failure") {
+            return yield* failed(
+              `filed card ${card.id} and opened run ${sessionId}, but its first message was refused: ${sent.failure.code}: ${sent.failure.message}`,
+              { taskId: card.id, sessionId },
+            );
+          }
+          return yield* finish(row.id, tickAt, {
+            ...at,
+            status: "started",
+            reason: `${filed.success.created ? "filed" : "found"} card ${card.id} and started run ${sessionId} in ${column}, on ${base.ref}${
+              base.sha === undefined
+                ? ` (its tip could not be read: ${base.note ?? "no reason given"})`
+                : ` at ${short(base.sha)}`
+            }${sent.success === "after_setup" ? "; its first message waits for the worktree's setup" : ""}`,
             taskId: card.id,
-            taskColumn: column,
-            actor: automationActorOf(id),
-            ...(row.budget === null ? {} : { budget: row.budget }),
-          })
-          .pipe(Effect.result);
-        if (created._tag === "Failure") {
-          return yield* failed(
-            `filed card ${card.id}, but its run could not be opened: ${created.failure.code}: ${created.failure.message}`,
-            { taskId: card.id },
-          );
-        }
-        const sessionId = created.success.id;
-        const sent = yield* sessions
-          .sendDeferringSetup({
             sessionId,
-            content: runPrompt(card, columnOf),
-            requestId,
-          })
-          .pipe(Effect.result);
-        if (sent._tag === "Failure") {
-          return yield* failed(
-            `filed card ${card.id} and opened run ${sessionId}, but its first message was refused: ${sent.failure.code}: ${sent.failure.message}`,
-            { taskId: card.id, sessionId },
-          );
-        }
-        return yield* finish(row.id, tickAt, {
-          ...at,
-          status: "started",
-          reason: `${filed.success.created ? "filed" : "found"} card ${card.id} and started run ${sessionId} in ${column}, on ${base.ref}${
-            base.sha === undefined
-              ? ` (its tip could not be read: ${base.note ?? "no reason given"})`
-              : ` at ${short(base.sha)}`
-          }${sent.success === "after_setup" ? "; its first message waits for the worktree's setup" : ""}`,
-          taskId: card.id,
-          sessionId,
-        });
+          });
+          }),
+        );
       });
 
     /** Claim the tick and, when this caller holds it, do it; either way answer the tick. */
@@ -826,6 +874,41 @@ export const AutomationServiceLive = Layer.effect(
           : yield* fire(row, due, "schedule");
       });
 
+    /**
+     * Record as `failed` every claim on the automation older than `RECLAIM_AFTER` whose instant is not
+     * `due`: the process that held it stopped before it recorded an outcome, and no caller will take
+     * it over, because the schedule has moved past its instant (`claim` takes over only the instant
+     * that is due). The due instant's own stale claim is left for `claim` to take over and finish.
+     * The card and the run the claim got as far as making are found by the ref and the request id
+     * they were made under, so the history still links them.
+     */
+    const closeStaleClaims = (id: string, due: number | undefined) =>
+      storage(
+        "close the stale claims",
+        sql`
+          UPDATE automation_ticks AS t
+          SET status = 'failed', finished_at = now(),
+            reason = 'the process that claimed this tick stopped before it recorded an outcome, '
+              || 'and the schedule has moved past its instant, so it is not retried',
+            task_id = COALESCE(t.task_id, (
+              SELECT c.id FROM tasks c
+              WHERE c.external_ref = 'automation:' || t.automation_id || '@'
+                || to_char(t.tick_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+              ORDER BY c.created_at LIMIT 1
+            )),
+            session_id = COALESCE(t.session_id, (
+              SELECT r.id FROM sessions r
+              WHERE r.request_id = 'automation:' || t.automation_id || '@'
+                || (extract(epoch FROM t.tick_at) * 1000)::bigint::text
+              LIMIT 1
+            ))
+          WHERE automation_id = ${id}
+            AND status = 'claimed'
+            AND claimed_at < now() - ${Duration.toSeconds(RECLAIM_AFTER)} * interval '1 second'
+            ${due === undefined ? sql`` : sql`AND tick_at <> ${isoAt(due)}::timestamptz`}
+        `,
+      );
+
     const pass = (at?: number) =>
       Effect.gen(function* () {
         const now = at ?? (yield* Clock.currentTimeMillis);
@@ -838,6 +921,13 @@ export const AutomationServiceLive = Layer.effect(
         const fired: Array<AutomationTick> = [];
         for (const row of rows) {
           const due = dueFor(row, now);
+          yield* closeStaleClaims(row.id, due).pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning(
+                `automation ${row.id}: its stale claims could not be closed: ${cause.message}`,
+              ),
+            ),
+          );
           if (due === undefined) continue;
           const outcome = yield* fire(row, due, "schedule").pipe(
             Effect.catch((cause) =>

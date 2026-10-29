@@ -25,7 +25,7 @@ import { createFauxModelAccess } from "@repo/harness";
 import { DatabaseLive } from "@repo/storage-postgres";
 import { Clock, DateTime, Effect, Layer, ManagedRuntime } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
   automationCardRef,
   AutomationService,
@@ -88,6 +88,31 @@ const layer = () =>
   );
 
 let runtime = ManagedRuntime.make(layer());
+
+/**
+ * Each case's automations stop with it, and the cards they filed are finished: `pass` reads every
+ * enabled automation in the database, so one left enabled would be fired by a later case's pass —
+ * extra cards and runs holding slots of the board's run cap (B9) — and hidden by its filter.
+ */
+afterEach(async () => {
+  await runtime.runPromise(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient;
+      yield* sql`
+        UPDATE automations SET enabled = false
+        WHERE repo LIKE ${`automation-${runId}/%`}
+      `;
+      yield* sql`
+        UPDATE tasks SET "column" = 'canceled'
+        WHERE "column" <> 'canceled'
+          AND split_part(external_ref, '@', 1) IN (
+            SELECT 'automation:' || id FROM automations
+            WHERE repo LIKE ${`automation-${runId}/%`}
+          )
+      `;
+    }),
+  );
+});
 
 /**
  * This run's automations go with it: an enabled one left behind would be fired by the next run's
@@ -528,6 +553,90 @@ describe("a scheduled automation (S-general-automations)", () => {
     expect(outcome.gone._tag).toBe("AutomationNotFound");
   }, 60_000);
 
+  /**
+   * Mutations this catches: a pass that leaves a stale claim on an instant the schedule has moved
+   * past — it stays `claimed` in the history for ever; a sweep that also closes the due instant's
+   * own stale claim — the takeover never happens and the one-off never runs; a sweep with no age
+   * floor — a claim another process holds right now is closed under it.
+   */
+  it("closes a stale claim the schedule has moved past as failed, and takes over the due one", async () => {
+    const outcome = await run(
+      Effect.gen(function* () {
+        yield* setUp;
+        const sql = yield* SqlClient;
+        const automations = yield* AutomationService;
+        const added = yield* automations.add({
+          repo,
+          cron: "* * * * *",
+          prompt: "Look at the open issues.",
+          skipIfUnchanged: false,
+        });
+        const first = minuteAfter(Date.parse(added.enabledAt));
+        // Three claims a process left behind: two stale (11 minutes old), one fresh.
+        const claimed = (at: number, age: string) => sql`
+          INSERT INTO automation_ticks (automation_id, tick_at, trigger, claimed_at)
+          VALUES (${added.id}, ${isoAt(at)}::timestamptz, 'schedule',
+            now() - ${age}::interval)
+        `;
+        yield* claimed(first, "11 minutes");
+        yield* claimed(first + 60_000, "30 seconds");
+        yield* claimed(first + 120_000, "11 minutes");
+        // The pass at the third minute: its due instant is the third claim's, stale — taken over.
+        const passed = yield* automations.pass(first + 120_000 + 1_000);
+        const ticks = yield* automations.ticks(added.id);
+        return { added, first, passed, ticks };
+      }),
+    );
+    const at = (millis: number) =>
+      outcome.ticks.find((tick) => tick.tickAt === isoAt(millis));
+    expect(at(outcome.first)?.status).toBe("failed");
+    expect(at(outcome.first)?.reason).toContain(
+      "stopped before it recorded an outcome",
+    );
+    // Not stale yet: its holder may still be at it.
+    expect(at(outcome.first + 60_000)?.status).toBe("claimed");
+    expect(
+      outcome.passed
+        .filter((tick) => tick.automationId === outcome.added.id)
+        .map((tick) => [tick.tickAt, tick.status]),
+    ).toEqual([[isoAt(outcome.first + 120_000), "started"]]);
+  }, 60_000);
+
+  /**
+   * Mutations this catches: a tick whose run is refused that leaves its card on the board — the card
+   * stays in `intake` with no run, and a frequent schedule piles one up per tick.
+   */
+  it("cancels the card it filed when the run cannot be opened", async () => {
+    const outcome = await run(
+      Effect.gen(function* () {
+        yield* setUp;
+        const sql = yield* SqlClient;
+        const automations = yield* AutomationService;
+        const tasks = yield* TaskService;
+        const added = yield* automations.add({
+          repo,
+          cron: "* * * * *",
+          prompt: "Refused.",
+          skipIfUnchanged: false,
+        });
+        // The board no longer declares the column the automation starts its runs in (say, it was
+        // upgraded to a definition that renamed it): the card is filed and the run refused.
+        yield* sql`UPDATE automations SET task_column = 'retired' WHERE id = ${added.id}`;
+        const first = minuteAfter(Date.parse(added.enabledAt));
+        const fired = yield* automations.tick(added.id, first + 1_000);
+        const card = yield* tasks.get(fired?.tick.taskId ?? "");
+        return { fired, card, runs: yield* runsOf(added.id) };
+      }),
+    );
+    expect(outcome.fired?.tick.status).toBe("failed");
+    expect(outcome.fired?.tick.reason).toContain("its run could not be opened");
+    expect(outcome.fired?.tick.reason).toContain(
+      "the card was moved to canceled",
+    );
+    expect(outcome.card.column).toBe("canceled");
+    expect(outcome.runs).toEqual([]);
+  }, 60_000);
+
   /** Each refusal names its field, and nothing is written for any of them. */
   it("refuses an automation it could not run, naming the field", async () => {
     const refusals = await run(
@@ -558,6 +667,7 @@ describe("a scheduled automation (S-general-automations)", () => {
             prompt: "x",
           }),
           yield* fieldOf({ repo, cron: "0 0 31 2 *", prompt: "never" }),
+          yield* fieldOf({ repo, cron: "*/10 * * * * *", prompt: "too often" }),
           yield* fieldOf({ repo, runAt: "2020-01-01T00:00:00Z", prompt: "x" }),
           yield* fieldOf({ repo, cron: "* * * * *" }),
           yield* fieldOf({
@@ -593,6 +703,7 @@ describe("a scheduled automation (S-general-automations)", () => {
       "schedule",
       "cron",
       "timezone",
+      "cron",
       "cron",
       "runAt",
       "prompt",

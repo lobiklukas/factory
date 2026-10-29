@@ -9,7 +9,7 @@ board and starts one run on it, so what an automation did is reviewed on the boa
   with `factory automation add --repo … (--cron "…" [--tz …] | --at <instant>) (--prompt … |
 --skill …) [--name] [--budget] [--column] [--base-ref] [--always]`, or `addAutomation` over RPC
   (`AutomationsRpc`). A cron or zone `effect/Cron` cannot read, an expression no date matches, a
-  one-off in the past, a skill the library lacks, a column the board does not declare, an unsafe
+  cron that fires more often than once a minute, a one-off in the past, a skill the library lacks, a column the board does not declare, an unsafe
   base ref and a repo with no board are `invalid_automation` naming the field; an unregistered repo
   `repo_not_found`. Nothing is written for any of them.
 - **Fired by the API's clock.** `AUTOMATIONS_POLL_MS` (default 15000; `0` is off) is how often the
@@ -18,15 +18,22 @@ board and starts one run on it, so what an automation did is reviewed on the boa
 - **One card per tick, across restarts.** The tick is claimed in `automation_ticks` (primary key:
   the automation and the instant) before anything happens, so a second process, or the same one
   after a restart, answers the recorded tick and files nothing. A claim whose process died before
-  recording an outcome is taken over after ten minutes; the card is filed under
-  `automation:<id>@<instant>` (`TaskService.file`), the run created and sent under
-  `automation:<id>@<millis>`, so a retried tick makes none of them twice.
+  recording an outcome is taken over after ten minutes when its instant is still the due one (a
+  one-off's, an infrequent cron's); the card is filed under `automation:<id>@<instant>`
+  (`TaskService.file`), the run created and sent under `automation:<id>@<millis>`, so a retried tick
+  makes none of them twice. A stale claim on an instant the schedule has moved past is recorded
+  `failed` by the next pass, linked to whatever card and run it made. From filing the card to
+  recording the outcome a tick is uninterruptible, so a shutdown waits for it.
+- **No card without a run.** When the run cannot be opened (admission control, the board's run cap,
+  a start column the board no longer declares), the card the tick filed is moved to `canceled` and
+  the tick is `failed` with the reason.
 - **Skip if unchanged.** A scheduled tick reads its base's tip first (`SessionService.baseHead`:
   the clone synced, the forge fetched, or the checkout's ref). The same commit as the last `started`
   tick is `skipped` with `no new commits on <base> since the run at <instant> (<sha>), so nothing was
 filed`. `--always` opts out; a tip git cannot read never skips.
 - **Run now, pause, resume.** `factory automation run <id>` fires one at once — paused or not, never
-  skipped. `pause` stops the scheduled ticks; `resume` starts them again from now, so an instant
+  skipped on an unmoved base; it exits non-zero (`tick_failed`, `tick_skipped`) when the tick
+  started no run. `pause` stops the scheduled ticks; `resume` starts them again from now, so an instant
   reached while paused does not fire.
 - **History.** `factory automation history <id>` (`listAutomationTicks`): each tick's trigger,
   status, card, run and reason, newest first, with the run's status and spend read from
@@ -34,7 +41,7 @@ filed`. `--always` opts out; a tip git cannot read never skips.
 
 **The docs schedule stays.** `DOCS_SCHEDULE_MS`/`DOCS_SCHEDULE_REPO` (LOB-234) keep their own daemon
 and their `factory/doc-*` session branches; a docs pass on a schedule can now also be an automation
-(`--skill docs`), whose ticks are cards.
+(`--skill docs`), whose ticks are cards. Folding the docs schedule into automations is a follow-up.
 
 ## How it is proven
 

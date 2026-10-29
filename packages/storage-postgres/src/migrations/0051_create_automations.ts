@@ -12,15 +12,20 @@ import { SqlClient } from "effect/sql/SqlClient";
  * it slept through.
  *
  * `automation_ticks` is the history and the dedupe. Its primary key is the automation and the tick's
- * instant, and a tick is claimed with one `INSERT … ON CONFLICT DO NOTHING RETURNING`, so of two
- * processes (or one process before and after a restart) reaching the same tick only one fires it. A
- * tick is `claimed` while it runs, then `started` (it filed a card and opened a run on it), `skipped`
- * (the base had not moved since the last started tick, or the repo has no board), or `failed`, with
- * the reason. `base_commit` is the base's tip the tick read: what the next tick compares against.
- * The run's own status and spend are not copied here: they are `session_activity`'s, joined on read.
+ * instant, and a tick is claimed with one `INSERT … ON CONFLICT … DO UPDATE SET claimed_at = now()
+ * WHERE status = 'claimed' AND claimed_at < now() - <reclaim window> RETURNING`: of two processes (or
+ * one process before and after a restart) reaching the same tick only one gets a row back and fires
+ * it, and a claim left `claimed` past the window by a process that died is taken over
+ * (`AutomationService`'s `RECLAIM_AFTER`). A stale claim on an instant the schedule has moved past is
+ * not taken over: the next pass records it `failed`. A tick is `claimed` while it runs, then
+ * `started` (it filed a card and opened a run on it), `skipped` (the base had not moved since the
+ * last started tick, or the repo has no board), or `failed`, with the reason. `base_commit` is the
+ * base's tip the tick read: what the next tick compares against. The run's own status and spend are
+ * not copied here: they are `session_activity`'s, joined on read.
  *
  * A repo's automations go with its row; a card or a session that is gone leaves its tick's history
- * with nothing to link to rather than taking the history with it.
+ * with nothing to link to rather than taking the history with it. Both links are indexed, so deleting
+ * a card or a session does not scan the history to clear them.
  */
 export default Effect.gen(function* () {
   const sql = yield* SqlClient;
@@ -64,5 +69,14 @@ export default Effect.gen(function* () {
       finished_at TIMESTAMPTZ,
       PRIMARY KEY (automation_id, tick_at)
     )
+  `;
+
+  yield* sql`
+    CREATE INDEX IF NOT EXISTS automation_ticks_task_id_idx
+      ON automation_ticks (task_id) WHERE task_id IS NOT NULL
+  `;
+  yield* sql`
+    CREATE INDEX IF NOT EXISTS automation_ticks_session_id_idx
+      ON automation_ticks (session_id) WHERE session_id IS NOT NULL
   `;
 });

@@ -30,7 +30,7 @@ card-mode trigger and `factory board start` do. A tick is claimed in `automation
 automation and its instant before anything happens, so a restart or a second process never fires it
 twice; a scheduled tick whose base tip (`SessionService.baseHead`) is the commit the last started
 tick ran on is recorded `skipped` with the reason. The docs schedule (`DOCS_SCHEDULE_MS`) keeps its
-own daemon and branch rule. Webhook and event automations remain the trigger routes they are.
+own daemon and branch rule for now; folding it into automations is a follow-up. Webhook and event automations remain the trigger routes they are.
 _Rejected:_ ticking through the trigger seam (a tick is no outside delivery: it has no source to
 answer and must read the base before it decides), and one session per tick with no card (an
 automation's work is reviewed and gated on the board like any other).

@@ -19,6 +19,7 @@ import {
   automationLsLines,
   historyLines,
   NONE,
+  runRefusal,
   tickLines,
 } from "./automation";
 
@@ -107,6 +108,17 @@ describe("factory automation's lines", () => {
     expect(
       automationLines("added", automation({ skipIfUnchanged: false })),
     ).toContain("skip         never");
+  });
+
+  it("refuses, for the exit code, a run that started no run", () => {
+    expect(runRefusal(started)).toBe(undefined);
+    expect(runRefusal(skipped)).toEqual({
+      code: "tick_skipped",
+      message: `the tick at ${skipped.tickAt} started no run: ${skipped.reason}`,
+    });
+    expect(
+      runRefusal({ ...started, status: "failed", reason: "at capacity" })?.code,
+    ).toBe("tick_failed");
   });
 
   it("prints a tick's card, run and reason, and the history's run status and spend", () => {
