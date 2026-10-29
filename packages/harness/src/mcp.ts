@@ -109,7 +109,7 @@ export const parseMcpServers = (
 ): Effect.Effect<readonly McpServerDeclaration[], InvalidMcpServers> =>
   Effect.gen(function* () {
     if (text.trim().length === 0) return [];
-    const declared = yield* Schema.decodeUnknownEffect(McpServersJson)(text, {
+    const declared = yield* Schema.decodeEffect(McpServersJson)(text, {
       onExcessProperty: "error",
     }).pipe(
       Effect.mapError(
@@ -336,13 +336,13 @@ const asTransport = (transport: StreamableHTTPClientTransport): Transport =>
 
 /** Every tool a connected server lists, page by page. */
 const listTools = (client: Client, timeoutMs: number) =>
-  Effect.tryPromise(async () => {
+  Effect.gen(function* () {
     const tools: McpTool[] = [];
     let cursor: string | undefined;
     for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
-      const listed = await client.listTools(
-        cursor === undefined ? {} : { cursor },
-        { timeout: timeoutMs },
+      const params = cursor === undefined ? {} : { cursor };
+      const listed = yield* Effect.tryPromise(() =>
+        client.listTools(params, { timeout: timeoutMs }),
       );
       tools.push(...listed.tools);
       cursor = listed.nextCursor;
@@ -374,14 +374,22 @@ const connectServer = (
         `MCP server ${server.name} (${server.url}) could not be reached, so none of its tools is offered: ${describe(cause)}`,
       ],
     });
-    const listed = yield* Effect.tryPromise(async () => {
-      const transport = new StreamableHTTPClientTransport(new URL(server.url), {
-        requestInit: { headers: { ...server.headers } },
-      });
-      await client.connect(asTransport(transport), {
-        timeout: connectTimeoutMs,
-      });
-    }).pipe(Effect.andThen(listTools(client, connectTimeoutMs)), Effect.result);
+    const listed = yield* Effect.try(
+      () =>
+        new StreamableHTTPClientTransport(new URL(server.url), {
+          requestInit: { headers: { ...server.headers } },
+        }),
+    ).pipe(
+      Effect.flatMap((transport) =>
+        Effect.tryPromise(() =>
+          client.connect(asTransport(transport), {
+            timeout: connectTimeoutMs,
+          }),
+        ),
+      ),
+      Effect.andThen(listTools(client, connectTimeoutMs)),
+      Effect.result,
+    );
     if (listed._tag === "Failure") {
       yield* Effect.promise(() => client.close().catch(() => undefined));
       return unreachable(listed.failure.cause);

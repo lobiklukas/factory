@@ -14,6 +14,8 @@
  * What it does not prove: OAuth, SSE responses, session ids, resumability, or anything a real
  * server's tools do. A tool's answer is whatever its `answer` returns.
  */
+import { once } from "node:events";
+// oxlint-disable-next-line effecttsgo/node-builtin-import -- a listener the MCP client connects to, not a client: the server's side of the wire.
 import { createServer, type IncomingMessage } from "node:http";
 
 export type FakeMcpTool = {
@@ -77,13 +79,15 @@ const record = (value: unknown): Readonly<Record<string, unknown>> =>
     ? (value as Record<string, unknown>)
     : {};
 
-const bodyOf = (request: IncomingMessage): Promise<string> =>
-  new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    request.on("data", (chunk: Buffer) => chunks.push(chunk));
-    request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    request.on("error", reject);
-  });
+/** Call `then` with the request's whole body once it has arrived. */
+const withBody = (
+  request: IncomingMessage,
+  then: (text: string) => void,
+): void => {
+  const chunks: Buffer[] = [];
+  request.on("data", (chunk: Buffer) => chunks.push(chunk));
+  request.on("end", () => then(Buffer.concat(chunks).toString("utf8")));
+};
 
 const toolJson = (tool: FakeMcpTool) => ({
   name: tool.name,
@@ -93,7 +97,8 @@ const toolJson = (tool: FakeMcpTool) => ({
 });
 
 /** Start the fake on loopback; port 0 (the default) picks a free one. */
-export const startFakeMcpServer = (
+// oxlint-disable-next-line effecttsgo/async-function -- a vitest `beforeAll` and a verify driver await it, as the other fakes' callers do.
+export const startFakeMcpServer = async (
   options: FakeMcpOptions,
 ): Promise<FakeMcpServer> => {
   const requests: FakeMcpRequest[] = [];
@@ -115,7 +120,7 @@ export const startFakeMcpServer = (
       response.writeHead(tools === undefined ? 404 : 405).end();
       return;
     }
-    void bodyOf(request).then((text) => {
+    withBody(request, (text) => {
       let message: RpcMessage;
       try {
         message = record(JSON.parse(text));
@@ -206,22 +211,21 @@ export const startFakeMcpServer = (
       }
     });
   });
-  return new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(options.port ?? 0, options.host ?? "127.0.0.1", () => {
-      const address = server.address();
-      const port =
-        typeof address === "object" && address !== null ? address.port : 0;
-      resolve({
-        url: `http://${options.host ?? "127.0.0.1"}:${port}`,
-        requests,
-        calls,
-        close: () =>
-          new Promise((done) => {
-            server.closeAllConnections();
-            server.close(() => done());
-          }),
-      });
-    });
-  });
+  const host = options.host ?? "127.0.0.1";
+  server.listen(options.port ?? 0, host);
+  await once(server, "listening");
+  const address = server.address();
+  if (address === null || typeof address === "string")
+    throw new Error("the fake MCP server did not bind a TCP port");
+  return {
+    url: `http://${host}:${address.port}`,
+    requests,
+    calls,
+    // oxlint-disable-next-line effecttsgo/async-function -- a test's `afterAll` awaits it.
+    close: async () => {
+      server.closeAllConnections();
+      server.close();
+      await once(server, "close");
+    },
+  };
 };

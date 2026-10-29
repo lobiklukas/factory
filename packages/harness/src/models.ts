@@ -807,7 +807,7 @@ export const parseFauxMcpCalls = (
 ): Effect.Effect<readonly FauxToolCall[], InvalidFauxMcpCalls> =>
   text.trim() === ""
     ? Effect.succeed([])
-    : Schema.decodeUnknownEffect(FauxToolCallsJson)(text, {
+    : Schema.decodeEffect(FauxToolCallsJson)(text, {
         onExcessProperty: "error",
       }).pipe(
         Effect.map((calls) =>
