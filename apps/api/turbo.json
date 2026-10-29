@@ -46,6 +46,7 @@
         "SESSION_ROOT",
         "SESSION_IDLE_TIMEOUT_MS",
         "SESSION_MAX_CONCURRENT",
+        "SETUP_TIMEOUT_SECONDS",
         "SPEND_CAPS",
         "SANDBOX_RUNTIME",
         "PR_CAP_MAX_FILES",

@@ -1,4 +1,8 @@
-import { createFauxModelAccess, NO_ROLE_MODELS } from "@repo/harness";
+import {
+  createFauxModelAccess,
+  NO_ROLE_MODELS,
+  SETUP_TIMEOUT_SECONDS,
+} from "@repo/harness";
 import { Layer, Option } from "effect";
 import { ServerFacts } from "./ServerInfo";
 
@@ -20,4 +24,5 @@ export const FauxServerFacts = Layer.succeed(ServerFacts, {
   sandbox: "in-process",
   triggerRules: 0,
   envFiles: [],
+  setupTimeoutSeconds: SETUP_TIMEOUT_SECONDS,
 });

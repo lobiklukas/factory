@@ -23,7 +23,18 @@
 //   readiness the registry answers each checkout's agent-readiness score on registration, and
 //             `listRepos` the same score.
 //
-// Env: API_URL, DATABASE_URL (to read the session logs), SETUP_REPOS, EVIDENCE_DIR.
+// A second phase, `PHASE=restarted`, runs against an API booted with `SETUP_TIMEOUT_SECONDS=1` (F24):
+//
+//   timeout   an install that sleeps 5 s is stopped at the deployment's bound. A card's first message
+//             is refused `setup_failed` with the step's `could not run (timeout)`, the card is blocked
+//             `setup_failed`, the install never reached its end, and `factory doctor`'s
+//             `checkDeployment` reports the bound the process runs under.
+//   recut     (main phase) a session whose worktree directory was deleted is cut again by its next
+//             send and set up again (F23): the install ran twice, the record names a new cut.
+//   replay    (main phase) a replay of a session on a repo with an install runs the install in its
+//             own worktree before its first model call (F23).
+//
+// Env: API_URL, DATABASE_URL (to read the session logs), SETUP_REPOS, EVIDENCE_DIR, PHASE.
 import { execSync } from "node:child_process";
 import { createHmac } from "node:crypto";
 import {
@@ -62,6 +73,13 @@ const TRIGGER_SECRET = process.env["TRIGGER_SECRET"] ?? "";
 /** This checkout: the `self` scenario clones it, so a session runs on the factory repo itself. */
 const SELF = path.resolve(import.meta.dirname, "..", "..", "..");
 
+/**
+ * `main` boots on the default bound; `restarted` runs against the same API home after a restart with
+ * `SETUP_TIMEOUT_SECONDS=1` (setup.sh), which is what releases the owners the recut scenario needs.
+ */
+const PHASE = process.env["PHASE"] === "restarted" ? "restarted" : "main";
+const STATE_FILE = path.join(REPOS, "recut-state.json");
+
 const observed: {
   apiUrl: string;
   run: string;
@@ -70,6 +88,9 @@ const observed: {
   abandoned?: unknown;
   triggered?: unknown;
   self?: unknown;
+  replay?: unknown;
+  recut?: unknown;
+  timeout?: unknown;
   readiness?: unknown;
   checks: Record<string, CheckRecord>;
 } = { apiUrl: API_URL, run: RUN, checks: {} };
@@ -147,7 +168,7 @@ const logged = (sessionId: string) =>
     );
   });
 
-const program = Effect.gen(function* () {
+const mainProgram = Effect.gen(function* () {
   const client = yield* RpcClient.make(RpcApi);
 
   // --- ok: installed and built before the first turn ---------------------------------------------
@@ -605,6 +626,151 @@ const program = Effect.gen(function* () {
     selfProbe?.text.trim().slice(0, 80) ?? "no bash result",
   );
 
+  // --- replay: a replay's worktree is set up before its first model call (F23) -------------------
+  const replayLog = path.join(REPOS, "replay-attempts.txt");
+  const replayRepo = RepoSlug.make(`verify-setup-${RUN}/replayed`);
+  yield* client.registerRepo({
+    repo: replayRepo,
+    defaultBaseRef: "main",
+    localPath: fixtureRepo("replayed", {
+      ...PACKAGE,
+      ".factory/config": JSON.stringify({
+        install: `echo install >> ${replayLog}; sleep 3; bun install`,
+        verify: "true",
+      }),
+    }),
+  });
+  const replaySource = yield* client.createSession({
+    repo: replayRepo,
+    title: "verify-setup replay source",
+  });
+  yield* client.sendMessage({
+    sessionId: replaySource.id,
+    content: "do the task",
+  });
+  yield* waitUntil(
+    Effect.map(client.getSession({ sessionId: replaySource.id }), (snapshot) =>
+      !snapshot.live.busy &&
+      snapshot.entries.some(
+        (entry) => entry.kind === "assistant" && entry.text !== "",
+      )
+        ? snapshot
+        : undefined,
+    ),
+    "the replay source's run to answer",
+  );
+  const replayed = yield* client.replaySession({ sessionId: replaySource.id });
+  // Answered while the replay's own install still sleeps: no prompt, so no model call, yet.
+  const replayAtAnswer = yield* client.getSession({ sessionId: replayed.id });
+  const replaySnapshot = yield* waitUntil(
+    Effect.map(client.getSession({ sessionId: replayed.id }), (snapshot) =>
+      !snapshot.live.busy &&
+      snapshot.entries.some(
+        (entry) => entry.kind === "assistant" && entry.text !== "",
+      )
+        ? snapshot
+        : undefined,
+    ),
+    "the replay's run to answer",
+  );
+  const replayCompared = yield* waitUntil(
+    Effect.map(client.getSession({ sessionId: replayed.id }), (snapshot) =>
+      (snapshot.replayComparisons ?? []).length > 0 ? snapshot : undefined,
+    ),
+    "the replay's comparison",
+  );
+  const replayProbe = replaySnapshot.entries.find(
+    (entry) => entry.kind === "toolResult" && entry.toolName === "bash",
+  );
+  const replayInstalls = readFileSync(replayLog, "utf8");
+  const replaySetup = (yield* logged(replayed.id)).setup;
+  observed.replay = {
+    source: replaySource.id,
+    replay: replayed.id,
+    usersAtAnswer: replayAtAnswer.entries.filter(
+      (entry) => entry.kind === "user",
+    ).length,
+    installs: replayInstalls,
+    setup: replaySetup,
+    probe: replayProbe?.text.slice(0, 120),
+    comparison: replayCompared.replayComparisons?.[0]?.self.outcome,
+  };
+  assert(
+    "replay: the replay is answered before its install ends, with no prompt submitted yet",
+    replayAtAnswer.entries.filter((entry) => entry.kind === "user").length ===
+      0,
+    `${replayAtAnswer.entries.length} entries at the answer`,
+  );
+  assert(
+    "replay: its own install ran in its own worktree before the agent's first command",
+    replayInstalls === "install\ninstall\n" &&
+      replaySetup?.outcome === "succeeded" &&
+      replaySetup.directory.endsWith(replayed.id) &&
+      replayProbe?.text.includes("deps-present") === true,
+    `${JSON.stringify(replayInstalls)}; ${replaySetup?.outcome}; ${replayProbe?.text.trim().slice(0, 40)}`,
+  );
+  assert(
+    "replay: the comparison waited for the held prompt and reads a run that answered",
+    replayCompared.replayComparisons?.[0]?.self.outcome === "answered",
+    String(replayCompared.replayComparisons?.[0]?.self.outcome),
+  );
+
+  // --- recut, seeded: the session the restarted phase deletes the worktree of (F23) -------------
+  const recutLog = path.join(REPOS, "recut-attempts.txt");
+  const recutRepo = RepoSlug.make(`verify-setup-${RUN}/recut`);
+  yield* client.registerRepo({
+    repo: recutRepo,
+    defaultBaseRef: "main",
+    localPath: fixtureRepo("recut", {
+      ...PACKAGE,
+      ".factory/config": JSON.stringify({
+        install: `echo install >> ${recutLog}; touch installed.marker`,
+        verify: "true",
+      }),
+    }),
+  });
+  const recutSession = yield* client.createSession({
+    repo: recutRepo,
+    title: "verify-setup recut",
+  });
+  yield* client.sendMessage({ sessionId: recutSession.id, content: "one" });
+  const recutSeeded = yield* waitUntil(
+    Effect.map(client.getSession({ sessionId: recutSession.id }), (snapshot) =>
+      !snapshot.live.busy &&
+      snapshot.entries.some(
+        (entry) => entry.kind === "assistant" && entry.text !== "",
+      )
+        ? snapshot
+        : undefined,
+    ),
+    "the recut session's first run to answer",
+  );
+  const recutFirst = (yield* logged(recutSession.id)).setup;
+  writeFileSync(
+    STATE_FILE,
+    JSON.stringify({
+      sessionId: recutSession.id,
+      worktree: recutSeeded.workspace.path,
+      attempts: recutLog,
+      cut: recutFirst?.cut ?? null,
+    }),
+  );
+  observed.recut = {
+    seeded: {
+      sessionId: recutSession.id,
+      worktree: recutSeeded.workspace.path,
+      cut: recutFirst?.cut,
+    },
+  };
+  assert(
+    "recut: the first send installed once and the record names the worktree's cut",
+    recutFirst?.outcome === "succeeded" &&
+      typeof recutFirst.cut === "string" &&
+      readFileSync(recutLog, "utf8") === "install\n" &&
+      existsSync(path.join(recutSeeded.workspace.path, "installed.marker")),
+    `${recutFirst?.outcome}; cut ${recutFirst?.cut}`,
+  );
+
   // --- readiness: scored at registration and on read ----------------------------------------------
   const listed = (yield* client.listRepos({})).repos.find(
     (row) => row.repo === okRepo,
@@ -624,8 +790,145 @@ const program = Effect.gen(function* () {
   );
 });
 
+/** The scenarios that need the process restarted with `SETUP_TIMEOUT_SECONDS=1` (setup.sh). */
+const restartedProgram = Effect.gen(function* () {
+  const client = yield* RpcClient.make(RpcApi);
+
+  // --- recut: the worktree's directory is gone, so the next send cuts it again (F23) -------------
+  // The API was restarted, so no owner holds the session: deleting the directory is what a pruned
+  // scratch disk does between two of a session's days.
+  const state = JSON.parse(readFileSync(STATE_FILE, "utf8")) as {
+    sessionId: string;
+    worktree: string;
+    attempts: string;
+    cut: string | null;
+  };
+  const sessionId = SessionId.make(state.sessionId);
+  const before = (yield* logged(sessionId)).setup;
+  rmSync(state.worktree, { recursive: true, force: true });
+  yield* client.sendMessage({ sessionId, content: "two" });
+  const recutSnapshot = yield* waitUntil(
+    Effect.map(client.getSession({ sessionId }), (snapshot) =>
+      !snapshot.live.busy &&
+      snapshot.entries.filter((entry) => entry.kind === "user").length === 2 &&
+      snapshot.entries.some(
+        (entry) => entry.kind === "assistant" && entry.text !== "",
+      )
+        ? snapshot
+        : undefined,
+    ),
+    "the recut session's second run to answer",
+  );
+  const after = (yield* logged(sessionId)).setup;
+  const installs = readFileSync(state.attempts, "utf8");
+  observed.recut = {
+    sessionId,
+    cutBefore: before?.cut,
+    cutAfter: after?.cut,
+    installs,
+    markerInNewWorktree: existsSync(
+      path.join(recutSnapshot.workspace.path, "installed.marker"),
+    ),
+  };
+  assert(
+    "recut: the worktree cut again is set up again, and its record names the new cut",
+    installs === "install\ninstall\n" &&
+      existsSync(path.join(recutSnapshot.workspace.path, "installed.marker")) &&
+      after?.outcome === "succeeded" &&
+      typeof after.cut === "string" &&
+      after.cut !== state.cut &&
+      before?.cut === state.cut,
+    `${JSON.stringify(installs)}; ${state.cut} -> ${after?.cut}`,
+  );
+
+  // --- timeout: an install that outlives SETUP_TIMEOUT_SECONDS=1 fails the setup (F24) ------------
+  const sleepLog = path.join(REPOS, "timeout-attempts.txt");
+  const sleepRepo = RepoSlug.make(`verify-setup-${RUN}/timeout`);
+  yield* client.registerRepo({
+    repo: sleepRepo,
+    defaultBaseRef: "main",
+    localPath: fixtureRepo("timeout", {
+      ...PACKAGE,
+      ".factory/config": JSON.stringify({
+        install: `echo start >> ${sleepLog}; sleep 5; echo done >> ${sleepLog}`,
+        verify: "true",
+      }),
+    }),
+  });
+  const board = yield* client.createBoard({
+    repo: sleepRepo,
+    definitionId: DefinitionId.make("default"),
+  });
+  const card = yield* client.createTask({
+    boardId: BoardInstanceId.make(board.id),
+    title: "a card whose install is slower than the bound",
+    actor: "person:verify-setup",
+  });
+  const run = yield* client.createSession({
+    taskId: card.id,
+    taskColumn: card.column,
+  });
+  const startedAt = yield* Clock.currentTimeMillis;
+  const refused = yield* Effect.exit(
+    client.sendMessage({ sessionId: run.id, content: "build it" }),
+  );
+  const refusedInMs = (yield* Clock.currentTimeMillis) - startedAt;
+  const error = Exit.isFailure(refused)
+    ? refused.cause.reasons.find((reason) => reason._tag === "Fail")?.error
+    : undefined;
+  const parked = yield* client.getTask({ taskId: TaskId.make(card.id) });
+  const snapshot = yield* client.getSession({ sessionId: run.id });
+  const timeoutLog = yield* logged(run.id);
+  // Past the install's own end: a step left running would have written `done`.
+  yield* Effect.sleep(5_000);
+  const attempts = readFileSync(sleepLog, "utf8");
+  const deployment = yield* client.checkDeployment({});
+  observed.timeout = {
+    sessionId: run.id,
+    taskId: card.id,
+    refusedInMs,
+    error,
+    blocked: parked.blocked,
+    setup: timeoutLog.setup,
+    attempts,
+    doctorSetupTimeoutSeconds: deployment.setupTimeoutSeconds,
+  };
+  const errorCode =
+    error !== undefined && "code" in error ? String(error.code) : undefined;
+  const errorMessage =
+    error !== undefined && "message" in error ? String(error.message) : "";
+  assert(
+    "timeout: the first message is refused setup_failed with the step's timeout, after about one second",
+    errorCode === "setup_failed" &&
+      errorMessage.includes("setup failed: install") &&
+      errorMessage.includes("could not run (timeout)") &&
+      refusedInMs < 4_500,
+    `${errorCode}: ${errorMessage.split("\n")[0]?.slice(0, 120)} in ${refusedInMs}ms`,
+  );
+  assert(
+    "timeout: the card is parked setup_failed with the same words",
+    parked.blocked?.reason === "setup_failed" &&
+      parked.blocked.note?.includes("could not run (timeout)") === true,
+    JSON.stringify(parked.blocked ?? null).slice(0, 160),
+  );
+  assert(
+    "timeout: the log records the step unrunnable with code timeout, no model answered, and the install was stopped",
+    timeoutLog.setup?.outcome === "failed" &&
+      timeoutLog.setup.steps[0]?._tag === "SetupStepUnrunnable" &&
+      timeoutLog.setup.steps[0].code === "timeout" &&
+      snapshot.entries.length === 0 &&
+      attempts === "start\n",
+    `${timeoutLog.setup?.steps[0]?._tag}; ${JSON.stringify(attempts)}`,
+  );
+  assert(
+    "timeout: checkDeployment (factory doctor) reports the bound the process runs under",
+    deployment.setupTimeoutSeconds === 1,
+    String(deployment.setupTimeoutSeconds),
+  );
+});
+
 const result = await Effect.runPromiseExit(
-  Effect.scoped(program).pipe(
+  Effect.scoped(PHASE === "restarted" ? restartedProgram : mainProgram).pipe(
     Effect.provide(Layer.mergeAll(protocolFor(API_URL), DatabaseLive)),
   ),
 );
@@ -635,13 +938,16 @@ if (Exit.isFailure(result)) {
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
 await writeFile(
-  path.join(EVIDENCE_DIR, "setup.json"),
+  path.join(
+    EVIDENCE_DIR,
+    PHASE === "restarted" ? "setup-restarted.json" : "setup.json",
+  ),
   `${JSON.stringify(observed, null, 2)}\n`,
 );
 const failed = Object.entries(observed.checks).filter(
   ([, check]) => !check.passed,
 );
 console.log(
-  `\nsetup: ${Object.keys(observed.checks).length - failed.length}/${Object.keys(observed.checks).length} checks passed — evidence in ${EVIDENCE_DIR}/setup.json`,
+  `\nsetup (${PHASE}): ${Object.keys(observed.checks).length - failed.length}/${Object.keys(observed.checks).length} checks passed — evidence in ${EVIDENCE_DIR}/${PHASE === "restarted" ? "setup-restarted" : "setup"}.json`,
 );
 if (failed.length > 0) process.exitCode = 1;

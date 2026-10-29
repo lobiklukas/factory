@@ -310,6 +310,7 @@ a file in git and never in the repository the agent works on.
 | Slack                         | `SLACK_SIGNING_SECRET`, `SLACK_CHANNELS`, `SLACK_BOT_TOKEN`                                  | an Events API subscription at `https://<host>/webhooks/slack`                                                                                |
 | Notifications                 | `NOTIFY_SLACK_WEBHOOK_URL`, `NOTIFY_NTFY_TOPIC`, `NOTIFY_LINK_BASE`                          | a Slack incoming webhook URL, or an ntfy topic                                                                                               |
 | Limits                        | `SESSION_MAX_CONCURRENT`, `SESSION_BUDGET`, `PR_CAP_MAX_FILES`, `PR_CAP_MAX_LINES`           | nothing                                                                                                                                      |
+| Worktree setup                | `SETUP_TIMEOUT_SECONDS`                                                                      | nothing                                                                                                                                      |
 | Telemetry                     | `MOTEL_URL`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`                                           | nothing                                                                                                                                      |
 
 Rules of thumb:

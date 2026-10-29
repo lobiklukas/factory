@@ -2,8 +2,9 @@ import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
-import { Cause } from "effect";
+import { Cause, Option } from "effect";
 import { ChevronRightIcon } from "lucide-react";
+import type { RepoSlug, RepoSummary } from "@repo/domain/Session";
 import type {
   BoardCard,
   BoardColumn,
@@ -12,6 +13,7 @@ import type {
 } from "@repo/domain/Task";
 import { cn } from "cn";
 import { boardConfigAtom } from "@/lib/atoms/board-atom";
+import { repoAtom } from "@/lib/atoms/repos-atom";
 import { blockedLabel, type BoardLanes } from "@/lib/board-view";
 import { cardFace, faceIsBlank } from "@/lib/card-face-view";
 import { ColumnSettings } from "@/components/column-settings";
@@ -38,22 +40,26 @@ import {
  * Under the link, a card that has had a run shows what its runs say (C10): the newest run's state,
  * the PR the runs opened and their summed spend. They are the board read's own — the same
  * `listBoardCards` answer as the card — so no face costs a call, and a run that starts or a PR that
- * opens reaches the face on the next poll.
+ * opens reaches the face on the next poll. Beside the id sits the board's repository's readiness
+ * (F25), from `getRepo` read once by the board and handed to every card.
  */
 export const TaskCard = ({
   boardId,
   task,
   card,
+  repo,
   selected,
 }: {
   readonly boardId: BoardInstanceId;
   readonly task: Task;
   /** What the card's runs say (C10); absent when the board read did not carry it. */
   readonly card: BoardCard | undefined;
+  /** The board's repository's row, for its readiness (F25); absent when it was not read. */
+  readonly repo: RepoSummary | undefined;
   readonly selected: boolean;
 }) => {
   const blocked = blockedLabel(task);
-  const face = cardFace(card);
+  const face = cardFace(card, repo);
   return (
     <li
       data-card={task.id}
@@ -102,6 +108,16 @@ export const TaskCard = ({
             {task.id}
           </span>
           <span className="shrink-0">r{task.revision}</span>
+          {face.readiness === null ? null : (
+            <span
+              data-card-readiness={face.readiness.score}
+              data-card-readiness-ready={face.readiness.ready}
+              title={face.readiness.title}
+              className="ml-auto shrink-0"
+            >
+              ready {face.readiness.score}
+            </span>
+          )}
         </span>
       </Link>
       {faceIsBlank(face) ? null : (
@@ -213,12 +229,14 @@ export const BoardLane = ({
   column,
   cards,
   faces,
+  repo,
   selected,
 }: {
   readonly boardId: BoardInstanceId;
   readonly column: BoardColumn;
   readonly cards: ReadonlyArray<Task>;
   readonly faces: ReadonlyMap<string, BoardCard>;
+  readonly repo: RepoSummary | undefined;
   readonly selected: string | undefined;
 }) => {
   const [open, setOpen] = useState(false);
@@ -284,6 +302,7 @@ export const BoardLane = ({
               boardId={boardId}
               task={task}
               card={faces.get(task.id)}
+              repo={repo}
               selected={task.id === selected}
             />
           ))}
@@ -304,51 +323,63 @@ export const BoardLanesView = ({
   boardId,
   board,
   faces,
+  repo: slug,
   selected,
 }: {
   readonly boardId: BoardInstanceId;
   readonly board: BoardLanes;
   readonly faces: ReadonlyMap<string, BoardCard>;
+  /** The board's repository: its row is read once here, whatever the number of cards. */
+  readonly repo: RepoSlug;
   readonly selected: string | undefined;
-}) => (
-  <div className="flex min-h-0 flex-1 flex-col">
-    <div
-      role="group"
-      aria-label="Lanes"
-      className="flex min-h-0 flex-1 overflow-x-auto"
-    >
-      {board.lanes.map((lane) => (
-        <BoardLane
-          key={lane.column.name}
-          boardId={boardId}
-          column={lane.column}
-          cards={lane.cards}
-          faces={faces}
-          selected={selected}
-        />
-      ))}
-    </div>
-    {board.strays.length === 0 ? null : (
-      <section
-        aria-label="Cards outside this definition"
-        className="border-t border-border px-3 py-2"
+}) => {
+  // The last good answer: a poll that fails keeps the score on the cards, and a repo with no row
+  // (a registry that never saw the slug) answers an error, which is no score.
+  const repo = Option.getOrUndefined(
+    AsyncResult.value(useAtomValue(repoAtom(slug))),
+  );
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div
+        role="group"
+        aria-label="Lanes"
+        className="flex min-h-0 flex-1 overflow-x-auto"
       >
-        <p className="mb-2 text-xs text-destructive">
-          {board.strays.length} card(s) sit in a column this definition does not
-          declare.
-        </p>
-        <ul className="flex flex-wrap gap-2">
-          {board.strays.map((task) => (
-            <TaskCard
-              key={task.id}
-              boardId={boardId}
-              task={task}
-              card={faces.get(task.id)}
-              selected={task.id === selected}
-            />
-          ))}
-        </ul>
-      </section>
-    )}
-  </div>
-);
+        {board.lanes.map((lane) => (
+          <BoardLane
+            key={lane.column.name}
+            boardId={boardId}
+            column={lane.column}
+            cards={lane.cards}
+            faces={faces}
+            repo={repo}
+            selected={selected}
+          />
+        ))}
+      </div>
+      {board.strays.length === 0 ? null : (
+        <section
+          aria-label="Cards outside this definition"
+          className="border-t border-border px-3 py-2"
+        >
+          <p className="mb-2 text-xs text-destructive">
+            {board.strays.length} card(s) sit in a column this definition does
+            not declare.
+          </p>
+          <ul className="flex flex-wrap gap-2">
+            {board.strays.map((task) => (
+              <TaskCard
+                key={task.id}
+                boardId={boardId}
+                task={task}
+                card={faces.get(task.id)}
+                repo={repo}
+                selected={task.id === selected}
+              />
+            ))}
+          </ul>
+        </section>
+      )}
+    </div>
+  );
+};

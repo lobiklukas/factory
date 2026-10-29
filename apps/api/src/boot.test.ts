@@ -486,7 +486,29 @@ describe("checkDeployment on a booted API (E8)", () => {
     expect(exit.value.repos).toEqual([]);
     expect(typeof exit.value.reposError).toBe("string");
     expect(asked).not.toContain(TOKEN);
+    // No `SETUP_TIMEOUT_SECONDS`: the harness's default bound.
+    expect(exit.value.setupTimeoutSeconds).toBe(1_800);
   }, 30_000);
+
+  it("reports the SETUP_TIMEOUT_SECONDS the deployment set, and refuses a malformed one at boot (F24)", async () => {
+    const { code, output, asked } = await boot(
+      { MODEL_BACKEND: "faux", SETUP_TIMEOUT_SECONDS: "5400" },
+      checkDeployment,
+    );
+    expect(code, output).toBeNull();
+    const line = asked?.split("\n").find((text) => text.includes('"Exit"'));
+    expect(JSON.parse(line ?? "{}").exit.value.setupTimeoutSeconds).toBe(5400);
+    for (const bad of ["0", "soon", "-1"]) {
+      const refused = await boot({
+        MODEL_BACKEND: "faux",
+        SETUP_TIMEOUT_SECONDS: bad,
+      });
+      expect(refused.code, refused.output).not.toBeNull();
+      expect(refused.code, refused.output).not.toBe(0);
+      expect(refused.output).toContain("SETUP_TIMEOUT_SECONDS");
+      expect(refused.output).not.toContain(LISTENING);
+    }
+  }, 90_000);
 });
 
 /**
