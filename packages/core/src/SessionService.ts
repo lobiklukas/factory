@@ -365,6 +365,7 @@ import {
   checkoutDefaultBranch,
   inspectCheckout,
   refExists,
+  REGISTRATION_GIT_TIMEOUT_MS,
   resolveCommit,
   workTreeRoot,
 } from "./repos";
@@ -3131,7 +3132,10 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               message: `repo ${repo}: local path ${localPath} is not an absolute path`,
             });
           }
-          if ((yield* workTreeRoot(localPath)) === undefined) {
+          const root = yield* workTreeRoot(localPath, {
+            timeoutMs: REGISTRATION_GIT_TIMEOUT_MS,
+          });
+          if (root === undefined) {
             return yield* new SessionErrorClass({
               code: "invalid_input",
               message: `repo ${repo}: local path ${localPath} is not a git work tree`,

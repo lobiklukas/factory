@@ -43,6 +43,13 @@ const NO_CHECKOUT: CheckoutFacts = {
 const GIT_TIMEOUT_MS = 5_000;
 
 /**
+ * How long a registration waits for the same answer (`workTreeRoot`'s `timeoutMs`): a refusal is the
+ * operator's to act on, and a loaded machine outlived the five seconds on a real checkout, which was
+ * then refused as no work tree (DEFLAKE). A read keeps the probe's deadline.
+ */
+export const REGISTRATION_GIT_TIMEOUT_MS = 60_000;
+
+/**
  * The root of the git work tree `directory` is inside, or `undefined` when it is not inside one.
  *
  * `rev-parse --is-inside-work-tree` prints `false` (and exits 0) inside a `.git` directory, so the
@@ -52,6 +59,7 @@ const GIT_TIMEOUT_MS = 5_000;
  */
 export const workTreeRoot = (
   directory: string,
+  options: { readonly timeoutMs?: number } = {},
 ): Effect.Effect<string | undefined> =>
   Effect.callback<string | undefined>((resume, signal) => {
     execFile(
@@ -67,7 +75,11 @@ export const workTreeRoot = (
         "--is-inside-work-tree",
         "--show-toplevel",
       ],
-      { encoding: "utf8", signal, timeout: GIT_TIMEOUT_MS },
+      {
+        encoding: "utf8",
+        signal,
+        timeout: options.timeoutMs ?? GIT_TIMEOUT_MS,
+      },
       // stderr is dropped: a path that is not a repository is an answer, not a log line.
       (error, stdout) => {
         const [inside, root] = stdout.split("\n").map((line) => line.trim());
