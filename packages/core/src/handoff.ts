@@ -94,6 +94,9 @@ const git = (
           }),
         ),
     );
+    // A git that exits without reading its stdin (a refused call, `git apply` on a bad patch) closes the
+    // pipe under the write: EPIPE here is the child's exit, which the callback already reports.
+    child.stdin?.on("error", () => undefined);
     child.stdin?.end(input ?? "");
   });
 
