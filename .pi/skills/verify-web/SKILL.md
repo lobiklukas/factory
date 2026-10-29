@@ -317,7 +317,7 @@ the typed multi-line prompt to be the session's first user entry verbatim, a ses
 and base ref to be listed with both and to work in a `factory/<session-id>` worktree cut from that
 ref, a repo whose base ref the checkout lacks to be refused inline in the server's words and to leave
 no `sessions` row (read from the table over TCP), and an answer to a form the person closed to be a
-toast rather than lost or pulled into a later form (`features/session-new.md`). Evidence goes to `.verify/evidence/latest/session-new/`.
+toast rather than lost or pulled into a later form (`features/session-new.md`). It also proves the session pane's line of what the run was told about its repository (F19, F20: the instruction file read, its bytes and tokens, the skills and nested files, a truncated file, `no repo instructions`) and the form's "Open a PR when done" box (F17), against a loopback GitHub fake whose ledger is the oracle (`SESSION_NEW_GITHUB_PORT`, default 9462). Evidence goes to `.verify/evidence/latest/session-new/`.
 
 ### The New session model picker
 

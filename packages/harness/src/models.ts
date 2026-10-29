@@ -22,6 +22,7 @@ import type {
   AssistantMessage,
   AssistantMessageEventStream,
   AuthContext,
+  JsonObject,
   Message,
   ToolCall,
 } from "@earendil-works/pi-ai";
@@ -455,6 +456,7 @@ export const fauxAnswer = (
   review: readonly FauxSpecAttempt[] = [],
   plan?: string,
   planAttempts: readonly FauxSpecAttempt[] = [],
+  toolCalls: readonly FauxToolCall[] = [],
 ): AssistantMessage => {
   // A compaction asks for a summary of a transcript rather than for a turn: it has to answer with
   // text, because a tool call there fails the compaction and the run that waited for it.
@@ -496,6 +498,17 @@ export const fauxAnswer = (
     return fauxAssistantMessage(fauxToolCall(VERIFY_TOOL, {}), {
       stopReason: "toolUse",
     });
+  }
+  // The scripted calls (S-agent-mcp-tools), in order, each until the turn holds its result — a
+  // blocked or unknown call's result counts, so a refused call is made once rather than forever.
+  const pendingCall = toolCalls.find(
+    (call) => toolResultText(turn, call.tool) === undefined,
+  );
+  if (pendingCall !== undefined) {
+    return fauxAssistantMessage(
+      fauxToolCall(pendingCall.tool, { ...pendingCall.arguments }),
+      { stopReason: "toolUse" },
+    );
   }
   const specAttempt = nextSpecAttempt(messages, spec);
   if (specAttempt !== undefined) {
@@ -637,6 +650,13 @@ export type ModelAccessOptions = {
    */
   readonly fauxFail?: FauxFail | undefined;
   /**
+   * Tool calls the faux makes after its `bash` (and `verify`) step, one a response, each once a turn
+   * when `fauxEveryTurn` is set and once a session otherwise (S-agent-mcp-tools, `FAUX_MCP_CALLS`):
+   * how a drive calls an MCP tool — or one it was not offered — without a model choosing to.
+   * Absent: none.
+   */
+  readonly fauxMcpCalls?: readonly FauxToolCall[] | undefined;
+  /**
    * A script per published faux model id, overriding `fauxCommand` and `fauxVerify` for a request
    * made under that model (LOB-86). Under the faux backend a model *is* its script, so a role that
    * runs another model (`ROLE_MODELS`, LOB-207) is how one process plays two kinds of run: a
@@ -756,6 +776,53 @@ export const FAUX_FAIL_MESSAGE =
  * context the model is sent, so a compaction that drops answers can bring it back under the count.
  */
 export type FauxFail = { readonly afterAnswers: number };
+
+/** One tool call the faux makes after its `bash` step (`FAUX_MCP_CALLS`). */
+export type FauxToolCall = {
+  readonly tool: string;
+  readonly arguments: JsonObject;
+};
+
+/** `FAUX_MCP_CALLS` is not a JSON array of `{ tool, arguments? }`. */
+export class InvalidFauxMcpCalls extends Schema.TaggedError<InvalidFauxMcpCalls>()(
+  "InvalidFauxMcpCalls",
+  { message: Schema.String },
+) {}
+
+const FauxToolCallsJson = Schema.fromJsonString(
+  Schema.Array(
+    Schema.Struct({
+      tool: Schema.String,
+      arguments: Schema.optional(Schema.Record(Schema.String, Schema.Json)),
+    }),
+  ),
+);
+
+/**
+ * Read `FAUX_MCP_CALLS` (S-agent-mcp-tools): a JSON array of `{ "tool", "arguments"? }`, the calls
+ * the faux makes after its `bash` step, in order. Blank is none; anything else fails the boot.
+ */
+export const parseFauxMcpCalls = (
+  text: string,
+): Effect.Effect<readonly FauxToolCall[], InvalidFauxMcpCalls> =>
+  text.trim() === ""
+    ? Effect.succeed([])
+    : Schema.decodeEffect(FauxToolCallsJson)(text, {
+        onExcessProperty: "error",
+      }).pipe(
+        Effect.map((calls) =>
+          calls.map((call) => ({
+            tool: call.tool,
+            arguments: call.arguments ?? {},
+          })),
+        ),
+        Effect.mapError(
+          (error) =>
+            new InvalidFauxMcpCalls({
+              message: `FAUX_MCP_CALLS is not a JSON array of { tool, arguments? }: ${error.message.replace(/\n\s*/g, " ")}`,
+            }),
+        ),
+      );
 
 /** `FAUX_FAIL` (or a script's `fail`) is not `model_error` or `model_error:<answers>`. */
 export class InvalidFauxFail extends Schema.TaggedError<InvalidFauxFail>()(
@@ -991,6 +1058,7 @@ export const createFauxModelAccess = (
         options.fauxReview ?? [],
         options.fauxPlanFreshness,
         script?.plan ?? [],
+        options.fauxMcpCalls ?? [],
       );
     return sleepMs > 0 && isFauxTurnStep(context.messages)
       ? fauxNap(sleepMs, streamOptions?.signal).then(answer)

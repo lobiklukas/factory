@@ -51,6 +51,8 @@ own instance of `apps/api` and record it in `.verify/run/api.pid`, so run them o
 | `factory board block\|unblock\|attention\|runs` (LOB-264)                     | not here: verify-board `./drive.sh`'s triage phase                                                                        | the card and its runs are the server's, never a local guess             |
 | `factory board vocabulary` / `define` / `definition show --json` (F5, F7, F8) | not here: verify-board `./definitions.sh` (vocabulary against the RPC) and `./define.sh` (show --json round trip, author) | the file an author edits is the file `define` takes, and names its keys |
 | `factory board add` (LOB-261)                                                 | not here: verify-board `./drive.sh`'s add phase (features/add.md)                                                         | the card is the server's row, read back, never a local guess            |
+| `factory run --open-pr` (F17)                                                 | `./open-pr.sh`: the PR opens at the settle against a GitHub fake; none without the flag or a change                       | a person's session can opt in to "delegate, get a PR"                   |
+| `factory show` (F19, F20)                                                     | `./repo-context.sh`: the `context` line (file read, size, skills, truncation); AGENTS.md wins over CLAUDE.md              | an operator reads what a run was told                                   |
 
 Every check is required: `drive.sh` exits non-zero when one fails.
 
@@ -67,6 +69,8 @@ Every check is required: `drive.sh` exits non-zero when one fails.
 ./replay.sh      # self-contained: its own API on :9360 (REPLAY_PORT), a checkout, and a second faux model
 ./session.sh     # self-contained: its own API on :9390 (SESSION_PORT), a checkout it registers, FAUX_COST
 ./clone.sh       # self-contained: its own API on :9350 (CLONE_PORT) and a loopback git forge on :9351
+./open-pr.sh     # self-contained: its own API on :9392 (OPEN_PR_PORT) and a GitHub fake on :9393 (OPEN_PR_GITHUB_PORT)
+./repo-context.sh # self-contained: its own API on :9394 (CONTEXT_PORT) and fixture checkouts
 ./repo.sh        # needs ./up.sh's instance (API_URL/API_PORT); drive.sh runs it before approve.sh
 ./skill.sh       # needs ./up.sh's instance (API_URL/API_PORT); drive.sh runs it after repo.sh
 ./preflight.sh   # self-contained: `factory doctor` against its own APIs on :9480 (DOCTOR_PORT), :9481, :9482

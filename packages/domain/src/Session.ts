@@ -323,6 +323,13 @@ export const TranscriptEntry = Schema.Struct({
   toolName: Schema.optional(Schema.String),
   isError: Schema.optional(Schema.Boolean),
   error: Schema.optional(Schema.String),
+  /**
+   * Set on the entries a settled run's PR step announces when it opened no PR (F17): an unchanged
+   * branch, a refusal, a push of later commits. Their kind is `other`, as every entry this package
+   * writes is, so a reader that waits for the step's answer (`factory run --open-pr`) matches this
+   * flag instead of taking any `other` entry — an approval or a page the run wrote — for it.
+   */
+  prStep: Schema.optional(Schema.Boolean),
 });
 export type TranscriptEntry = typeof TranscriptEntry.Type;
 
@@ -915,6 +922,14 @@ export const CreateSessionInput = Schema.Struct({
    * else the deployment's.
    */
   model: Schema.optional(Schema.String),
+  /**
+   * Open the session's pull request when its run settles with a change (F17, `@repo/core`'s
+   * `prOnSettle`). A person's session keeps its PR their call (`factory pr`, "Open pull request");
+   * this is how they say at the start that it opens by itself. Recorded in the session's log, so a
+   * rebuild keeps it. Requires `repo` and no `taskId`: a scratch session has no PR to open, and a
+   * card's run opens its PR by its column. Absent or `false`: nothing changes.
+   */
+  openPrOnSettle: Schema.optional(Schema.Boolean),
 });
 export type CreateSessionInput = typeof CreateSessionInput.Type;
 

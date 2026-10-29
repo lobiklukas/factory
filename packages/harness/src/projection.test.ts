@@ -245,4 +245,17 @@ describe("projectEntry on the no-change entry (F18)", () => {
     const current = "no change: the branch has nothing to publish against main";
     expect(projectEntry(noChange(current)).text).toBe(current);
   });
+
+  it("flags the PR step's own entries, and no other entry of kind other (F17)", () => {
+    expect(projectEntry(noChange("no change")).prStep).toBe(true);
+    const approval: EntryRecord = {
+      id: 10 as EntryId,
+      conversationId: ROOT_CONVERSATION_ID,
+      kind: "factory.approval.requested",
+      data: {},
+    };
+    const projected = projectEntry(approval);
+    expect(projected.kind).toBe("other");
+    expect(projected.prStep).toBeUndefined();
+  });
 });

@@ -16,14 +16,25 @@
 //   refuse    a repo whose base ref the checkout does not have is refused by the server, and the form
 //             shows the server's own message inline, keeps the prompt, and stays on `/sessions`; the
 //             refused create leaves no `sessions` row on that repo (read from the table over TCP)
+//   context   (F19) the pane's line of what the run was told: a session on the widgets repo (AGENTS.md,
+//             two skills, a nested AGENTS.md) says `told AGENTS.md (<bytes> bytes, <tokens> tokens) and
+//             2 repo skills ...` with the bytes the file has and the tokens `getSessionContext` records;
+//             a repo that keeps only CLAUDE.md says it read CLAUDE.md; a file far over the cap is
+//             called out as truncated; a bare repo and a scratch session say `no repo instructions`
+//   openpr    (F17) the form's "Open a PR when done" box is off and disabled with no repo and on-able
+//             with one; ticked on a repo whose run commits, the createSession carries
+//             `openPrOnSettle`, the session's PR is opened at the settle (the fake GitHub's ledger holds
+//             one create for `factory/<id>`, the pane links it); unticked, or ticked on a repo whose run
+//             changes nothing, the ledger holds none
 //   late      an answer to an opening the person closed is a toast: a refusal says no session was
 //             created in the server's words, and a session landing while a later opening is being
 //             typed into leaves that form open and its text kept, with a toast whose Open opens it
 //             (the page's `createSession` is held for a moment so the close lands first)
 //
-// Env: WEB_URL, API_URL, EVIDENCE_DIR, RUN_DIR, DATABASE_URL.
+// Env: WEB_URL, API_URL, EVIDENCE_DIR, RUN_DIR, LEDGER (the fake GitHub's ledger file), DATABASE_URL.
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { chromium } from "@playwright/test";
@@ -35,6 +46,8 @@ const EVIDENCE_DIR =
 const RUN_DIR = path.resolve(
   process.env["RUN_DIR"] ?? ".verify/run/session-new",
 );
+const LEDGER =
+  process.env["LEDGER"] ?? path.join(RUN_DIR, "github-ledger.json");
 const DATABASE_URL =
   process.env["DATABASE_URL"] ??
   "postgres://factory:factory@localhost:5442/factory";
@@ -42,9 +55,17 @@ const DATABASE_URL =
 const TAG = randomBytes(4).toString("hex");
 const WIDGETS = `verify-session-new-${TAG}/widgets`;
 const BROKEN = `verify-session-new-${TAG}/broken`;
+const CLAUDE = `verify-session-new-${TAG}/claude`;
+const LONG = `verify-session-new-${TAG}/long`;
+const BARE = `verify-session-new-${TAG}/bare`;
+const SHIP = `verify-session-new-${TAG}/ship`;
+const QUIET = `verify-session-new-${TAG}/quiet`;
 const CHECKOUTS = path.join(RUN_DIR, "checkouts", TAG);
 const WIDGETS_DIR = path.join(CHECKOUTS, "widgets");
 const BROKEN_DIR = path.join(CHECKOUTS, "broken");
+const dirOf = (name) => path.join(CHECKOUTS, name);
+// What the widgets repo tells a run (F19): the file the pane's byte count is checked against.
+const WIDGETS_AGENTS = `# Widgets rules (${TAG})\n\n- Run the repository's check before you finish.\n- Say what it printed.\n`;
 // The base ref the drive types: a branch only the widgets checkout has, so a worktree on it can only
 // have come from the field.
 const BASE = "release/1.2";
@@ -60,7 +81,16 @@ const git = (args) => {
     throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
   return result.stdout.trim();
 };
-for (const dir of [WIDGETS_DIR, BROKEN_DIR]) {
+const REPO_DIRS = {
+  widgets: WIDGETS_DIR,
+  broken: BROKEN_DIR,
+  claude: dirOf("claude"),
+  long: dirOf("long"),
+  bare: dirOf("bare"),
+  ship: dirOf("ship"),
+  quiet: dirOf("quiet"),
+};
+for (const dir of Object.values(REPO_DIRS)) {
   git(["init", "-q", "-b", "main", dir]);
   git([
     "-C",
@@ -76,6 +106,46 @@ for (const dir of [WIDGETS_DIR, BROKEN_DIR]) {
     "seed",
   ]);
 }
+// What each fixture repo says on its base, as one more commit on main (F17, F19): the widgets repo's
+// instruction file, two skills and a nested file; a repo with only CLAUDE.md; one whose AGENTS.md is far
+// past the cap; a bare one; and the repo whose run commits (the marker the API's faux command reads).
+const commitFiles = (dir, files) => {
+  for (const [file, content] of Object.entries(files)) {
+    const target = path.join(dir, file);
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, content);
+  }
+  git(["-C", dir, "add", "-A"]);
+  git([
+    "-C",
+    dir,
+    "-c",
+    "user.email=verify-session-new@localhost",
+    "-c",
+    "user.name=verify-session-new",
+    "commit",
+    "-q",
+    "-m",
+    "context",
+  ]);
+};
+commitFiles(WIDGETS_DIR, {
+  "AGENTS.md": WIDGETS_AGENTS,
+  ".pi/skills/probe-a/SKILL.md":
+    "---\nname: probe-a\ndescription: Probe the first thing.\n---\n\nbody a\n",
+  ".agents/skills/probe-b/SKILL.md":
+    "---\nname: probe-b\ndescription: Probe the second thing.\n---\n\nbody b\n",
+  "packages/web/AGENTS.md": "# Web rules (nested)\n",
+});
+commitFiles(REPO_DIRS.claude, {
+  "CLAUDE.md": "# Claude rules\n\n- Use bun.\n",
+});
+commitFiles(REPO_DIRS.long, {
+  "AGENTS.md": `${Array.from({ length: 3000 }, (_, line) => `- rule ${line}: keep the gate green`).join("\n")}\n`,
+});
+commitFiles(REPO_DIRS.bare, { "README.md": "nothing for agents\n" });
+commitFiles(REPO_DIRS.ship, { ".verify-ship": "1\n", "README.md": "ship\n" });
+commitFiles(REPO_DIRS.quiet, { "README.md": "quiet\n" });
 // One commit ahead of main, so a worktree cut from it is told apart from one cut from main.
 git(["-C", WIDGETS_DIR, "checkout", "-q", "-b", BASE]);
 git([
@@ -247,6 +317,15 @@ try {
     localPath: BROKEN_DIR,
     defaultBaseRef: "trunk",
   });
+  for (const [slug, name] of [
+    [CLAUDE, "claude"],
+    [LONG, "long"],
+    [BARE, "bare"],
+    [SHIP, "ship"],
+    [QUIET, "quiet"],
+  ]) {
+    await rpc("registerRepo", { repo: slug, localPath: REPO_DIRS[name] });
+  }
 
   // --- open: a press opens the form and creates nothing ---------------------------------------
   const before = await sessionIds();
@@ -475,6 +554,223 @@ try {
     path: path.join(EVIDENCE_DIR, "session-new-repo.png"),
     fullPage: true,
   });
+
+  // --- context: what the run was told about its repository (F19) -----------------------------------
+  const contextLine = async (sessionId) => {
+    await page.goto(`${WEB_URL}/sessions/${sessionId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    const line = page.locator("[data-session-context]");
+    await line.waitFor({ timeout: 20_000 });
+    return {
+      text: (await line.textContent())?.trim() ?? "",
+      kind: await line.getAttribute("data-session-context"),
+      truncated:
+        (await line.getAttribute("data-session-context-truncated")) !== null,
+    };
+  };
+  const onRepo = async (repo) => {
+    const created = await rpc("createSession", {
+      repo,
+      baseRef: "main",
+      title: `context ${repo}`,
+      actor: "dashboard",
+    });
+    return created.id;
+  };
+  const widgetsContext = await contextLine(repoId);
+  const widgetsRecord = (await rpc("getSessionContext", { sessionId: repoId }))
+    .repo;
+  const claudeId = await onRepo(CLAUDE);
+  const claudeContext = await contextLine(claudeId);
+  const longId = await onRepo(LONG);
+  const longContext = await contextLine(longId);
+  const bareId = await onRepo(BARE);
+  const bareContext = await contextLine(bareId);
+  const scratchContext = await contextLine(scratchId);
+  observed.context = {
+    widgets: widgetsContext,
+    widgetsRecord,
+    claude: claudeContext,
+    long: longContext,
+    bare: bareContext,
+    scratch: scratchContext,
+  };
+  assert(
+    "the pane says the session told AGENTS.md's bytes and tokens, its skills and the nested file",
+    widgetsRecord?.instructions?.path === "AGENTS.md" &&
+      widgetsRecord.instructions.bytes === Buffer.byteLength(WIDGETS_AGENTS) &&
+      widgetsRecord.instructions.tokens > 0 &&
+      widgetsContext.text ===
+        `told AGENTS.md (${widgetsRecord.instructions.bytes} bytes, ${widgetsRecord.instructions.tokens} tokens) and 2 repo skills and 1 nested AGENTS.md listed` &&
+      !widgetsContext.truncated,
+    JSON.stringify(observed.context.widgets),
+  );
+  assert(
+    "a repo that keeps only CLAUDE.md is told CLAUDE.md, and the pane names it",
+    claudeContext.text.startsWith("told CLAUDE.md (") &&
+      !claudeContext.truncated,
+    JSON.stringify(claudeContext),
+  );
+  assert(
+    "a file far over the cap is called out as truncated",
+    longContext.truncated &&
+      longContext.text.startsWith("told AGENTS.md (") &&
+      longContext.text.includes("truncated"),
+    JSON.stringify(longContext),
+  );
+  assert(
+    "a repo with neither file nor skills, and a scratch session, say no repo instructions",
+    bareContext.text === "no repo instructions" &&
+      scratchContext.text === "no repo instructions" &&
+      scratchContext.kind === "none",
+    JSON.stringify({ bare: bareContext, scratch: scratchContext }),
+  );
+  await contextLine(repoId);
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "session-new-context.png"),
+    fullPage: true,
+  });
+
+  // --- openpr: "Open a PR when done" (F17) -------------------------------------------------------
+  const ledger = () => JSON.parse(readFileSync(LEDGER, "utf8"));
+  const pullsFor = (sessionId) =>
+    ledger().pulls.filter((pull) => pull.head === `factory/${sessionId}`);
+  /** Wait for the session's run to settle: idle, with an assistant answer in the transcript. */
+  const settled = async (sessionId) => {
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      const snapshot = await rpc("getSession", { sessionId });
+      if (
+        !snapshot.live.busy &&
+        snapshot.entries.some((entry) => entry.kind === "assistant")
+      )
+        return snapshot;
+      await sleep(100);
+    }
+    throw new Error(`session ${sessionId}'s run never settled`);
+  };
+  const startOn = async (repo, { openPr }) => {
+    await openForm();
+    await page.waitForSelector(`#new-session-repo option[value='${repo}']`, {
+      state: "attached",
+      timeout: 15_000,
+    });
+    await prompt().fill(`Ship it on ${repo} (${TAG}).`);
+    await page.locator("#new-session-repo").selectOption(repo);
+    if (openPr) await page.locator("#new-session-open-pr").check();
+    const sentBefore = creates.length;
+    const sessionId = await submitAndFollow();
+    return { sessionId, body: creates.at(sentBefore)?.body ?? "" };
+  };
+
+  await openForm();
+  const box = page.locator("#new-session-open-pr");
+  const noRepoBox = {
+    checked: await box.isChecked(),
+    disabled: await box.isDisabled(),
+  };
+  await page.waitForSelector(`#new-session-repo option[value='${SHIP}']`, {
+    state: "attached",
+    timeout: 15_000,
+  });
+  await page.locator("#new-session-repo").selectOption(SHIP);
+  const repoBox = {
+    checked: await box.isChecked(),
+    disabled: await box.isDisabled(),
+  };
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "session-new-open-pr-box.png"),
+    fullPage: true,
+  });
+  assert(
+    '"Open a PR when done" is off by default, disabled with no repo and enabled with one',
+    !noRepoBox.checked &&
+      noRepoBox.disabled &&
+      !repoBox.checked &&
+      !repoBox.disabled,
+    JSON.stringify({ noRepoBox, repoBox }),
+  );
+
+  const asked = await startOn(SHIP, { openPr: true });
+  await settled(asked.sessionId);
+  let askedPr;
+  for (let attempt = 0; attempt < 300 && askedPr === undefined; attempt += 1) {
+    askedPr = (await rpc("getSession", { sessionId: asked.sessionId })).session
+      .prUrl;
+    if (askedPr === undefined) await sleep(100);
+  }
+  const askedPulls = pullsFor(asked.sessionId);
+  const linkVisible =
+    askedPr === undefined
+      ? false
+      : await page
+          .locator(`a[href="${askedPr}"]`)
+          .first()
+          .waitFor({ timeout: 15_000 })
+          .then(
+            () => true,
+            () => false,
+          );
+  observed.openPr = { asked: { ...asked, prUrl: askedPr, pulls: askedPulls } };
+  assert(
+    "ticked, the createSession carries openPrOnSettle and the run's settle opens exactly one PR on the session's branch",
+    asked.body.includes('"openPrOnSettle":true') &&
+      askedPr !== undefined &&
+      askedPulls.length === 1 &&
+      askedPr === askedPulls[0].url,
+    JSON.stringify(observed.openPr.asked),
+  );
+  assert(
+    "the session pane links the PR the settle opened",
+    linkVisible,
+    askedPr ?? "no PR",
+  );
+  await page.screenshot({
+    path: path.join(EVIDENCE_DIR, "session-new-open-pr.png"),
+    fullPage: true,
+  });
+
+  const unticked = await startOn(SHIP, { openPr: false });
+  await settled(unticked.sessionId);
+  await sleep(4_000);
+  const untickedSnapshot = await rpc("getSession", {
+    sessionId: unticked.sessionId,
+  });
+  assert(
+    "unticked, the same repo's run settles with a change and opens no PR: the person's call",
+    !unticked.body.includes("openPrOnSettle") &&
+      untickedSnapshot.session.prUrl === undefined &&
+      pullsFor(unticked.sessionId).length === 0,
+    JSON.stringify({
+      body: unticked.body,
+      prUrl: untickedSnapshot.session.prUrl ?? null,
+    }),
+  );
+
+  const requestsBefore = ledger().requests.length;
+  const quiet = await startOn(QUIET, { openPr: true });
+  await settled(quiet.sessionId);
+  let quietSnapshot;
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    quietSnapshot = await rpc("getSession", { sessionId: quiet.sessionId });
+    if (quietSnapshot.entries.some((entry) => entry.text.includes("no change")))
+      break;
+    await sleep(100);
+  }
+  assert(
+    "ticked on a repo whose run changes nothing, the settle says there is no change and asks the forge for nothing",
+    quiet.body.includes('"openPrOnSettle":true') &&
+      quietSnapshot?.entries.some((entry) =>
+        entry.text.includes("no change"),
+      ) === true &&
+      quietSnapshot.session.prUrl === undefined &&
+      ledger().requests.length === requestsBefore,
+    JSON.stringify({
+      requests: ledger().requests.length,
+      before: requestsBefore,
+      prUrl: quietSnapshot?.session.prUrl ?? null,
+    }),
+  );
 
   // --- refuse: the server's error, inline ---------------------------------------------------------
   await openForm();
