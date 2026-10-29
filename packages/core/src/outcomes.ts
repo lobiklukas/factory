@@ -54,7 +54,8 @@
  *   (LOB-254) counts under that rule's source — the card's `created` event names `trigger:<source>`
  *   as its actor — and a run of a card anybody else filed under `board`.
  * - `actors.repeat`: of the people who started a session in the window (`sessions.actor`, not a
- *   trigger's `trigger:<source>`), the share who started more than one.
+ *   trigger's `trigger:<source>` nor an automation's `automation:<id>`), the share who started more
+ *   than one.
  *
  * **Cost** (`cost`), over the same sessions: `total` and `per_session`, in the dollars
  * `session_activity.cost_total` holds (LOB-17) — the list's own number, so the two reconcile.
@@ -601,7 +602,12 @@ export const deriveOutcomes = (
   }
   const perPerson = new Map<string, number>();
   for (const session of created) {
-    if (session.actor === null || session.actor.startsWith("trigger:"))
+    // A trigger (`trigger:<source>`) and a scheduled automation (`automation:<id>`) are no person.
+    if (
+      session.actor === null ||
+      session.actor.startsWith("trigger:") ||
+      session.actor.startsWith("automation:")
+    )
       continue;
     perPerson.set(session.actor, (perPerson.get(session.actor) ?? 0) + 1);
   }

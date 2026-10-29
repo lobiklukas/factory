@@ -190,6 +190,13 @@ The scoped secrets checks (S-agent-secrets) were run from the `agent/S-agent-sec
 every evidence file and the API's log for the value), evidence `.verify/evidence/latest/api/secrets.json`
 and `secrets-board-show.txt`. See [secrets.md](secrets.md).
 
+The scheduled automations checks (S-general-automations) were run from the
+`agent/S-general-automations` worktree on 2026-10-29 (`API_PORT=9530`, faux,
+`DATABASE_URL=…/factory_agent_s_general_automations` on 5442): `./automations.sh` **15/15** (3 checks
+before the restart, 11 after it, and the two API logs: the first process started the minute and the
+restarted one did not), evidence `.verify/evidence/latest/api/automations-before.json`,
+`automations-after.json` and both API logs. See [automations.md](automations.md).
+
 The repo instructions and skills checks (S-repo-instructions-and-skills) were run from the
 `agent/S-repo-instructions-and-skills` worktree on 2026-10-28 (`API_PORT=9530`, faux,
 `DATABASE_URL=…/factory_agent_s_repo_instructions_and_skills` on 5442): `./repo-context.sh` **9/9**,
@@ -361,6 +368,7 @@ one place it can be flaky: its windows are the UTC day. See [limits.md](limits.m
 | A worktree's setup       | passing | [setup.md](setup.md)                         |
 | Repo instructions        | passing | [repo-context.md](repo-context.md)           |
 | Scoped secrets           | passing | [secrets.md](secrets.md)                     |
+| Scheduled automations    | passing | [automations.md](automations.md)             |
 | Repo policy              | passing | [repo-policy.md](repo-policy.md)             |
 | PR evidence block        | passing | [pr-evidence.md](pr-evidence.md)             |
 | The spec document        | passing | [spec.md](spec.md)                           |
