@@ -25,7 +25,11 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { RpcApi } from "@repo/domain/Rpc";
-import { RepoSlug, type SessionSnapshot } from "@repo/domain/Session";
+import {
+  RepoSlug,
+  type SessionId,
+  type SessionSnapshot,
+} from "@repo/domain/Session";
 import { readPolicyRecord } from "@repo/harness";
 import { startFakeMcpServer } from "@repo/harness/mcpFake";
 import { DatabaseLive, PostgresStorage } from "@repo/storage-postgres";
@@ -129,7 +133,7 @@ const program = Effect.gen(function* () {
   const sql = yield* SqlClient;
 
   /** Send, and wait for the turn to settle with one more result of the last scripted call. */
-  const turn = (sessionId: SessionSnapshot["id"], content: string) =>
+  const turn = (sessionId: SessionId, content: string) =>
     Effect.gen(function* () {
       const before = results(
         yield* client.getSession({ sessionId }),
