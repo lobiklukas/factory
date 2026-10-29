@@ -29,7 +29,8 @@ if [ -S "$sock" ]; then
 fi
 
 rm -f "$RUN_DIR/board.json" "$RUN_DIR/card.json" "$RUN_DIR/github-ledger.json" "$RUN_DIR/github-mode" \
-  "$RUN_DIR/webhook-secret"
+  "$RUN_DIR/webhook-secret" "$RUN_DIR/github-token" "$RUN_DIR/github-port" "$RUN_DIR/model-backend" \
+  "$RUN_DIR/api-port"
 # The fixture repo goes with the session root: the build runs' worktrees are linked into it.
 rm -rf "$RUN_DIR/sessions" "$RUN_DIR/board-repo"
 echo "run dir cleaned; evidence kept in $ROOT/.verify/evidence"
