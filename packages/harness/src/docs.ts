@@ -246,9 +246,11 @@ export const SkillPinsDoc = defineDoc({
 
 /**
  * What the repository told the session's last open (S-repo-instructions-and-skills, `./repoContext`):
- * the ref and commit its `AGENTS.md` and skills were read at, the instructions' size in bytes and in
+ * the ref and commit its instruction file (`AGENTS.md`, else `CLAUDE.md`, else the Copilot file, F20)
+ * and skills were read at, the instructions' path, size in bytes and in
  * prompt tokens (and whether the cap cut them), and the skills the index listed, dropped for the
- * budget, or left to the column's own skill of the same name.
+ * budget, or left to the column's own skill of the same name, and the nested `AGENTS.md` paths named
+ * beside them (F20).
  *
  * Written by every open of a session on a repository checkout, in the open's one commit, so "what did
  * this run's repo tell it, and what did that cost" is a read rather than a reconstruction; a
@@ -278,6 +280,7 @@ export const RepoPromptDoc = defineDoc({
       tokens: 0,
       cap: 0,
       listed: [] as Array<{ name: string; path: string }>,
+      nested: [] as string[],
       dropped: [] as string[],
       shadowed: [] as string[],
     },

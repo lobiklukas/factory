@@ -210,6 +210,7 @@ import {
   usageCostTotal,
   SESSION_DOC_KIND,
   ACTOR_DOC_KIND,
+  SETTLE_PR_DOC_KIND,
   TASK_DOC_KIND,
   SPEC_DOC_KIND,
   PLAN_DOC_KIND,
@@ -278,6 +279,21 @@ export const ActorDoc = defineDoc({
   history: "latest",
   fork: "current",
   initial: () => ({ actor: "" }),
+});
+
+/**
+ * That the session opens its PR when its run settles (F17), committed to the log so the opt-in
+ * outlives the process and a rebuild of the index. Written once at create, only when asked; a
+ * session that never opted in has no document. A fork or a replay starts from the seed: its PR is
+ * a choice of its own, and the settle rule leaves them out whatever the log says.
+ */
+export const SettlePrDoc = defineDoc({
+  kind: SETTLE_PR_DOC_KIND,
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  initial: () => ({ openOnSettle: false as boolean }),
 });
 
 /** A task's binding, committed to the log so a rebuild can recover it (LOB-60). */
@@ -989,6 +1005,7 @@ export const writePagePrompt = (
                       tokens: 0,
                       cap: 0,
                       listed: [],
+                      nested: [],
                       dropped: [],
                       shadowed: [],
                     };
@@ -1009,6 +1026,7 @@ export const writePagePrompt = (
                           path,
                         }),
                       ),
+                      nested: [...repoPrompt.skills.nested],
                       dropped: [...repoPrompt.skills.dropped],
                       shadowed: [...repoPrompt.skills.shadowed],
                     };
@@ -1207,9 +1225,14 @@ export const readRepoPrompt = (
   Effect.map(readDocument(storage, REPO_PROMPT_DOC_KIND), (value) => {
     if (value === undefined) return undefined;
     const decoded = Schema.decodeUnknownOption(RepoPromptRecordSchema)(value);
-    return Option.isNone(decoded) || decoded.value.skills.cap === 0
-      ? undefined
-      : decoded.value;
+    if (Option.isNone(decoded) || decoded.value.skills.cap === 0)
+      return undefined;
+    const { skills } = decoded.value;
+    // A record written before nested files were listed (F20) has no such field: none were listed.
+    return {
+      ...decoded.value,
+      skills: { ...skills, nested: skills.nested ?? [] },
+    };
   });
 
 /** The record's shape, as a reader of the log checks it (`readRepoPrompt`). */
@@ -1231,6 +1254,7 @@ const RepoPromptRecordSchema = Schema.Struct({
     listed: Schema.Array(
       Schema.Struct({ name: Schema.String, path: Schema.String }),
     ),
+    nested: Schema.optional(Schema.Array(Schema.String)),
     dropped: Schema.Array(Schema.String),
     shadowed: Schema.Array(Schema.String),
   }),
@@ -1489,6 +1513,32 @@ export const writeActor = (
         }),
       BACKGROUND_CONTEXT,
     ),
+  );
+
+/** Commit that the session opens its PR when its run settles (F17). */
+export const writeSettlePr = (
+  conversation: Conversation,
+): Effect.Effect<void, SessionError> =>
+  attempt("write settle PR opt-in", () =>
+    conversation.commit(
+      (tx) =>
+        tx.doc(SettlePrDoc, conversation.id).then((doc) => {
+          doc.openOnSettle = true;
+        }),
+      BACKGROUND_CONTEXT,
+    ),
+  );
+
+/**
+ * Whether the session's log records the opt-in to a PR on settle (F17), read without owning the
+ * log. A log with no document, or one that is not the record's shape, did not opt in.
+ */
+export const readSettlePr = (
+  storage: Storage,
+): Effect.Effect<boolean, SessionError> =>
+  Effect.map(
+    readDocument(storage, SETTLE_PR_DOC_KIND),
+    (value) => value?.["openOnSettle"] === true,
   );
 
 export type TaskBinding = {

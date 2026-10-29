@@ -485,6 +485,101 @@ describe("a settled run's PR (C18)", () => {
     expect(outcome.opened.outcome).toBe("opened");
   }, 120_000);
 
+  /**
+   * F17. Mutations: drop the `writeSettlePr` call in `create` (the opted-in session is a person's
+   * as before); read the flag without `withReader` in `settlePullRequest`'s decision (the index says
+   * undeclared, so it never opens); read it for a card's run (its column decides).
+   */
+  it("a person's session that asked for it opens its PR when the run settles with a change, and none without one (F17)", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        yield* register;
+        const service = yield* SessionService;
+        const before = forge.length;
+        const asked = yield* service.create({
+          title: "a person's change, asked to open",
+          repo: repos.fits.slug,
+          baseRef: "main",
+          openPrOnSettle: true,
+        });
+        yield* service.send({ sessionId: asked.id, content: "change it" });
+        yield* settled(asked.id);
+        const decision = yield* decided(asked.id);
+        const opened = yield* waitUntil(
+          service.get(asked.id),
+          (read) => read.session.prUrl !== undefined,
+          "the asked session's PR",
+        );
+        const forgeAsked = forge.slice(before);
+        // The same ask over a repository the run changes nothing in: nothing to publish.
+        const none = yield* service.create({
+          title: "a person's no-change run, asked to open",
+          repo: repos.even.slug,
+          baseRef: "main",
+          openPrOnSettle: true,
+        });
+        yield* service.send({ sessionId: none.id, content: "look around" });
+        yield* settled(none.id);
+        const noneDecision = yield* decided(none.id);
+        const noneAfter = yield* service.get(none.id);
+        // And one that said nothing, over the same changing repository, is still the person's call.
+        const quiet = yield* service.create({
+          title: "a person's change, not asked",
+          repo: repos.fits.slug,
+          baseRef: "main",
+          openPrOnSettle: false,
+        });
+        yield* service.send({ sessionId: quiet.id, content: "change it" });
+        yield* settled(quiet.id);
+        const quietDecision = yield* decided(quiet.id);
+        return {
+          decision,
+          opened,
+          forgeAsked,
+          recorded: yield* recordedPr(asked.id),
+          noneDecision,
+          noneAfter,
+          quietDecision,
+          quietAfter: yield* service.get(quiet.id),
+        };
+      }),
+    );
+
+    expect(outcome.decision).toEqual(["opened"]);
+    expect(outcome.forgeAsked).toHaveLength(1);
+    expect(outcome.forgeAsked[0]?.url).toBe(`/repos/${repos.fits.slug}/pulls`);
+    expect(outcome.recorded?.url).toBe(outcome.opened.session.prUrl);
+    expect(outcome.noneDecision).toEqual(["no-change"]);
+    expect(outcome.noneAfter.session.prUrl).toBeUndefined();
+    expect(outcome.quietDecision).toEqual(["undeclared"]);
+    expect(outcome.quietAfter.session.prUrl).toBeUndefined();
+  }, 120_000);
+
+  it("an ask for a PR on settle is refused where there is no PR for it to be: a scratch session and a card's run (F17)", async () => {
+    const outcome = await runtime.runPromise(
+      Effect.gen(function* () {
+        yield* register;
+        const service = yield* SessionService;
+        const scratch = yield* Effect.flip(
+          service.create({ title: "scratch", openPrOnSettle: true }),
+        );
+        const card = yield* Effect.flip(
+          service.create({
+            taskId: "no-such-card",
+            repo: repos.fits.slug,
+            openPrOnSettle: true,
+          }),
+        );
+        return { scratch, card };
+      }),
+    );
+
+    expect(outcome.scratch.code).toBe("invalid_input");
+    expect(outcome.scratch.message).toContain("needs a repo");
+    expect(outcome.card.code).toBe("invalid_input");
+    expect(outcome.card.message).toContain("by its column");
+  }, 120_000);
+
   it("a card's building run over the cap opens nothing, and says so in its transcript and on its card", async () => {
     const outcome = await runtime.runPromise(
       Effect.gen(function* () {

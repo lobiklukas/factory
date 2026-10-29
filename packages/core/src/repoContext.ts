@@ -1,6 +1,6 @@
 /**
- * Read what a repository tells a run (S-repo-instructions-and-skills): its `AGENTS.md`, and the
- * skills it ships as `.pi/skills/<name>/SKILL.md` or `.agents/skills/<name>/SKILL.md`, from the
+ * Read what a repository tells a run (S-repo-instructions-and-skills): its `AGENTS.md` (else, F20, its
+ * `CLAUDE.md` or `.github/copilot-instructions.md`), and the skills it ships as `.pi/skills/<name>/SKILL.md` or `.agents/skills/<name>/SKILL.md`, from the
  * session's worktree at the commit its base ref names.
  *
  * **At the base, not the worktree's files.** The run's own branch is the agent's to change, and a run
@@ -13,8 +13,14 @@
  * named by size and path only, and the run is told to read it (`@repo/harness`'s `repoContext` caps
  * what a prompt carries either way). Of a skill only its frontmatter is wanted, so a `SKILL.md` over
  * `REPO_SKILL_READ_BYTES` is listed by its directory name with no description, and at most
- * `REPO_SKILLS_MAX` skills are read at all. An `AGENTS.md` that is a symlink is followed once, to a
- * file inside the repository — the common `AGENTS.md -> CLAUDE.md` layout.
+ * `REPO_SKILLS_MAX` skills are read at all. An instruction file that is a symlink is followed once, to
+ * a file inside the repository — the common `AGENTS.md -> CLAUDE.md` layout.
+ *
+ * **Which file.** The first of `REPO_INSTRUCTION_FILES` that yields instructions, at the same caps and
+ * with the same symlink rule, so `AGENTS.md` wins when a repo has both and the record names the path
+ * that was read. One that exists but cannot be used (a link out of the repository, a directory) is
+ * passed over for the next, and said in `problems`; an empty one is passed over silently. The
+ * `AGENTS.md` files nested in directories are only listed, by path (`readNestedInstructions`).
  *
  * **Never fails the open.** Every git question answers `undefined` on failure (`gitAnswer`), and a
  * repository whose base does not resolve, or a directory that is not the root of a work tree, reads
@@ -25,7 +31,9 @@
 import { Effect } from "effect";
 import { parseSkillDocument } from "@repo/domain/Skill";
 import {
+  REPO_INSTRUCTION_FILES,
   REPO_INSTRUCTIONS_FILE,
+  REPO_NESTED_MAX,
   type RepoContext,
   type RepoInstructions,
   type RepoSkill,
@@ -164,21 +172,20 @@ export const symlinkTargetInRepo = (target: string): string | undefined => {
 /** What one part of the read came to: its value, and what it could not read. */
 type Part<A> = { readonly value: A; readonly problems: readonly string[] };
 
-/** `AGENTS.md` at `commit`, followed through one symlink; `undefined` when there is none. */
-const readInstructions = (
+/**
+ * The instructions at `commit` from one candidate's tree `entry`, followed through one symlink;
+ * an `undefined` value with a problem when it cannot be used.
+ */
+const readInstructionsFile = (
   directory: string,
   commit: string,
+  entry: TreeEntry,
 ): Effect.Effect<Part<RepoInstructions | undefined>> =>
   Effect.gen(function* () {
     const failed = (problem: string) => ({
       value: undefined,
       problems: [problem],
     });
-    const listed = yield* listTree(directory, commit, [REPO_INSTRUCTIONS_FILE]);
-    if (listed === undefined)
-      return failed(`git could not list ${REPO_INSTRUCTIONS_FILE}`);
-    const [entry] = listed;
-    if (entry === undefined) return { value: undefined, problems: [] };
     let file = entry;
     if (isSymlink(entry)) {
       const target = yield* readBlob(directory, entry.object, 4096);
@@ -203,6 +210,71 @@ const readInstructions = (
           value: { path: file.path, bytes: file.bytes, text },
           problems: [],
         };
+  });
+
+/**
+ * The repository's instructions at `commit`: the first of `REPO_INSTRUCTION_FILES` there that
+ * yields some (F20). A candidate that is empty or all whitespace says nothing and is passed over;
+ * one that cannot be read is passed over too, and its problem is kept.
+ */
+const readInstructions = (
+  directory: string,
+  commit: string,
+): Effect.Effect<Part<RepoInstructions | undefined>> =>
+  Effect.gen(function* () {
+    const listed = yield* listTree(directory, commit, REPO_INSTRUCTION_FILES);
+    if (listed === undefined)
+      return {
+        value: undefined,
+        problems: [`git could not list ${REPO_INSTRUCTION_FILES.join(", ")}`],
+      };
+    const problems: string[] = [];
+    for (const candidate of REPO_INSTRUCTION_FILES) {
+      const entry = listed.find((found) => found.path === candidate);
+      if (entry === undefined) continue;
+      const read = yield* readInstructionsFile(directory, commit, entry);
+      problems.push(...read.problems);
+      if (read.value !== undefined && read.value.text?.trim() !== "")
+        return { value: read.value, problems };
+    }
+    return { value: undefined, problems };
+  });
+
+/**
+ * The paths of the `AGENTS.md` files in directories under the root at `commit` (F20), sorted, at
+ * most `REPO_NESTED_MAX` of them. Read from one recursive listing, which a very large tree can
+ * outgrow (`LISTING_MAX_BYTES`, or the time bound): the answer is then no listing, with a problem,
+ * and the run is told only its root file. A symlink named `AGENTS.md` is not a file to list. Names
+ * only, no sizes: `-l` would read every blob's header.
+ */
+const readNestedInstructions = (
+  directory: string,
+  commit: string,
+): Effect.Effect<Part<readonly string[]>> =>
+  Effect.gen(function* () {
+    const output = yield* gitAnswer(
+      directory,
+      ["ls-tree", "-r", "-z", "--end-of-options", commit],
+      {
+        trim: false,
+        maxBuffer: LISTING_MAX_BYTES,
+        timeoutMs: GIT_READ_TIMEOUT_MS,
+      },
+    );
+    if (output === undefined)
+      return {
+        value: [],
+        problems: ["git could not list the tree for nested AGENTS.md files"],
+      };
+    const nested = parseTreeEntries(output)
+      .filter(
+        (entry) =>
+          isFile(entry) && entry.path.endsWith(`/${REPO_INSTRUCTIONS_FILE}`),
+      )
+      .map((entry) => entry.path)
+      .sort()
+      .slice(0, REPO_NESTED_MAX);
+    return { value: nested, problems: [] };
   });
 
 /** A skill root's directory: where its `SKILL.md` would be. */
@@ -306,8 +378,8 @@ export type RepoContextRead = {
 };
 
 /**
- * What the repository whose work tree is rooted at `directory` holds at `ref`: its `AGENTS.md` and
- * its skills. No context when `directory` is not the root of a work tree (a directory nested in
+ * What the repository whose work tree is rooted at `directory` holds at `ref`: its instruction file,
+ * its skills and its nested `AGENTS.md` paths. No context when `directory` is not the root of a work tree (a directory nested in
  * some other repository is not that repository's session), when git cannot say whether it is, or
  * when `ref` names no commit there; `problems` says which.
  */
@@ -335,12 +407,13 @@ export const readRepoContext = (input: {
     const commit = yield* resolveCommit(input.directory, input.ref);
     if (commit === undefined)
       return { problems: [`${input.ref} names no commit there`] };
-    const [instructions, skills] = yield* Effect.all(
+    const [instructions, skills, nested] = yield* Effect.all(
       [
         readInstructions(input.directory, commit),
         readSkills(input.directory, commit),
+        readNestedInstructions(input.directory, commit),
       ],
-      { concurrency: 2 },
+      { concurrency: 3 },
     );
     return {
       context: {
@@ -350,7 +423,12 @@ export const readRepoContext = (input: {
           ? {}
           : { instructions: instructions.value }),
         skills: skills.value,
+        ...(nested.value.length === 0 ? {} : { nested: nested.value }),
       },
-      problems: [...instructions.problems, ...skills.problems],
+      problems: [
+        ...instructions.problems,
+        ...skills.problems,
+        ...nested.problems,
+      ],
     };
   });

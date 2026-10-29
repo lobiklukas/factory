@@ -915,6 +915,14 @@ export const CreateSessionInput = Schema.Struct({
    * else the deployment's.
    */
   model: Schema.optional(Schema.String),
+  /**
+   * Open the session's pull request when its run settles with a change (F17, `@repo/core`'s
+   * `prOnSettle`). A person's session keeps its PR their call (`factory pr`, "Open pull request");
+   * this is how they say at the start that it opens by itself. Recorded in the session's log, so a
+   * rebuild keeps it. Requires `repo` and no `taskId`: a scratch session has no PR to open, and a
+   * card's run opens its PR by its column. Absent or `false`: nothing changes.
+   */
+  openPrOnSettle: Schema.optional(Schema.Boolean),
 });
 export type CreateSessionInput = typeof CreateSessionInput.Type;
 

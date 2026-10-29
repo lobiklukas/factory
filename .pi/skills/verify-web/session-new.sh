@@ -2,7 +2,12 @@
 # Prove the New session form (E6): a press opens a form and creates nothing, an empty prompt sends no
 # `createSession`, the typed prompt is the session's first user entry verbatim, a session on a picked
 # repo and base ref is listed with both and works in a `factory/<session-id>` worktree, and a repo the
-# server cannot cut a worktree from is refused inline in the server's words.
+# server cannot cut a worktree from is refused inline in the server's words. It also proves what the
+# form says about the run's repository (F19: the pane's line of what the run was told, from the
+# instruction file the repo keeps — AGENTS.md, else CLAUDE.md — and its skills, a cut file called out,
+# "no repo instructions" for a scratch session and a bare repo) and its "Open a PR when done" box (F17:
+# ticked on a repo whose run commits, the PR opens at the settle against a loopback GitHub fake; unticked,
+# or with no change, none does).
 #
 # This script owns its own API and dashboard (its own ports, session root, logs and pid files) and
 # its own throwaway git checkouts under .verify/run/session-new/, so the instance ./up.sh starts is
@@ -23,14 +28,16 @@ unset FACTORY_API_TOKEN FACTORY_API_TOKENS VITE_FACTORY_API_TOKEN FACTORY_API_AU
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 API_PORT="${SESSION_NEW_API_PORT:-9461}"
 WEB_PORT="${SESSION_NEW_WEB_PORT:-3461}"
+GH_PORT="${SESSION_NEW_GITHUB_PORT:-9462}"
 RUN_DIR="$ROOT/.verify/run/session-new"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/.verify/evidence/latest}/session-new"
+LEDGER="$RUN_DIR/github-ledger.json"
 
 mkdir -p "$RUN_DIR" "$EVIDENCE_DIR"
 
-for port in "$API_PORT" "$WEB_PORT"; do
+for port in "$API_PORT" "$WEB_PORT" "$GH_PORT"; do
   if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "port $port is already in use — set SESSION_NEW_API_PORT / SESSION_NEW_WEB_PORT to free ones" >&2
+    echo "port $port is already in use — set SESSION_NEW_API_PORT / SESSION_NEW_WEB_PORT / SESSION_NEW_GITHUB_PORT to free ones" >&2
     exit 1
   fi
 done
@@ -48,6 +55,8 @@ stop() { # name
 cleanup() {
   stop web
   stop api
+  stop github
+  cp "$LEDGER" "$EVIDENCE_DIR/ledger.json" 2>/dev/null || true
   cp "$RUN_DIR/api.log" "$EVIDENCE_DIR/api.log" 2>/dev/null || true
   cp "$RUN_DIR/web.log" "$EVIDENCE_DIR/web.log" 2>/dev/null || true
   # Sessions first: their worktrees live in the checkouts, and the checkouts go with them.
@@ -65,13 +74,35 @@ trap cleanup EXIT
 source "$ROOT/.pi/skills/lib/postgres.sh"
 ensure_postgres || exit 1
 
-rm -rf "$RUN_DIR/sessions"
+rm -rf "$RUN_DIR/sessions" "$LEDGER"
+
+# The forge: a loopback fake that records every request, so "the PR opened" and "none was asked for"
+# are read from what it was asked, never from the factory's own record.
+( exec env GITHUB_FAKE_PORT="$GH_PORT" GITHUB_FAKE_LEDGER="$LEDGER" \
+    bun "$ROOT/.pi/skills/verify-api/github-fake.ts" ) > "$RUN_DIR/github.log" 2>&1 &
+echo $! > "$RUN_DIR/github.pid"
+for _ in $(seq 1 60); do
+  grep -q "github-fake listening" "$RUN_DIR/github.log" 2>/dev/null && break
+  sleep 0.1
+done
+grep -q "github-fake listening" "$RUN_DIR/github.log" 2>/dev/null || {
+  echo "session-new: the fake GitHub did not start — see $RUN_DIR/github.log" >&2
+  exit 1
+}
+
+# What a session's one scripted command does, decided by a marker the fixture checkout carries on its
+# base: `.verify-ship` commits one small file (a change a PR is opened over), anything else changes
+# nothing. One instance, two behaviours: under faux a model is its script.
+FAUX_COMMAND="if [ -f .verify-ship ]; then echo ship > ship.txt; git add -A && git -c user.email=verify-session-new@localhost -c user.name=verify-session-new commit -q -m run; fi; echo faux-ok"
 
 ( cd "$ROOT/apps/api" && exec env \
+    -u GITHUB_TOKEN -u GITHUB_APP_ID -u GITHUB_APP_PRIVATE_KEY -u GITHUB_APP_INSTALLATION_ID \
     PORT="$API_PORT" \
     ALLOWED_ORIGINS="http://localhost:$WEB_PORT" \
     MODEL_BACKEND=faux \
-    FAUX_COMMAND="echo faux-ok" \
+    FAUX_COMMAND="$FAUX_COMMAND" \
+    GITHUB_API_URL="http://127.0.0.1:$GH_PORT" \
+    GITHUB_TOKEN="verify-session-new-fake-token" \
     SESSION_ROOT="$RUN_DIR/sessions" \
     SESSION_IDLE_TIMEOUT_MS=600000 \
     bun run src/index.ts ) > "$RUN_DIR/api.log" 2>&1 &
@@ -98,7 +129,7 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 WEB_URL="http://localhost:$WEB_PORT" API_URL="http://localhost:$API_PORT" \
-  EVIDENCE_DIR="$EVIDENCE_DIR" RUN_DIR="$RUN_DIR" \
+  EVIDENCE_DIR="$EVIDENCE_DIR" RUN_DIR="$RUN_DIR" LEDGER="$LEDGER" \
   node "$ROOT/.pi/skills/verify-web/session-new.mjs"
 rc=$?
 

@@ -1,4 +1,9 @@
-import { RepoSlug, SessionActor, SessionBudgetCap } from "@repo/domain/Session";
+import {
+  RepoSlug,
+  SessionActor,
+  SessionBudgetCap,
+  type SessionSnapshot,
+} from "@repo/domain/Session";
 import { Console, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/cli";
 import { resolveApiUrl } from "../api";
@@ -7,6 +12,30 @@ import { BoardClient } from "../rpc";
 import { followSession, formatDollars } from "../transcript";
 import { predictedCap, predictionLine } from "./cost";
 import { runModelLines } from "./status";
+
+/** How long `--open-pr` waits for the settle-time PR step's answer after the run settled. */
+const OPEN_PR_POLL_MS = 250;
+const OPEN_PR_POLL_TRIES = 240;
+
+/**
+ * What the settle-time PR step came to, as the session's snapshot shows it (F17): the `pr <url>`
+ * line once the PR is recorded, `pr none: <the step's sentence>` once the step wrote one (a branch
+ * with no change, a diff over the cap, a push it refused), and `undefined` while neither is there.
+ * `seen` is how many step lines the transcript held before the run settled, so an earlier one is
+ * never read as this run's.
+ */
+export const settledPrLine = (
+  snapshot: SessionSnapshot,
+  seen: number,
+): string | undefined => {
+  if (snapshot.session.prUrl !== undefined)
+    return `pr ${snapshot.session.prUrl}`;
+  const steps = snapshot.entries.filter((entry) => entry.kind === "other");
+  const latest = steps.at(-1);
+  return steps.length > seen && latest !== undefined
+    ? `pr none: ${latest.text}`
+    : undefined;
+};
 
 /**
  * `factory run "<task>"` — mint a session, hand it the task, and follow the transcript until the
@@ -21,6 +50,11 @@ import { runModelLines } from "./status";
  * run proves the read path as well as the write. The `model` line is the model the session is pinned
  * to (LOB-272), and under the faux backend a `warning: faux backend` line follows it: a scripted answer
  * reads exactly like a real one, so the run says which it is getting.
+ *
+ * `--open-pr` (F17) asks the control plane to open the session's pull request when its run settles
+ * with a change, as a trigger's session does; without it a person's session keeps `factory pr`. It
+ * needs `--repo`. The run then waits for the step's answer and prints it as a `pr` line: the PR's
+ * link, or why none was opened.
  *
  * Before anything is created, the run prints what it is predicted to cost (LOB-38): a range from the
  * completed sessions most like the task (`factory cost predict`'s line). The prediction is advice, so
@@ -69,6 +103,12 @@ export const runCommand = Command.make(
       Flag.withSchema(SessionActor),
       Flag.withDefault("cli"),
     ),
+    openPr: Flag.Boolean("open-pr").pipe(
+      Flag.withDescription(
+        "Open the session's pull request when its run settles with a change (needs --repo)",
+      ),
+      Flag.withDefault(false),
+    ),
     api: Flag.String("api").pipe(
       Flag.withDescription("Control plane base URL"),
       Flag.optional,
@@ -82,12 +122,19 @@ export const runCommand = Command.make(
     capAtPrediction,
     model,
     actor,
+    openPr,
     api,
   }) {
     if (capAtPrediction && Option.isSome(budget)) {
       return yield* reportFailure(
         "invalid_input",
         "--cap-at-prediction and --budget both set the cap; pass one",
+      );
+    }
+    if (openPr && Option.isNone(repo)) {
+      return yield* reportFailure(
+        "invalid_input",
+        "--open-pr needs --repo: a scratch session has no pull request to open",
       );
     }
     const apiUrl = yield* resolveApiUrl(api);
@@ -101,11 +148,13 @@ export const runCommand = Command.make(
         budget?: number;
         model?: string;
         actor: string;
+        openPrOnSettle?: boolean;
       } = { actor };
       if (Option.isSome(repo)) input.repo = repo.value;
       if (Option.isSome(baseRef)) input.baseRef = baseRef.value;
       if (Option.isSome(budget)) input.budget = budget.value;
       if (Option.isSome(model)) input.model = model.value;
+      if (openPr) input.openPrOnSettle = true;
 
       // What the run is predicted to cost, before it exists (LOB-38). Only a cap that needs it makes
       // a failed prediction the run's failure.
@@ -173,6 +222,25 @@ export const runCommand = Command.make(
           `stopped: budget reached (${formatDollars(after.budget.stopped.spent)} of ${formatDollars(after.budget.stopped.cap)})`,
         );
       }
+      if (openPr) {
+        // The step runs when the run goes idle, a moment after the answer printed: wait for what it
+        // wrote (the PR, or the sentence saying why there is none).
+        const seen = opened.entries.filter(
+          (entry) => entry.kind === "other",
+        ).length;
+        let line: string | undefined;
+        for (let tries = 0; line === undefined && tries < OPEN_PR_POLL_TRIES;) {
+          const snapshot = yield* client.getSession({ sessionId: session.id });
+          line = settledPrLine(snapshot, seen);
+          if (line === undefined) {
+            tries += 1;
+            yield* Effect.sleep(OPEN_PR_POLL_MS);
+          }
+        }
+        yield* Console.log(
+          line ?? "pr none: the settle-time PR step did not answer in time",
+        );
+      }
     });
 
     yield* reportFailures(Effect.provide(program, BoardClient.layer(apiUrl)));
@@ -203,6 +271,11 @@ export const runCommand = Command.make(
     {
       command: 'factory run "tighten the parser" --repo lobiklukas/factory',
       description: "Run a task against a repository",
+    },
+    {
+      command:
+        'factory run "tighten the parser" --repo lobiklukas/factory --open-pr',
+      description: "Run a task and open its pull request when the run settles",
     },
   ]),
 );

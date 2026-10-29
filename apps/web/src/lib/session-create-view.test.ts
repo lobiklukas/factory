@@ -104,6 +104,30 @@ describe("newSessionInput", () => {
     );
   });
 
+  // F17. Mutations: send `openPrOnSettle` whenever it is ticked (a scratch session is refused by the
+  // server); never send it (the checkbox does nothing).
+  it("asks for a PR on settle only when ticked and on a repo, and the payload is one the wire accepts", () => {
+    const create = (over: Partial<SessionForm>) => {
+      const result = newSessionInput(
+        form({ prompt: "Fix it", ...over }),
+        undefined,
+      );
+      return result.ok ? result.start.create : undefined;
+    };
+
+    expect(create({ repo: slug("acme/widgets"), openPr: true })).toMatchObject({
+      repo: "acme/widgets",
+      openPrOnSettle: true,
+    });
+    expect(create({ repo: slug("acme/widgets") })).not.toHaveProperty(
+      "openPrOnSettle",
+    );
+    // Ticked, then the repo cleared: nothing is sent for it.
+    expect(create({ openPr: true })).not.toHaveProperty("openPrOnSettle");
+    const asked = create({ repo: slug("acme/widgets"), openPr: true });
+    expect(Schema.decodeSync(CreateSessionInput)(asked ?? {})).toEqual(asked);
+  });
+
   it("leaves out a blank base ref, so the registry's default applies", () => {
     const result = newSessionInput(
       form({ prompt: "Fix it", repo: slug("acme/widgets"), baseRef: "  " }),

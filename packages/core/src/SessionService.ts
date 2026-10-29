@@ -101,6 +101,7 @@ import type {
   WorkspaceRelease,
   WorkspaceReleaseReason,
 } from "@repo/domain/Session";
+import type { SessionContext } from "@repo/domain/RepoContext";
 import {
   RepoCloneFailed,
   RepoNotFound,
@@ -205,6 +206,8 @@ import {
   readRecordedReview,
   readSetupRecord,
   readPolicyRecord,
+  readRepoPrompt,
+  readSettlePr,
   readSkillPins,
   readTranscriptPage,
   readVerifyRecords,
@@ -241,6 +244,7 @@ import {
   writeApprovalRequested,
   writeApprovalUsed,
   writeActor,
+  writeSettlePr,
   commitBudget,
   formatDollars,
   writeBudget,
@@ -431,6 +435,14 @@ export type SessionServiceShape = {
   readonly history: (
     input: ReadSessionHistoryInput,
   ) => Effect.Effect<SessionHistoryPage, SessionError>;
+  /**
+   * What the session's repository told its last run (F19): the instruction file and the skills
+   * index, as the log records them. Read from the log, owned or not; `repo` is absent for a
+   * scratch session and for a log that never recorded one.
+   */
+  readonly context: (
+    sessionId: SessionId,
+  ) => Effect.Effect<SessionContext, SessionError>;
   readonly send: (
     input: SendMessageInput,
   ) => Effect.Effect<SendMessageResult, SessionError>;
@@ -4022,6 +4034,18 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
           // the lookup a replay does — before anything is written: a model this process cannot serve
           // is refused here, not registered as a repo, an index row and a log that never run.
           const model = yield* sessionModelFor(input.model);
+          if (
+            input.openPrOnSettle === true &&
+            (input.repo === undefined || input.taskId !== undefined)
+          ) {
+            return yield* new SessionErrorClass({
+              code: "invalid_input",
+              message:
+                input.taskId !== undefined
+                  ? "a card's run opens its PR by its column, so it takes no openPrOnSettle"
+                  : "openPrOnSettle needs a repo: a scratch session has no pull request to open",
+            });
+          }
           // The column the run starts in, before anything is written: it is what the run's prompt
           // and its autonomy are resolved from (B6, C22), so it has to be one the card's pinned
           // definition declares.
@@ -4143,6 +4167,11 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               // The log keeps the actor too (LOB-162), so a rebuilt index still knows whose spend
               // this session is.
               yield* writeActor(owner.root, input.actor);
+            }
+            if (input.openPrOnSettle === true) {
+              // The opt-in is the log's (F17), so a restart and a rebuilt index keep it: the settle
+              // rule reads it from here (`settledRunOf`'s caller).
+              yield* writeSettlePr(owner.root);
             }
             if (input.taskId !== undefined && column !== undefined) {
               yield* writeTaskBinding(owner.root, {
@@ -4394,6 +4423,15 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               ...(input.limit === undefined ? {} : { limit: input.limit }),
             }),
           );
+        });
+
+      const sessionContext = (
+        sessionId: SessionId,
+      ): Effect.Effect<SessionContext, SessionError> =>
+        Effect.gen(function* () {
+          yield* requireSession(sessionId);
+          const repo = yield* withReader(sessionId, readRepoPrompt);
+          return repo === undefined ? {} : { repo };
         });
 
       /** The checks a message passes before anything is opened for it. */
@@ -5394,7 +5432,21 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         forge: Context.Context<CredentialProvider | HttpClient.HttpClient>,
       ): Effect.Effect<void> => {
         const decide = Effect.gen(function* () {
-          const settled = yield* settledRunOf(sessionId);
+          const indexed = yield* settledRunOf(sessionId);
+          // A person's session may have asked, at create, for its PR to open (F17): that is the
+          // log's, not the index's, so it is read for the sessions the index leaves undeclared and
+          // that no card runs — one reader, for a repo session only.
+          const asked =
+            indexed !== undefined &&
+            indexed.taskId === undefined &&
+            indexed.run.repo !== null &&
+            settleDeclarationOf(indexed.run) === "undeclared"
+              ? yield* withReader(sessionId, readSettlePr)
+              : false;
+          const settled =
+            indexed === undefined || !asked
+              ? indexed
+              : { ...indexed, run: { ...indexed.run, openPrOnSettle: true } };
           const declaration =
             settled === undefined
               ? "undeclared"
@@ -8636,6 +8688,7 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
         create,
         get,
         history,
+        context: sessionContext,
         send,
         sendDeferringSetup,
         interrupt,

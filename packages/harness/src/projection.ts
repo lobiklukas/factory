@@ -61,6 +61,11 @@ export const MERGE_DOC_KIND = "factory.merge";
  * a fork or a replay took from its source. The `sessions.actor` column is its index.
  */
 export const ACTOR_DOC_KIND = "factory.actor";
+/**
+ * That a person's session opted in to a PR when its run settles (F17): written by `createSession`
+ * when it was given `openPrOnSettle`, read by the control plane's settle rule.
+ */
+export const SETTLE_PR_DOC_KIND = "factory.settlePr";
 /** The lineage a forked session's log records (LOB-180): its parent and the entry it was taken at. */
 export const FORK_DOC_KIND = "factory.fork";
 /**

@@ -506,6 +506,100 @@ describe("interruptSession over RPC (C8)", () => {
   }, 120_000);
 });
 
+describe("getSessionContext over RPC (F19)", () => {
+  it("answers the instruction file a session's run was told and its skills, nothing for a scratch session, and carries an unknown one back as not_found", async () => {
+    const checkout = mkdtempSync(join(tmpdir(), "factory-api-rpc-context-"));
+    const git = (command: string) =>
+      execSync(command, { cwd: checkout, stdio: "ignore" });
+    git("git init -b main");
+    mkdirSync(join(checkout, ".pi/skills/probe"), { recursive: true });
+    writeFileSync(join(checkout, "AGENTS.md"), "# Rules\n\n- Gate it.\n");
+    writeFileSync(
+      join(checkout, ".pi/skills/probe/SKILL.md"),
+      "---\nname: probe\ndescription: Probe the thing.\n---\n\nbody\n",
+    );
+    git("git add -A");
+    git("git -c user.email=t@t.com -c user.name=t commit -m base");
+    const told = RepoSlug.make(`acme/rpc-context-${run}`);
+    try {
+      const outcome = await callApi((client) =>
+        Effect.gen(function* () {
+          yield* client.registerRepo({ repo: told, localPath: checkout });
+          const withRepo = yield* client.createSession({
+            repo: told,
+            baseRef: "main",
+          });
+          const scratch = yield* client.createSession({ title: "scratch" });
+          return {
+            told: yield* client.getSessionContext({ sessionId: withRepo.id }),
+            scratch: yield* client.getSessionContext({ sessionId: scratch.id }),
+            missing: yield* failureOf(
+              client.getSessionContext({
+                sessionId: "ses_00000000000000000000000000" as SessionId,
+              }),
+            ),
+          };
+        }),
+      );
+
+      expect(outcome.told.repo?.instructions).toMatchObject({
+        path: "AGENTS.md",
+        bytes: "# Rules\n\n- Gate it.\n".length,
+        truncated: false,
+      });
+      expect(outcome.told.repo?.skills.listed).toEqual([
+        { name: "probe", path: ".pi/skills/probe/SKILL.md" },
+      ]);
+      expect(outcome.told.repo?.ref).toBe("main");
+      expect(outcome.scratch).toEqual({});
+      expect(outcome.missing).toMatchObject({
+        _tag: "SessionError",
+        code: "not_found",
+      });
+    } finally {
+      rmSync(checkout, { recursive: true, force: true });
+    }
+  }, 120_000);
+});
+
+describe("createSession's openPrOnSettle over RPC (F17)", () => {
+  it("accepts it on a repo session and carries a scratch session's ask back as invalid_input", async () => {
+    const checkout = mkdtempSync(join(tmpdir(), "factory-api-rpc-settle-"));
+    const git = (command: string) =>
+      execSync(command, { cwd: checkout, stdio: "ignore" });
+    git("git init -b main");
+    git(
+      "git -c user.email=t@t.com -c user.name=t commit --allow-empty -m base",
+    );
+    const asked = RepoSlug.make(`acme/rpc-settle-${run}`);
+    try {
+      const outcome = await callApi((client) =>
+        Effect.gen(function* () {
+          yield* client.registerRepo({ repo: asked, localPath: checkout });
+          return {
+            created: yield* client.createSession({
+              repo: asked,
+              baseRef: "main",
+              openPrOnSettle: true,
+            }),
+            refused: yield* failureOf(
+              client.createSession({ openPrOnSettle: true }),
+            ),
+          };
+        }),
+      );
+
+      expect(outcome.created.repo).toBe(asked);
+      expect(outcome.refused).toMatchObject({
+        _tag: "SessionError",
+        code: "invalid_input",
+      });
+    } finally {
+      rmSync(checkout, { recursive: true, force: true });
+    }
+  }, 120_000);
+});
+
 describe("setSessionBudget over RPC (C23)", () => {
   it("commits a cap and reports the budget off the wire, and refuses an unknown session", async () => {
     const outcome = await call((client) =>
