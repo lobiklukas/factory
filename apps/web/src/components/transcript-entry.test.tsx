@@ -72,7 +72,7 @@ describe("TranscriptRow", () => {
 
   it("renders a model switch as a status marker with its line, not as the agent's prose (S-model-provider-breadth)", () => {
     const line =
-      "model switch: faux/faux-1 is unavailable (529 overloaded_error), so the run's retried request and every later one go to openai-compatible/compat-1";
+      "model switch: faux/faux-1 is unavailable (529 overloaded_error), so the retried request and every later one go to openai-compatible/compat-1";
     const markup = render(entry("modelSwitch", line));
     expect(markup).toContain('data-entry-kind="modelSwitch"');
     expect(markup).toContain('role="status"');
