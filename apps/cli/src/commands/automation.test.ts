@@ -81,6 +81,13 @@ describe("factory automation's lines", () => {
         enabled: false,
         nextTickAt: undefined,
       }),
+      automation({
+        cron: undefined,
+        runAt: "2026-10-29T03:00:00.000Z",
+        enabled: false,
+        nextTickAt: undefined,
+        lastTick: started,
+      }),
     ]);
     expect(lines[0]).toBe(AUTOMATION_LS_HEADER);
     expect(lines[1]?.split("\t")).toEqual([
@@ -98,6 +105,8 @@ describe("factory automation's lines", () => {
       NONE,
       NONE,
     ]);
+    // A one-off whose scheduled tick has an outcome is done, not paused.
+    expect(lines[3]?.split("\t")[4]).toBe("done");
     expect(automationLsLines([])).toEqual(["no automations"]);
   });
 

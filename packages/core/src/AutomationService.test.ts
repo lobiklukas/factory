@@ -271,7 +271,7 @@ describe("a scheduled automation (S-general-automations)", () => {
       Effect.gen(function* () {
         const automations = yield* AutomationService;
         const tick = yield* automations.tick(added.id, first + 50_000);
-        const passed = yield* automations.pass(first + 55_000);
+        const passed = yield* automations.pass(first + 55_000, { repo });
         return {
           tick,
           passed: passed.filter((entry) => entry.automationId === added.id),
@@ -293,7 +293,7 @@ describe("a scheduled automation (S-general-automations)", () => {
       Effect.gen(function* () {
         yield* finishCards(added.id);
         const automations = yield* AutomationService;
-        const passed = yield* automations.pass(first + 60_000 + 3_000);
+        const passed = yield* automations.pass(first + 60_000 + 3_000, { repo });
         return {
           passed: passed.filter((entry) => entry.automationId === added.id),
           cards: yield* cardsOf(added.id),
@@ -454,9 +454,9 @@ describe("a scheduled automation (S-general-automations)", () => {
           added.id,
           first + 60_000 + 1_000,
         );
-        const passWhilePaused = yield* automations.pass(
-          first + 120_000 + 1_000,
-        );
+        const passWhilePaused = yield* automations.pass(first + 120_000 + 1_000, {
+          repo,
+        });
         // A paused automation still runs when a person asks.
         const manualWhilePaused = yield* automations.run(added.id);
         yield* finishCards(added.id);
@@ -528,12 +528,29 @@ describe("a scheduled automation (S-general-automations)", () => {
         const early = yield* automations.tick(added.id, now + 30_000);
         const due = yield* automations.tick(added.id, now + 90_000);
         const later = yield* automations.tick(added.id, now + 600_000);
+        const done = yield* automations.get(added.id);
+        const passedLater = yield* automations.pass(now + 660_000, { repo });
         const tasks = yield* TaskService;
         const card = yield* tasks.get(due?.tick.taskId ?? "");
         yield* finishCards(added.id);
+        const ticks = yield* automations.ticks(added.id);
         const removed = yield* automations.remove(added.id);
         const gone = yield* automations.get(added.id).pipe(Effect.flip);
-        return { added, early, due, later, card, removed, gone, skill };
+        return {
+          added,
+          early,
+          due,
+          later,
+          done,
+          passedLater: passedLater.filter(
+            (entry) => entry.automationId === added.id,
+          ),
+          ticks,
+          card,
+          removed,
+          gone,
+          skill,
+        };
       }),
     );
     expect(outcome.added.runAt).toBeDefined();
@@ -542,7 +559,12 @@ describe("a scheduled automation (S-general-automations)", () => {
     expect(outcome.early).toBeUndefined();
     expect(outcome.due?.tick.status).toBe("started");
     expect(outcome.due?.tick.tickAt).toBe(outcome.added.runAt);
-    expect(outcome.later?.replayed).toBe(true);
+    // Fired, it is done: disabled, with no next instant, and no later pass reaches it again.
+    expect(outcome.later).toBeUndefined();
+    expect(outcome.done.enabled).toBe(false);
+    expect(outcome.done.nextTickAt).toBeUndefined();
+    expect(outcome.passedLater).toEqual([]);
+    expect(outcome.ticks).toHaveLength(1);
     expect(outcome.card.body).toContain(
       `Follow the factory skill "${outcome.skill}" (version 1):`,
     );
@@ -582,7 +604,7 @@ describe("a scheduled automation (S-general-automations)", () => {
         yield* claimed(first + 60_000, "30 seconds");
         yield* claimed(first + 120_000, "11 minutes");
         // The pass at the third minute: its due instant is the third claim's, stale — taken over.
-        const passed = yield* automations.pass(first + 120_000 + 1_000);
+        const passed = yield* automations.pass(first + 120_000 + 1_000, { repo });
         const ticks = yield* automations.ticks(added.id);
         return { added, first, passed, ticks };
       }),
@@ -635,6 +657,53 @@ describe("a scheduled automation (S-general-automations)", () => {
     );
     expect(outcome.card.column).toBe("canceled");
     expect(outcome.runs).toEqual([]);
+  }, 60_000);
+
+  /**
+   * Mutations this catches: a one-off left enabled after a failed tick — every pass claims and reads
+   * its instant again, for ever; a pass that sweeps only enabled automations — a paused one's stale
+   * manual claim stays `claimed` in the history.
+   */
+  it("retires a one-off whose tick failed, and closes a paused automation's stale claim", async () => {
+    const outcome = await run(
+      Effect.gen(function* () {
+        yield* setUp;
+        const sql = yield* SqlClient;
+        const automations = yield* AutomationService;
+        const now = yield* Clock.currentTimeMillis;
+        const once = yield* automations.add({
+          repo,
+          runAt: isoAt(now + 60_000),
+          prompt: "Refused once.",
+        });
+        yield* sql`UPDATE automations SET task_column = 'retired' WHERE id = ${once.id}`;
+        const fired = yield* automations.tick(once.id, now + 90_000);
+        const retired = yield* automations.get(once.id);
+
+        const paused = yield* automations.add({
+          repo,
+          cron: "* * * * *",
+          prompt: "Paused.",
+        });
+        yield* automations.pause(paused.id);
+        const stale = now - 3_600_000;
+        yield* sql`
+          INSERT INTO automation_ticks (automation_id, tick_at, trigger, claimed_at)
+          VALUES (${paused.id}, ${isoAt(stale)}::timestamptz, 'manual',
+            now() - '11 minutes'::interval)
+        `;
+        yield* automations.pass(now + 120_000, { repo });
+        const ticks = yield* automations.ticks(paused.id);
+        return { fired, retired, ticks };
+      }),
+    );
+    expect(outcome.fired?.tick.status).toBe("failed");
+    expect(outcome.retired.enabled).toBe(false);
+    expect(outcome.retired.nextTickAt).toBeUndefined();
+    expect(outcome.ticks.map((tick) => tick.status)).toEqual(["failed"]);
+    expect(outcome.ticks[0]?.reason).toContain(
+      "stopped before it recorded an outcome",
+    );
   }, 60_000);
 
   /** Each refusal names its field, and nothing is written for any of them. */

@@ -5,7 +5,7 @@ expression in a time zone, or one instant — and what its run is told (a prompt
 both), with an optional budget, start column and base ref. Each **tick** files one card on the repo's
 board and starts one run on it, so what an automation did is reviewed on the board like any card.
 
-- **Stored.** `automations` and `automation_ticks` (migration `0051_create_automations.ts`). Added
+- **Stored.** `automations` and `automation_ticks` (migration `0053_create_automations.ts`). Added
   with `factory automation add --repo … (--cron "…" [--tz …] | --at <instant>) (--prompt … |
 --skill …) [--name] [--budget] [--column] [--base-ref] [--always]`, or `addAutomation` over RPC
   (`AutomationsRpc`). A cron or zone `effect/Cron` cannot read, an expression no date matches, a
@@ -34,7 +34,10 @@ filed`. `--always` opts out; a tip git cannot read never skips.
 - **Run now, pause, resume.** `factory automation run <id>` fires one at once — paused or not, never
   skipped on an unmoved base; it exits non-zero (`tick_failed`, `tick_skipped`) when the tick
   started no run. `pause` stops the scheduled ticks; `resume` starts them again from now, so an instant
-  reached while paused does not fire.
+  reached while paused does not fire. A one-off is done once its scheduled tick has an outcome
+  (started, skipped or failed): it is disabled, `ls` shows it `done`, and no pass reaches its instant
+  again; `run` retries a failed one by hand. Each pass closes stale claims on every automation,
+  paused ones included.
 - **History.** `factory automation history <id>` (`listAutomationTicks`): each tick's trigger,
   status, card, run and reason, newest first, with the run's status and spend read from
   `session_activity`. `factory automation ls` shows the schedule, state, next instant and last tick.

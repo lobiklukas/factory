@@ -47,6 +47,19 @@ export const scheduleCell = (automation: Automation): string =>
 const lastCell = (tick: AutomationTick | undefined): string =>
   tick === undefined ? NONE : `${tick.status} ${tick.tickAt}`;
 
+/**
+ * Enabled, paused, or done: a one-off whose scheduled tick has an outcome is disabled by the server
+ * and never fires again, which is not the same as a pause a resume undoes.
+ */
+export const stateCell = (automation: Automation): string =>
+  automation.enabled
+    ? "enabled"
+    : automation.runAt !== undefined &&
+        automation.lastTick?.trigger === "schedule" &&
+        automation.lastTick.tickAt === automation.runAt
+      ? "done"
+      : "paused";
+
 /** One `factory automation ls` row. */
 export const automationRow = (automation: Automation): string =>
   [
@@ -54,7 +67,7 @@ export const automationRow = (automation: Automation): string =>
     automation.name,
     automation.repo,
     scheduleCell(automation),
-    automation.enabled ? "enabled" : "paused",
+    stateCell(automation),
     automation.nextTickAt ?? NONE,
     lastCell(automation.lastTick),
   ].join(AUTOMATION_SEPARATOR);
@@ -75,7 +88,7 @@ export const automationLines = (
   `name         ${automation.name}`,
   `repo         ${automation.repo}`,
   `schedule     ${scheduleCell(automation)}`,
-  `state        ${automation.enabled ? "enabled" : "paused"}`,
+  `state        ${stateCell(automation)}`,
   `next         ${automation.nextTickAt ?? NONE}`,
   ...(automation.skill === undefined
     ? []

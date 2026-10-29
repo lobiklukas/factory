@@ -145,11 +145,14 @@ export type AutomationServiceShape = {
     at?: number,
   ) => Effect.Effect<FiredTick | undefined, AutomationError>;
   /**
-   * Every enabled automation's due tick at `at` (default: now), one after another. A tick that fails
-   * is recorded and logged and does not stop the pass. The answer is the ticks this pass fired.
+   * Every enabled automation's due tick at `at` (default: now), one after another, and every
+   * automation's stale claims closed. A tick that fails is recorded and logged and does not stop the
+   * pass. The answer is the ticks this pass fired. `scope.repo` keeps the pass to one repo's
+   * automations (a test's own); the clock passes over all of them.
    */
   readonly pass: (
     at?: number,
+    scope?: { readonly repo?: RepoSlug },
   ) => Effect.Effect<ReadonlyArray<AutomationTick>, AutomationError>;
   /** The automation's ticks, newest first, at most `limit`. */
   readonly ticks: (
@@ -833,6 +836,22 @@ export const AutomationServiceLive = Layer.effect(
         );
       });
 
+    /**
+     * A one-off is done once its scheduled tick has an outcome, whatever it was: it is disabled, so no
+     * pass reaches its instant again. A failed one is not retried on its own — the history says why,
+     * and `run` starts it again by hand.
+     */
+    const retireOneOff = (row: AutomationRow, tick: AutomationTick) =>
+      row.cron === null && tick.trigger === "schedule" && tick.status !== "claimed"
+        ? storage(
+            "retire the one-off",
+            sql`
+              UPDATE automations SET enabled = false
+              WHERE id = ${row.id} AND cron IS NULL AND enabled
+            `,
+          )
+        : Effect.void;
+
     /** Claim the tick and, when this caller holds it, do it; either way answer the tick. */
     const fire = (
       row: AutomationRow,
@@ -847,9 +866,12 @@ export const AutomationServiceLive = Layer.effect(
           yield* Effect.logInfo(
             `automation ${row.id}: ${trigger} tick ${tick.tickAt} ${tick.status}: ${tick.reason}`,
           );
+          yield* retireOneOff(row, tick);
           return { tick, replayed: false };
         }
-        return { tick: yield* readTick(row.id, tickAt), replayed: true };
+        const tick = yield* readTick(row.id, tickAt);
+        yield* retireOneOff(row, tick);
+        return { tick, replayed: true };
       });
 
     const run = (id: AutomationId) =>
@@ -911,14 +933,18 @@ export const AutomationServiceLive = Layer.effect(
         `,
       );
 
-    const pass = (at?: number) =>
+    const pass = (at?: number, scope?: { readonly repo?: RepoSlug }) =>
       Effect.gen(function* () {
         const now = at ?? (yield* Clock.currentTimeMillis);
+        // Every automation, not only the enabled ones: a paused one can hold a stale claim too (a
+        // manual run whose process died), and only this pass closes it. `dueFor` fires none of them.
         const rows = yield* storage(
-          "list the enabled automations",
-          sql<AutomationRow>`
-            SELECT * FROM automations WHERE enabled ORDER BY created_at, id
-          `,
+          "list the automations",
+          scope?.repo === undefined
+            ? sql<AutomationRow>`SELECT * FROM automations ORDER BY created_at, id`
+            : sql<AutomationRow>`
+                SELECT * FROM automations WHERE repo = ${scope.repo} ORDER BY created_at, id
+              `,
         );
         const fired: Array<AutomationTick> = [];
         for (const row of rows) {
