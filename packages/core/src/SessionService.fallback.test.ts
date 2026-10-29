@@ -65,9 +65,7 @@ describe("a card's run on its role's fallback (S-model-provider-breadth)", () =>
         const sessions = yield* SessionService;
         const sql = yield* SqlClient;
         const board = yield* tasks.createBoard({
-          repo: RepoSlug.make(
-            `factory-test/${randomBytes(4).toString("hex")}`,
-          ),
+          repo: RepoSlug.make(`factory-test/${randomBytes(4).toString("hex")}`),
           definitionId: DefinitionId.make(DEFAULT_DEFINITION_ID),
         });
         const card = yield* tasks.create({

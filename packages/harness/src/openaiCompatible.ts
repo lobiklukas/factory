@@ -177,15 +177,19 @@ export const openAICompatibleProvider = (
     auth: {
       apiKey: {
         name: "OpenAI-compatible endpoint key",
-        resolve: async ({ ctx }) => {
-          const key = (await ctx.env(OPENAI_COMPATIBLE_KEY_VARIABLE))?.trim();
-          return key === undefined || key === ""
-            ? {
-                auth: { apiKey: KEYLESS_PLACEHOLDER },
-                source: "keyless endpoint",
-              }
-            : { auth: { apiKey: key }, source: OPENAI_COMPATIBLE_KEY_VARIABLE };
-        },
+        resolve: ({ ctx }) =>
+          ctx.env(OPENAI_COMPATIBLE_KEY_VARIABLE).then((value) => {
+            const key = value?.trim();
+            return key === undefined || key === ""
+              ? {
+                  auth: { apiKey: KEYLESS_PLACEHOLDER },
+                  source: "keyless endpoint",
+                }
+              : {
+                  auth: { apiKey: key },
+                  source: OPENAI_COMPATIBLE_KEY_VARIABLE,
+                };
+          }),
       },
     },
     models: config.models.map((model) => ({

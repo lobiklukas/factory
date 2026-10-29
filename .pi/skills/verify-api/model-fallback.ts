@@ -65,14 +65,18 @@ const assert = makeChecker(observed);
 const near = (left: number | undefined, right: number): boolean =>
   left !== undefined && Math.abs(left - right) < 1e-9;
 
-const ledger = Effect.promise(
-  async () =>
-    (
-      (await (await fetch(`${FAKE_URL}/__ledger`)).json()) as {
-        readonly requests: ReadonlyArray<OpenAICompatibleFakeRequest>;
-      }
-    ).requests,
-);
+/** What the fake was asked, from its `/__ledger`: read outside Effect code, as a plain fetch. */
+const readLedger = async (): Promise<
+  ReadonlyArray<OpenAICompatibleFakeRequest>
+> => {
+  const response = await fetch(`${FAKE_URL}/__ledger`);
+  const body = (await response.json()) as {
+    readonly requests: ReadonlyArray<OpenAICompatibleFakeRequest>;
+  };
+  return body.requests;
+};
+
+const ledger = Effect.promise(readLedger);
 
 const costOf = (snapshot: SessionSnapshot, key: string): number | undefined =>
   snapshot.usage.models.find((entry) => entry.key === key)?.usage.costTotal;
@@ -107,7 +111,10 @@ const program = Effect.gen(function* () {
     });
 
   /** Send `content` and wait for the run to settle on a final answer to it. */
-  const settled = (sessionId: Parameters<typeof client.getSession>[0]["sessionId"], content: string) =>
+  const settled = (
+    sessionId: Parameters<typeof client.getSession>[0]["sessionId"],
+    content: string,
+  ) =>
     Effect.gen(function* () {
       yield* client.sendMessage({ sessionId, content });
       return yield* waitUntil(
@@ -161,7 +168,9 @@ const program = Effect.gen(function* () {
       "the spend is the endpoint model's, at its configured price",
       snapshot.usage.models.length === 1 &&
         near(costOf(snapshot, COMPAT), 2 * COMPAT_ANSWER),
-      JSON.stringify(snapshot.usage.models.map((m) => [m.key, m.usage.costTotal])),
+      JSON.stringify(
+        snapshot.usage.models.map((m) => [m.key, m.usage.costTotal]),
+      ),
     );
     return;
   }
@@ -170,7 +179,9 @@ const program = Effect.gen(function* () {
     const sessionId = yield* specifierRun("fallback: the primary is down");
     const first = yield* settled(sessionId, "go");
     observed.snapshots["first"] = first;
-    const switches = first.entries.filter((entry) => entry.kind === "modelSwitch");
+    const switches = first.entries.filter(
+      (entry) => entry.kind === "modelSwitch",
+    );
     assert(
       "the 529 switched the run once, and the transcript says so",
       switches.length === 1 &&
@@ -182,12 +193,21 @@ const program = Effect.gen(function* () {
     const kinds = first.entries
       .filter((entry) => entry.kind !== "system" && entry.kind !== "title")
       .map((entry) =>
-        entry.kind === "assistant" && entry.isError === true ? "error" : entry.kind,
+        entry.kind === "assistant" && entry.isError === true
+          ? "error"
+          : entry.kind,
       );
     assert(
       "the transcript reads: the primary's tool round, the switch, its 529, the fallback's answer",
       JSON.stringify(kinds) ===
-        JSON.stringify(["user", "assistant", "toolResult", "modelSwitch", "error", "assistant"]),
+        JSON.stringify([
+          "user",
+          "assistant",
+          "toolResult",
+          "modelSwitch",
+          "error",
+          "assistant",
+        ]),
       JSON.stringify(kinds),
     );
     const requests = yield* ledger;
@@ -217,7 +237,8 @@ const program = Effect.gen(function* () {
     observed.ledger = after;
     assert(
       "a second message stays on the fallback, and nothing switches again",
-      second.entries.filter((entry) => entry.kind === "modelSwitch").length === 1 &&
+      second.entries.filter((entry) => entry.kind === "modelSwitch").length ===
+        1 &&
         after.length === 2 &&
         near(costOf(second, PRIMARY), FAUX_COST) &&
         near(costOf(second, COMPAT), 2 * COMPAT_ANSWER),
@@ -229,12 +250,17 @@ const program = Effect.gen(function* () {
       JSON.stringify(info.roleFallbacks) ===
         JSON.stringify([{ role: "specifier", models: [COMPAT] }]) &&
         info.models.includes(COMPAT),
-      JSON.stringify({ roleFallbacks: info.roleFallbacks, models: info.models }),
+      JSON.stringify({
+        roleFallbacks: info.roleFallbacks,
+        models: info.models,
+      }),
     );
     return;
   }
 
-  return yield* Effect.die(new Error(`PHASE must be role or fallback, not ${PHASE}`));
+  return yield* Effect.die(
+    new Error(`PHASE must be role or fallback, not ${PHASE}`),
+  );
 });
 
 try {
@@ -250,7 +276,9 @@ await writeFile(
   `${JSON.stringify(observed, null, 2)}\n`,
 );
 
-const failed = Object.entries(observed.checks).filter(([, check]) => !check.passed);
+const failed = Object.entries(observed.checks).filter(
+  ([, check]) => !check.passed,
+);
 if (failed.length > 0) {
   console.error(`\n${failed.length} required check(s) failed`);
   process.exitCode = 1;

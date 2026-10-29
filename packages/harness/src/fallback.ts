@@ -181,6 +181,17 @@ export const ModelSwitchEntry = defineEntry<
   ModelSwitch & { readonly text: string }
 >(MODEL_SWITCH_ENTRY_KIND);
 
+/** A switch could not be committed: the conversation could not be read, or its commit failed. */
+export class ModelSwitchFailed extends Schema.TaggedError<ModelSwitchFailed>()(
+  "ModelSwitchFailed",
+  { message: Schema.String },
+) {}
+
+const switchFailed = (cause: unknown): ModelSwitchFailed =>
+  new ModelSwitchFailed({
+    message: cause instanceof Error ? cause.message : String(cause),
+  });
+
 /** The switch as one transcript line. */
 export const describeModelSwitch = (change: {
   readonly from: string;
@@ -202,11 +213,12 @@ const commitSwitch = (
   failed: ModelAccess,
   to: ModelAccess,
   reason: string,
-): Effect.Effect<void, unknown> =>
+): Effect.Effect<void, ModelSwitchFailed> =>
   Effect.gen(function* () {
-    const conversation = yield* Effect.tryPromise(() =>
-      harness.conversation(conversationId, BACKGROUND_CONTEXT),
-    );
+    const conversation = yield* Effect.tryPromise({
+      try: () => harness.conversation(conversationId, BACKGROUND_CONTEXT),
+      catch: switchFailed,
+    });
     if (conversation === undefined) return;
     const at = DateTime.formatIso(yield* DateTime.now);
     const change: ModelSwitch = {
@@ -215,22 +227,28 @@ const commitSwitch = (
       reason,
       at,
     };
-    yield* Effect.tryPromise(() =>
-      conversation.commit(async (tx) => {
-        const agent = await tx.doc(AgentDoc, conversationId);
-        if (
-          agent.model?.provider !== failed.provider ||
-          agent.model.modelId !== failed.modelId
-        )
-          return;
-        await configure(tx, conversationId, {
-          model: { provider: to.provider, modelId: to.modelId },
-        });
-        await tx.appendEntry(ModelSwitchEntry, conversationId, {
-          data: { ...change, text: describeModelSwitch(change) },
-        });
-      }, BACKGROUND_CONTEXT),
-    );
+    yield* Effect.tryPromise({
+      try: () =>
+        conversation.commit(
+          (tx) =>
+            tx.doc(AgentDoc, conversationId).then((agent) =>
+              agent.model?.provider !== failed.provider ||
+              agent.model.modelId !== failed.modelId
+                ? undefined
+                : configure(tx, conversationId, {
+                    model: { provider: to.provider, modelId: to.modelId },
+                  })
+                    .then(() =>
+                      tx.appendEntry(ModelSwitchEntry, conversationId, {
+                        data: { ...change, text: describeModelSwitch(change) },
+                      }),
+                    )
+                    .then(() => undefined),
+            ),
+          BACKGROUND_CONTEXT,
+        ),
+      catch: switchFailed,
+    });
   });
 
 /**
@@ -275,10 +293,9 @@ export const fallbackExtension = (
               next,
               message.errorMessage ?? "",
             ).pipe(
-              Effect.catch((cause) =>
+              Effect.catch((error) =>
                 Effect.logError(
-                  `model switch: ${modelKey(failed)} → ${modelKey(next)} could not be committed; the request is retried on ${modelKey(failed)}`,
-                  cause,
+                  `model switch: ${modelKey(failed)} → ${modelKey(next)} could not be committed (${error.message}); the request is retried on ${modelKey(failed)}`,
                 ),
               ),
             ),

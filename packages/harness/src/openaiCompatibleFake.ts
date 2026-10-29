@@ -16,6 +16,7 @@
  * another process reads the same record from `GET /__ledger`. Nothing here
  * reaches past 127.0.0.1, and the key it is sent is a test's dummy, never a real one.
  */
+// oxlint-disable-next-line effecttsgo/node-builtin-import -- a fake server the gate runs under node and bun alike; Bun.serve is not in node.
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 
@@ -38,7 +39,8 @@ export type OpenAICompatibleFakeOptions = {
     | undefined;
   /** The usage every answer reports, which the provider's price turns into its cost. */
   readonly usage?:
-    { readonly prompt: number; readonly completion: number } | undefined;
+    | { readonly prompt: number; readonly completion: number }
+    | undefined;
   /** The port to bind on 127.0.0.1; `0` (the default) is any free one. */
   readonly port?: number | undefined;
 };
@@ -83,6 +85,7 @@ const contentText = (content: unknown): string =>
       : "";
 
 const readBody = (request: IncomingMessage): Promise<string> =>
+  // oxlint-disable-next-line effecttsgo/new-promise -- a node:http stream and server take callbacks.
   new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -219,6 +222,7 @@ export const startOpenAICompatibleFake = (
       response.end("data: [DONE]\n\n");
     });
   });
+  // oxlint-disable-next-line effecttsgo/new-promise -- a node:http stream and server take callbacks.
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(options.port ?? 0, "127.0.0.1", () => {
@@ -227,6 +231,7 @@ export const startOpenAICompatibleFake = (
         url: `http://127.0.0.1:${port}/v1`,
         requests,
         close: () =>
+          // oxlint-disable-next-line effecttsgo/new-promise -- a node:http stream and server take callbacks.
           new Promise<void>((done) => {
             server.closeAllConnections();
             server.close(() => done());

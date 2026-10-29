@@ -393,7 +393,10 @@ describe("getServerInfo on a booted API (LOB-269)", () => {
   it("refuses to boot on a fallback chain outside the catalog, or half an endpoint (S-model-provider-breadth)", async () => {
     for (const [env, says] of [
       [
-        { MODEL_BACKEND: "faux", ROLE_FALLBACKS: "builder=openai-compatible/x" },
+        {
+          MODEL_BACKEND: "faux",
+          ROLE_FALLBACKS: "builder=openai-compatible/x",
+        },
         "builder's fallback chain names model openai-compatible/x",
       ],
       [

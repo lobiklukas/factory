@@ -6654,16 +6654,16 @@ export const SessionServiceLive = (options: SessionServiceOptions) =>
               Effect.andThen(touchActivity(sessionId)),
             )
           : entry.kind === "budget"
-          ? Effect.logWarning(
-              `session ${sessionId} stopped by its budget: ${entry.text}`,
-            ).pipe(
-              Effect.andThen(countRefusal("budget")),
-              Effect.andThen(
-                recordRunFailure(sessionId, entry.id, "budget", entry.text),
-              ),
-              Effect.andThen(touchActivity(sessionId)),
-            )
-          : touchActivity(sessionId);
+            ? Effect.logWarning(
+                `session ${sessionId} stopped by its budget: ${entry.text}`,
+              ).pipe(
+                Effect.andThen(countRefusal("budget")),
+                Effect.andThen(
+                  recordRunFailure(sessionId, entry.id, "budget", entry.text),
+                ),
+                Effect.andThen(touchActivity(sessionId)),
+              )
+            : touchActivity(sessionId);
 
       /**
        * The session's model after a recorded model switch (S-model-provider-breadth): the log's

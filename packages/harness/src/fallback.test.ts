@@ -183,6 +183,12 @@ const turn = (
     }),
   );
 
+/** Ledger rows in model order, so a comparison does not depend on which model answered first. */
+const byKey = (
+  left: readonly [string, number],
+  right: readonly [string, number],
+): number => left[0].localeCompare(right[0]);
+
 const failure = (errorMessage: string): AssistantMessage => ({
   role: "assistant",
   content: [],
@@ -479,7 +485,7 @@ describe("a role's fallback chain", () => {
     ]);
     // Each answer is charged to the model that gave it: the primary's `bash` call at the faux's
     // price, its 529 at nothing, and the fallback's answer at the endpoint's.
-    expect([...first.usage].sort()).toEqual([
+    expect([...first.usage].sort(byKey)).toEqual([
       ["faux/faux-1", FAUX_ANSWER_COST],
       ["openai-compatible/compat-1", COMPAT_ANSWER_COST],
     ]);
@@ -537,7 +543,7 @@ describe("a role's fallback chain", () => {
     );
     expect(result.pinned).toBe("faux/faux-backup");
     expect(result.entries.at(-1)?.text).toBe("compat-ok (re: go)");
-    expect([...result.usage].sort()).toEqual([
+    expect([...result.usage].sort(byKey)).toEqual([
       ["faux/faux-backup", FAUX_ANSWER_COST],
       ["openai-compatible/compat-1", COMPAT_ANSWER_COST],
     ]);

@@ -498,7 +498,10 @@ const scanLatestRun = (
  * question or approval has not completed either; it is `unfinished`.
  */
 export type RunTurn =
-  "completed" | "unfinished" | "truncated" | Exclude<RunEnding, "finished">;
+  | "completed"
+  | "unfinished"
+  | "truncated"
+  | Exclude<RunEnding, "finished">;
 
 /** The newest run's turn, from the log's entries newest first (`runEndingOf`'s window). */
 export const runTurnOf = (newestFirst: Iterable<EntryRecord>): RunTurn => {

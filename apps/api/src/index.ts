@@ -785,7 +785,9 @@ const HttpLive = Effect.gen(function* () {
           ([role, chain]) =>
             `${role} → ${chain.map((access) => modelKey(access)).join(" | ")}`,
         )
-        .join(", ")} (ROLE_FALLBACKS; on an overloaded or unavailable model only)`,
+        .join(
+          ", ",
+        )} (ROLE_FALLBACKS; on an overloaded or unavailable model only)`,
     );
   }
   const declaredPolicies = yield* parseRolePolicies(yield* RolePoliciesConfig);
