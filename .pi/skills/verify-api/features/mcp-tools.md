@@ -41,17 +41,21 @@ narrowing what the one before allows:
 The agent calls a tool as `mcp__<server>__<tool>`. The control plane is the MCP client
 (`packages/harness/src/mcp.ts`, the official SDK's `Client`): it connects and lists the tools at every
 open, and sends each call itself, so the token is a header on its own requests and never enters the
-session's shell, prompt or log (it is masked in tool results too, should a server echo it). A server
-that cannot be reached at open, or whose secret the repo does not hold, is a warning and offers no
-tools for that open; the run goes on. The open records the repo's allowlist and the tools it offered,
+session's shell, prompt or log (it is masked in tool results too, should a server echo it). The
+connection is made before the service's owners' gate, within one 15 s deadline for the handshake and
+every page of `tools/list` together, so a slow or silent server delays only its own session's open; the
+open then offers what it grants under the gate. A server that cannot be reached in time, or whose
+secret the repo does not hold or cannot read, is a warning and offers no tools for that open; the run
+goes on. A server that forgets the session (`404`) gets a new one on the next call: a read is sent again
+at once, a write is not (it fails, saying so). Closing the owner ends the server's session (`DELETE`). The open records the repo's allowlist and the tools it offered,
 with whether each asks, in the log's `factory.policy` (`repo.mcp`, `effective.mcpTools`), pinned for
 the session like the rest of the repository's policy.
 
 **Not a boundary (D15).** `readOnlyHint` is the server's word about its own tool; the deployment chose
 to trust the server by registering it, and the repository can gate any tool by name.
 
-**How to drive it.** `./mcp-tools.sh` (API on `API_PORT`, default `:9446`; the fake MCP server on
-`MCP_FAKE_PORT`, default `:9447`). The deployment registers `tracker` (its token from the secret
+**How to drive it.** `./mcp-tools.sh` (API on `API_PORT`, default `:9448`; the fake MCP server on
+`MCP_FAKE_PORT`, default `:9449`). The deployment registers `tracker` (its token from the secret
 `TRACKER_MCP_TOKEN`) and `rogue`, both served by `@repo/harness/mcpFake` on loopback; the fixture
 repo allows `tracker`'s `get_issue` and `update_issue`. The faux model, on every turn, runs
 `printenv TRACKER_MCP_TOKEN` and then calls the three tools (`FAUX_MCP_CALLS`).

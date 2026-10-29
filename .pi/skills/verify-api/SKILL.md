@@ -162,7 +162,7 @@ DATABASE_URL=… ./backend-boot.sh  # api on :9426 (BACKEND_BOOT_PORT), booted f
 ./spec.sh        # no port — the spec document: refused without gaps, committed with [], read by a second process
 ./budget.sh      # api on :9419 — a priced faux: a capped run stops at its limit and says so (features/budget.md)
 ./repo-policy.sh # api on API_PORT (default :9444), booted twice — .factory/config's policy at the base gates, denies, rejects widening, is pinned (features/repo-policy.md)
-./mcp-tools.sh # api on API_PORT (default :9446), a fake MCP server on MCP_FAKE_PORT (default :9447) — allowlisted MCP tools, a gated write denied, an unallowed server unoffered (features/mcp-tools.md)
+./mcp-tools.sh # api on API_PORT (default :9448), a fake MCP server on MCP_FAKE_PORT (default :9449) — allowlisted MCP tools, a gated write denied, an unallowed server unoffered (features/mcp-tools.md)
 ./admission.sh   # api on :9432 (ADMISSION_PORT), SESSION_MAX_CONCURRENT=2 — the N+1th create and a trigger delivery refused typed, both served after the idle sweep (features/limits.md)
 ./pr-rpc.sh      # api on :9420, fake GitHub on :9421 — openPullRequest over RPC: opened, then already-open, one request (features/pr-rpc.md)
 ./pr-push.sh     # api on :9580, fake GitHub on :9581, git forge on :9582 — repo add/run/pr through the CLI: base fetched, branch pushed, then the PR (features/pr-push.md)

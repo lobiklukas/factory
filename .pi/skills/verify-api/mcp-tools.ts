@@ -44,8 +44,8 @@ import {
 } from "./harness.ts";
 import type { CheckRecord } from "./harness.ts";
 
-const API_URL = process.env["API_URL"] ?? "http://localhost:9446";
-const FAKE_PORT = Number(process.env["MCP_FAKE_PORT"] ?? "9447");
+const API_URL = process.env["API_URL"] ?? "http://localhost:9448";
+const FAKE_PORT = Number(process.env["MCP_FAKE_PORT"] ?? "9449");
 const REPOS = path.resolve(
   process.env["MCP_TOOLS_REPOS"] ?? ".verify/run/mcp-tools/repos",
 );

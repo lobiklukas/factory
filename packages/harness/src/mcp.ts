@@ -33,6 +33,13 @@
  * Its tools are listed once per open, so a tool the server added since reaches the next open and one
  * it removed is gone from it. A server that cannot be reached at open is a warning and offers no
  * tools for that open, never a failed open: the run goes on without it.
+ *
+ * **Two halves: the network, then the offer.** `listMcp` connects and lists, within one deadline per
+ * server for the handshake and every page together; `offerMcp` picks, from what was listed, the tools
+ * an open grants, and touches nothing remote. The control plane lists before its owners' gate and
+ * offers under it, so a slow or silent server holds its own session's open and nobody else's. A link
+ * outlives the open (`McpLink`): it re-initialises a session the server forgot, and ends the session
+ * with a `DELETE` when it closes.
  */
 import { Type } from "@earendil-works/pi-ai";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
