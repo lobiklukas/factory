@@ -45,6 +45,7 @@ export * from "./pullRequestFeedback";
 export * from "./metrics";
 export * from "./outcomes";
 export * from "./admission";
+export * from "./spendCaps";
 export * from "./Notifier";
 export * from "./SecretService";
 export * from "./secretScan";

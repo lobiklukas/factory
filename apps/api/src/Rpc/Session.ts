@@ -47,6 +47,7 @@ const SessionRpcHandlers = SessionRpc.toLayer(
         attributed(input).pipe(Effect.flatMap(sessions.create)),
       getSession: (input) => sessions.get(input.sessionId),
       readSessionHistory: (input) => sessions.history(input),
+      getSessionContext: (input) => sessions.context(input.sessionId),
       sendMessage: (input) => sessions.send(input),
       withdrawMessage: (input) => sessions.withdraw(input),
       interruptSession: (input) => sessions.interrupt(input.sessionId),

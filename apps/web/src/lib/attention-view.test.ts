@@ -273,3 +273,39 @@ describe("attentionBadge", () => {
     expect(attentionBadge(100)).toBe("99+");
   });
 });
+
+describe("a spend cap row (S-aggregate-spend-caps)", () => {
+  const spend = (threshold: number): AttentionItem => ({
+    reason: {
+      _tag: "spend",
+      scope: "repo",
+      subject: "acme/widgets",
+      window: "month",
+      threshold,
+      limit: 300,
+      spent: threshold === 100 ? 301.5 : 241,
+      since: AT,
+      resetsAt: "2026-11-01T00:00:00.000Z",
+    },
+  });
+
+  it("is titled by what it counts, says how far the spend is and what happens next, and opens the spend page", () => {
+    expect(attentionTitle(spend(80))).toBe("Repository acme/widgets");
+    expect(attentionReasonText(spend(80))).toBe(
+      "At 80% of its monthly cap ($241.00 of $300.00): new runs are refused once it is reached",
+    );
+    expect(attentionReasonText(spend(100))).toBe(
+      "Reached its monthly cap ($301.50 of $300.00): new runs are refused until 2026-11-01T00:00:00.000Z",
+    );
+    expect(attentionLink(spend(100))).toEqual({ kind: "spend" });
+  });
+
+  it("is its own group, last, beside the card rows", () => {
+    const groups = attentionGroups([
+      spend(80),
+      item("approve me", approval("")),
+    ]);
+    expect(groups.map((group) => group.kind)).toEqual(["approval", "spend"]);
+    expect(groups[1]?.title).toBe("Spend cap reached or near");
+  });
+});

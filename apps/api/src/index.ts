@@ -8,6 +8,8 @@ import {
   githubReviewPoster,
   gitRepoMirror,
   gitRepoRemote,
+  hasSpendCaps,
+  parseSpendCaps,
   PlanFreshnessPassesLive,
   ReviewerCredentialConfig,
   selectReviewerCredentialProvider,
@@ -30,6 +32,8 @@ import {
   modelKey,
   parseFauxFail,
   parseFauxModelScripts,
+  parseFauxMcpCalls,
+  parseMcpServers,
   parseRoleModels,
   parseRolePolicies,
   extendRolePolicies,
@@ -176,6 +180,17 @@ const ApprovalGateConfig = Config.String("APPROVAL_REQUIRED").pipe(
 );
 
 /**
+ * The remote MCP servers the deployment registers for its agents (S-agent-mcp-tools): a JSON array
+ * of `{ "name", "url", "secret"? }` — `[{"name":"tracker","url":"https://mcp.example/mcp","secret":"TRACKER_MCP_TOKEN"}]`.
+ * Registering offers nothing: a repository's `.factory/config` `policy.mcp` names the servers and
+ * tools its runs are offered. `secret` names the repository secret (`factory secrets set`) sent as
+ * the bearer token. Parsed at boot (`parseMcpServers`), so a malformed list fails it. Blank: none.
+ */
+const McpServersConfig = Config.String("MCP_SERVERS").pipe(
+  Config.withDefault(""),
+);
+
+/**
  * Which model a session runs against.
  *
  * `MODEL_BACKEND` wins when set. Otherwise a credential decides (`./ModelBackend`, LOB-258): the real
@@ -266,6 +281,13 @@ const ModelConfig = Config.all({
    */
   fauxFail: Config.String("FAUX_FAIL").pipe(Config.withDefault("")),
   /**
+   * Tool calls the faux makes after its `bash` step (S-agent-mcp-tools): a JSON array of
+   * `{ "tool", "arguments"? }` — `[{"tool":"mcp__tracker__get_issue","arguments":{"id":"ISS-1"}}]` —
+   * each once a turn under `FAUX_EVERY_TURN`. What `verify-api/mcp-tools.sh` calls an MCP tool with.
+   * Blank: none; anything else fails the boot (`parseFauxMcpCalls`).
+   */
+  fauxMcpCalls: Config.String("FAUX_MCP_CALLS").pipe(Config.withDefault("")),
+  /**
    * A faux script per model id (LOB-86): `{"builder": {"command": "…", "verify": true}}`. With
    * `ROLE_MODELS=builder=faux/builder`, a run in a `builder` column writes, commits and verifies a
    * change while every other run keeps `FAUX_COMMAND` — what `.pi/skills/verify-board/drive.sh`
@@ -352,6 +374,18 @@ const SessionMaxConcurrentConfig = Config.option(
     Schema.Finite.pipe(Schema.check(Schema.isInt(), Schema.isGreaterThan(0))),
     "SESSION_MAX_CONCURRENT",
   ),
+);
+
+/**
+ * Aggregate spend caps (S-aggregate-spend-caps): dollars per UTC day and month a repository or an
+ * actor may spend before a new run on them is refused `budget_exceeded` (a webhook delivery: `503`
+ * with `Retry-After`), with an alert (an attention item and a notification) at 80% and 100%. JSON:
+ * `{"repos": {"acme/web": {"daily": 20, "monthly": 300}}, "actors": {"alice": {"daily": 5}}}`. Unset
+ * or blank: no cap. A value that is not that shape, or names a key it does not know, fails the boot
+ * rather than silently leaving a spend uncapped.
+ */
+const SpendCapsConfig = Config.String("SPEND_CAPS").pipe(
+  Config.withDefault(""),
 );
 
 /**
@@ -598,9 +632,11 @@ const HttpLive = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const model = yield* ModelConfig;
   const prCap = yield* PrCapConfig;
-  const autonomy = yield* ApprovalGateConfig;
+  const mcpServers = yield* parseMcpServers(yield* McpServersConfig);
+  const autonomy = { ...(yield* ApprovalGateConfig), mcpServers };
   const defaultBudget = yield* SessionBudgetConfig;
   const maxConcurrent = yield* SessionMaxConcurrentConfig;
+  const spendCaps = yield* parseSpendCaps(yield* SpendCapsConfig);
   const declaredRoles = yield* parseRoleModels(yield* RoleModelsConfig);
   const declaredDefault = (yield* DefaultModelConfig).trim();
   const docsSchedule = yield* DocsScheduleConfig;
@@ -654,6 +690,11 @@ const HttpLive = Effect.gen(function* () {
         `session admission: at most ${limit} concurrent sessions (SESSION_MAX_CONCURRENT)`,
     }),
   );
+  yield* Effect.logInfo(
+    hasSpendCaps(spendCaps)
+      ? `spend caps: ${spendCaps.repos.size} repositor${spendCaps.repos.size === 1 ? "y" : "ies"} and ${spendCaps.actors.size} actor${spendCaps.actors.size === 1 ? "" : "s"} capped per UTC day or month (SPEND_CAPS)`
+      : "spend caps: none (SPEND_CAPS unset)",
+  );
   for (const warning of modelBackendWarnings(backendChoice)) {
     yield* Effect.logWarning(warning);
   }
@@ -686,6 +727,7 @@ const HttpLive = Effect.gen(function* () {
     );
   }
   const fauxFail = yield* parseFauxFail(model.fauxFail);
+  const fauxMcpCalls = yield* parseFauxMcpCalls(model.fauxMcpCalls);
   if (backend === "faux" && fauxFail !== undefined) {
     yield* Effect.logWarning(
       `faux requests fail with model_error once a session holds ${fauxFail.afterAnswers} answers (FAUX_FAIL)`,
@@ -703,6 +745,7 @@ const HttpLive = Effect.gen(function* () {
     fauxVerify: model.fauxVerify,
     fauxSleepMs: model.fauxSleepMs,
     fauxFail,
+    fauxMcpCalls,
     fauxModels,
     fauxModelScripts,
   });
@@ -840,6 +883,8 @@ const HttpLive = Effect.gen(function* () {
           }),
           prCap,
           autonomy,
+          // Always given, even with no caps, so a cap removed from SPEND_CAPS stops its alerts.
+          spendCaps,
           ...Option.match(defaultBudget, {
             onNone: () => ({}),
             onSome: (budget) => ({ defaultBudget: budget }),
@@ -944,6 +989,9 @@ const HttpLive = Effect.gen(function* () {
   );
   yield* Effect.logInfo(
     `  - commands that wait for an approval: ${autonomy.approvalRequired.length === 0 ? "none" : autonomy.approvalRequired.join(", ")}`,
+  );
+  yield* Effect.logInfo(
+    `  - MCP servers a repository may allow its runs: ${mcpServers.length === 0 ? "none (MCP_SERVERS unset)" : mcpServers.map((server) => `${server.name} (${server.url}${server.secret === undefined ? "" : `, token from secret ${server.secret}`})`).join(", ")}`,
   );
   yield* Effect.logInfo(
     `  - a session's PR step refuses a diff over ${prCap.maxFiles} files / ${prCap.maxLines} lines`,

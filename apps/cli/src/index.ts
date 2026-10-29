@@ -31,6 +31,7 @@ import {
 import { spendCommand } from "./commands/spend";
 import { secretCommand } from "./commands/secret";
 import { skillCommand } from "./commands/skill";
+import { showCommand } from "./commands/show";
 import { statusCommand } from "./commands/status";
 import { triggersCommand } from "./commands/triggers";
 import { watchCommand } from "./commands/watch";
@@ -47,6 +48,7 @@ const root = Command.make("factory").pipe(
     watchCommand,
     historyCommand,
     lsCommand,
+    showCommand,
     sendCommand,
     withdrawCommand,
     interruptCommand,

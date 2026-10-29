@@ -17,7 +17,9 @@ to each configured sink — a Slack incoming webhook, an ntfy topic, or both —
   `ntfySink` (ntfy's JSON publish to the server's root). Their ids fingerprint the destination, so the
   URL and the topic never reach the ledger or the log.
 - Event ids: `question:<card>:<blocked since>`, `approval:<session>:<request>`,
-  `gate:<card>:<column>:<run>`, `failed:<session>:<entry>`.
+  `gate:<card>:<column>:<run>`, `failed:<session>:<entry>`, and (S-aggregate-spend-caps)
+  `spend:<scope>:<subject>:<window>:<period end>:<threshold>`, a repo's or actor's spend at 80% or
+  100% of its `SPEND_CAPS` limit, linked to `/spend` and driven by `spend-caps.sh`.
 - Links: a question opens the card's thread (`/boards/<board>?card=<card>#thread`); an approval, a
   gate and a failure the card with the run (`&run=<session>`); an approval or a failure no card owns
   the session (`/sessions/<session>`).
@@ -34,7 +36,7 @@ to each configured sink — a Slack incoming webhook, an ntfy topic, or both —
 
 Set `NOTIFY_SLACK_WEBHOOK_URL` and/or `NOTIFY_NTFY_TOPIC` (`NOTIFY_NTFY_URL` for a server other than
 `https://ntfy.sh`, `NOTIFY_NTFY_TOKEN` for a protected topic), optionally `NOTIFY_TYPES` (a subset of
-`question,approval,gate,failed`), `NOTIFY_LINK_BASE` (the dashboard's origin; the first
+`question,approval,gate,failed,spend`), `NOTIFY_LINK_BASE` (the dashboard's origin; the first
 `ALLOWED_ORIGINS` entry by default) and `NOTIFY_POLL_MS` (5000). The ntfy phone app is the mobile
 path.
 
