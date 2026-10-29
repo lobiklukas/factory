@@ -33,7 +33,9 @@ import {
   compareReplay,
   readReplayRun,
   readReplaySource,
+  openReplay,
   replaySession,
+  submitReplayPrompt,
   writeReplayComparison,
 } from "./replay";
 import {
@@ -250,6 +252,48 @@ describe("replaying a session", () => {
 
     // The source log is unchanged: same entries, same spend, same lineage — nothing at all.
     expect(result.after).toEqual(result.before);
+  }, 120_000);
+});
+
+describe("opening a replay without its prompt (F23)", () => {
+  /** Mutation: submit the prompt in `openReplay`, which leaves a caller nothing to run before it. */
+  it("links the replay and submits nothing until the prompt is submitted", async () => {
+    const sourceId = newLogId("source-held");
+    const replayId = newLogId("replay-held");
+    await recordedSession(sourceId, "fix the flaky login test");
+
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const sourceReader = yield* Effect.promise(() =>
+          openStorage(sourceId, "reader"),
+        );
+        const source = yield* readReplaySource(sourceReader);
+        const replayStorage = yield* Effect.promise(() =>
+          openStorage(replayId),
+        );
+        const replay = yield* openReplay({
+          source,
+          sourceId,
+          replayId,
+          target: replayStorage,
+          model: models,
+          title: "fix the flaky login test",
+          cwd: workdir,
+        });
+        const held = yield* readSessionLog(replayStorage);
+        const submitted = yield* submitReplayPrompt(replay);
+        yield* Effect.promise(() => submitted.submission.wait(context));
+        const after = yield* readSessionLog(replayStorage);
+        yield* closeHarness(replay.harness);
+        return { held, after };
+      }),
+    );
+
+    expect(result.held.replay?.source).toBe(sourceId);
+    expect(result.held.entries.filter((e) => e.kind === "user")).toEqual([]);
+    expect(
+      result.after.entries.find((entry) => entry.kind === "user")?.text,
+    ).toBe("fix the flaky login test");
   }, 120_000);
 });
 

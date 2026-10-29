@@ -184,6 +184,14 @@ send whose install ran once, a webhook delivery answered before its install fini
 on this repo running its own `bun install`; and `factory board show` on the parked card), evidence
 `.verify/evidence/latest/api/setup.json` and `setup-board-show.txt`. See [setup.md](setup.md).
 
+The replay, re-cut and setup-timeout checks (F23-F24) were run from the `agent/F23-F24-F25` worktree on
+2026-10-29 (`API_PORT=9570`, faux, `DATABASE_URL=…/factory_agent_f23_f24_f25` on 5442): `./setup.sh`
+**19/19** in its first phase (the earlier checks, a replay set up before its first model call with its
+comparison reading a run that answered, a seeded session for the re-cut) and **5/5** after the API
+restarted through turbo with `SETUP_TIMEOUT_SECONDS=1` (the worktree cut again and set up again, a
+5 s install stopped at one second and its card parked `setup_failed`, `checkDeployment` reporting the
+bound), evidence `.verify/evidence/latest/api/setup.json`, `setup-restarted.json`. See [setup.md](setup.md).
+
 The scoped secrets checks (S-agent-secrets) were run from the `agent/S-agent-secrets` worktree on
 2026-10-28 (`API_PORT=9520`, faux, `DATABASE_URL=…/factory_agent_s_agent_secrets` on 5442):
 `./secrets.sh` **15/15** (13 driver checks, `factory board show` on the refused card, and a grep of

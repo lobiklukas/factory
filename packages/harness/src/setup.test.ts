@@ -20,6 +20,7 @@ import {
   rootEverSubmitted,
   runSetup,
   SETUP_NOTE_TAIL,
+  setupCovers,
   setupFailureText,
   setupSteps,
   writeSetupRecord,
@@ -58,6 +59,45 @@ describe("setupSteps", () => {
     ]);
     expect(setupSteps({ test: "t", verify: "v" })).toEqual([]);
   });
+});
+
+describe("a setup's cut (F23)", () => {
+  const record = (cut?: string): SetupRecord => ({
+    outcome: "succeeded",
+    directory: "/w",
+    steps: [],
+    startedAt: "2026-10-28T00:00:00.000Z",
+    finishedAt: "2026-10-28T00:00:01.000Z",
+    ...(cut === undefined ? {} : { cut }),
+  });
+
+  /** Mutation: compare only when both are present but treat a mismatch as covered (always true). */
+  it("covers the worktree it ran in and not one cut since, and never reads an unnamed cut as stale", () => {
+    expect(setupCovers(record("a"), "a")).toBe(true);
+    expect(setupCovers(record("a"), "b")).toBe(false);
+    // Nothing to tell apart: written before cuts were named, or a directory with no cut.
+    expect(setupCovers(record(), "b")).toBe(true);
+    expect(setupCovers(record("a"), undefined)).toBe(true);
+    expect(setupCovers(record(), undefined)).toBe(true);
+  });
+
+  it(
+    "is recorded with the steps, and left out of a record that has none",
+    async () => {
+      const cwd = workdir();
+      const named = await Effect.runPromise(
+        runSetup({
+          env: new NodeExecutionEnv({ cwd }),
+          commands: { install: "true" },
+          cut: "cut-1",
+        }),
+      );
+      expect(named?.cut).toBe("cut-1");
+      const unnamed = await run(cwd, { install: "true" });
+      expect(unnamed).not.toHaveProperty("cut");
+    },
+    SPAWNS,
+  );
 });
 
 describe("runSetup", () => {
