@@ -115,6 +115,11 @@ sandbox is the in-process special case. A capability flag is not needed for that
 has `bind` or the control plane creates. A session's bound sandbox keeps its exec spill files when
 it ends (`BindOptions.keepSpillFiles`), because the session's transcript names them (Pi Durable's
 bash tool reports `Full output: <path>`) and outlives the sandbox through an idle release.
+_As built (LOB-91):_ `OpenSessionOptions.sandbox` now takes `SandboxRuntimeShape` too: with a
+runtime that has no `bind` (the Kubernetes one), the conversation's sandbox is `create`d on first use
+and its commands start at that sandbox's workdir, with the credential filter passed per command.
+`SessionServiceOptions.sandbox` and apps/api still require `bind`, until the control plane cuts the
+worktree inside the sandbox it creates.
 
 ### D7 — Storage: append-only log is truth, projections are derived
 
