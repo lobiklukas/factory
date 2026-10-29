@@ -351,7 +351,8 @@ board's one `listBoardCards` read. `card-face.sh` starts its own API and dashboa
 the RPC, and requires `busy` within one poll interval of a run starting, the summed spend to equal the
 sum the drive reads off `listTaskRuns` and `listSessions`, a PR link to appear within one poll interval
 of the session recording it, `idle` once the run settles, no per-card read in the page's RPC tags, and
-nine cards to cost no more calls per window than three (`features/card-face.md`). Evidence goes to
+nine cards to cost no more calls per window than three, and (F25) a board on a checkout to show its
+repo's readiness score on every card from one `getRepo` read (`features/card-face.md`). Evidence goes to
 `.verify/evidence/latest/card-face/`.
 
 ### The exit checklist

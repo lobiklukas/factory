@@ -255,6 +255,7 @@ const Board = ({ boardId }: { readonly boardId: BoardInstanceId }) => {
           boardId={boardId}
           board={boardLanes(definition, tasks)}
           faces={faces}
+          repo={instance.repo}
           selected={card}
         />
       </div>
